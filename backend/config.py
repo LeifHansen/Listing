@@ -61,3 +61,8 @@ def ebay_ready() -> bool:
         ]
     )
     return has_token and has_policies
+
+
+def taxonomy_ready() -> bool:
+    """The Taxonomy API only needs an application token (client id/secret)."""
+    return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)

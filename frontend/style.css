@@ -104,6 +104,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .specific-row input { flex: 1; }
 .specific-row button { padding: 4px 10px; }
 
+.cat-suggest { margin: -4px 0 14px; }
+.cat-suggestions { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.cat-suggestion {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  cursor: pointer; font-size: 0.85rem; background: #fafbfc;
+}
+.cat-suggestion:hover { border-color: var(--ebay-blue); background: #f0f6ff; }
+.cat-suggestion .cat-path { color: var(--text); }
+.cat-suggestion .cat-id { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cat-suggestion.chosen { border-color: var(--ebay-green); background: #f1f8e6; }
+
 .missing-info { margin-top: 14px; }
 .missing-info ul { margin: 6px 0; padding-left: 20px; }
 .missing-info li { color: #8a6100; }

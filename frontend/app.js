@@ -12,6 +12,7 @@ const state = {
   files: [],
   listing: null,
   ebayConfigured: false,
+  taxonomyConfigured: false,
 };
 
 // ---------- helpers ----------
@@ -36,6 +37,7 @@ async function loadHealth() {
   try {
     const h = await api("/api/health");
     state.ebayConfigured = h.ebay_configured;
+    state.taxonomyConfigured = h.taxonomy_configured;
     const bar = $("status-bar");
     bar.innerHTML = "";
     const pill = (label, ok) => {
@@ -50,6 +52,9 @@ async function loadHealth() {
     bar.appendChild(pill(
       h.ebay_configured ? `eBay: ${h.ebay_env} ready` : "eBay: dry-run (no creds)",
       h.ebay_configured));
+    bar.appendChild(pill(
+      h.taxonomy_configured ? "Categories: auto" : "Categories: manual",
+      h.taxonomy_configured));
   } catch (e) { /* ignore */ }
 }
 
@@ -173,6 +178,7 @@ function renderPreview(result) {
   renderSpecifics(l.item_specifics);
   renderImages();
   renderMissingInfo(l.missing_info);
+  $("cat-suggestions").innerHTML = "";
   updateTitleCount();
 
   const conf = (result && result.confidence) || "medium";
@@ -213,6 +219,56 @@ function collectListing() {
     images: state.listing.images,
     currency: state.listing.currency || "USD",
   };
+}
+
+async function suggestCategories() {
+  const box = $("cat-suggestions");
+  if (!state.taxonomyConfigured) {
+    box.innerHTML =
+      `<p class="hint">Automatic categories need EBAY_CLIENT_ID / EBAY_CLIENT_SECRET in .env. ` +
+      `You can still enter a category ID manually.</p>`;
+    return;
+  }
+  const l = collectListing();
+  const query = [l.brand, l.title, l.category_suggestion].filter(Boolean).join(" ").trim();
+  if (!query) { box.innerHTML = `<p class="hint">Add a title or brand first.</p>`; return; }
+  try {
+    showSpinner("Resolving eBay categories…");
+    const res = await api("/api/category-suggestions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, limit: 5 }),
+    });
+    renderCategorySuggestions(res.suggestions || []);
+  } catch (e) {
+    box.innerHTML = `<p class="hint">Couldn't fetch categories: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    hideSpinner();
+  }
+}
+
+function renderCategorySuggestions(suggestions) {
+  const box = $("cat-suggestions");
+  box.innerHTML = "";
+  if (suggestions.length === 0) {
+    box.innerHTML = `<p class="hint">No category matches found. Try editing the title.</p>`;
+    return;
+  }
+  const current = $("f-category-id").value.trim();
+  suggestions.forEach((s) => {
+    const row = document.createElement("div");
+    row.className = "cat-suggestion" + (s.category_id === current ? " chosen" : "");
+    row.innerHTML =
+      `<span class="cat-path">${escapeHtml(s.path || s.category_name)}</span>` +
+      `<span class="cat-id">#${escapeHtml(s.category_id)}</span>`;
+    row.addEventListener("click", () => {
+      $("f-category-id").value = s.category_id;
+      $("f-category").value = s.path || s.category_name;
+      [...box.children].forEach((c) => c.classList.remove("chosen"));
+      row.classList.add("chosen");
+    });
+    box.appendChild(row);
+  });
 }
 
 async function refine() {
@@ -273,6 +329,7 @@ function init() {
   $("btn-process").addEventListener("click", processImages);
   $("btn-refine").addEventListener("click", refine);
   $("btn-add-specific").addEventListener("click", () => addSpecificRow());
+  $("btn-suggest-cat").addEventListener("click", suggestCategories);
   $("btn-draft").addEventListener("click", () => publish("draft"));
   $("btn-live").addEventListener("click", () => publish("live"));
   $("f-title").addEventListener("input", updateTitleCount);
