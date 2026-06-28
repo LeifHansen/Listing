@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+*.local
+
+# Runtime data (uploaded images, generated listings, sessions)
+data/sessions/
+data/exports/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

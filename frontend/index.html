@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>eBay Listing Generator</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>📦 eBay Listing Generator</h1>
+    <p class="tagline">Upload photos → AI identifies them → optimize → edit → publish</p>
+    <div id="status-bar" class="status-bar"></div>
+  </header>
+
+  <main>
+    <!-- Step 1: Upload -->
+    <section id="step-upload" class="card">
+      <h2>1. Upload product photos</h2>
+      <div id="dropzone" class="dropzone">
+        <p>Drag &amp; drop images here, or click to choose files</p>
+        <input type="file" id="file-input" accept="image/*" multiple hidden />
+      </div>
+      <div id="thumbs" class="thumbs"></div>
+      <button id="btn-process" class="primary" disabled>Optimize &amp; Identify →</button>
+    </section>
+
+    <!-- Step 2: Preview / Edit -->
+    <section id="step-preview" class="card hidden">
+      <h2>2. Review &amp; edit your listing</h2>
+
+      <div id="confidence" class="confidence"></div>
+
+      <div class="preview-grid">
+        <div class="images-col">
+          <h3>Optimized images</h3>
+          <div id="opt-images" class="opt-images"></div>
+        </div>
+
+        <div class="fields-col">
+          <label>Title <span class="hint">(max 80 chars)</span>
+            <input type="text" id="f-title" maxlength="80" />
+            <span id="title-count" class="count"></span>
+          </label>
+
+          <label>Subtitle
+            <input type="text" id="f-subtitle" />
+          </label>
+
+          <div class="row">
+            <label>Brand
+              <input type="text" id="f-brand" />
+            </label>
+            <label>Price (<span id="cur-label">USD</span>)
+              <input type="number" id="f-price" step="0.01" min="0" />
+            </label>
+            <label>Quantity
+              <input type="number" id="f-qty" min="1" value="1" />
+            </label>
+          </div>
+
+          <div class="row">
+            <label>Condition
+              <select id="f-condition"></select>
+            </label>
+            <label>Suggested category
+              <input type="text" id="f-category" />
+            </label>
+            <label>eBay Category ID <span class="hint">(optional)</span>
+              <input type="text" id="f-category-id" />
+            </label>
+          </div>
+
+          <label>Condition description
+            <textarea id="f-condition-desc" rows="2"></textarea>
+          </label>
+
+          <label>Description
+            <textarea id="f-description" rows="6"></textarea>
+          </label>
+
+          <h3>Item specifics</h3>
+          <div id="specifics" class="specifics"></div>
+          <button id="btn-add-specific" class="ghost">+ Add specific</button>
+
+          <div id="missing-info" class="missing-info"></div>
+        </div>
+      </div>
+
+      <!-- Refine via prompt -->
+      <div class="refine">
+        <h3>✨ Refine with a prompt</h3>
+        <div class="refine-row">
+          <input type="text" id="refine-input"
+            placeholder="e.g. Make the title punchier and lower the price to $45" />
+          <button id="btn-refine" class="secondary">Apply</button>
+        </div>
+        <p class="hint">Or just edit any field above manually.</p>
+      </div>
+
+      <!-- Publish -->
+      <div class="publish">
+        <h3>3. Publish</h3>
+        <p id="publish-note" class="hint"></p>
+        <div class="publish-buttons">
+          <button id="btn-draft" class="secondary">Save as Draft</button>
+          <button id="btn-live" class="primary">Publish Live</button>
+        </div>
+        <pre id="publish-result" class="result hidden"></pre>
+      </div>
+    </section>
+  </main>
+
+  <div id="spinner" class="spinner hidden"><div class="dot"></div><span id="spinner-text">Working…</span></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
