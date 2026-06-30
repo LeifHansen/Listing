@@ -31,6 +31,7 @@ def health() -> dict:
         "ok": True,
         "anthropic_configured": config.anthropic_ready(),
         "ebay_configured": config.ebay_ready(),
+        "ebay_missing": config.ebay_status()["missing"],
         "taxonomy_configured": config.taxonomy_ready(),
         "ebay_env": config.EBAY_ENV,
     }

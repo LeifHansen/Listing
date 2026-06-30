@@ -65,6 +65,22 @@ def ebay_ready() -> bool:
     return has_token and has_policies
 
 
+def ebay_status() -> dict:
+    """Detailed breakdown of eBay readiness, for surfacing what's missing."""
+    has_token = bool(EBAY_OAUTH_TOKEN) or bool(
+        EBAY_CLIENT_ID and EBAY_CLIENT_SECRET and EBAY_REFRESH_TOKEN
+    )
+    checks = {
+        "OAuth token": has_token,
+        "fulfillment policy": bool(EBAY_FULFILLMENT_POLICY_ID),
+        "payment policy": bool(EBAY_PAYMENT_POLICY_ID),
+        "return policy": bool(EBAY_RETURN_POLICY_ID),
+        "merchant location": bool(EBAY_MERCHANT_LOCATION_KEY),
+    }
+    missing = [name for name, ok in checks.items() if not ok]
+    return {"ready": not missing, "missing": missing, "env": EBAY_ENV}
+
+
 def taxonomy_ready() -> bool:
     """The Taxonomy API only needs an application token (client id/secret)."""
     return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)

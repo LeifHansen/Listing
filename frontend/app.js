@@ -40,18 +40,22 @@ async function loadHealth() {
     state.taxonomyConfigured = h.taxonomy_configured;
     const bar = $("status-bar");
     bar.innerHTML = "";
-    const pill = (label, ok) => {
+    const pill = (label, ok, title) => {
       const s = document.createElement("span");
       s.className = "pill " + (ok ? "ok" : "warn");
       s.textContent = label;
+      if (title) s.title = title;
       return s;
     };
     bar.appendChild(pill(
       h.anthropic_configured ? "AI: ready" : "AI: missing ANTHROPIC_API_KEY",
       h.anthropic_configured));
-    bar.appendChild(pill(
-      h.ebay_configured ? `eBay: ${h.ebay_env} ready` : "eBay: dry-run (no creds)",
-      h.ebay_configured));
+    const missing = h.ebay_missing || [];
+    const ebayLabel = h.ebay_configured
+      ? `eBay: ${h.ebay_env} ready`
+      : `eBay: dry-run (missing: ${missing.length ? missing.join(", ") : "credentials"})`;
+    bar.appendChild(pill(ebayLabel, h.ebay_configured,
+      h.ebay_configured ? "" : "Set these as env vars / Fly secrets to publish for real"));
     bar.appendChild(pill(
       h.taxonomy_configured ? "Categories: auto" : "Categories: manual",
       h.taxonomy_configured));
