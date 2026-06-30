@@ -9,8 +9,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Paths -----------------------------------------------------------------
+# DATA_DIR can be pointed at a mounted volume (e.g. on Fly.io) so uploaded and
+# generated files survive restarts; defaults to ./data for local runs.
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT_DIR / "data"
+DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT_DIR / "data")))
 SESSIONS_DIR = DATA_DIR / "sessions"
 EXPORTS_DIR = DATA_DIR / "exports"
 

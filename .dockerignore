@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+*.pyc
+data
+.env
+*.local
+README.md
+run.sh
+fly.toml
+.dockerignore
+.DS_Store
+.idea
+.vscode

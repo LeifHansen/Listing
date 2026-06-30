@@ -44,6 +44,32 @@ cp .env.example .env
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
 
+## Deploy to Fly.io
+
+A `Dockerfile` and `fly.toml` are included. eBay requires **publicly reachable
+HTTPS image URLs**, so deploying (vs. running on localhost) is what makes real
+publishing work — the app uses its public origin for `imageUrls`.
+
+```bash
+fly launch --no-deploy        # or: fly apps create <name> ; edit fly.toml `app`
+fly secrets set ANTHROPIC_API_KEY=sk-ant-...
+# eBay sandbox creds (see below):
+fly secrets set EBAY_OAUTH_TOKEN=... \
+  EBAY_FULFILLMENT_POLICY_ID=... EBAY_PAYMENT_POLICY_ID=... \
+  EBAY_RETURN_POLICY_ID=... EBAY_MERCHANT_LOCATION_KEY=...
+fly deploy
+```
+
+`EBAY_ENV=sandbox` is preset in `fly.toml`. The app listens on `$PORT` (8080)
+and runs uvicorn with `--proxy-headers` so it sees Fly's HTTPS origin. Uploaded
+files live on the container's ephemeral disk by default; uncomment the
+`[mounts]` block in `fly.toml` (and create a volume) to persist them.
+
+> **You do NOT need eBay's "Alerts & Notifications" / Platform Notifications
+> page to create listings.** That's for receiving events from eBay. The only
+> notification eBay mandates is *Marketplace Account Deletion*, and only for
+> **Production** keysets — irrelevant for sandbox testing.
+
 ## eBay credentials (optional)
 
 Without eBay credentials the app runs in **dry-run mode**: it builds the exact
