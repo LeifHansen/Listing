@@ -13,12 +13,30 @@ can inspect them and push later once you have a developer account.
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 import httpx
 
 from .. import config, storage
 from ..models import Listing
+
+
+def _prune(value):
+    """Recursively drop None values and empty dicts.
+
+    eBay's API rejects explicit nulls for optional fields (e.g. categoryId,
+    conditionDescription), so we omit them rather than send `null`.
+    """
+    if isinstance(value, dict):
+        out = {}
+        for key, val in value.items():
+            pruned = _prune(val)
+            if pruned is None or (isinstance(pruned, dict) and not pruned):
+                continue
+            out[key] = pruned
+        return out
+    if isinstance(value, list):
+        return [_prune(v) for v in value]
+    return value
 
 
 def _sku(session_id: str, listing: Listing) -> str:
@@ -46,7 +64,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
             if spec.value not in aspects[spec.name]:
                 aspects[spec.name].append(spec.value)
 
-    return {
+    return _prune({
         "sku": _sku(session_id, listing),
         "availability": {
             "shipToLocationAvailability": {"quantity": max(1, listing.quantity)}
@@ -60,12 +78,12 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
             "imageUrls": _image_urls(session_id, base_url),
             "brand": listing.brand or None,
         },
-    }
+    })
 
 
 def build_offer(session_id: str, listing: Listing) -> dict:
     price = listing.price if listing.price is not None else 0.0
-    return {
+    return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
         "format": "FIXED_PRICE",
@@ -84,7 +102,7 @@ def build_offer(session_id: str, listing: Listing) -> dict:
             "returnPolicyId": config.EBAY_RETURN_POLICY_ID or None,
         },
         "merchantLocationKey": config.EBAY_MERCHANT_LOCATION_KEY or None,
-    }
+    })
 
 
 # --- live API calls --------------------------------------------------------
@@ -138,9 +156,10 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str) -> d
             headers=_headers(token),
             json=offer,
         )
-        steps.append({"step": "createOffer", "status": r2.status_code, "body": r2.json()})
+        r2_body = r2.json()
+        steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
         r2.raise_for_status()
-        offer_id = r2.json().get("offerId")
+        offer_id = r2_body.get("offerId")
 
         published = False
         listing_id = None
@@ -149,10 +168,11 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str) -> d
                 f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
                 headers=_headers(token),
             )
-            steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3.json()})
+            r3_body = r3.json()
+            steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
             r3.raise_for_status()
             published = True
-            listing_id = r3.json().get("listingId")
+            listing_id = r3_body.get("listingId")
 
     return {
         "dry_run": False,

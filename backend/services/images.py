@@ -11,6 +11,15 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
+# iPhone/Mac photos are HEIC by default; register the decoder if available so
+# uploads don't fail. Falls back gracefully if the package isn't installed.
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except Exception:  # noqa: BLE001
+    pass
+
 TARGET_SIZE = 1600  # px, longest side per eBay zoom recommendation
 JPEG_QUALITY = 88
 CANVAS_COLOR = (248, 248, 248)  # near-white, looks clean on eBay

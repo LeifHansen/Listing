@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from . import config
 from .models import Listing
@@ -45,13 +44,6 @@ def optimized_dir(session_id: str) -> Path:
 def save_listing(session_id: str, listing: Listing) -> None:
     d = ensure_session(session_id)
     (d / "listing.json").write_text(listing.model_dump_json(indent=2))
-
-
-def load_listing(session_id: str) -> Optional[Listing]:
-    path = session_dir(session_id) / "listing.json"
-    if not path.exists():
-        return None
-    return Listing.model_validate_json(path.read_text())
 
 
 def list_optimized(session_id: str) -> list[str]:

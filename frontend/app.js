@@ -23,11 +23,16 @@ function showSpinner(text) {
 function hideSpinner() { $("spinner").classList.add("hidden"); }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (e) {
+    throw new Error("Network error — the server may be starting up. Try again in a few seconds.");
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) {}
-    throw new Error(detail);
+    throw new Error(`(${res.status}) ${detail}`);
   }
   return res.json();
 }
@@ -105,13 +110,33 @@ async function processImages() {
     const result = await api(`/api/identify/${state.sessionId}`, { method: "POST" });
     state.listing = result.listing;
     renderPreview(result);
-    $("step-upload").classList.add("hidden");
-    $("step-preview").classList.remove("hidden");
+    showView("preview");
   } catch (e) {
     alert("Error: " + e.message);
   } finally {
     hideSpinner();
   }
+}
+
+// ---------- navigation ----------
+function showView(view) {
+  $("step-upload").classList.toggle("hidden", view !== "upload");
+  $("step-preview").classList.toggle("hidden", view !== "preview");
+  // Contextual nav buttons.
+  $("nav-images").classList.toggle("hidden", view !== "preview");
+  $("nav-edit").classList.toggle("hidden", !(view === "upload" && state.listing));
+}
+
+function startNew() {
+  if (state.listing && !confirm("Start a new listing? Your current draft will be cleared.")) return;
+  state.sessionId = null;
+  state.files = [];
+  state.listing = null;
+  $("thumbs").innerHTML = "";
+  $("file-input").value = "";
+  $("btn-process").disabled = true;
+  $("publish-result").classList.add("hidden");
+  showView("upload");
 }
 
 // ---------- step 2: preview ----------
@@ -338,6 +363,12 @@ function init() {
   $("btn-live").addEventListener("click", () => publish("live"));
   $("f-title").addEventListener("input", updateTitleCount);
   $("refine-input").addEventListener("keydown", (e) => { if (e.key === "Enter") refine(); });
+  // Nav buttons
+  $("nav-new").addEventListener("click", startNew);
+  $("nav-images").addEventListener("click", () => showView("upload"));
+  $("nav-edit").addEventListener("click", () => showView("preview"));
+  $("nav-restart").addEventListener("click", () => location.reload());
+  showView("upload");
 }
 
 init();

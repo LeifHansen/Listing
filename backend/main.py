@@ -57,6 +57,13 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
 
     opt_results = images.optimize_all(orig, storage.optimized_dir(session_id))
     optimized = storage.list_optimized(session_id)
+    if not optimized:
+        errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
+        raise HTTPException(
+            400,
+            "Could not process the uploaded image(s)"
+            + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
+        )
     return {
         "session_id": session_id,
         "optimized": optimized,
@@ -76,7 +83,10 @@ def identify(session_id: str) -> dict:
     if not names:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
-    result = claude_ai.identify(paths, names)
+    try:
+        result = claude_ai.identify(paths, names)
+    except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
+        raise HTTPException(502, f"AI identification failed: {exc}") from exc
 
     # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
     if config.taxonomy_ready() and not result.listing.category_id:
@@ -137,8 +147,10 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
 
 @app.get("/media/{session_id}/optimized/{name}")
 def media(session_id: str, name: str):
-    path = storage.optimized_dir(session_id) / name
-    if not path.exists():
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    # Guard against path traversal in `name` (e.g. "../../etc/passwd").
+    if opt_dir not in path.parents or not path.is_file():
         raise HTTPException(404, "Not found")
     return FileResponse(path)
 

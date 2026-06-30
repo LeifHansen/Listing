@@ -49,22 +49,6 @@ def anthropic_ready() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
 
-def ebay_ready() -> bool:
-    """True when we have enough config to actually call eBay (not dry-run)."""
-    has_token = bool(EBAY_OAUTH_TOKEN) or bool(
-        EBAY_CLIENT_ID and EBAY_CLIENT_SECRET and EBAY_REFRESH_TOKEN
-    )
-    has_policies = all(
-        [
-            EBAY_FULFILLMENT_POLICY_ID,
-            EBAY_PAYMENT_POLICY_ID,
-            EBAY_RETURN_POLICY_ID,
-            EBAY_MERCHANT_LOCATION_KEY,
-        ]
-    )
-    return has_token and has_policies
-
-
 def ebay_status() -> dict:
     """Detailed breakdown of eBay readiness, for surfacing what's missing."""
     has_token = bool(EBAY_OAUTH_TOKEN) or bool(
@@ -79,6 +63,11 @@ def ebay_status() -> dict:
     }
     missing = [name for name, ok in checks.items() if not ok]
     return {"ready": not missing, "missing": missing, "env": EBAY_ENV}
+
+
+def ebay_ready() -> bool:
+    """True when we have enough config to actually call eBay (not dry-run)."""
+    return ebay_status()["ready"]
 
 
 def taxonomy_ready() -> bool:
