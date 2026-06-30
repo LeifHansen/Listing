@@ -1,30 +1,24 @@
-# Fly.io configuration for the eBay Listing Generator.
-# Change `app` to your Fly app name and `primary_region` to one near you
-# (list regions with: fly platform regions).
+# fly.toml app configuration file generated for listing-lfwjrg on 2026-06-30T21:32:31Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "listing"
-primary_region = "sjc"
+app = 'listing-lfwjrg'
+primary_region = 'sjc'
 
 [build]
+
+[env]
+  EBAY_ENV = 'sandbox'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
-[env]
-  PORT = "8080"
-  EBAY_ENV = "sandbox"
-
-# Optional: persist uploaded/generated files across restarts.
-# 1) create a volume:  fly volumes create listing_data --size 1 --region sjc
-# 2) uncomment below and set DATA_DIR = "/data" in [env].
-# [mounts]
-#   source = "listing_data"
-#   destination = "/data"
-
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
