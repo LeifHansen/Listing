@@ -3,13 +3,24 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>eBay Listing Generator</title>
+  <title>Thryft — AI eBay listings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Pacifico&family=Anton&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header>
-    <h1>📦 eBay Listing Generator</h1>
-    <p class="tagline">Upload photos → AI identifies them → optimize → edit → publish</p>
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-name">Thryft</span>
+        <span class="brand-dots"><i></i><i></i><i></i><i></i></span>
+      </div>
+      <div id="auth-area" class="auth-area">
+        <button id="btn-login" class="nav-btn" type="button">Log in</button>
+      </div>
+    </div>
+    <p class="tagline">Snap it · AI writes it · list it on eBay</p>
     <div id="status-bar" class="status-bar"></div>
     <nav id="nav" class="nav">
       <button id="nav-new" class="nav-btn" type="button">＋ New listing</button>
@@ -19,6 +30,22 @@
       <button id="nav-restart" class="nav-btn" type="button">↻ Restart</button>
     </nav>
   </header>
+
+  <!-- Auth modal -->
+  <div id="auth-overlay" class="auth-overlay hidden">
+    <div class="auth-modal">
+      <button id="auth-close" class="auth-close" type="button">✕</button>
+      <span class="brand-name auth-brand">Thryft</span>
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active" type="button">Log in</button>
+        <button id="tab-signup" class="auth-tab" type="button">Sign up</button>
+      </div>
+      <input type="email" id="auth-email" class="auth-field" placeholder="you@email.com" autocomplete="email" />
+      <input type="password" id="auth-password" class="auth-field" placeholder="Password (min 8 chars)" autocomplete="current-password" />
+      <p id="auth-error" class="auth-error"></p>
+      <button id="auth-submit" class="primary auth-submit" type="button">Log in</button>
+    </div>
+  </div>
 
   <main>
     <!-- Step 1: Upload -->

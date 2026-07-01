@@ -13,6 +13,8 @@ const state = {
   listing: null,
   ebayConfigured: false,
   taxonomyConfigured: false,
+  user: null,
+  authMode: "login",
 };
 
 // ---------- helpers ----------
@@ -141,6 +143,12 @@ async function loadListings() {
       grid.innerHTML = "";
       return;
     }
+    if (!res.authed) {
+      $("listings-note").textContent = "Log in to save and see your listings.";
+      grid.innerHTML = "";
+      openAuthModal();
+      return;
+    }
     $("listings-note").textContent = res.db.connected
       ? "" : "Database configured but unreachable.";
     renderListings(res.listings || []);
@@ -198,6 +206,71 @@ function startNew() {
   $("btn-process").disabled = true;
   $("publish-result").classList.add("hidden");
   showView("upload");
+}
+
+// ---------- auth ----------
+async function loadAuth() {
+  try {
+    const res = await api("/api/auth/me");
+    state.user = res.user;
+  } catch (e) { state.user = null; }
+  renderAuthArea();
+}
+
+function renderAuthArea() {
+  const area = $("auth-area");
+  if (state.user) {
+    area.innerHTML =
+      `<span class="user-chip">👟 ${escapeHtml(state.user.email)}</span>` +
+      `<button id="btn-logout" class="nav-btn" type="button">Log out</button>`;
+    $("btn-logout").addEventListener("click", logout);
+  } else {
+    area.innerHTML = `<button id="btn-login" class="nav-btn" type="button">Log in</button>`;
+    $("btn-login").addEventListener("click", openAuthModal);
+  }
+}
+
+function openAuthModal() {
+  $("auth-error").textContent = "";
+  $("auth-overlay").classList.remove("hidden");
+  setAuthMode("login");
+}
+function closeAuthModal() { $("auth-overlay").classList.add("hidden"); }
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  $("tab-login").classList.toggle("active", mode === "login");
+  $("tab-signup").classList.toggle("active", mode === "signup");
+  $("auth-submit").textContent = mode === "login" ? "Log in" : "Create account";
+  $("auth-error").textContent = "";
+}
+
+async function submitAuth() {
+  const email = $("auth-email").value.trim();
+  const password = $("auth-password").value;
+  if (!email || !password) { $("auth-error").textContent = "Enter your email and password."; return; }
+  try {
+    showSpinner(state.authMode === "login" ? "Logging in…" : "Creating account…");
+    const res = await api(`/api/auth/${state.authMode === "login" ? "login" : "signup"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    state.user = res.user;
+    closeAuthModal();
+    renderAuthArea();
+    $("auth-email").value = ""; $("auth-password").value = "";
+  } catch (e) {
+    $("auth-error").textContent = e.message;
+  } finally {
+    hideSpinner();
+  }
+}
+
+async function logout() {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+  state.user = null;
+  renderAuthArea();
 }
 
 // ---------- step 2: preview ----------
@@ -416,6 +489,15 @@ async function publish(mode) {
 function init() {
   setupDropzone();
   loadHealth();
+  loadAuth();
+  // Auth modal wiring
+  $("btn-login").addEventListener("click", openAuthModal);
+  $("auth-close").addEventListener("click", closeAuthModal);
+  $("tab-login").addEventListener("click", () => setAuthMode("login"));
+  $("tab-signup").addEventListener("click", () => setAuthMode("signup"));
+  $("auth-submit").addEventListener("click", submitAuth);
+  $("auth-password").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuth(); });
+  $("auth-overlay").addEventListener("click", (e) => { if (e.target === $("auth-overlay")) closeAuthModal(); });
   $("btn-process").addEventListener("click", processImages);
   $("btn-refine").addEventListener("click", refine);
   $("btn-add-specific").addEventListener("click", () => addSpecificRow());

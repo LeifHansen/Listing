@@ -1,4 +1,6 @@
-# 📦 eBay Listing Generator
+# Thryft
+
+**Snap it · AI writes it · list it on eBay.**
 
 Turn product photos into a complete, ready-to-publish eBay listing.
 
@@ -114,8 +116,10 @@ Without them, you can still type a category ID manually in the preview.
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
 | `POST` | `/api/publish` | Push to eBay (draft/live) or dry-run |
-| `GET`  | `/api/listings` | Saved listing history (Neon/Postgres) |
-| `GET`  | `/api/listings/{id}` | Fetch one saved listing |
+| `GET`  | `/api/listings` | Current user's saved listing history |
+| `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
+| `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 
 ## Database (Neon / Postgres)
 
@@ -127,13 +131,18 @@ errors on a DB problem. Tables are auto-created on first use.
 ## Roadmap (toward a real web + mobile app)
 
 1. **Persistence** ✅ — Neon-backed listing history + My listings.
-2. **Accounts & auth** — multi-user login so listings belong to a user.
-3. **Object storage for images** — move optimized photos to S3/R2 so they
-   survive restarts and scale (currently local disk).
-4. **eBay OAuth** — "Sign in with eBay" + auto-fetched business policies so
+2. **Reliability & UX** ✅ — HEIC uploads, clear errors, nav.
+3. **Accounts & auth** ✅ — email/password login; listings scoped per user.
+4. **Brand & UX design** ✅ — Thryft identity: eBay palette, retro-modern,
+   90s Jordan/Nike energy, cursive wordmark. (Ongoing design pass each phase.)
+5. **eBay OAuth** — "Sign in with eBay" + auto-fetched business policies so
    the 5 publish secrets populate themselves.
-5. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
-   can reuse every `/api/*` endpoint.
+6. **Object storage for images** — move optimized photos to S3/R2 so they
+   survive restarts and scale (currently local disk).
+7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
+   reuses every `/api/*` endpoint.
+8. **Item Identifier (mobile-only)** — double-layer identification: Claude's
+   vision lens + Google Lens, cross-checked for higher-confidence item IDs.
 
 ## Project layout
 

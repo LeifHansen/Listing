@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, storage
+from . import auth, config, db, storage
 from .models import Listing, PublishRequest, RefineRequest
 from .services import claude_ai, ebay, images, taxonomy
 
@@ -41,6 +41,54 @@ def health() -> dict:
 def _category_query(listing) -> str:
     parts = [listing.brand, listing.title, listing.category_suggestion]
     return " ".join(p for p in parts if p).strip()
+
+
+def _uid(request: Request):
+    user = auth.current_user(request)
+    return user["id"] if user else None
+
+
+# --- auth ------------------------------------------------------------------
+
+@app.post("/api/auth/signup")
+def auth_signup(request: Request, response: Response, payload: dict) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", ""))
+    if not email or "@" not in email:
+        raise HTTPException(400, "A valid email is required")
+    if len(password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    if not db.enabled():
+        raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
+    user = auth.signup(email, password)
+    if not user:
+        raise HTTPException(409, "An account with that email already exists")
+    auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
+    return {"user": user}
+
+
+@app.post("/api/auth/login")
+def auth_login(request: Request, response: Response, payload: dict) -> dict:
+    email = str(payload.get("email", "")).strip().lower()
+    password = str(payload.get("password", ""))
+    if not db.enabled():
+        raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
+    user = auth.login(email, password)
+    if not user:
+        raise HTTPException(401, "Invalid email or password")
+    auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response) -> dict:
+    auth.clear_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict:
+    return {"user": auth.current_user(request)}
 
 
 @app.post("/api/upload")
@@ -73,7 +121,7 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
 
 
 @app.post("/api/identify/{session_id}")
-def identify(session_id: str) -> dict:
+def identify(session_id: str, request: Request) -> dict:
     """Run Claude vision over the optimized images and draft a listing."""
     if not config.anthropic_ready():
         raise HTTPException(
@@ -101,7 +149,7 @@ def identify(session_id: str) -> dict:
             pass
 
     storage.save_listing(session_id, result.listing)
-    db.upsert_listing(session_id, result.listing.model_dump(), status="draft")
+    db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
     return result.model_dump()
 
 
@@ -124,32 +172,37 @@ def category_suggestions(payload: dict) -> dict:
 
 
 @app.post("/api/refine")
-def refine(req: RefineRequest) -> dict:
+def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     updated = claude_ai.refine(req.listing, req.prompt)
     storage.save_listing(req.session_id, updated)
-    db.upsert_listing(req.session_id, updated.model_dump(), status="draft")
+    db.upsert_listing(req.session_id, updated.model_dump(), status="draft", user_id=_uid(request))
     return updated.model_dump()
 
 
 @app.post("/api/save/{session_id}")
-def save_listing(session_id: str, listing: Listing) -> dict:
+def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(), status="draft")
+    db.upsert_listing(session_id, listing.model_dump(), status="draft", user_id=_uid(request))
     return {"saved": True}
 
 
 @app.get("/api/listings")
-def listings(limit: int = 50) -> dict:
-    """History of saved listings (most recent first)."""
-    return {"listings": db.list_listings(limit=limit), "db": db.db_status()}
+def listings(request: Request, limit: int = 50) -> dict:
+    """History of the current user's saved listings (most recent first)."""
+    user = auth.current_user(request)
+    items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
+    return {"listings": items, "db": db.db_status(), "authed": bool(user)}
 
 
 @app.get("/api/listings/{listing_id}")
-def get_listing(listing_id: str) -> dict:
+def get_listing(listing_id: str, request: Request) -> dict:
     rec = db.get_listing(listing_id)
     if not rec:
+        raise HTTPException(404, "Listing not found")
+    # Enforce ownership for listings that belong to an account.
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
     return rec
 
@@ -167,7 +220,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         status = "dry_run"
     else:
         status = req.mode
-    db.upsert_listing(req.session_id, req.listing.model_dump(), status=status)
+    db.upsert_listing(req.session_id, req.listing.model_dump(), status=status, user_id=_uid(request))
     return JSONResponse(result)
 
 

@@ -23,6 +23,11 @@ for _d in (DATA_DIR, SESSIONS_DIR, EXPORTS_DIR):
 # Neon gives a URL like postgresql://user:pass@host/db?sslmode=require
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
+# --- Auth ------------------------------------------------------------------
+# Used to sign session JWTs. Set a stable value in production so sessions
+# survive restarts; otherwise a random per-process key is generated.
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip() or os.urandom(32).hex()
+
 # --- Anthropic / Claude ----------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
