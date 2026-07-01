@@ -13,6 +13,7 @@
     <div id="status-bar" class="status-bar"></div>
     <nav id="nav" class="nav">
       <button id="nav-new" class="nav-btn" type="button">＋ New listing</button>
+      <button id="nav-listings" class="nav-btn" type="button">☰ My listings</button>
       <button id="nav-images" class="nav-btn hidden" type="button">← Back to images</button>
       <button id="nav-edit" class="nav-btn hidden" type="button">✎ Edit listing</button>
       <button id="nav-restart" class="nav-btn" type="button">↻ Restart</button>
@@ -29,6 +30,13 @@
       </div>
       <div id="thumbs" class="thumbs"></div>
       <button id="btn-process" class="primary" disabled>Optimize &amp; Identify →</button>
+    </section>
+
+    <!-- My Listings -->
+    <section id="step-listings" class="card hidden">
+      <h2>My listings</h2>
+      <p id="listings-note" class="hint"></p>
+      <div id="listings-grid" class="listings-grid"></div>
     </section>
 
     <!-- Step 2: Preview / Edit -->

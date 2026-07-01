@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, storage
+from . import config, db, storage
 from .models import Listing, PublishRequest, RefineRequest
 from .services import claude_ai, ebay, images, taxonomy
 
@@ -34,6 +34,7 @@ def health() -> dict:
         "ebay_missing": config.ebay_status()["missing"],
         "taxonomy_configured": config.taxonomy_ready(),
         "ebay_env": config.EBAY_ENV,
+        "db": db.db_status(),
     }
 
 
@@ -100,6 +101,7 @@ def identify(session_id: str) -> dict:
             pass
 
     storage.save_listing(session_id, result.listing)
+    db.upsert_listing(session_id, result.listing.model_dump(), status="draft")
     return result.model_dump()
 
 
@@ -127,13 +129,29 @@ def refine(req: RefineRequest) -> dict:
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     updated = claude_ai.refine(req.listing, req.prompt)
     storage.save_listing(req.session_id, updated)
+    db.upsert_listing(req.session_id, updated.model_dump(), status="draft")
     return updated.model_dump()
 
 
 @app.post("/api/save/{session_id}")
 def save_listing(session_id: str, listing: Listing) -> dict:
     storage.save_listing(session_id, listing)
+    db.upsert_listing(session_id, listing.model_dump(), status="draft")
     return {"saved": True}
+
+
+@app.get("/api/listings")
+def listings(limit: int = 50) -> dict:
+    """History of saved listings (most recent first)."""
+    return {"listings": db.list_listings(limit=limit), "db": db.db_status()}
+
+
+@app.get("/api/listings/{listing_id}")
+def get_listing(listing_id: str) -> dict:
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    return rec
 
 
 @app.post("/api/publish")
@@ -142,6 +160,14 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     storage.save_listing(req.session_id, req.listing)
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request))
+    # Record the outcome: published (live), draft, or dry-run.
+    if result.get("published"):
+        status = "published"
+    elif result.get("dry_run"):
+        status = "dry_run"
+    else:
+        status = req.mode
+    db.upsert_listing(req.session_id, req.listing.model_dump(), status=status)
     return JSONResponse(result)
 
 

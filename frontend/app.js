@@ -122,9 +122,70 @@ async function processImages() {
 function showView(view) {
   $("step-upload").classList.toggle("hidden", view !== "upload");
   $("step-preview").classList.toggle("hidden", view !== "preview");
+  $("step-listings").classList.toggle("hidden", view !== "listings");
   // Contextual nav buttons.
   $("nav-images").classList.toggle("hidden", view !== "preview");
-  $("nav-edit").classList.toggle("hidden", !(view === "upload" && state.listing));
+  $("nav-edit").classList.toggle("hidden", !(view !== "preview" && state.listing));
+}
+
+// ---------- my listings ----------
+async function loadListings() {
+  showView("listings");
+  const grid = $("listings-grid");
+  grid.innerHTML = "<p class='hint'>Loading…</p>";
+  try {
+    const res = await api("/api/listings");
+    if (!res.db.configured) {
+      $("listings-note").textContent =
+        "No database configured — set DATABASE_URL to save listing history.";
+      grid.innerHTML = "";
+      return;
+    }
+    $("listings-note").textContent = res.db.connected
+      ? "" : "Database configured but unreachable.";
+    renderListings(res.listings || []);
+  } catch (e) {
+    grid.innerHTML = `<p class="hint">Couldn't load listings: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderListings(items) {
+  const grid = $("listings-grid");
+  if (!items.length) {
+    grid.innerHTML = "<p class='hint'>No saved listings yet. Create one to see it here.</p>";
+    return;
+  }
+  grid.innerHTML = "";
+  items.forEach((it) => {
+    const l = it.listing || {};
+    const thumb = (l.images && l.images[0])
+      ? `/media/${it.id}/optimized/${l.images[0]}` : "";
+    const card = document.createElement("div");
+    card.className = "listing-card";
+    card.innerHTML =
+      (thumb ? `<img src="${thumb}" onerror="this.style.display='none'"/>` : `<div class="noimg">no image</div>`) +
+      `<div class="listing-meta">
+         <strong>${escapeHtml(l.title || it.title || "(untitled)")}</strong>
+         <span class="listing-sub">${escapeHtml(it.status)} · ${l.price != null ? "$" + l.price : "no price"}</span>
+       </div>`;
+    card.addEventListener("click", () => openListing(it.id));
+    grid.appendChild(card);
+  });
+}
+
+async function openListing(id) {
+  try {
+    showSpinner("Loading listing…");
+    const rec = await api(`/api/listings/${id}`);
+    state.sessionId = rec.id;
+    state.listing = rec.listing;
+    renderPreview({ confidence: "medium" });
+    showView("preview");
+  } catch (e) {
+    alert("Couldn't open listing: " + e.message);
+  } finally {
+    hideSpinner();
+  }
 }
 
 function startNew() {
@@ -365,6 +426,7 @@ function init() {
   $("refine-input").addEventListener("keydown", (e) => { if (e.key === "Enter") refine(); });
   // Nav buttons
   $("nav-new").addEventListener("click", startNew);
+  $("nav-listings").addEventListener("click", loadListings);
   $("nav-images").addEventListener("click", () => showView("upload"));
   $("nav-edit").addEventListener("click", () => showView("preview"));
   $("nav-restart").addEventListener("click", () => location.reload());

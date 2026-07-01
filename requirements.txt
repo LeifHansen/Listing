@@ -7,3 +7,5 @@ anthropic==0.45.0
 pydantic==2.10.5
 python-dotenv==1.0.1
 httpx==0.28.1
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3

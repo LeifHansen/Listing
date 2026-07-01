@@ -114,6 +114,26 @@ Without them, you can still type a category ID manually in the preview.
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
 | `POST` | `/api/publish` | Push to eBay (draft/live) or dry-run |
+| `GET`  | `/api/listings` | Saved listing history (Neon/Postgres) |
+| `GET`  | `/api/listings/{id}` | Fetch one saved listing |
+
+## Database (Neon / Postgres)
+
+Set `DATABASE_URL` (e.g. a Neon connection string) to persist every listing
+draft durably and power the **My listings** view. It's optional and resilient:
+if unset or unreachable, the app falls back to the local filesystem and never
+errors on a DB problem. Tables are auto-created on first use.
+
+## Roadmap (toward a real web + mobile app)
+
+1. **Persistence** ✅ — Neon-backed listing history + My listings.
+2. **Accounts & auth** — multi-user login so listings belong to a user.
+3. **Object storage for images** — move optimized photos to S3/R2 so they
+   survive restarts and scale (currently local disk).
+4. **eBay OAuth** — "Sign in with eBay" + auto-fetched business policies so
+   the 5 publish secrets populate themselves.
+5. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
+   can reuse every `/api/*` endpoint.
 
 ## Project layout
 
