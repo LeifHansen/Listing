@@ -13,6 +13,7 @@ can inspect them and push later once you have a developer account.
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 import httpx
 
@@ -81,8 +82,9 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
     })
 
 
-def build_offer(session_id: str, listing: Listing) -> dict:
+def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None) -> dict:
     price = listing.price if listing.price is not None else 0.0
+    c = creds or {}
     return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
@@ -97,11 +99,11 @@ def build_offer(session_id: str, listing: Listing) -> dict:
             }
         },
         "listingPolicies": {
-            "fulfillmentPolicyId": config.EBAY_FULFILLMENT_POLICY_ID or None,
-            "paymentPolicyId": config.EBAY_PAYMENT_POLICY_ID or None,
-            "returnPolicyId": config.EBAY_RETURN_POLICY_ID or None,
+            "fulfillmentPolicyId": c.get("fulfillment_policy_id") or config.EBAY_FULFILLMENT_POLICY_ID or None,
+            "paymentPolicyId": c.get("payment_policy_id") or config.EBAY_PAYMENT_POLICY_ID or None,
+            "returnPolicyId": c.get("return_policy_id") or config.EBAY_RETURN_POLICY_ID or None,
         },
-        "merchantLocationKey": config.EBAY_MERCHANT_LOCATION_KEY or None,
+        "merchantLocationKey": c.get("merchant_location_key") or config.EBAY_MERCHANT_LOCATION_KEY or None,
     })
 
 
@@ -134,11 +136,12 @@ def _headers(token: str) -> dict:
     }
 
 
-def _push_live(session_id: str, listing: Listing, mode: str, base_url: str) -> dict:
-    token = _access_token()
+def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
+               creds: Optional[dict] = None) -> dict:
+    token = (creds or {}).get("access_token") or _access_token()
     sku = _sku(session_id, listing)
     item = build_inventory_item(session_id, listing, base_url)
-    offer = build_offer(session_id, listing)
+    offer = build_offer(session_id, listing, creds)
     base = config.EBAY_API_BASE
     steps: list[dict] = []
 
@@ -185,30 +188,35 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str) -> d
     }
 
 
-def publish(session_id: str, listing: Listing, mode: str, base_url: str) -> dict:
+def publish(session_id: str, listing: Listing, mode: str, base_url: str,
+            creds: Optional[dict] = None) -> dict:
     """Push to eBay, or dry-run if not configured.
 
+    creds: a connected user's eBay credentials (access_token + policy ids +
+    location). When present we publish with those; otherwise we fall back to
+    env config, and dry-run if neither is available.
     mode: "draft" (create unpublished offer) or "live" (also publishOffer).
     """
     item = build_inventory_item(session_id, listing, base_url)
-    offer = build_offer(session_id, listing)
+    offer = build_offer(session_id, listing, creds)
     payload = {"inventory_item": item, "offer": offer, "mode": mode}
     export_path = storage.write_export(session_id, "ebay_payload", payload)
 
-    if not config.ebay_ready():
+    ready = bool((creds or {}).get("access_token")) or config.ebay_ready()
+    if not ready:
         return {
             "dry_run": True,
             "mode": mode,
             "message": (
-                "eBay credentials not configured - generated the API payload "
-                "instead of publishing. Add credentials to .env to go live."
+                "eBay not connected - generated the API payload instead of "
+                "publishing. Connect eBay (or add credentials) to go live."
             ),
             "export_path": str(export_path),
             "payload": payload,
         }
 
     try:
-        result = _push_live(session_id, listing, mode, base_url)
+        result = _push_live(session_id, listing, mode, base_url, creds)
         result["export_path"] = str(export_path)
         return result
     except httpx.HTTPStatusError as exc:

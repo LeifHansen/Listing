@@ -259,6 +259,7 @@ async function submitAuth() {
     state.user = res.user;
     closeAuthModal();
     renderAuthArea();
+    loadEbayStatus();
     $("auth-email").value = ""; $("auth-password").value = "";
   } catch (e) {
     $("auth-error").textContent = e.message;
@@ -271,6 +272,42 @@ async function logout() {
   try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
   state.user = null;
   renderAuthArea();
+  loadEbayStatus();
+}
+
+// ---------- eBay connection ----------
+async function loadEbayStatus() {
+  const btn = $("nav-ebay");
+  try {
+    const s = await api("/api/ebay/status");
+    if (s.connected) {
+      btn.textContent = "✓ eBay connected";
+      btn.style.background = "var(--green)";
+      btn.style.color = "#fff";
+    } else {
+      btn.textContent = "🔗 Connect eBay";
+      btn.style.background = "";
+      btn.style.color = "";
+    }
+    btn.dataset.ready = s.oauth_ready ? "1" : "0";
+  } catch (e) { /* ignore */ }
+}
+
+function connectEbay() {
+  if (!state.user) { openAuthModal(); return; }
+  if ($("nav-ebay").dataset.ready !== "1") {
+    alert("eBay isn't configured on the server yet (needs EBAY_CLIENT_ID / SECRET / RUNAME).");
+    return;
+  }
+  window.location.href = "/api/ebay/connect";
+}
+
+function handleEbayRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  const e = params.get("ebay");
+  if (e === "connected") alert("✅ eBay connected! You can now publish real listings.");
+  else if (e === "error") alert("⚠️ eBay connection failed. Please try again.");
+  if (e) history.replaceState({}, "", window.location.pathname);
 }
 
 // ---------- step 2: preview ----------
@@ -490,6 +527,9 @@ function init() {
   setupDropzone();
   loadHealth();
   loadAuth();
+  loadEbayStatus();
+  handleEbayRedirect();
+  $("nav-ebay").addEventListener("click", connectEbay);
   // Auth modal wiring
   $("btn-login").addEventListener("click", openAuthModal);
   $("auth-close").addEventListener("click", closeAuthModal);

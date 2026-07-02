@@ -135,8 +135,10 @@ errors on a DB problem. Tables are auto-created on first use.
 3. **Accounts & auth** ✅ — email/password login; listings scoped per user.
 4. **Brand & UX design** ✅ — Thryft identity: eBay palette, retro-modern,
    90s Jordan/Nike energy, cursive wordmark. (Ongoing design pass each phase.)
-5. **eBay OAuth** — "Sign in with eBay" + auto-fetched business policies so
-   the 5 publish secrets populate themselves.
+5. **eBay OAuth** ✅ — "Sign in with eBay" (Authorization Code flow) with
+   per-user tokens + auto-fetched business policies/location. Set
+   `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET`/`EBAY_RUNAME` and users click
+   "Connect eBay"; publishing then uses their token, no manual secrets.
 6. **Object storage for images** — move optimized photos to S3/R2 so they
    survive restarts and scale (currently local disk).
 7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)

@@ -36,6 +36,18 @@ class User(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class EbayAccount(Base):
+    __tablename__ = "ebay_accounts"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    refresh_token: Mapped[str] = mapped_column(String(2048), default="")
+    fulfillment_policy_id: Mapped[str] = mapped_column(String(64), default="")
+    payment_policy_id: Mapped[str] = mapped_column(String(64), default="")
+    return_policy_id: Mapped[str] = mapped_column(String(64), default="")
+    merchant_location_key: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ListingRecord(Base):
     __tablename__ = "listings"
 
@@ -188,6 +200,49 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
             return _user_to_dict(u) if u else None
     except Exception as exc:  # noqa: BLE001
         print(f"[db] get_user_by_id failed: {exc}")
+        return None
+
+
+# --- eBay accounts ---------------------------------------------------------
+
+_EBAY_FIELDS = (
+    "refresh_token", "fulfillment_policy_id", "payment_policy_id",
+    "return_policy_id", "merchant_location_key",
+)
+
+
+def save_ebay_account(user_id: str, **fields) -> None:
+    """Create/update a user's eBay connection. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            acct = s.get(EbayAccount, user_id)
+            if acct is None:
+                acct = EbayAccount(user_id=user_id)
+                s.add(acct)
+            for key in _EBAY_FIELDS:
+                if key in fields and fields[key] is not None:
+                    setattr(acct, key, fields[key])
+            acct.updated_at = _now()
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[db] save_ebay_account failed: {exc}")
+
+
+def get_ebay_account(user_id: str) -> Optional[dict]:
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            a = s.get(EbayAccount, user_id)
+            if not a:
+                return None
+            return {f: getattr(a, f) for f in _EBAY_FIELDS}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[db] get_ebay_account failed: {exc}")
         return None
 
 

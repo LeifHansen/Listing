@@ -9,10 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, config, db, storage
+from . import auth, config, db, ebay_auth, storage
 from .models import Listing, PublishRequest, RefineRequest
 from .services import claude_ai, ebay, images, taxonomy
 
@@ -34,6 +34,7 @@ def health() -> dict:
         "ebay_missing": config.ebay_status()["missing"],
         "taxonomy_configured": config.taxonomy_ready(),
         "ebay_env": config.EBAY_ENV,
+        "ebay_oauth_ready": config.ebay_oauth_ready(),
         "db": db.db_status(),
     }
 
@@ -89,6 +90,71 @@ def auth_logout(response: Response) -> dict:
 @app.get("/api/auth/me")
 def auth_me(request: Request) -> dict:
     return {"user": auth.current_user(request)}
+
+
+# --- eBay connect (Sign in with eBay) --------------------------------------
+
+def _ebay_creds_for(request: Request):
+    """Build live eBay creds for the logged-in user, or None if not connected."""
+    uid = _uid(request)
+    if not uid:
+        return None
+    acct = db.get_ebay_account(uid)
+    if not acct or not acct.get("refresh_token"):
+        return None
+    try:
+        fresh = ebay_auth.refresh_access_token(acct["refresh_token"])
+    except Exception:  # noqa: BLE001
+        return None
+    return {
+        "access_token": fresh["access_token"],
+        "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
+        "payment_policy_id": acct.get("payment_policy_id", ""),
+        "return_policy_id": acct.get("return_policy_id", ""),
+        "merchant_location_key": acct.get("merchant_location_key", ""),
+    }
+
+
+@app.get("/api/ebay/connect")
+def ebay_connect(request: Request):
+    if not config.ebay_oauth_ready():
+        raise HTTPException(400, "eBay OAuth not configured (EBAY_CLIENT_ID/SECRET/RUNAME).")
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in before connecting eBay.")
+    return RedirectResponse(ebay_auth.authorize_url(state=uid))
+
+
+@app.get("/api/ebay/callback")
+def ebay_callback(request: Request, code: str = "", state: str = ""):
+    uid = _uid(request) or state
+    if not code or not uid:
+        return RedirectResponse("/?ebay=error")
+    try:
+        tokens = ebay_auth.exchange_code(code)
+        policies = ebay_auth.fetch_policies_and_location(tokens["access_token"])
+        db.save_ebay_account(uid, refresh_token=tokens["refresh_token"], **policies)
+        return RedirectResponse("/?ebay=connected")
+    except Exception:  # noqa: BLE001
+        return RedirectResponse("/?ebay=error")
+
+
+@app.get("/api/ebay/status")
+def ebay_status(request: Request) -> dict:
+    uid = _uid(request)
+    acct = db.get_ebay_account(uid) if uid else None
+    connected = bool(acct and acct.get("refresh_token"))
+    return {
+        "oauth_ready": config.ebay_oauth_ready(),
+        "connected": connected,
+        "env": config.EBAY_ENV,
+        "policies": {
+            "fulfillment": bool(acct and acct.get("fulfillment_policy_id")),
+            "payment": bool(acct and acct.get("payment_policy_id")),
+            "return": bool(acct and acct.get("return_policy_id")),
+            "location": bool(acct and acct.get("merchant_location_key")),
+        } if connected else {},
+    }
 
 
 @app.post("/api/upload")
@@ -212,7 +278,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     storage.save_listing(req.session_id, req.listing)
-    result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request))
+    result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
+                          creds=_ebay_creds_for(request))
     # Record the outcome: published (live), draft, or dry-run.
     if result.get("published"):
         status = "published"

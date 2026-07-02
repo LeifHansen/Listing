@@ -47,11 +47,25 @@ EBAY_MERCHANT_LOCATION_KEY = os.getenv("EBAY_MERCHANT_LOCATION_KEY", "").strip()
 EBAY_MARKETPLACE_ID = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US").strip()
 EBAY_CURRENCY = os.getenv("EBAY_CURRENCY", "USD").strip()
 
-EBAY_API_BASE = (
-    "https://api.sandbox.ebay.com"
-    if EBAY_ENV != "production"
-    else "https://api.ebay.com"
-)
+# "Sign in with eBay": the RuName (redirect URL name) from your eBay app's
+# OAuth settings. Required for the connect flow.
+EBAY_RUNAME = os.getenv("EBAY_RUNAME", "").strip()
+
+_SANDBOX = EBAY_ENV != "production"
+EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
+EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
+
+# Scopes needed to create listings and read/fetch business policies.
+EBAY_OAUTH_SCOPES = [
+    "https://api.ebay.com/oauth/api_scope",
+    "https://api.ebay.com/oauth/api_scope/sell.inventory",
+    "https://api.ebay.com/oauth/api_scope/sell.account",
+]
+
+
+def ebay_oauth_ready() -> bool:
+    """Enough config to run the 'Sign in with eBay' flow."""
+    return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET and EBAY_RUNAME)
 
 
 def anthropic_ready() -> bool:
