@@ -52,9 +52,22 @@ def clear_session_cookie(response: Response) -> None:
     response.delete_cookie(COOKIE_NAME)
 
 
+def make_token(user_id: str) -> str:
+    """Public: mint a session token (for native clients using Bearer auth)."""
+    return _make_token(user_id)
+
+
 def current_user(request: Request) -> Optional[dict]:
-    """Return the logged-in user dict, or None. Never raises."""
+    """Return the logged-in user dict, or None. Never raises.
+
+    Accepts either the session cookie (web) or an `Authorization: Bearer`
+    header (native/mobile clients).
+    """
     token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        authz = request.headers.get("Authorization", "")
+        if authz.startswith("Bearer "):
+            token = authz[7:].strip()
     if not token:
         return None
     try:

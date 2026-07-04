@@ -66,7 +66,7 @@ def auth_signup(request: Request, response: Response, payload: dict) -> dict:
     if not user:
         raise HTTPException(409, "An account with that email already exists")
     auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
-    return {"user": user}
+    return {"user": user, "token": auth.make_token(user["id"])}
 
 
 @app.post("/api/auth/login")
@@ -79,7 +79,7 @@ def auth_login(request: Request, response: Response, payload: dict) -> dict:
     if not user:
         raise HTTPException(401, "Invalid email or password")
     auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
-    return {"user": user}
+    return {"user": user, "token": auth.make_token(user["id"])}
 
 
 @app.post("/api/auth/logout")
