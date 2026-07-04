@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, config, db, ebay_auth, storage
+from . import auth, config, db, ebay_auth, objstore, storage
 from .models import Listing, PublishRequest, RefineRequest
 from .services import claude_ai, ebay, images, taxonomy
 
@@ -35,6 +35,7 @@ def health() -> dict:
         "taxonomy_configured": config.taxonomy_ready(),
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
+        "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
     }
 
@@ -179,6 +180,8 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
             "Could not process the uploaded image(s)"
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
+    # Push optimized images to durable object storage (R2) when configured.
+    objstore.upload_optimized(session_id, storage.optimized_dir(session_id), optimized)
     return {
         "session_id": session_id,
         "optimized": optimized,
@@ -296,9 +299,14 @@ def media(session_id: str, name: str):
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name` (e.g. "../../etc/passwd").
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents:
         raise HTTPException(404, "Not found")
-    return FileResponse(path)
+    if path.is_file():
+        return FileResponse(path)
+    # Local file gone (e.g. after a restart) — fall back to R2 if available.
+    if objstore.enabled():
+        return RedirectResponse(objstore.public_url(objstore.key_for(session_id, name)))
+    raise HTTPException(404, "Not found")
 
 
 # Serve the frontend (index.html + assets) at the root.

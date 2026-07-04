@@ -11,3 +11,4 @@ SQLAlchemy==2.0.36
 psycopg[binary]==3.2.3
 bcrypt==4.2.1
 PyJWT==2.10.1
+boto3==1.35.99

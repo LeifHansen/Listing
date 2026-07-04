@@ -139,8 +139,10 @@ errors on a DB problem. Tables are auto-created on first use.
    per-user tokens + auto-fetched business policies/location. Set
    `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET`/`EBAY_RUNAME` and users click
    "Connect eBay"; publishing then uses their token, no manual secrets.
-6. **Object storage for images** — move optimized photos to S3/R2 so they
-   survive restarts and scale (currently local disk).
+6. **Object storage for images** ✅ — optimized photos upload to Cloudflare R2
+   (S3-compatible) and are served via the bucket's public URL, so they survive
+   restarts and are reliably fetched by eBay. Set the `R2_*` env vars; falls
+   back to local disk when unset.
 7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
    reuses every `/api/*` endpoint.
 8. **Item Identifier (mobile-only)** — double-layer identification: Claude's

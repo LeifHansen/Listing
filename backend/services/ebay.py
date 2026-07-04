@@ -17,7 +17,7 @@ from typing import Optional
 
 import httpx
 
-from .. import config, storage
+from .. import config, objstore, storage
 from ..models import Listing
 
 
@@ -45,13 +45,15 @@ def _sku(session_id: str, listing: Listing) -> str:
     return f"{base[:20]}-{session_id}".upper()
 
 
-def _image_urls(session_id: str, base_url: str) -> list[str]:
+def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
     """eBay requires publicly reachable image URLs.
 
-    We expose optimized images via the app; base_url is the public origin the
-    UI was loaded from. In dry-run mode these are informational.
+    Prefer durable R2 public URLs when object storage is configured; otherwise
+    fall back to serving via the app (needs a public deployment).
     """
-    names = storage.list_optimized(session_id)
+    names = names or storage.list_optimized(session_id)
+    if objstore.enabled():
+        return [objstore.public_url(objstore.key_for(session_id, n)) for n in names]
     return [f"{base_url}/media/{session_id}/optimized/{n}" for n in names]
 
 
@@ -76,7 +78,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
             "title": listing.title[:80],
             "description": listing.description or listing.title,
             "aspects": aspects,
-            "imageUrls": _image_urls(session_id, base_url),
+            "imageUrls": _image_urls(session_id, listing.images, base_url),
             "brand": listing.brand or None,
         },
     })

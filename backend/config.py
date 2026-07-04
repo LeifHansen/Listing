@@ -28,6 +28,23 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 # survive restarts; otherwise a random per-process key is generated.
 SECRET_KEY = os.getenv("SECRET_KEY", "").strip() or os.urandom(32).hex()
 
+# --- Object storage (Cloudflare R2 / any S3, optional) ---------------------
+# Store optimized images in R2 so they survive restarts and are publicly
+# fetchable by eBay. Leave blank to serve images off local disk.
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "").strip()
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+R2_BUCKET = os.getenv("R2_BUCKET", "").strip()
+# The bucket's public base URL (r2.dev URL or a custom domain), no trailing /.
+R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+
+def r2_ready() -> bool:
+    return bool(
+        R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY
+        and R2_BUCKET and R2_PUBLIC_BASE_URL
+    )
+
 # --- Anthropic / Claude ----------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
