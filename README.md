@@ -67,10 +67,32 @@ and runs uvicorn with `--proxy-headers` so it sees Fly's HTTPS origin. Uploaded
 files live on the container's ephemeral disk by default; uncomment the
 `[mounts]` block in `fly.toml` (and create a volume) to persist them.
 
-> **You do NOT need eBay's "Alerts & Notifications" / Platform Notifications
-> page to create listings.** That's for receiving events from eBay. The only
-> notification eBay mandates is *Marketplace Account Deletion*, and only for
-> **Production** keysets — irrelevant for sandbox testing.
+> **Sandbox keysets don't need eBay's "Alerts & Notifications" page.** The one
+> notification eBay mandates — *Marketplace Account Deletion* — applies to
+> **Production** keysets only, and the app now ships the endpoint for it (see
+> below).
+
+### Marketplace Account Deletion endpoint (Production keysets)
+
+eBay refuses to enable a Production keyset until you register a validated
+account-deletion notification endpoint. The app implements it at
+`/api/ebay/account-deletion` (GET answers eBay's challenge, POST acks and
+records the notification under `data/exports/`). To wire it up:
+
+1. Invent a verification token, 32–80 chars of letters/digits/`_`/`-`
+   (e.g. `openssl rand -hex 32`), and set it on the app:
+   `fly secrets set EBAY_VERIFICATION_TOKEN=<token>`
+2. On <https://developer.ebay.com/> → **Application Keys** → your Production
+   keyset → **Alerts & Notifications**, choose *Marketplace Account Deletion*
+   and enter the endpoint URL `https://<your-app>.fly.dev/api/ebay/account-deletion`
+   plus the **same** token.
+3. Hit **Save** — eBay immediately sends a `challenge_code` GET; the app
+   answers with the expected SHA-256 hash and the portal shows the endpoint
+   as verified.
+
+The challenge hash covers the endpoint URL *exactly as registered*; the app
+derives it from the request (correct on Fly), or set `EBAY_DELETION_ENDPOINT`
+explicitly if a proxy rewrites your scheme/host.
 
 ## eBay credentials (optional)
 

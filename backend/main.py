@@ -6,6 +6,7 @@ Pipeline:
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -35,6 +36,7 @@ def health() -> dict:
         "taxonomy_configured": config.taxonomy_ready(),
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
+        "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
         "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
     }
@@ -156,6 +158,63 @@ def ebay_status(request: Request) -> dict:
             "location": bool(acct and acct.get("merchant_location_key")),
         } if connected else {},
     }
+
+
+# --- eBay marketplace account deletion notifications ------------------------
+# eBay requires every *Production* keyset to expose this endpoint (developer
+# portal -> Alerts & Notifications). eBay first validates it with a GET
+# challenge, then POSTs a notification whenever an eBay user requests account
+# deletion; we must ack with a 2xx.
+
+def _deletion_endpoint_url(request: Request) -> str:
+    """The endpoint URL eBay hashes: as registered in the portal, no query."""
+    if config.EBAY_DELETION_ENDPOINT:
+        return config.EBAY_DELETION_ENDPOINT
+    return str(request.url.remove_query_params("challenge_code"))
+
+
+@app.get("/api/ebay/account-deletion")
+def ebay_account_deletion_challenge(request: Request, challenge_code: str = "") -> dict:
+    """Answer eBay's endpoint-validation challenge.
+
+    eBay calls GET <endpoint>?challenge_code=... and expects
+    {"challengeResponse": sha256(challengeCode + verificationToken + endpointUrl)}.
+    """
+    if not config.EBAY_VERIFICATION_TOKEN:
+        raise HTTPException(
+            503,
+            "EBAY_VERIFICATION_TOKEN is not set. Set it to the same value you "
+            "entered on eBay's Alerts & Notifications page.",
+        )
+    if not challenge_code:
+        raise HTTPException(400, "Missing challenge_code query parameter.")
+    digest = hashlib.sha256(
+        (challenge_code + config.EBAY_VERIFICATION_TOKEN
+         + _deletion_endpoint_url(request)).encode("utf-8")
+    ).hexdigest()
+    return {"challengeResponse": digest}
+
+
+@app.post("/api/ebay/account-deletion")
+async def ebay_account_deletion_notice(request: Request) -> Response:
+    """Acknowledge an account-deletion notification (and keep an audit copy).
+
+    We key stored eBay connections by *our* user ids, not eBay usernames, so
+    there is no per-user data to purge here — but the notification is recorded
+    under data/exports/ so there's an audit trail of every notice received.
+    """
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001 - malformed body; ack anyway
+        payload = {}
+    notif_id = ((payload.get("notification") or {}).get("notificationId")
+                or "unknown")
+    try:
+        storage.write_export(f"account-deletion-{notif_id}",
+                             "ebay_notification", payload)
+    except Exception as exc:  # noqa: BLE001 - never fail the ack
+        print(f"[ebay] failed to record deletion notice: {exc}")
+    return Response(status_code=200)
 
 
 @app.post("/api/upload")
