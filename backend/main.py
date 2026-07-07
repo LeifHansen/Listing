@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -157,6 +158,36 @@ def ebay_status(request: Request) -> dict:
             "return": bool(acct and acct.get("return_policy_id")),
             "location": bool(acct and acct.get("merchant_location_key")),
         } if connected else {},
+    }
+
+
+@app.get("/api/ebay/payments-status")
+def ebay_payments_status(request: Request) -> dict:
+    """Live check of the connected eBay account's payments onboarding.
+
+    Answers "did my bank account link actually work?": eBay reports the
+    account as OPTED_IN to the payments program once payout setup is done.
+    """
+    if not _uid(request):
+        raise HTTPException(401, "Log in first.")
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "eBay is not connected for this account.")
+    try:
+        program = ebay_auth.fetch_payments_program(creds["access_token"])
+    except httpx.HTTPStatusError as exc:
+        return {
+            "env": config.EBAY_ENV,
+            "opted_in": False,
+            "error": f"eBay API error: {exc.response.status_code}",
+            "detail": exc.response.text,
+        }
+    status = str(program.get("status", "")).upper()
+    return {
+        "env": config.EBAY_ENV,
+        "status": status,
+        "opted_in": status == "OPTED_IN",
+        "program": program,
     }
 
 

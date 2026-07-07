@@ -284,10 +284,14 @@ async function loadEbayStatus() {
       btn.textContent = "✓ eBay connected";
       btn.style.background = "var(--green)";
       btn.style.color = "#fff";
+      btn.title = "Click to check payout (bank account) setup on eBay";
+      btn.dataset.connected = "1";
     } else {
       btn.textContent = "🔗 Connect eBay";
       btn.style.background = "";
       btn.style.color = "";
+      btn.title = "";
+      btn.dataset.connected = "0";
     }
     btn.dataset.ready = s.oauth_ready ? "1" : "0";
   } catch (e) { /* ignore */ }
@@ -295,11 +299,32 @@ async function loadEbayStatus() {
 
 function connectEbay() {
   if (!state.user) { openAuthModal(); return; }
+  if ($("nav-ebay").dataset.connected === "1") { checkEbayPayments(); return; }
   if ($("nav-ebay").dataset.ready !== "1") {
     alert("eBay isn't configured on the server yet (needs EBAY_CLIENT_ID / SECRET / RUNAME).");
     return;
   }
   window.location.href = "/api/ebay/connect";
+}
+
+async function checkEbayPayments() {
+  showSpinner("Checking payout setup on eBay…");
+  try {
+    const s = await api("/api/ebay/payments-status");
+    if (s.opted_in) {
+      alert(`✅ Payments are set up on eBay (${s.env}): status ${s.status}. ` +
+        "Bank/payout onboarding is complete — you can publish live listings.");
+    } else if (s.error) {
+      alert(`⚠️ Couldn't verify payments setup (${s.env}): ${s.error}\n${s.detail || ""}`);
+    } else {
+      alert(`⚠️ eBay (${s.env}) reports payments status "${s.status || "unknown"}". ` +
+        "Finish payout setup in eBay Seller Hub → Payments (bank verification can take 1–2 days).");
+    }
+  } catch (e) {
+    alert(`⚠️ Payments check failed: ${e.message}`);
+  } finally {
+    hideSpinner();
+  }
 }
 
 function handleEbayRedirect() {

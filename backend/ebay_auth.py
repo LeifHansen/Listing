@@ -78,6 +78,23 @@ def _account_get(path: str, access_token: str) -> dict:
     return resp.json()
 
 
+def fetch_payments_program(access_token: str) -> dict:
+    """Payments-program opt-in status for the connected seller.
+
+    Bank accounts are linked on eBay's side (Seller Hub -> Payments); the
+    closest signal the API exposes is the payments-program status, which is
+    OPTED_IN once payout setup (including a bank account) is complete.
+    """
+    resp = httpx.get(
+        f"{config.EBAY_API_BASE}/sell/account/v1/payments_program/"
+        f"{config.EBAY_MARKETPLACE_ID}/EBAY_PAYMENTS",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def fetch_policies_and_location(access_token: str) -> dict:
     """Best-effort auto-discovery of the seller's default policies + location.
 
