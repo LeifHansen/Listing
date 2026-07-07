@@ -68,6 +68,18 @@ EBAY_CURRENCY = os.getenv("EBAY_CURRENCY", "USD").strip()
 # OAuth settings. Required for the connect flow.
 EBAY_RUNAME = os.getenv("EBAY_RUNAME", "").strip()
 
+# Marketplace Account Deletion notifications — eBay requires every Production
+# keyset to expose a validated endpoint for these. The verification token is a
+# value YOU invent (32-80 chars: letters, digits, underscore, hyphen) and must
+# match exactly what you paste into the developer portal's Alerts &
+# Notifications page alongside the endpoint URL.
+EBAY_VERIFICATION_TOKEN = os.getenv("EBAY_VERIFICATION_TOKEN", "").strip()
+# eBay's challenge hash is computed over the endpoint URL exactly as
+# registered in the portal. It defaults to the request's own URL, which works
+# on Fly (uvicorn runs with --proxy-headers); set it explicitly if the app
+# sits behind a proxy that rewrites scheme/host.
+EBAY_DELETION_ENDPOINT = os.getenv("EBAY_DELETION_ENDPOINT", "").strip()
+
 _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
