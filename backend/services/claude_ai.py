@@ -34,7 +34,7 @@ _LISTING_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this exact shape:
 {
   "title": "string, <= 80 chars, keyword-rich eBay title",
-  "subtitle": "string, optional short subtitle, can be empty",
+  "subtitle": "always the empty string \\"\\" (eBay charges an extra fee for subtitles; the seller adds one manually if they want)",
   "brand": "string",
   "condition": "one of: %s",
   "condition_description": "string describing visible wear/flaws",
@@ -147,6 +147,10 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
     text = "".join(b.text for b in resp.content if b.type == "text")
     data = _extract_json(text)
     listing = _to_listing(data, image_names)
+    # eBay charges extra for subtitles - never auto-fill one; the seller can
+    # add it in the editor if it's worth the fee. (refine() keeps whatever
+    # the seller typed, so only clear it here at first draft.)
+    listing.subtitle = ""
     return IdentifyResult(
         listing=listing,
         confidence=str(data.get("confidence", "medium")),

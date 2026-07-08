@@ -11,11 +11,19 @@ const state = {
   sessionId: null,
   files: [],
   listing: null,
-  ebayConfigured: false,
+  ebayConfigured: false,   // server-level env credentials (legacy path)
+  ebayConnected: false,    // the logged-in user's own eBay connection
+  ebayEnv: "",
   taxonomyConfigured: false,
   user: null,
   authMode: "login",
 };
+
+// Publishing is live if EITHER the user connected their eBay account or the
+// server has env-level credentials.
+function canPublishLive() {
+  return state.ebayConnected || state.ebayConfigured;
+}
 
 // ---------- helpers ----------
 function showSpinner(text) {
@@ -57,12 +65,10 @@ async function loadHealth() {
     bar.appendChild(pill(
       h.anthropic_configured ? "AI: ready" : "AI: missing ANTHROPIC_API_KEY",
       h.anthropic_configured));
-    const missing = h.ebay_missing || [];
-    const ebayLabel = h.ebay_configured
-      ? `eBay: ${h.ebay_env} ready`
-      : `eBay: dry-run (missing: ${missing.length ? missing.join(", ") : "credentials"})`;
-    bar.appendChild(pill(ebayLabel, h.ebay_configured,
-      h.ebay_configured ? "" : "Set these as env vars / Fly secrets to publish for real"));
+    const ebayPill = pill("", false);
+    ebayPill.id = "pill-ebay";
+    bar.appendChild(ebayPill);
+    renderEbayPill();
     bar.appendChild(pill(
       h.taxonomy_configured ? "Categories: auto" : "Categories: manual",
       h.taxonomy_configured));
@@ -306,11 +312,36 @@ async function logout() {
   loadEbayStatus();
 }
 
+// The eBay status pill depends on two async fetches (health + per-user eBay
+// status); render from state so whichever finishes last wins correctly.
+function renderEbayPill() {
+  const p = $("pill-ebay");
+  if (!p) return;
+  if (state.ebayConnected) {
+    p.textContent = `eBay: your account connected (${state.ebayEnv || "production"})`;
+    p.className = "pill ok";
+    p.title = "Publishing goes to your connected eBay account";
+  } else if (state.ebayConfigured) {
+    p.textContent = "eBay: ready (server credentials)";
+    p.className = "pill ok";
+    p.title = "";
+  } else {
+    p.textContent = state.user
+      ? "eBay: dry-run — click 'Connect eBay' to publish for real"
+      : "eBay: dry-run — log in and connect eBay to publish for real";
+    p.className = "pill warn";
+    p.title = "Publish generates the exact eBay API payload without posting";
+  }
+}
+
 // ---------- eBay connection ----------
 async function loadEbayStatus() {
   const btn = $("nav-ebay");
   try {
     const s = await api("/api/ebay/status");
+    state.ebayConnected = !!s.connected;
+    state.ebayEnv = s.env || "";
+    renderEbayPill();
     if (s.connected) {
       btn.textContent = "✓ eBay connected";
       btn.style.background = "var(--green)";
@@ -441,9 +472,9 @@ function renderPreview(result) {
   $("confidence").innerHTML =
     `AI confidence: <span class="badge ${conf}">${conf.toUpperCase()}</span>`;
 
-  $("publish-note").textContent = state.ebayConfigured
+  $("publish-note").textContent = canPublishLive()
     ? "Connected to eBay. Drafts create an unpublished offer; Live publishes it."
-    : "Dry-run mode: no eBay credentials yet, so we'll generate the exact API payload for you to inspect/use later.";
+    : "Dry-run mode: no eBay connection yet, so we'll generate the exact API payload for you to inspect/use later.";
 }
 
 function updateTitleCount() {
