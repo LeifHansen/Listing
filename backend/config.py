@@ -23,10 +23,23 @@ for _d in (DATA_DIR, SESSIONS_DIR, EXPORTS_DIR):
 # Neon gives a URL like postgresql://user:pass@host/db?sslmode=require
 
 
+def _env(*names: str) -> str:
+    """First real value among the named env vars, in order.
+
+    Placeholder values like '<your production App ID>' (a recurring
+    copy-the-template-literally mistake in this app's Fly secrets) are
+    treated as unset so features degrade cleanly instead of sending
+    garbage to eBay/Postgres.
+    """
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value and "<" not in value:
+            return value
+    return ""
+
+
 def _clean_db_url(value: str) -> str:
-    """Ignore unset, placeholder ('<the Neon connection string>'), or
-    obviously-not-a-URL values so a botched secret disables the DB cleanly
-    instead of making every query raise a parse error."""
+    """Placeholder-proof like _env, plus require a plausible URL scheme."""
     value = (value or "").strip()
     if not value or "<" in value or not value.startswith(("postgres", "sqlite")):
         return ""
@@ -65,10 +78,14 @@ CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
-EBAY_OAUTH_TOKEN = os.getenv("EBAY_OAUTH_TOKEN", "").strip()
-EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID", "").strip()
-EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET", "").strip()
-EBAY_REFRESH_TOKEN = os.getenv("EBAY_REFRESH_TOKEN", "").strip()
+EBAY_OAUTH_TOKEN = _env("EBAY_OAUTH_TOKEN")
+# The Fly secrets store the real production keyset under EBAY_APP_CLIENT_ID /
+# EBAY_CERT_ID (eBay's "App ID" and "Cert ID" = OAuth client id and secret),
+# while EBAY_CLIENT_ID/SECRET were left as placeholder text — hence the
+# fallbacks.
+EBAY_CLIENT_ID = _env("EBAY_CLIENT_ID", "EBAY_APP_CLIENT_ID")
+EBAY_CLIENT_SECRET = _env("EBAY_CLIENT_SECRET", "EBAY_CERT_ID")
+EBAY_REFRESH_TOKEN = _env("EBAY_REFRESH_TOKEN")
 
 EBAY_FULFILLMENT_POLICY_ID = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "").strip()
 EBAY_PAYMENT_POLICY_ID = os.getenv("EBAY_PAYMENT_POLICY_ID", "").strip()
@@ -79,7 +96,7 @@ EBAY_CURRENCY = os.getenv("EBAY_CURRENCY", "USD").strip()
 
 # "Sign in with eBay": the RuName (redirect URL name) from your eBay app's
 # OAuth settings. Required for the connect flow.
-EBAY_RUNAME = os.getenv("EBAY_RUNAME", "").strip()
+EBAY_RUNAME = _env("EBAY_RUNAME")
 
 # Marketplace Account Deletion notifications — eBay requires every Production
 # keyset to expose a validated endpoint for these. The verification token is a
