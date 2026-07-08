@@ -7,6 +7,8 @@ per-account listing history.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import hmac
 import uuid
 from typing import Optional
 
@@ -75,6 +77,25 @@ def current_user(request: Request) -> Optional[dict]:
         return db.get_user_by_id(payload.get("sub", ""))
     except Exception:  # noqa: BLE001 - expired/invalid token -> treat as anonymous
         return None
+
+
+def _state_sig(user_id: str) -> str:
+    return hmac.new(config.SECRET_KEY.encode(), user_id.encode(),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def make_state(user_id: str) -> str:
+    """Sign the OAuth state so the eBay callback can't be fed an arbitrary
+    user id (the session cookie is often absent on that cross-site redirect)."""
+    return f"{user_id}.{_state_sig(user_id)}"
+
+
+def verify_state(state: str) -> Optional[str]:
+    """Return the user id from a signed state, or None if missing/tampered."""
+    user_id, _, sig = (state or "").partition(".")
+    if not user_id or not sig:
+        return None
+    return user_id if hmac.compare_digest(sig, _state_sig(user_id)) else None
 
 
 def signup(email: str, password: str):

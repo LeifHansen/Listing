@@ -138,6 +138,14 @@ def _headers(token: str) -> dict:
     }
 
 
+def _body(resp: httpx.Response) -> dict:
+    """eBay error responses aren't always JSON; never let parsing crash us."""
+    try:
+        return resp.json()
+    except ValueError:
+        return {"raw": resp.text[:500]}
+
+
 def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                creds: Optional[dict] = None) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
@@ -161,7 +169,7 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
             headers=_headers(token),
             json=offer,
         )
-        r2_body = r2.json()
+        r2_body = _body(r2)
         steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
         r2.raise_for_status()
         offer_id = r2_body.get("offerId")
@@ -173,7 +181,7 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                 f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
                 headers=_headers(token),
             )
-            r3_body = r3.json()
+            r3_body = _body(r3)
             steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
             r3.raise_for_status()
             published = True

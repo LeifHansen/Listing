@@ -13,6 +13,7 @@ import httpx
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from . import auth, config, db, ebay_auth, objstore, storage
 from .models import Listing, PublishRequest, RefineRequest
@@ -134,12 +135,12 @@ def ebay_connect(request: Request):
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
-    return RedirectResponse(ebay_auth.authorize_url(state=uid))
+    return RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid)))
 
 
 @app.get("/api/ebay/callback")
 def ebay_callback(request: Request, code: str = "", state: str = ""):
-    uid = _uid(request) or state
+    uid = _uid(request) or auth.verify_state(state)
     if not code or not uid:
         return RedirectResponse("/?ebay=error")
     try:
@@ -256,20 +257,32 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
     return Response(status_code=200)
 
 
+MAX_UPLOAD_FILES = 12   # eBay allows up to 24 photos; keep memory bounded
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # per file
+
+
 @app.post("/api/upload")
 async def upload(files: list[UploadFile] = File(...)) -> dict:
     """Accept images, optimize them, and return a session id."""
     if not files:
         raise HTTPException(400, "No files uploaded")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
     for i, f in enumerate(files):
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
         suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-        dest = orig / f"src_{i:02d}{suffix}"
-        dest.write_bytes(await f.read())
+        (orig / f"src_{i:02d}{suffix}").write_bytes(data)
 
-    opt_results = images.optimize_all(orig, storage.optimized_dir(session_id))
+    # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
+    # the event loop so photo processing doesn't stall every other request.
+    opt_results = await run_in_threadpool(
+        images.optimize_all, orig, storage.optimized_dir(session_id))
     optimized = storage.list_optimized(session_id)
     if not optimized:
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
@@ -279,7 +292,8 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
     # Push optimized images to durable object storage (R2) when configured.
-    objstore.upload_optimized(session_id, storage.optimized_dir(session_id), optimized)
+    await run_in_threadpool(
+        objstore.upload_optimized, session_id, storage.optimized_dir(session_id), optimized)
     return {
         "session_id": session_id,
         "optimized": optimized,

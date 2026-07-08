@@ -121,7 +121,9 @@ def upsert_listing(
             if rec is None:
                 rec = ListingRecord(id=listing_id, created_at=now)
                 s.add(rec)
-            if user_id is not None:
+            # Claim ownership only if unowned; never reassign a listing to
+            # whoever happens to save it (session ids can leak in URLs).
+            if user_id is not None and rec.user_id in (None, user_id):
                 rec.user_id = user_id
             rec.status = status
             rec.title = (listing.get("title") or "")[:255]

@@ -586,8 +586,8 @@ function init() {
   loadEbayStatus();
   handleEbayRedirect();
   $("nav-ebay").addEventListener("click", connectEbay);
-  // Auth modal wiring
-  $("btn-login").addEventListener("click", openAuthModal);
+  // Auth modal wiring (the login/logout button itself is wired by
+  // renderAuthArea, which replaces it on every auth change)
   $("auth-close").addEventListener("click", closeAuthModal);
   $("tab-login").addEventListener("click", () => setAuthMode("login"));
   $("tab-signup").addEventListener("click", () => setAuthMode("signup"));

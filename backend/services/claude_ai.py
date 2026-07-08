@@ -101,6 +101,10 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         price = round(float(price), 2) if price is not None else None
     except (TypeError, ValueError):
         price = None
+    try:
+        quantity = max(1, int(float(data.get("quantity") or 1)))
+    except (TypeError, ValueError):
+        quantity = 1
     return Listing(
         title=title,
         subtitle=(data.get("subtitle") or "").strip(),
@@ -111,7 +115,7 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         description=(data.get("description") or "").strip(),
         price=price,
         currency=config.EBAY_CURRENCY,
-        quantity=int(data.get("quantity") or 1),
+        quantity=quantity,
         item_specifics=specifics,
         images=image_names,
         missing_info=[str(m) for m in data.get("missing_info", [])],
