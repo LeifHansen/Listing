@@ -12,9 +12,8 @@ primary_region = 'sjc'
   EBAY_ENV = 'sandbox'
   PORT = '8080'
   DATA_DIR = '/data'
-  # Cache the rembg U^2-Net model on the persistent volume so cold starts
-  # don't re-download the ~170MB model every time.
-  U2NET_HOME = '/data/models'
+  # The background-removal model is baked into the image (see Dockerfile), so
+  # no runtime download and no volume dependency for it.
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...

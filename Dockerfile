@@ -11,6 +11,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bake the lightweight background-removal model into the image so there's no
+# slow/fragile 176MB download at request time. u2netp is ~4.7MB.
+RUN python -c "from rembg import new_session; new_session('u2netp')"
+
 COPY backend ./backend
 COPY frontend ./frontend
 

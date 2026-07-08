@@ -25,8 +25,14 @@ JPEG_QUALITY = 88
 CANVAS_COLOR = (248, 248, 248)  # near-white, looks clean on eBay
 WHITE = (255, 255, 255)  # pure white when the user asks to strip the background
 
-# rembg loads a ~170MB ONNX model on first use; keep the session process-global
-# so we pay that cost once, and only when background removal is actually used.
+# rembg loads an ONNX model on first use; keep the session process-global so we
+# pay that cost once, and only when background removal is actually used.
+# Default to the lightweight "u2netp" model (~4.7MB): the full "u2net" (176MB)
+# is too slow to download and too memory-hungry for a shared-cpu-1x machine.
+# Override with REMBG_MODEL if the box ever gets a bigger VM.
+import os
+
+_REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 _rembg_session = None
 
 
@@ -40,7 +46,7 @@ def _remove_background(img: Image.Image) -> Image.Image:
     from rembg import new_session, remove
 
     if _rembg_session is None:
-        _rembg_session = new_session("u2net")
+        _rembg_session = new_session(_REMBG_MODEL)
     cutout = remove(img.convert("RGBA"), session=_rembg_session)  # transparent bg
     canvas = Image.new("RGBA", cutout.size, WHITE + (255,))
     canvas.alpha_composite(cutout)
