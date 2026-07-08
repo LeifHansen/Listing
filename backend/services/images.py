@@ -36,6 +36,21 @@ _REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 _rembg_session = None
 
 
+def warm() -> None:
+    """Pre-import rembg and trigger numba's JIT on a tiny image.
+
+    The very first background removal otherwise pays a ~60-70s one-time cost
+    (importing scipy/numba/opencv + JIT compilation). Called in a background
+    thread at startup so the machine is reachable immediately while this warms
+    up, and real uploads hit a warm (~1s) path.
+    """
+    try:
+        _remove_background(Image.new("RGB", (32, 32), (200, 100, 50)))
+        print("[images] background-removal model warmed")
+    except Exception as exc:  # noqa: BLE001 - warmup is best-effort
+        print(f"[images] warmup failed (will lazy-load on first use): {exc}")
+
+
 def _remove_background(img: Image.Image) -> Image.Image:
     """Cut out the subject and composite it onto a pure-white canvas.
 

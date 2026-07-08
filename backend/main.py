@@ -24,6 +24,16 @@ app = FastAPI(title="eBay Listing Generator")
 FRONTEND_DIR = config.ROOT_DIR / "frontend"
 
 
+@app.on_event("startup")
+def _warm_models() -> None:
+    """Warm the background-removal model in a daemon thread so uvicorn binds
+    the port immediately (machine stays reachable) while the ~60s first-use
+    JIT/import cost happens in the background."""
+    import threading
+
+    threading.Thread(target=images.warm, daemon=True).start()
+
+
 def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 

@@ -31,7 +31,8 @@ primary_region = 'sjc'
   min_machines_running = 0
 
 [[vm]]
-  size = 'shared-cpu-1x'
-  # 1GB: background removal loads onnxruntime + the U^2-Net model, which OOMs
-  # a 512MB machine.
-  memory = '1gb'
+  # Background removal loads onnxruntime + rembg (scipy/numba/opencv). 1GB
+  # thrashes and the request hangs; 2GB + 2 vCPUs runs it in a few seconds.
+  # auto_stop keeps it billed only while actually in use.
+  size = 'shared-cpu-2x'
+  memory = '2gb'
