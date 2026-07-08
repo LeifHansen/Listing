@@ -407,5 +407,17 @@ def media(session_id: str, name: str):
     raise HTTPException(404, "Not found")
 
 
+# Clean URLs for the static pages eBay's app settings link to (StaticFiles
+# only serves them under their exact .html filenames).
+@app.get("/privacy-policy")
+def privacy_policy():
+    return FileResponse(FRONTEND_DIR / "privacy-policy.html")
+
+
+@app.get("/about")
+def about():
+    return FileResponse(FRONTEND_DIR / "about.html")
+
+
 # Serve the frontend (index.html + assets) at the root.
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
