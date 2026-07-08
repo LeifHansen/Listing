@@ -137,11 +137,13 @@ async function downscaleForUpload(file) {
 
 async function processImages() {
   try {
+    const removeBg = $("opt-remove-bg").checked;
     showSpinner("Preparing photos…");
     const prepped = await Promise.all(state.files.map(downscaleForUpload));
-    showSpinner("Uploading & optimizing images…");
+    showSpinner(removeBg ? "Uploading & removing backgrounds…" : "Uploading & optimizing images…");
     const fd = new FormData();
     prepped.forEach((f) => fd.append("files", f));
+    fd.append("remove_bg", removeBg ? "true" : "false");
     const up = await api("/api/upload", { method: "POST", body: fd });
     state.sessionId = up.session_id;
 

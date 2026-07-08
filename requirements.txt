@@ -12,3 +12,7 @@ psycopg[binary]==3.2.3
 bcrypt==4.2.1
 PyJWT==2.10.1
 boto3==1.35.99
+# Background removal (optional "white background" upload toggle). rembg pulls
+# in onnxruntime + a ~170MB U^2-Net model downloaded on first use.
+rembg==2.0.59
+onnxruntime==1.20.1

@@ -12,6 +12,9 @@ primary_region = 'sjc'
   EBAY_ENV = 'sandbox'
   PORT = '8080'
   DATA_DIR = '/data'
+  # Cache the rembg U^2-Net model on the persistent volume so cold starts
+  # don't re-download the ~170MB model every time.
+  U2NET_HOME = '/data/models'
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...
@@ -30,4 +33,6 @@ primary_region = 'sjc'
 
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '512mb'
+  # 1GB: background removal loads onnxruntime + the U^2-Net model, which OOMs
+  # a 512MB machine.
+  memory = '1gb'

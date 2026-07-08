@@ -23,6 +23,28 @@ except Exception:  # noqa: BLE001
 TARGET_SIZE = 1600  # px, longest side per eBay zoom recommendation
 JPEG_QUALITY = 88
 CANVAS_COLOR = (248, 248, 248)  # near-white, looks clean on eBay
+WHITE = (255, 255, 255)  # pure white when the user asks to strip the background
+
+# rembg loads a ~170MB ONNX model on first use; keep the session process-global
+# so we pay that cost once, and only when background removal is actually used.
+_rembg_session = None
+
+
+def _remove_background(img: Image.Image) -> Image.Image:
+    """Cut out the subject and composite it onto a pure-white canvas.
+
+    Uses rembg (U^2-Net). Imported lazily so the dependency/model is only
+    loaded when a user actually checks the box.
+    """
+    global _rembg_session
+    from rembg import new_session, remove
+
+    if _rembg_session is None:
+        _rembg_session = new_session("u2net")
+    cutout = remove(img.convert("RGBA"), session=_rembg_session)  # transparent bg
+    canvas = Image.new("RGBA", cutout.size, WHITE + (255,))
+    canvas.alpha_composite(cutout)
+    return canvas.convert("RGB")
 
 
 def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
@@ -66,13 +88,18 @@ def _enhance(img: Image.Image) -> Image.Image:
     return img
 
 
-def optimize(src: Path, dst: Path) -> dict:
+def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
     """Optimize a single image. Returns metadata about what was done."""
     with Image.open(src) as raw:
         img = ImageOps.exif_transpose(raw)  # honor camera rotation
         original_size = img.size
 
-        img = _autocrop_borders(img)
+        bg_removed = False
+        if remove_bg:
+            img = _remove_background(img)
+            bg_removed = True
+        else:
+            img = _autocrop_borders(img)
         img = _pad_to_square(img)
 
         if img.size[0] != TARGET_SIZE:
@@ -87,10 +114,11 @@ def optimize(src: Path, dst: Path) -> dict:
         "file": dst.name,
         "original_size": original_size,
         "output_size": (TARGET_SIZE, TARGET_SIZE),
+        "background_removed": bg_removed,
     }
 
 
-def optimize_all(src_dir: Path, dst_dir: Path) -> list[dict]:
+def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[dict]:
     dst_dir.mkdir(parents=True, exist_ok=True)
     results = []
     exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".heic"}
@@ -99,7 +127,7 @@ def optimize_all(src_dir: Path, dst_dir: Path) -> list[dict]:
             continue
         dst = dst_dir / f"img_{i:02d}.jpg"
         try:
-            results.append(optimize(src, dst))
+            results.append(optimize(src, dst, remove_bg))
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             results.append({"file": src.name, "error": str(exc)})
     return results

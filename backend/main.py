@@ -10,7 +10,7 @@ import hashlib
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -262,12 +262,21 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # per file
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)) -> dict:
-    """Accept images, optimize them, and return a session id."""
+async def upload(
+    files: list[UploadFile] = File(...),
+    remove_bg: str = Form("false"),
+) -> dict:
+    """Accept images, optimize them, and return a session id.
+
+    remove_bg: when "true", each photo's background is removed and replaced
+    with a solid white canvas before the usual optimization pass.
+    """
     if not files:
         raise HTTPException(400, "No files uploaded")
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
+
+    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
@@ -282,7 +291,7 @@ async def upload(files: list[UploadFile] = File(...)) -> dict:
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
     opt_results = await run_in_threadpool(
-        images.optimize_all, orig, storage.optimized_dir(session_id))
+        images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
     optimized = storage.list_optimized(session_id)
     if not optimized:
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
