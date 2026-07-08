@@ -77,8 +77,8 @@ def current_user(request: Request) -> Optional[dict]:
         return None
 
 
-def signup(email: str, password: str) -> Optional[dict]:
-    """Create a user; returns the user dict or None if the email is taken."""
+def signup(email: str, password: str):
+    """Create a user; returns the user dict, db.EMAIL_TAKEN, or None on DB error."""
     return db.create_user(uuid.uuid4().hex[:16], email.strip().lower(), hash_password(password))
 
 

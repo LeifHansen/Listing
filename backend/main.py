@@ -66,8 +66,12 @@ def auth_signup(request: Request, response: Response, payload: dict) -> dict:
     if not db.enabled():
         raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
     user = auth.signup(email, password)
-    if not user:
+    if user is db.EMAIL_TAKEN:
         raise HTTPException(409, "An account with that email already exists")
+    if not user:
+        raise HTTPException(
+            503, "Account service is temporarily unavailable (database error). "
+                 "Please try again shortly.")
     auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
     return {"user": user, "token": auth.make_token(user["id"])}
 
@@ -80,6 +84,10 @@ def auth_login(request: Request, response: Response, payload: dict) -> dict:
         raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
     user = auth.login(email, password)
     if not user:
+        if not db.db_status().get("connected"):
+            raise HTTPException(
+                503, "Account service is temporarily unavailable (database "
+                     "error). Please try again shortly.")
         raise HTTPException(401, "Invalid email or password")
     auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
     return {"user": user, "token": auth.make_token(user["id"])}

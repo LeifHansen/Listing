@@ -19,3 +19,4 @@ data/exports/
 .DS_Store
 .idea/
 .vscode/
+.claude/

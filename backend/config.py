@@ -21,7 +21,20 @@ for _d in (DATA_DIR, SESSIONS_DIR, EXPORTS_DIR):
 
 # --- Database (Neon / any Postgres, optional) ------------------------------
 # Neon gives a URL like postgresql://user:pass@host/db?sslmode=require
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+
+def _clean_db_url(value: str) -> str:
+    """Ignore unset, placeholder ('<the Neon connection string>'), or
+    obviously-not-a-URL values so a botched secret disables the DB cleanly
+    instead of making every query raise a parse error."""
+    value = (value or "").strip()
+    if not value or "<" in value or not value.startswith(("postgres", "sqlite")):
+        return ""
+    return value
+
+
+DATABASE_URL = (_clean_db_url(os.getenv("DATABASE_URL", ""))
+                or _clean_db_url(os.getenv("NEON_PRODUCTION_DATABASE_URL", "")))
 
 # --- Auth ------------------------------------------------------------------
 # Used to sign session JWTs. Set a stable value in production so sessions

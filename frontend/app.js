@@ -100,11 +100,42 @@ function setupDropzone() {
   dz.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
 }
 
+// Phone photos are often 5-12MB; the server only needs ~1600px. Re-encoding
+// in the browser before upload cuts transfer time ~10x. Formats the browser
+// can't decode (e.g. HEIC) fall through and upload as-is — the server
+// handles them.
+const MAX_UPLOAD_SIDE = 2000;
+async function downscaleForUpload(file) {
+  try {
+    let bmp;
+    try {
+      bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch (e) {
+      bmp = await createImageBitmap(file);
+    }
+    const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(bmp.width, bmp.height));
+    if (scale >= 1 && file.size < 2 * 1024 * 1024) { bmp.close(); return file; }
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close();
+    const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
+    if (!blob) return file;
+    const name = (file.name || "photo").replace(/\.\w+$/, "") + ".jpg";
+    return new File([blob], name, { type: "image/jpeg" });
+  } catch (e) {
+    return file; // never block the upload on a client-side optimization
+  }
+}
+
 async function processImages() {
   try {
-    showSpinner("Optimizing images…");
+    showSpinner("Preparing photos…");
+    const prepped = await Promise.all(state.files.map(downscaleForUpload));
+    showSpinner("Uploading & optimizing images…");
     const fd = new FormData();
-    state.files.forEach((f) => fd.append("files", f));
+    prepped.forEach((f) => fd.append("files", f));
     const up = await api("/api/upload", { method: "POST", body: fd });
     state.sessionId = up.session_id;
 

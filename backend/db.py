@@ -155,15 +155,20 @@ def _user_to_dict(u: User) -> dict:
     return {"id": u.id, "email": u.email, "created_at": u.created_at.isoformat()}
 
 
-def create_user(user_id: str, email: str, password_hash: str) -> Optional[dict]:
-    """Create a user. Returns None if the email already exists or on error."""
+# Sentinel so callers can tell "email taken" (user error, 409) apart from
+# "database broken" (server error, 503).
+EMAIL_TAKEN = object()
+
+
+def create_user(user_id: str, email: str, password_hash: str):
+    """Create a user. Returns the user dict, EMAIL_TAKEN, or None on DB error."""
     try:
         eng = _get_engine()
         if eng is None:
             return None
         with Session(eng) as s:
             if s.execute(select(User).where(User.email == email)).scalar_one_or_none():
-                return None
+                return EMAIL_TAKEN
             u = User(id=user_id, email=email, password_hash=password_hash, created_at=_now())
             s.add(u)
             s.commit()
