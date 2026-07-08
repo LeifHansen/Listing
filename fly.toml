@@ -11,6 +11,15 @@ primary_region = 'sjc'
 [env]
   EBAY_ENV = 'sandbox'
   PORT = '8080'
+  DATA_DIR = '/data'
+
+# Sessions (uploaded/optimized photos) and exports must survive machine
+# restarts and deploys: eBay fetches the listing's image URLs from /media/...
+# at publish time, and the machine rootfs is ephemeral. Dead image URLs make
+# eBay's Inventory API fail with the opaque 25001 'system error'.
+[mounts]
+  source = 'data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080

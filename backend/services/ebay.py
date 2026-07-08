@@ -155,37 +155,49 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
     base = config.EBAY_API_BASE
     steps: list[dict] = []
 
-    with httpx.Client(timeout=60) as client:
-        r1 = client.put(
-            f"{base}/sell/inventory/v1/inventory_item/{sku}",
-            headers=_headers(token),
-            json=item,
-        )
-        steps.append({"step": "createOrReplaceInventoryItem", "status": r1.status_code})
-        r1.raise_for_status()
-
-        r2 = client.post(
-            f"{base}/sell/inventory/v1/offer",
-            headers=_headers(token),
-            json=offer,
-        )
-        r2_body = _body(r2)
-        steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
-        r2.raise_for_status()
-        offer_id = r2_body.get("offerId")
-
-        published = False
-        listing_id = None
-        if mode == "live":
-            r3 = client.post(
-                f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
+    try:
+        with httpx.Client(timeout=60) as client:
+            r1 = client.put(
+                f"{base}/sell/inventory/v1/inventory_item/{sku}",
                 headers=_headers(token),
+                json=item,
             )
-            r3_body = _body(r3)
-            steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
-            r3.raise_for_status()
-            published = True
-            listing_id = r3_body.get("listingId")
+            steps.append({"step": "createOrReplaceInventoryItem", "status": r1.status_code,
+                          "body": None if r1.is_success else _body(r1)})
+            r1.raise_for_status()
+
+            r2 = client.post(
+                f"{base}/sell/inventory/v1/offer",
+                headers=_headers(token),
+                json=offer,
+            )
+            r2_body = _body(r2)
+            steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
+            r2.raise_for_status()
+            offer_id = r2_body.get("offerId")
+
+            published = False
+            listing_id = None
+            if mode == "live":
+                r3 = client.post(
+                    f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
+                    headers=_headers(token),
+                )
+                r3_body = _body(r3)
+                steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
+                r3.raise_for_status()
+                published = True
+                listing_id = r3_body.get("listingId")
+    except httpx.HTTPStatusError as exc:
+        failed = steps[-1]["step"] if steps else "authentication"
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "message": f"eBay API error {exc.response.status_code} during {failed}",
+            "detail": exc.response.text,
+            "steps": steps,
+        }
 
     return {
         "dry_run": False,
@@ -224,6 +236,24 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             "export_path": str(export_path),
             "payload": payload,
         }
+
+    # eBay fetches every image URL when the inventory item is created; if the
+    # local files are gone (session predates a restart/deploy) it fails with
+    # an opaque 25001 'system error'. Fail clearly instead.
+    if not objstore.enabled():
+        names = listing.images or storage.list_optimized(session_id)
+        opt_dir = storage.optimized_dir(session_id)
+        if not names or any(not (opt_dir / n).is_file() for n in names):
+            return {
+                "dry_run": False,
+                "error": True,
+                "mode": mode,
+                "message": (
+                    "This listing's photos are no longer on the server, so eBay "
+                    "can't fetch them. Please re-upload the photos and try again."
+                ),
+                "export_path": str(export_path),
+            }
 
     try:
         result = _push_live(session_id, listing, mode, base_url, creds)
