@@ -271,7 +271,13 @@ def db_status() -> dict:
     if not enabled():
         return {"configured": False, "connected": False}
     try:
-        _get_engine()
+        eng = _get_engine()
+        # Actually round-trip to the DB. _get_engine() only reaches the server
+        # on first call (create_all); afterwards it returns a cached engine, so
+        # without this the probe would report "connected" even if the DB later
+        # went down.
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
         return {"configured": True, "connected": True}
     except Exception as exc:  # noqa: BLE001
         return {"configured": True, "connected": False, "error": str(exc)}

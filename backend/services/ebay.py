@@ -175,6 +175,17 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
             steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
             r2.raise_for_status()
             offer_id = r2_body.get("offerId")
+            if not offer_id:
+                # 2xx but no offerId (e.g. a non-JSON body) — publishing to
+                # /offer/None/publish would fail opaquely; stop with a clear error.
+                return {
+                    "dry_run": False,
+                    "error": True,
+                    "mode": mode,
+                    "message": "eBay createOffer succeeded but returned no offerId.",
+                    "detail": str(r2_body),
+                    "steps": steps,
+                }
 
             published = False
             listing_id = None

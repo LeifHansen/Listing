@@ -76,12 +76,19 @@ async function loadHealth() {
 }
 
 // ---------- step 1: upload ----------
+let _thumbUrls = [];
 function renderThumbs() {
   const box = $("thumbs");
+  // Revoke previously-created object URLs so re-rendering (add more, start new)
+  // doesn't leak blobs — matters on memory-limited phones.
+  _thumbUrls.forEach((u) => URL.revokeObjectURL(u));
+  _thumbUrls = [];
   box.innerHTML = "";
   state.files.forEach((f) => {
+    const url = URL.createObjectURL(f);
+    _thumbUrls.push(url);
     const img = document.createElement("img");
-    img.src = URL.createObjectURL(f);
+    img.src = url;
     box.appendChild(img);
   });
   $("btn-process").disabled = state.files.length === 0;
@@ -89,7 +96,10 @@ function renderThumbs() {
 
 function addFiles(fileList) {
   for (const f of fileList) {
-    if (f.type.startsWith("image/")) state.files.push(f);
+    if (!f.type.startsWith("image/")) continue;
+    // Skip duplicates (same file picked twice) so we don't upload it twice.
+    if (state.files.some((e) => e.name === f.name && e.size === f.size)) continue;
+    state.files.push(f);
   }
   renderThumbs();
 }
@@ -176,7 +186,7 @@ async function loadListings() {
   grid.innerHTML = "<p class='hint'>Loading…</p>";
   try {
     const res = await api("/api/listings");
-    if (!res.db.configured) {
+    if (!res.db || !res.db.configured) {
       $("listings-note").textContent =
         "No database configured — set DATABASE_URL to save listing history.";
       grid.innerHTML = "";
@@ -188,7 +198,7 @@ async function loadListings() {
       openAuthModal();
       return;
     }
-    $("listings-note").textContent = res.db.connected
+    $("listings-note").textContent = res.db && res.db.connected
       ? "" : "Database configured but unreachable.";
     renderListings(res.listings || []);
   } catch (e) {
@@ -240,7 +250,7 @@ function startNew() {
   state.sessionId = null;
   state.files = [];
   state.listing = null;
-  $("thumbs").innerHTML = "";
+  renderThumbs();  // clears thumbs and revokes their object URLs
   $("file-input").value = "";
   $("btn-process").disabled = true;
   $("publish-result").classList.add("hidden");
@@ -437,7 +447,7 @@ function escapeHtml(s) {
 function renderImages() {
   const box = $("opt-images");
   box.innerHTML = "";
-  (state.listing.images || []).forEach((name) => {
+  ((state.listing && state.listing.images) || []).forEach((name) => {
     const img = document.createElement("img");
     img.src = `/media/${state.sessionId}/optimized/${name}`;
     box.appendChild(img);
@@ -452,7 +462,9 @@ function renderMissingInfo(missing) {
 }
 
 function renderPreview(result) {
-  const l = state.listing;
+  // Guard against a record with a null/absent listing (e.g. opening a saved
+  // listing whose data didn't load) so we render an empty form, not a crash.
+  const l = state.listing || {};
   $("f-title").value = l.title || "";
   $("f-subtitle").value = l.subtitle || "";
   $("f-brand").value = l.brand || "";
@@ -491,9 +503,10 @@ function collectListing() {
     return { name: n.value.trim(), value: v.value.trim() };
   }).filter((s) => s.name);
 
+  const base = state.listing || {};
   const price = $("f-price").value;
   return {
-    ...state.listing,
+    ...base,
     title: $("f-title").value,
     subtitle: $("f-subtitle").value,
     brand: $("f-brand").value,
@@ -505,8 +518,8 @@ function collectListing() {
     condition_description: $("f-condition-desc").value,
     description: $("f-description").value,
     item_specifics: specs,
-    images: state.listing.images,
-    currency: state.listing.currency || "USD",
+    images: base.images || [],
+    currency: base.currency || "USD",
   };
 }
 
@@ -614,6 +627,9 @@ async function publish(mode) {
 // ---------- wire up ----------
 function init() {
   setupDropzone();
+  // Render + wire the auth button synchronously so tapping "Log in" works
+  // immediately; loadAuth() re-renders it once /api/auth/me resolves.
+  renderAuthArea();
   loadHealth();
   loadAuth();
   loadEbayStatus();

@@ -127,7 +127,10 @@ def _ebay_creds_for(request: Request):
         return None
     try:
         fresh = ebay_auth.refresh_access_token(acct["refresh_token"])
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - fall back to dry-run, but log it
+        # A token-refresh outage otherwise looks identical to "not connected"
+        # and silently dry-runs a live publish; log so it's debuggable.
+        print(f"[ebay] token refresh failed for user {uid}: {exc}")
         return None
     return {
         "access_token": fresh["access_token"],

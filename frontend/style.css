@@ -18,6 +18,9 @@
 
 * { box-sizing: border-box; }
 
+/* Any image (incl. ones inside AI-generated descriptions) stays in its box. */
+img { max-width: 100%; height: auto; }
+
 body {
   margin: 0;
   font-family: var(--font-body);
@@ -173,7 +176,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .fields-col label { display: block; margin-bottom: 14px; font-weight: 800; font-size: 0.82rem; }
 .fields-col input, .fields-col select, .fields-col textarea {
   width: 100%; margin-top: 5px; padding: 10px 12px; border: 2px solid var(--ink);
-  border-radius: 9px; font-size: 0.95rem; font-weight: 600; font-family: inherit; background: #fff;
+  border-radius: 9px; font-size: 16px; font-weight: 600; font-family: inherit; background: #fff;
 }
 .fields-col input:focus, .fields-col select:focus, .fields-col textarea:focus {
   outline: none; box-shadow: var(--shadow-sm);
@@ -205,7 +208,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .refine, .publish { margin-top: 26px; border-top: 2px dashed var(--border); padding-top: 20px; }
 .refine-row { display: flex; gap: 10px; }
-.refine-row input { flex: 1; padding: 11px 14px; border: 2px solid var(--ink); border-radius: 10px; font-family: inherit; font-weight: 600; }
+.refine-row input { flex: 1; padding: 11px 14px; border: 2px solid var(--ink); border-radius: 10px; font-family: inherit; font-weight: 600; font-size: 16px; }
 
 .publish-buttons { display: flex; gap: 12px; }
 .result {
@@ -242,7 +245,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .auth-tabs { display: flex; gap: 8px; }
 .auth-tab { flex: 1; background: var(--cream); border: 2px solid var(--ink); border-radius: 10px; padding: 9px; font-weight: 800; box-shadow: none; }
 .auth-tab.active { background: var(--blue); color: #fff; }
-.auth-field { padding: 12px 14px; border: 2px solid var(--ink); border-radius: 10px; font-size: 0.95rem; font-family: inherit; font-weight: 600; }
+.auth-field { padding: 12px 14px; border: 2px solid var(--ink); border-radius: 10px; font-size: 16px; font-family: inherit; font-weight: 600; }
 .auth-field:focus { outline: none; box-shadow: var(--shadow-sm); }
 .auth-submit { width: 100%; }
 .auth-error { color: var(--red); font-size: 0.82rem; font-weight: 800; margin: 0; min-height: 1em; }
@@ -258,3 +261,28 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   border-radius: 50%; animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- mobile (phones, where this app is actually used in-store) ---------- */
+@media (max-width: 600px) {
+  header { padding: 18px 16px 14px; }
+  .brand-name { font-size: 2rem; }
+  main { margin: 18px auto; padding: 0 12px; }
+  .card { padding: 18px 16px; border-radius: 14px; box-shadow: 4px 4px 0 var(--ink); }
+  .card h2 { font-size: 1.5rem; }
+
+  /* Stack the Brand/Price/Qty and Condition/Category/ID rows so each field is
+     usable instead of ~85px wide. */
+  .row { flex-direction: column; gap: 0; }
+
+  /* Comfortable tap targets (≥44px) for thumbs-in-a-store use. */
+  .nav-btn, .ghost, .auth-tab { min-height: 44px; }
+  button.primary, button.secondary { min-height: 48px; }
+  .specific-row button { min-height: 40px; }
+  .auth-close { min-height: 40px; min-width: 40px; }
+
+  .dropzone { padding: 32px 16px; }
+  .publish-buttons { flex-direction: column; }
+  .publish-buttons button { width: 100%; }
+  .refine-row { flex-direction: column; }
+  .refine-row button { width: 100%; }
+}
