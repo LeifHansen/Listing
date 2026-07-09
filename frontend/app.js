@@ -489,10 +489,108 @@ function renderImages() {
   const box = $("opt-images");
   box.innerHTML = "";
   ((state.listing && state.listing.images) || []).forEach((name) => {
+    const wrap = document.createElement("div");
+    wrap.className = "opt-image";
     const img = document.createElement("img");
-    img.src = `/media/${state.sessionId}/optimized/${name}`;
-    box.appendChild(img);
+    // Cache-bust so a just-edited image shows the new version.
+    img.src = `/media/${state.sessionId}/optimized/${name}?v=${Date.now()}`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ghost edit-img-btn";
+    btn.textContent = "🖌️ Clean up background";
+    btn.addEventListener("click", () => openImageEditor(name));
+    wrap.appendChild(img);
+    wrap.appendChild(btn);
+    box.appendChild(wrap);
   });
+}
+
+// ---------- background clean-up editor ----------
+const editor = { name: null, painting: false, ctx: null };
+
+function openImageEditor(name) {
+  const canvas = $("editor-canvas");
+  const ctx = canvas.getContext("2d");
+  editor.name = name;
+  editor.ctx = ctx;
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    ctx.drawImage(img, 0, 0);
+    $("editor-overlay").classList.remove("hidden");
+  };
+  img.onerror = () => alert("Couldn't load the image to edit.");
+  // Same-origin so the canvas isn't tainted and toBlob() works.
+  img.src = `/media/${state.sessionId}/optimized/${name}?v=${Date.now()}`;
+}
+
+function closeImageEditor() {
+  $("editor-overlay").classList.add("hidden");
+  editor.name = null;
+  editor.painting = false;
+}
+
+// Map a pointer event to canvas pixel coordinates (canvas is displayed scaled).
+function _canvasPoint(e) {
+  const canvas = $("editor-canvas");
+  const rect = canvas.getBoundingClientRect();
+  const p = e.touches ? e.touches[0] : e;
+  return {
+    x: (p.clientX - rect.left) * (canvas.width / rect.width),
+    y: (p.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function _paintAt(e) {
+  if (!editor.painting || !editor.ctx) return;
+  const { x, y } = _canvasPoint(e);
+  const canvas = $("editor-canvas");
+  // Brush radius is in displayed pixels; scale to canvas pixels.
+  const scale = canvas.width / canvas.getBoundingClientRect().width;
+  const r = (parseInt($("editor-brush").value, 10) || 40) * scale / 2;
+  editor.ctx.fillStyle = "#ffffff";
+  editor.ctx.beginPath();
+  editor.ctx.arc(x, y, r, 0, Math.PI * 2);
+  editor.ctx.fill();
+}
+
+function setupImageEditor() {
+  const canvas = $("editor-canvas");
+  const start = (e) => { editor.painting = true; _paintAt(e); e.preventDefault(); };
+  const move = (e) => { if (editor.painting) { _paintAt(e); e.preventDefault(); } };
+  const end = () => { editor.painting = false; };
+  canvas.addEventListener("mousedown", start);
+  canvas.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", end);
+  canvas.addEventListener("touchstart", start, { passive: false });
+  canvas.addEventListener("touchmove", move, { passive: false });
+  canvas.addEventListener("touchend", end);
+  $("editor-cancel").addEventListener("click", closeImageEditor);
+  $("editor-overlay").addEventListener("click", (e) => {
+    if (e.target === $("editor-overlay")) closeImageEditor();
+  });
+  $("editor-reset").addEventListener("click", () => { if (editor.name) openImageEditor(editor.name); });
+  $("editor-save").addEventListener("click", saveEditedImage);
+}
+
+async function saveEditedImage() {
+  if (!editor.name) return;
+  const canvas = $("editor-canvas");
+  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.92));
+  if (!blob) { alert("Couldn't export the edited image."); return; }
+  try {
+    showSpinner("Saving edited photo…");
+    const fd = new FormData();
+    fd.append("file", new File([blob], editor.name, { type: "image/jpeg" }));
+    await api(`/api/edit-image/${state.sessionId}/${editor.name}`, { method: "POST", body: fd });
+    closeImageEditor();
+    renderImages();  // cache-busted src picks up the new version
+  } catch (e) {
+    alert("Save failed: " + e.message);
+  } finally {
+    hideSpinner();
+  }
 }
 
 function renderMissingInfo(missing) {
@@ -668,6 +766,7 @@ async function publish(mode) {
 // ---------- wire up ----------
 function init() {
   setupDropzone();
+  setupImageEditor();
   // Render + wire the auth button synchronously so tapping "Log in" works
   // immediately; loadAuth() re-renders it once /api/auth/me resolves.
   renderAuthArea();

@@ -173,6 +173,27 @@
     </section>
   </main>
 
+  <!-- Background clean-up editor -->
+  <div id="editor-overlay" class="editor-overlay hidden">
+    <div class="editor-modal">
+      <div class="editor-head">
+        <strong>Clean up background</strong>
+        <span class="hint">Paint over any leftover background with white.</span>
+      </div>
+      <div class="editor-canvas-wrap">
+        <canvas id="editor-canvas"></canvas>
+      </div>
+      <div class="editor-tools">
+        <label class="editor-brush">Brush
+          <input type="range" id="editor-brush" min="8" max="120" value="40" />
+        </label>
+        <button id="editor-reset" class="ghost" type="button">↺ Revert</button>
+        <button id="editor-cancel" class="secondary" type="button">Cancel</button>
+        <button id="editor-save" class="primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div id="spinner" class="spinner hidden"><div class="dot"></div><span id="spinner-text">Working…</span></div>
 
   <script src="/app.js"></script>

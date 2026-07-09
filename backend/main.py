@@ -349,6 +349,35 @@ async def upload(
     }
 
 
+@app.post("/api/edit-image/{session_id}/{name}")
+async def edit_image(session_id: str, name: str, file: UploadFile = File(...)) -> dict:
+    """Overwrite one optimized image with a user-edited version (from the
+    in-browser background clean-up tool). Re-encodes through Pillow to a clean
+    JPEG so eBay always gets a valid file, and re-pushes to R2 if configured."""
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    # Guard against path traversal in `name`.
+    if opt_dir not in path.parents or not path.is_file():
+        raise HTTPException(404, "Not found")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Edited image too large")
+
+    def _save() -> None:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(data)).convert("RGB")
+        img.save(path, "JPEG", quality=88, optimize=True)
+
+    try:
+        await run_in_threadpool(_save)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Could not process the edited image: {exc}") from exc
+    await run_in_threadpool(
+        objstore.upload_optimized, session_id, opt_dir, [name])
+    return {"ok": True, "name": name}
+
+
 @app.post("/api/identify/{session_id}")
 def identify(session_id: str, request: Request) -> dict:
     """Run Claude vision over the optimized images and draft a listing."""
