@@ -278,6 +278,24 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .ebay-modal-title { margin: 0; font-family: var(--font-head); font-weight: 400; text-transform: uppercase; letter-spacing: 0.02em; }
 #ebay-acct-info { line-height: 1.5; }
 
+/* ---------- listing settings ---------- */
+.settings-modal { max-width: 460px; }
+.settings-field { display: block; font-weight: 800; font-size: 0.82rem; margin-bottom: 4px; }
+.settings-field select {
+  width: 100%; margin-top: 5px; padding: 10px 12px; border: 2px solid var(--ink);
+  border-radius: 9px; font-size: 16px; font-weight: 600; font-family: inherit; background: #fff;
+}
+.settings-link { color: var(--blue); font-weight: 800; font-size: 0.85rem; }
+.publish-defaults {
+  margin: 8px 0 4px; padding: 10px 12px; background: var(--cream);
+  border: 2px solid var(--ink); border-radius: 10px; font-size: 0.82rem; font-weight: 700;
+}
+.linklike {
+  background: none; border: none; box-shadow: none; padding: 0 0 0 4px;
+  color: var(--blue); text-decoration: underline; cursor: pointer; font-weight: 800; font-size: 0.82rem;
+}
+.linklike:hover { transform: none; box-shadow: none; }
+
 /* ---------- spinner ---------- */
 .spinner {
   position: fixed; bottom: 24px; right: 24px; background: var(--ink); color: var(--cream);

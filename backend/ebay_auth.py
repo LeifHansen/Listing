@@ -122,6 +122,55 @@ def fetch_payments_program(access_token: str) -> dict:
     return resp.json()
 
 
+_POLICY_SPECS = {
+    "fulfillment": ("/sell/account/v1/fulfillment_policy", "fulfillmentPolicies", "fulfillmentPolicyId"),
+    "payment": ("/sell/account/v1/payment_policy", "paymentPolicies", "paymentPolicyId"),
+    "return": ("/sell/account/v1/return_policy", "returnPolicies", "returnPolicyId"),
+}
+
+
+def list_business_policies(access_token: str) -> dict:
+    """All of the seller's eBay business policies, grouped by type, as
+    [{id, name, summary}] so the user can pick a default for each."""
+    out = {"fulfillment": [], "payment": [], "return": []}
+    for key, (path, list_field, id_field) in _POLICY_SPECS.items():
+        try:
+            data = _account_get(path, access_token)
+            for p in data.get(list_field, []):
+                out[key].append({
+                    "id": p.get(id_field, ""),
+                    "name": p.get("name", "") or p.get(id_field, ""),
+                    "summary": _policy_summary(key, p),
+                })
+        except Exception:  # noqa: BLE001 - best effort per type
+            pass
+    return out
+
+
+def _policy_summary(kind: str, p: dict) -> str:
+    """A short human hint about what a policy does, for the picker."""
+    try:
+        if kind == "return":
+            if not p.get("returnsAccepted", False):
+                return "No returns"
+            days = (p.get("returnPeriod") or {}).get("value")
+            return f"{days}-day returns" if days else "Returns accepted"
+        if kind == "fulfillment":
+            opts = p.get("shippingOptions") or []
+            svcs = (opts[0].get("shippingServices") if opts else []) or []
+            if svcs:
+                cost = (svcs[0].get("shippingCost") or {}).get("value")
+                if cost in ("0.0", "0.00", 0, "0"):
+                    return "Free shipping"
+                return f"Flat/calculated shipping" if cost else "Shipping configured"
+            return "Shipping configured"
+        if kind == "payment":
+            return "Managed payments"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def fetch_policies_and_location(access_token: str) -> dict:
     """Best-effort auto-discovery of the seller's default policies + location.
 

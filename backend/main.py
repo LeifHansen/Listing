@@ -198,6 +198,45 @@ def ebay_status(request: Request) -> dict:
     }
 
 
+@app.get("/api/ebay/policies")
+def get_ebay_policies(request: Request) -> dict:
+    """The connected seller's eBay business policies + which ones are set as
+    this account's defaults. These are eBay's 'templates' for shipping,
+    payment, and returns; a listing's offer references them."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first to load your policies.")
+    lists = ebay_auth.list_business_policies(creds["access_token"])
+    acct = db.get_ebay_account(_uid(request)) or {}
+    return {
+        "policies": lists,
+        "selected": {
+            "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
+            "payment_policy_id": acct.get("payment_policy_id", ""),
+            "return_policy_id": acct.get("return_policy_id", ""),
+        },
+        "location_set": bool(acct.get("merchant_location_key")),
+        "manage_url": "https://www.bizpolicy.ebay.com/businesspolicy/manage",
+    }
+
+
+@app.post("/api/ebay/policies")
+def set_ebay_policies(request: Request, payload: dict) -> dict:
+    """Save the account's default shipping/payment/return policy selections."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    fields = {
+        k: str(payload.get(k) or "")
+        for k in ("fulfillment_policy_id", "payment_policy_id", "return_policy_id")
+        if k in payload
+    }
+    if not fields:
+        raise HTTPException(400, "No policy selections provided.")
+    db.save_ebay_account(uid, **fields)
+    return {"ok": True, "selected": fields}
+
+
 @app.post("/api/ebay/disconnect")
 def ebay_disconnect(request: Request) -> dict:
     """Unlink the current user's eBay account so they can connect a different

@@ -26,6 +26,7 @@
       <button id="nav-new" class="nav-btn" type="button">＋ New listing</button>
       <button id="nav-listings" class="nav-btn" type="button">☰ My listings</button>
       <button id="nav-ebay" class="nav-btn" type="button">🔗 Connect eBay</button>
+      <button id="nav-settings" class="nav-btn" type="button">⚙️ Listing settings</button>
       <button id="nav-images" class="nav-btn hidden" type="button">← Back to images</button>
       <button id="nav-edit" class="nav-btn hidden" type="button">✎ Edit listing</button>
       <button id="nav-restart" class="nav-btn" type="button">↻ Restart</button>
@@ -164,6 +165,7 @@
       <div class="publish">
         <h3>3. Publish</h3>
         <p id="publish-note" class="hint"></p>
+        <div id="publish-defaults"></div>
         <div class="publish-buttons">
           <button id="btn-draft" class="secondary">Save as Draft</button>
           <button id="btn-live" class="primary">Publish Live</button>
@@ -172,6 +174,16 @@
       </div>
     </section>
   </main>
+
+  <!-- Listing settings (default eBay policies) -->
+  <div id="settings-overlay" class="auth-overlay hidden">
+    <div class="auth-modal settings-modal">
+      <button id="settings-close" class="auth-close" type="button">✕</button>
+      <h3 class="ebay-modal-title">Listing defaults</h3>
+      <p class="hint">Applied to every listing you publish. Shipping, payment &amp; returns come from your eBay business policies — eBay's own reusable templates.</p>
+      <div id="settings-body"></div>
+    </div>
+  </div>
 
   <!-- Background clean-up editor -->
   <div id="editor-overlay" class="editor-overlay hidden">

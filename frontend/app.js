@@ -16,6 +16,7 @@ const state = {
   ebayEnv: "",
   ebayUsername: "",        // which eBay account is linked
   ebayEmail: "",
+  ebayPoliciesData: null,  // cached business-policy lists + selection
   taxonomyConfigured: false,
   user: null,
   authMode: "login",
@@ -390,6 +391,108 @@ function connectEbay() {
   window.location.href = "/api/ebay/connect";
 }
 
+// ---------- listing settings (default eBay business policies) ----------
+const POLICY_KINDS = [
+  { key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy" },
+  { key: "payment", field: "payment_policy_id", label: "Payment policy" },
+  { key: "return", field: "return_policy_id", label: "Return policy" },
+];
+
+async function openSettings() {
+  const body = $("settings-body");
+  $("settings-overlay").classList.remove("hidden");
+  if (!state.user) {
+    body.innerHTML = `<p class="hint">Log in and connect eBay to set your listing defaults.</p>`;
+    return;
+  }
+  if (!state.ebayConnected) {
+    body.innerHTML = `<p class="hint">Connect your eBay account first — your shipping, payment, and return templates come from there.</p>`;
+    return;
+  }
+  body.innerHTML = `<p class="hint">Loading your eBay policies…</p>`;
+  try {
+    const data = await api("/api/ebay/policies");
+    state.ebayPoliciesData = data;
+    renderSettingsBody(data);
+  } catch (e) {
+    body.innerHTML = `<p class="hint">Couldn't load policies: ${escapeHtml(e.message)}</p>`;
+  }
+}
+function closeSettings() { $("settings-overlay").classList.add("hidden"); }
+
+function renderSettingsBody(data) {
+  const body = $("settings-body");
+  const anyEmpty = POLICY_KINDS.some((k) => !(data.policies[k.key] || []).length);
+  let html = "";
+  POLICY_KINDS.forEach(({ key, field, label }) => {
+    const opts = data.policies[key] || [];
+    const sel = data.selected[field] || "";
+    const optionHtml = [`<option value="">— none —</option>`]
+      .concat(opts.map((p) =>
+        `<option value="${escapeHtml(p.id)}" ${p.id === sel ? "selected" : ""}>` +
+        `${escapeHtml(p.name)}${p.summary ? " · " + escapeHtml(p.summary) : ""}</option>`))
+      .join("");
+    html += `<label class="settings-field">${label}
+      <select data-field="${field}">${optionHtml}</select>
+      ${opts.length ? "" : `<span class="hint">No ${label.toLowerCase()} on eBay yet.</span>`}
+    </label>`;
+  });
+  if (anyEmpty) {
+    html += `<p class="hint">Missing a policy? eBay requires shipping, payment &amp; return
+      policies to publish. Create them on eBay, then reopen this. </p>
+      <a class="settings-link" href="${escapeHtml(data.manage_url)}" target="_blank" rel="noopener">Manage eBay business policies →</a>`;
+  }
+  if (!data.location_set) {
+    html += `<p class="hint">⚠ No inventory location set on eBay yet — required to publish. Add one in Seller Hub.</p>`;
+  }
+  html += `<button id="settings-save" class="primary" type="button">Save defaults</button>`;
+  body.innerHTML = html;
+  $("settings-save").addEventListener("click", saveSettings);
+}
+
+async function saveSettings() {
+  const payload = {};
+  $("settings-body").querySelectorAll("select[data-field]").forEach((s) => {
+    payload[s.dataset.field] = s.value;
+  });
+  try {
+    showSpinner("Saving listing defaults…");
+    await api("/api/ebay/policies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    // refresh the cache and the publish-step summary
+    state.ebayPoliciesData = null;
+    closeSettings();
+    if (state.listing) loadPublishDefaults();
+    alert("Saved. These now apply to every listing you publish.");
+  } catch (e) {
+    alert("Couldn't save: " + e.message);
+  } finally {
+    hideSpinner();
+  }
+}
+
+// Show the shipping/payment/return that will apply, on the publish step.
+async function loadPublishDefaults() {
+  const el = $("publish-defaults");
+  if (!el) return;
+  if (!state.ebayConnected) { el.innerHTML = ""; return; }
+  try {
+    const data = state.ebayPoliciesData || await api("/api/ebay/policies");
+    state.ebayPoliciesData = data;
+    const nameFor = (key, field) =>
+      ((data.policies[key] || []).find((p) => p.id === data.selected[field]) || {}).name || "not set";
+    el.innerHTML =
+      `<div class="publish-defaults">Applies to this listing — ` +
+      `<strong>Shipping:</strong> ${escapeHtml(nameFor("fulfillment", "fulfillment_policy_id"))} · ` +
+      `<strong>Payment:</strong> ${escapeHtml(nameFor("payment", "payment_policy_id"))} · ` +
+      `<strong>Returns:</strong> ${escapeHtml(nameFor("return", "return_policy_id"))} ` +
+      `<button class="linklike" type="button" onclick="openSettings()">change</button></div>`;
+  } catch (e) { el.innerHTML = ""; }
+}
+
 // ---------- eBay account modal (which account, payout, disconnect) ----------
 function openEbayModal() {
   const info = $("ebay-acct-info");
@@ -628,6 +731,7 @@ function renderPreview(result) {
   $("publish-note").textContent = canPublishLive()
     ? "Connected to eBay. Drafts create an unpublished offer; Live publishes it."
     : "Dry-run mode: no eBay connection yet, so we'll generate the exact API payload for you to inspect/use later.";
+  loadPublishDefaults();
 }
 
 function updateTitleCount() {
@@ -775,6 +879,10 @@ function init() {
   loadEbayStatus();
   handleEbayRedirect();
   $("nav-ebay").addEventListener("click", connectEbay);
+  // Listing settings modal
+  $("nav-settings").addEventListener("click", openSettings);
+  $("settings-close").addEventListener("click", closeSettings);
+  $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
   // eBay account modal
   $("ebay-close").addEventListener("click", closeEbayModal);
   $("ebay-check-payout").addEventListener("click", () => { closeEbayModal(); checkEbayPayments(); });
