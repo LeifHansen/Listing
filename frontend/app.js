@@ -690,15 +690,22 @@ function setupImageEditor() {
 }
 
 async function saveEditedImage() {
-  if (!editor.name) return;
+  if (!state.sessionId || !editor.name) {
+    alert("Couldn't save — lost track of which photo this is. Close and reopen the clean-up editor.");
+    return;
+  }
   const canvas = $("editor-canvas");
   const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.92));
   if (!blob) { alert("Couldn't export the edited image."); return; }
   try {
     showSpinner("Saving edited photo…");
     const fd = new FormData();
+    // session/name as form fields (not URL path) so nothing falls through to
+    // the static handler and 405s.
+    fd.append("session_id", state.sessionId);
+    fd.append("name", editor.name);
     fd.append("file", new File([blob], editor.name, { type: "image/jpeg" }));
-    await api(`/api/edit-image/${state.sessionId}/${editor.name}`, { method: "POST", body: fd });
+    await api("/api/edit-image", { method: "POST", body: fd });
     closeImageEditor();
     renderImages();  // cache-busted src picks up the new version
   } catch (e) {

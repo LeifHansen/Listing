@@ -406,16 +406,30 @@ async def upload(
     }
 
 
-@app.post("/api/edit-image/{session_id}/{name}")
-async def edit_image(session_id: str, name: str, file: UploadFile = File(...)) -> dict:
+@app.post("/api/edit-image")
+async def edit_image(
+    session_id: str = Form(...),
+    name: str = Form(...),
+    file: UploadFile = File(...),
+) -> dict:
     """Overwrite one optimized image with a user-edited version (from the
     in-browser background clean-up tool). Re-encodes through Pillow to a clean
-    JPEG so eBay always gets a valid file, and re-pushes to R2 if configured."""
+    JPEG so eBay always gets a valid file, and re-pushes to R2 if configured.
+
+    session_id/name are form fields (not URL path segments) so an empty value
+    can't fall through to the static handler and surface as an opaque 405.
+    """
+    session_id = (session_id or "").strip()
+    name = (name or "").strip()
+    if not session_id or not name:
+        log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
+        raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
     if opt_dir not in path.parents or not path.is_file():
-        raise HTTPException(404, "Not found")
+        log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Edited image too large")
@@ -429,9 +443,11 @@ async def edit_image(session_id: str, name: str, file: UploadFile = File(...)) -
     try:
         await run_in_threadpool(_save)
     except Exception as exc:  # noqa: BLE001
+        log.warning("edit-image: could not process (session=%s name=%s): %s", session_id, name, exc)
         raise HTTPException(400, f"Could not process the edited image: {exc}") from exc
     await run_in_threadpool(
         objstore.upload_optimized, session_id, opt_dir, [name])
+    log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 
 
