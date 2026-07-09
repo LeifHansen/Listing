@@ -114,11 +114,13 @@ _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
 
-# Scopes needed to create listings and read/fetch business policies.
+# Scopes needed to create listings, read/fetch business policies, and read the
+# connected seller's identity (so we can show WHICH eBay account is linked).
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.account",
+    "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ]
 
 

@@ -41,6 +41,8 @@ class EbayAccount(Base):
 
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     refresh_token: Mapped[str] = mapped_column(String(2048), default="")
+    ebay_username: Mapped[str] = mapped_column(String(128), default="")
+    ebay_email: Mapped[str] = mapped_column(String(255), default="")
     fulfillment_policy_id: Mapped[str] = mapped_column(String(64), default="")
     payment_policy_id: Mapped[str] = mapped_column(String(64), default="")
     return_policy_id: Mapped[str] = mapped_column(String(64), default="")
@@ -85,12 +87,19 @@ def _get_engine():
         _engine = create_engine(_normalize_url(config.DATABASE_URL), pool_pre_ping=True)
     if not _initialized:
         Base.metadata.create_all(_engine)  # may raise if DB unreachable
-        # Lightweight migration for DBs created before user_id existed.
-        try:
-            with _engine.begin() as conn:
-                conn.execute(text("ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)"))
-        except Exception:  # noqa: BLE001 - column already exists
-            pass
+        # Lightweight migrations for DBs created before a column existed. Each
+        # ALTER is separately guarded so an already-applied one doesn't skip
+        # the rest.
+        for stmt in (
+            "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
+            "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
+            "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
+        ):
+            try:
+                with _engine.begin() as conn:
+                    conn.execute(text(stmt))
+            except Exception:  # noqa: BLE001 - column already exists
+                pass
         _initialized = True
     return _engine
 
@@ -213,7 +222,8 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
 # --- eBay accounts ---------------------------------------------------------
 
 _EBAY_FIELDS = (
-    "refresh_token", "fulfillment_policy_id", "payment_policy_id",
+    "refresh_token", "ebay_username", "ebay_email",
+    "fulfillment_policy_id", "payment_policy_id",
     "return_policy_id", "merchant_location_key",
 )
 
@@ -251,6 +261,21 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         print(f"[db] get_ebay_account failed: {exc}")
         return None
+
+
+def delete_ebay_account(user_id: str) -> None:
+    """Disconnect: remove the user's stored eBay connection. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            acct = s.get(EbayAccount, user_id)
+            if acct is not None:
+                s.delete(acct)
+                s.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[db] delete_ebay_account failed: {exc}")
 
 
 def get_listing(listing_id: str) -> Optional[dict]:

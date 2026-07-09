@@ -54,16 +54,43 @@ def exchange_code(code: str) -> dict:
 
 
 def refresh_access_token(refresh_token: str) -> dict:
+    # Deliberately omit `scope`: a refresh grant may only request scopes that
+    # were in the original consent, so sending the full (possibly newly-widened)
+    # list would break connections made before a scope was added. Omitting it
+    # returns a token with exactly the scopes the user originally granted.
     body = _token_request(
         {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "scope": " ".join(config.EBAY_OAUTH_SCOPES),
         }
     )
     return {
         "access_token": body["access_token"],
         "expires_at": time.time() + float(body.get("expires_in", 7200)),
+    }
+
+
+def fetch_user_identity(access_token: str) -> dict:
+    """The connected seller's identity (username, email). Requires the
+    commerce.identity.readonly scope — connections made before that scope was
+    added won't have it and this will 403 until the user reconnects."""
+    # The Identity API lives on the apiz.* host, not api.*.
+    base = config.EBAY_API_BASE.replace("://api.", "://apiz.")
+    resp = httpx.get(
+        f"{base}/commerce/identity/v1/user/",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def identity_display(identity: dict) -> dict:
+    """Flatten the Identity API response to {username, email} for the UI."""
+    acct = identity.get("individualAccount") or identity.get("businessAccount") or {}
+    return {
+        "username": identity.get("username") or "",
+        "email": acct.get("email") or "",
     }
 
 

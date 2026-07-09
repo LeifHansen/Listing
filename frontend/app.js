@@ -14,6 +14,8 @@ const state = {
   ebayConfigured: false,   // server-level env credentials (legacy path)
   ebayConnected: false,    // the logged-in user's own eBay connection
   ebayEnv: "",
+  ebayUsername: "",        // which eBay account is linked
+  ebayEmail: "",
   taxonomyConfigured: false,
   user: null,
   authMode: "login",
@@ -330,9 +332,14 @@ function renderEbayPill() {
   const p = $("pill-ebay");
   if (!p) return;
   if (state.ebayConnected) {
-    p.textContent = `eBay: your account connected (${state.ebayEnv || "production"})`;
+    p.textContent = state.ebayUsername
+      ? `eBay: ${state.ebayUsername} ✓`
+      : "eBay: connected (reconnect to show which account)";
     p.className = "pill ok";
-    p.title = "Publishing goes to your connected eBay account";
+    p.title = state.ebayUsername
+      ? `Publishing goes to eBay account "${state.ebayUsername}"` +
+        (state.ebayEmail ? ` (${state.ebayEmail})` : "") + `. Click "eBay connected" to manage.`
+      : "Click 'eBay connected' to manage / reconnect and confirm the account";
   } else if (state.ebayConfigured) {
     p.textContent = "eBay: ready (server credentials)";
     p.className = "pill ok";
@@ -353,12 +360,14 @@ async function loadEbayStatus() {
     const s = await api("/api/ebay/status");
     state.ebayConnected = !!s.connected;
     state.ebayEnv = s.env || "";
+    state.ebayUsername = s.username || "";
+    state.ebayEmail = s.email || "";
     renderEbayPill();
     if (s.connected) {
-      btn.textContent = "✓ eBay connected";
+      btn.textContent = state.ebayUsername ? `✓ eBay: ${state.ebayUsername}` : "✓ eBay connected";
       btn.style.background = "var(--green)";
       btn.style.color = "#fff";
-      btn.title = "Click to check payout (bank account) setup on eBay";
+      btn.title = "Click to see which account is linked, check payout, or switch";
       btn.dataset.connected = "1";
     } else {
       btn.textContent = "🔗 Connect eBay";
@@ -373,12 +382,44 @@ async function loadEbayStatus() {
 
 function connectEbay() {
   if (!state.user) { openAuthModal(); return; }
-  if ($("nav-ebay").dataset.connected === "1") { checkEbayPayments(); return; }
+  if ($("nav-ebay").dataset.connected === "1") { openEbayModal(); return; }
   if ($("nav-ebay").dataset.ready !== "1") {
     alert("eBay isn't configured on the server yet (needs EBAY_CLIENT_ID / SECRET / RUNAME).");
     return;
   }
   window.location.href = "/api/ebay/connect";
+}
+
+// ---------- eBay account modal (which account, payout, disconnect) ----------
+function openEbayModal() {
+  const info = $("ebay-acct-info");
+  info.innerHTML = state.ebayUsername
+    ? `Connected to eBay account <strong>${escapeHtml(state.ebayUsername)}</strong>` +
+      (state.ebayEmail ? ` <span class="hint">(${escapeHtml(state.ebayEmail)})</span>` : "") +
+      ` on <strong>${escapeHtml(state.ebayEnv || "production")}</strong>.`
+    : `Connected, but this link was made before we could read the account name. ` +
+      `<strong>Disconnect and reconnect</strong> to confirm which account it is.`;
+  $("ebay-overlay").classList.remove("hidden");
+}
+function closeEbayModal() { $("ebay-overlay").classList.add("hidden"); }
+
+async function disconnectEbay() {
+  if (!confirm(
+    "Disconnect this eBay account?\n\n" +
+    "To connect a DIFFERENT account, first sign out of eBay in your browser " +
+    "(or use a private window) so eBay lets you choose — otherwise it may " +
+    "silently reconnect the same account.")) return;
+  try {
+    showSpinner("Disconnecting eBay…");
+    await api("/api/ebay/disconnect", { method: "POST" });
+    closeEbayModal();
+    await loadEbayStatus();
+    alert("Disconnected. Click 'Connect eBay' to link the account you want.");
+  } catch (e) {
+    alert("Couldn't disconnect: " + e.message);
+  } finally {
+    hideSpinner();
+  }
 }
 
 async function checkEbayPayments() {
@@ -635,6 +676,11 @@ function init() {
   loadEbayStatus();
   handleEbayRedirect();
   $("nav-ebay").addEventListener("click", connectEbay);
+  // eBay account modal
+  $("ebay-close").addEventListener("click", closeEbayModal);
+  $("ebay-check-payout").addEventListener("click", () => { closeEbayModal(); checkEbayPayments(); });
+  $("ebay-disconnect").addEventListener("click", disconnectEbay);
+  $("ebay-overlay").addEventListener("click", (e) => { if (e.target === $("ebay-overlay")) closeEbayModal(); });
   // Auth modal wiring (the login/logout button itself is wired by
   // renderAuthArea, which replaces it on every auth change)
   $("auth-close").addEventListener("click", closeAuthModal);

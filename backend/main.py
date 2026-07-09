@@ -158,8 +158,19 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         return RedirectResponse("/?ebay=error")
     try:
         tokens = ebay_auth.exchange_code(code)
-        policies = ebay_auth.fetch_policies_and_location(tokens["access_token"])
-        db.save_ebay_account(uid, refresh_token=tokens["refresh_token"], **policies)
+        access = tokens["access_token"]
+        policies = ebay_auth.fetch_policies_and_location(access)
+        # Record WHICH eBay account this is, so the user can confirm they
+        # connected the right one (best-effort — never block connect on it).
+        ident = {"username": "", "email": ""}
+        try:
+            ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ebay] identity fetch failed on connect: {exc}")
+        db.save_ebay_account(
+            uid, refresh_token=tokens["refresh_token"],
+            ebay_username=ident["username"], ebay_email=ident["email"],
+            **policies)
         return RedirectResponse("/?ebay=connected")
     except Exception:  # noqa: BLE001
         return RedirectResponse("/?ebay=error")
@@ -174,6 +185,10 @@ def ebay_status(request: Request) -> dict:
         "oauth_ready": config.ebay_oauth_ready(),
         "connected": connected,
         "env": config.EBAY_ENV,
+        # Which eBay account is linked (empty for connections made before the
+        # identity scope was added — reconnecting fills it in).
+        "username": (acct.get("ebay_username") or "") if connected else "",
+        "email": (acct.get("ebay_email") or "") if connected else "",
         "policies": {
             "fulfillment": bool(acct and acct.get("fulfillment_policy_id")),
             "payment": bool(acct and acct.get("payment_policy_id")),
@@ -181,6 +196,17 @@ def ebay_status(request: Request) -> dict:
             "location": bool(acct and acct.get("merchant_location_key")),
         } if connected else {},
     }
+
+
+@app.post("/api/ebay/disconnect")
+def ebay_disconnect(request: Request) -> dict:
+    """Unlink the current user's eBay account so they can connect a different
+    one (or the correct one, if the wrong account got linked)."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    db.delete_ebay_account(uid)
+    return {"ok": True}
 
 
 @app.get("/api/ebay/payments-status")
