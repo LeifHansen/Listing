@@ -274,6 +274,20 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     payload = {"inventory_item": item, "offer": offer, "mode": mode}
     export_path = storage.write_export(session_id, "ebay_payload", payload)
 
+    # "Draft" saves in Thryft only. An Inventory-API unpublished offer never
+    # appears in the eBay Seller Hub, so pushing a draft to eBay is pure
+    # downside (and leaves a stale offer that trips the duplicate check on a
+    # later live publish). Only "Publish Live" posts to eBay.
+    if mode == "draft":
+        return {
+            "dry_run": False,
+            "draft": True,
+            "mode": mode,
+            "message": ("Saved to your Thryft drafts (see 'My listings'). Drafts "
+                        "stay here — click Publish Live to post it to eBay."),
+            "export_path": str(export_path),
+        }
+
     ready = bool((creds or {}).get("access_token")) or config.ebay_ready()
     if not ready:
         return {
@@ -304,6 +318,21 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                 ),
                 "export_path": str(export_path),
             }
+
+    # eBay requires a ship-from inventory location to publish an offer. Without
+    # one, publishOffer fails opaquely — catch it here with a clear fix.
+    has_location = bool((creds or {}).get("merchant_location_key")
+                        or config.EBAY_MERCHANT_LOCATION_KEY)
+    if not has_location:
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "message": ("eBay needs a ship-from location before it can publish. "
+                        "Open 'Listing settings', add your ship-from ZIP, save, "
+                        "then Publish Live again."),
+            "export_path": str(export_path),
+        }
 
     try:
         result = _push_live(session_id, listing, mode, base_url, creds)

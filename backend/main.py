@@ -216,13 +216,16 @@ def get_ebay_policies(request: Request) -> dict:
             "return_policy_id": acct.get("return_policy_id", ""),
         },
         "location_set": bool(acct.get("merchant_location_key")),
+        "ship_from_postal": acct.get("ship_from_postal", ""),
         "manage_url": "https://www.bizpolicy.ebay.com/businesspolicy/manage",
     }
 
 
 @app.post("/api/ebay/policies")
 def set_ebay_policies(request: Request, payload: dict) -> dict:
-    """Save the account's default shipping/payment/return policy selections."""
+    """Save the account's default shipping/payment/return policy selections and
+    (optionally) a ship-from ZIP, which we use to create the eBay inventory
+    location that publishing requires."""
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
@@ -231,8 +234,20 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         for k in ("fulfillment_policy_id", "payment_policy_id", "return_policy_id")
         if k in payload
     }
+    postal = str(payload.get("ship_from_postal") or "").strip()
+    if postal:
+        creds = _ebay_creds_for(request)
+        if not creds:
+            raise HTTPException(400, "Connect eBay first to set a ship-from location.")
+        try:
+            key = ebay_auth.ensure_inventory_location(creds["access_token"], postal)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                400, f"eBay rejected that ship-from location: {exc}") from exc
+        fields["merchant_location_key"] = key
+        fields["ship_from_postal"] = postal
     if not fields:
-        raise HTTPException(400, "No policy selections provided.")
+        raise HTTPException(400, "No settings provided.")
     db.save_ebay_account(uid, **fields)
     return {"ok": True, "selected": fields}
 

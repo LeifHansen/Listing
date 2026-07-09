@@ -423,7 +423,14 @@ function closeSettings() { $("settings-overlay").classList.add("hidden"); }
 function renderSettingsBody(data) {
   const body = $("settings-body");
   const anyEmpty = POLICY_KINDS.some((k) => !(data.policies[k.key] || []).length);
-  let html = "";
+  // Ship-from ZIP creates the eBay inventory location that publishing requires.
+  let html = `<label class="settings-field">Ship-from ZIP code
+    <input type="text" id="settings-postal" inputmode="numeric" placeholder="e.g. 90210"
+      value="${escapeHtml(data.ship_from_postal || "")}" />
+    <span class="hint">${data.location_set
+      ? "✓ eBay ship-from location is set."
+      : "⚠ Required to publish — eBay needs a location to ship from."}</span>
+  </label>`;
   POLICY_KINDS.forEach(({ key, field, label }) => {
     const opts = data.policies[key] || [];
     const sel = data.selected[field] || "";
@@ -443,7 +450,7 @@ function renderSettingsBody(data) {
       <a class="settings-link" href="${escapeHtml(data.manage_url)}" target="_blank" rel="noopener">Manage eBay business policies →</a>`;
   }
   if (!data.location_set) {
-    html += `<p class="hint">⚠ No inventory location set on eBay yet — required to publish. Add one in Seller Hub.</p>`;
+    html += `<p class="hint">⚠ No eBay ship-from location yet. Enter your ZIP above and Save — we'll create it on eBay for you.</p>`;
   }
   html += `<button id="settings-save" class="primary" type="button">Save defaults</button>`;
   body.innerHTML = html;
@@ -455,8 +462,10 @@ async function saveSettings() {
   $("settings-body").querySelectorAll("select[data-field]").forEach((s) => {
     payload[s.dataset.field] = s.value;
   });
+  const postal = ($("settings-postal") ? $("settings-postal").value : "").trim();
+  if (postal) payload.ship_from_postal = postal;
   try {
-    showSpinner("Saving listing defaults…");
+    showSpinner(postal ? "Saving & setting up eBay location…" : "Saving listing defaults…");
     await api("/api/ebay/policies", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -729,7 +738,7 @@ function renderPreview(result) {
     `AI confidence: <span class="badge ${conf}">${conf.toUpperCase()}</span>`;
 
   $("publish-note").textContent = canPublishLive()
-    ? "Connected to eBay. Drafts create an unpublished offer; Live publishes it."
+    ? "Save as Draft keeps it here in Thryft; Publish Live posts it to your eBay account."
     : "Dry-run mode: no eBay connection yet, so we'll generate the exact API payload for you to inspect/use later.";
   loadPublishDefaults();
 }
@@ -853,11 +862,17 @@ async function publish(mode) {
       out.textContent =
         `✅ ${result.message}\nSaved payload: ${result.export_path}\n\n` +
         JSON.stringify(result.payload, null, 2);
+    } else if (result.draft) {
+      out.textContent = `✅ ${result.message}`;
     } else if (result.error) {
       out.textContent = `❌ ${result.message}\n${result.detail || ""}`;
+    } else if (result.published && result.listing_id) {
+      out.textContent =
+        `✅ Published live to eBay! Listing ID: ${result.listing_id}\n` +
+        `View it in your eBay account under Selling → Active.`;
     } else {
       out.textContent =
-        `✅ ${mode === "live" ? "Published live!" : "Draft created!"}\n` +
+        `✅ ${mode === "live" ? "Published live!" : "Done"}\n` +
         JSON.stringify(result, null, 2);
     }
   } catch (e) {

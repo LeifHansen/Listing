@@ -47,6 +47,7 @@ class EbayAccount(Base):
     payment_policy_id: Mapped[str] = mapped_column(String(64), default="")
     return_policy_id: Mapped[str] = mapped_column(String(64), default="")
     merchant_location_key: Mapped[str] = mapped_column(String(64), default="")
+    ship_from_postal: Mapped[str] = mapped_column(String(16), default="")
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -94,6 +95,7 @@ def _get_engine():
             "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
             "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
             "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
+            "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
         ):
             try:
                 with _engine.begin() as conn:
@@ -224,7 +226,7 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
 _EBAY_FIELDS = (
     "refresh_token", "ebay_username", "ebay_email",
     "fulfillment_policy_id", "payment_policy_id",
-    "return_policy_id", "merchant_location_key",
+    "return_policy_id", "merchant_location_key", "ship_from_postal",
 )
 
 

@@ -122,6 +122,41 @@ def fetch_payments_program(access_token: str) -> dict:
     return resp.json()
 
 
+def ensure_inventory_location(access_token: str, postal_code: str,
+                              country: str = "US") -> str:
+    """Return a usable merchantLocationKey, creating a default location if the
+    seller has none. eBay requires an inventory location to publish an offer."""
+    base = config.EBAY_API_BASE
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Content-Language": "en-US",
+    }
+    # Reuse an existing location if the seller already has one.
+    try:
+        r = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=30)
+        if r.status_code == 200:
+            locs = r.json().get("locations", []) or []
+            if locs:
+                return locs[0].get("merchantLocationKey", "")
+    except Exception:  # noqa: BLE001
+        pass
+    key = "thryft-loc-1"
+    body = {
+        "location": {"address": {"country": country, "postalCode": postal_code}},
+        "locationTypes": ["WAREHOUSE"],
+        "merchantLocationStatus": "ENABLED",
+        "name": "Thryft ship-from location",
+    }
+    r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
+                   headers=headers, json=body, timeout=30)
+    if r.status_code in (200, 204, 409):  # 409 == already exists
+        return key
+    r.raise_for_status()
+    return key
+
+
 _POLICY_SPECS = {
     "fulfillment": ("/sell/account/v1/fulfillment_policy", "fulfillmentPolicies", "fulfillmentPolicyId"),
     "payment": ("/sell/account/v1/payment_policy", "paymentPolicies", "paymentPolicyId"),
