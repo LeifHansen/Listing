@@ -154,20 +154,32 @@ _OFFER_IMMUTABLE = ("sku", "marketplaceId", "format")
 def _existing_offer_id(client, base: str, token: str, sku: str) -> Optional[str]:
     """Return the existing offerId for this SKU, or None. Republishing the same
     session reuses the SKU, so we must update that offer rather than create a
-    duplicate (eBay error 25002 'Offer entity already exists')."""
+    duplicate (eBay error 25002 'Offer entity already exists'). Queried by SKU
+    only — extra marketplace/format filters can hide a match."""
     try:
         r = client.get(
             f"{base}/sell/inventory/v1/offer",
             headers=_headers(token),
-            params={"sku": sku, "marketplace_id": config.EBAY_MARKETPLACE_ID,
-                    "format": "FIXED_PRICE"},
+            params={"sku": sku},
         )
         if r.status_code == 200:
             offers = r.json().get("offers", []) or []
             if offers:
                 return offers[0].get("offerId")
-    except Exception:  # noqa: BLE001 - treat as "no existing offer"
-        pass
+        else:
+            log.info("getOffers(sku=%s) -> %s %s", sku, r.status_code, _body(r))
+    except Exception as exc:  # noqa: BLE001 - treat as "no existing offer"
+        log.info("getOffers(sku=%s) failed: %s", sku, exc)
+    return None
+
+
+def _offer_id_from_error(body: dict) -> Optional[str]:
+    """eBay's 'Offer entity already exists' (25002) error carries the existing
+    offerId in its parameters — pull it out so we can update that offer."""
+    for err in (body or {}).get("errors", []) or []:
+        for p in err.get("parameters", []) or []:
+            if str(p.get("name", "")).lower() == "offerid" and p.get("value"):
+                return str(p["value"])
     return None
 
 
@@ -191,20 +203,23 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                           "body": None if r1.is_success else _body(r1)})
             r1.raise_for_status()
 
-            # Idempotent offer: update the existing one for this SKU, else create.
-            offer_id = _existing_offer_id(client, base, token, sku)
-            if offer_id:
+            # Idempotent offer: update the existing one for this SKU, else
+            # create. If we couldn't find it but createOffer says it already
+            # exists, recover the offerId from that error and update instead.
+            def _update_offer(oid: str):
                 update_body = {k: v for k, v in offer.items() if k not in _OFFER_IMMUTABLE}
-                r2 = client.put(
-                    f"{base}/sell/inventory/v1/offer/{offer_id}",
+                rr = client.put(
+                    f"{base}/sell/inventory/v1/offer/{oid}",
                     headers=_headers(token),
                     json=update_body,
                 )
-                # updateOffer returns 204 No Content on success.
-                r2_body = _body(r2) if r2.content else {}
-                steps.append({"step": "updateOffer", "status": r2.status_code,
-                              "offerId": offer_id, "body": r2_body})
-                r2.raise_for_status()
+                steps.append({"step": "updateOffer", "status": rr.status_code,
+                              "offerId": oid, "body": _body(rr) if rr.content else {}})
+                rr.raise_for_status()
+
+            offer_id = _existing_offer_id(client, base, token, sku)
+            if offer_id:
+                _update_offer(offer_id)
             else:
                 r2 = client.post(
                     f"{base}/sell/inventory/v1/offer",
@@ -213,8 +228,16 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                 )
                 r2_body = _body(r2)
                 steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
-                r2.raise_for_status()
-                offer_id = r2_body.get("offerId")
+                if not r2.is_success:
+                    recovered = _offer_id_from_error(r2_body)
+                    if recovered:
+                        log.info("createOffer said offer exists; updating %s (sku=%s)", recovered, sku)
+                        offer_id = recovered
+                        _update_offer(offer_id)
+                    else:
+                        r2.raise_for_status()
+                else:
+                    offer_id = r2_body.get("offerId")
             if not offer_id:
                 # No offerId to publish against — stop with a clear error rather
                 # than POSTing to /offer/None/publish.
