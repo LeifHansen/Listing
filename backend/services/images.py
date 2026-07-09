@@ -11,6 +11,8 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
+from ..config import log
+
 # iPhone/Mac photos are HEIC by default; register the decoder if available so
 # uploads don't fail. Falls back gracefully if the package isn't installed.
 try:
@@ -48,7 +50,7 @@ def warm() -> None:
         _remove_background(Image.new("RGB", (32, 32), (200, 100, 50)))
         print("[images] background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-        print(f"[images] warmup failed (will lazy-load on first use): {exc}")
+        log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
 
 def _remove_background(img: Image.Image) -> Image.Image:

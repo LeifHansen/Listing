@@ -18,6 +18,7 @@ from sqlalchemy import DateTime, JSON, String, create_engine, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from . import config
+from .config import log
 
 _engine = None
 _initialized = False
@@ -142,7 +143,7 @@ def upsert_listing(
             rec.updated_at = now
             s.commit()
     except Exception as exc:  # noqa: BLE001 - DB must never break a request
-        print(f"[db] upsert_listing failed: {exc}")
+        log.warning(f"db: upsert_listing failed: {exc}")
 
 
 def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
@@ -158,7 +159,7 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
             rows = s.execute(q).scalars().all()
             return [_record_to_dict(r) for r in rows]
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] list_listings failed: {exc}")
+        log.warning(f"db: list_listings failed: {exc}")
         return []
 
 
@@ -187,7 +188,7 @@ def create_user(user_id: str, email: str, password_hash: str):
             s.commit()
             return _user_to_dict(u)
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] create_user failed: {exc}")
+        log.warning(f"db: create_user failed: {exc}")
         return None
 
 
@@ -204,7 +205,7 @@ def get_user_by_email(email: str) -> Optional[dict]:
             d["password_hash"] = u.password_hash
             return d
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] get_user_by_email failed: {exc}")
+        log.warning(f"db: get_user_by_email failed: {exc}")
         return None
 
 
@@ -217,7 +218,7 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
             u = s.get(User, user_id)
             return _user_to_dict(u) if u else None
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] get_user_by_id failed: {exc}")
+        log.warning(f"db: get_user_by_id failed: {exc}")
         return None
 
 
@@ -247,7 +248,7 @@ def save_ebay_account(user_id: str, **fields) -> None:
             acct.updated_at = _now()
             s.commit()
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] save_ebay_account failed: {exc}")
+        log.warning(f"db: save_ebay_account failed: {exc}")
 
 
 def get_ebay_account(user_id: str) -> Optional[dict]:
@@ -261,7 +262,7 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
                 return None
             return {f: getattr(a, f) for f in _EBAY_FIELDS}
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] get_ebay_account failed: {exc}")
+        log.warning(f"db: get_ebay_account failed: {exc}")
         return None
 
 
@@ -277,7 +278,7 @@ def delete_ebay_account(user_id: str) -> None:
                 s.delete(acct)
                 s.commit()
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] delete_ebay_account failed: {exc}")
+        log.warning(f"db: delete_ebay_account failed: {exc}")
 
 
 def get_listing(listing_id: str) -> Optional[dict]:
@@ -289,7 +290,7 @@ def get_listing(listing_id: str) -> Optional[dict]:
             rec = s.get(ListingRecord, listing_id)
             return _record_to_dict(rec) if rec else None
     except Exception as exc:  # noqa: BLE001
-        print(f"[db] get_listing failed: {exc}")
+        log.warning(f"db: get_listing failed: {exc}")
         return None
 
 

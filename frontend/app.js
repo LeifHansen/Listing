@@ -398,7 +398,8 @@ const POLICY_KINDS = [
   { key: "return", field: "return_policy_id", label: "Return policy" },
 ];
 
-async function openSettings() {
+async function openSettings(focus) {
+  focus = (typeof focus === "string") ? focus : null;  // ignore click events
   const body = $("settings-body");
   $("settings-overlay").classList.remove("hidden");
   if (!state.user) {
@@ -414,6 +415,8 @@ async function openSettings() {
     const data = await api("/api/ebay/policies");
     state.ebayPoliciesData = data;
     renderSettingsBody(data);
+    if (focus === "postal") { markFix($("settings-postal")); if ($("settings-postal")) $("settings-postal").focus(); }
+    else if (focus === "policies") { document.querySelectorAll("#settings-body select[data-field]").forEach(markFix); }
   } catch (e) {
     body.innerHTML = `<p class="hint">Couldn't load policies: ${escapeHtml(e.message)}</p>`;
   }
@@ -849,6 +852,7 @@ async function refine() {
 async function publish(mode) {
   try {
     showSpinner(mode === "live" ? "Publishing live…" : "Saving draft…");
+    clearFixHighlights();
     state.listing = collectListing();
     const result = await api("/api/publish", {
       method: "POST",
@@ -856,8 +860,8 @@ async function publish(mode) {
       body: JSON.stringify({ session_id: state.sessionId, listing: state.listing, mode }),
     });
     const out = $("publish-result");
+    $("publish-issues").classList.add("hidden");
     out.classList.remove("hidden");
-    out.textContent = JSON.stringify(result, null, 2);
     if (result.dry_run) {
       out.textContent =
         `✅ ${result.message}\nSaved payload: ${result.export_path}\n\n` +
@@ -865,7 +869,8 @@ async function publish(mode) {
     } else if (result.draft) {
       out.textContent = `✅ ${result.message}`;
     } else if (result.error) {
-      out.textContent = `❌ ${result.message}\n${result.detail || ""}`;
+      out.classList.add("hidden");
+      renderPublishIssues(result);   // friendly "what to fix" panel + field highlight
     } else if (result.published && result.listing_id) {
       out.textContent =
         `✅ Published live to eBay! Listing ID: ${result.listing_id}\n` +
@@ -882,9 +887,79 @@ async function publish(mode) {
   }
 }
 
+// ---------- publish error → "what to fix" ----------
+function clearFixHighlights() {
+  document.querySelectorAll(".needs-fix").forEach((el) => el.classList.remove("needs-fix"));
+}
+function markFix(el) { if (el) el.classList.add("needs-fix"); }
+
+// Highlight (and optionally jump to) the field eBay flagged. `soft` just marks
+// it without scrolling/opening — used to pre-highlight the top issue.
+function highlightFix(target, soft) {
+  clearFixHighlights();
+  const jump = (el) => { if (el && !soft) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.focus({ preventScroll: true }); } };
+  switch (target) {
+    case "category": markFix($("f-category-id")); markFix($("f-category")); jump($("f-category-id")); break;
+    case "price": markFix($("f-price")); jump($("f-price")); break;
+    case "title": markFix($("f-title")); jump($("f-title")); break;
+    case "description": markFix($("f-description")); jump($("f-description")); break;
+    case "specifics":
+      markFix($("specifics"));
+      if (!soft) $("specifics").scrollIntoView({ behavior: "smooth", block: "center" });
+      break;
+    case "photos":
+      if (!soft) { showView("upload"); toast("Re-upload your photos, then Publish Live again."); }
+      break;
+    case "location": if (!soft) openSettings("postal"); break;
+    case "policies": if (!soft) openSettings("policies"); break;
+    default: break; // generic — nothing to point at
+  }
+}
+
+function renderPublishIssues(result) {
+  clearFixHighlights();
+  const panel = $("publish-issues");
+  const issues = (result.issues && result.issues.length)
+    ? result.issues
+    : [{ target: "generic", title: result.message || "eBay rejected the listing", fix: result.detail || "" }];
+
+  const items = issues.map((it) => {
+    const canFix = it.target && it.target !== "generic";
+    return `<li class="fix-item">
+      <div class="fix-title">${escapeHtml(it.title)}</div>
+      <div class="fix-how">${escapeHtml(it.fix || "")}</div>
+      ${canFix ? `<button class="fix-btn" data-target="${escapeHtml(it.target)}">Fix this →</button>` : ""}
+    </li>`;
+  }).join("");
+
+  const raw = result.detail
+    ? `<details class="fix-raw"><summary>eBay's exact message</summary><pre>${
+        escapeHtml(typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail, null, 2))
+      }</pre></details>`
+    : "";
+
+  panel.innerHTML =
+    `<p class="fix-head">⚠️ ${escapeHtml(result.message || "eBay couldn't publish this yet")}</p>` +
+    `<ul class="fix-list">${items}</ul>${raw}`;
+  panel.classList.remove("hidden");
+  panel.querySelectorAll("button[data-target]").forEach((b) =>
+    b.addEventListener("click", () => highlightFix(b.dataset.target)));
+
+  // Pre-highlight the first fixable field so it's obvious where to look.
+  const first = issues.find((x) => x.target && x.target !== "generic");
+  if (first) highlightFix(first.target, true);
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 // ---------- wire up ----------
 function init() {
   setupDropzone();
+  // Clear a field's "needs fix" ring as soon as the user edits it.
+  document.addEventListener("input", (e) => {
+    if (e.target && e.target.classList && e.target.classList.contains("needs-fix")) {
+      e.target.classList.remove("needs-fix");
+    }
+  });
   setupImageEditor();
   // Render + wire the auth button synchronously so tapping "Log in" works
   // immediately; loadAuth() re-renders it once /api/auth/me resolves.

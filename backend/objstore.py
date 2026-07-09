@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import config
+from .config import log
 
 _client = None
 
@@ -56,7 +57,7 @@ def upload(local_path: Path, key: str) -> Optional[str]:
         )
         return public_url(key)
     except Exception as exc:  # noqa: BLE001 - never break the request
-        print(f"[objstore] upload failed: {exc}")
+        log.warning(f"objstore: upload failed: {exc}")
         return None
 
 

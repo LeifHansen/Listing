@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import auth, config, db, ebay_auth, objstore, storage
+from .config import log
 from .models import Listing, PublishRequest, RefineRequest
 from .services import claude_ai, ebay, images, taxonomy
 
@@ -130,7 +131,7 @@ def _ebay_creds_for(request: Request):
     except Exception as exc:  # noqa: BLE001 - fall back to dry-run, but log it
         # A token-refresh outage otherwise looks identical to "not connected"
         # and silently dry-runs a live publish; log so it's debuggable.
-        print(f"[ebay] token refresh failed for user {uid}: {exc}")
+        log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
         return None
     return {
         "access_token": fresh["access_token"],
@@ -168,7 +169,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         try:
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
-            print(f"[ebay] identity fetch failed on connect: {exc}")
+            log.warning(f"ebay: identity fetch failed on connect: {exc}")
         db.save_ebay_account(
             uid, refresh_token=tokens["refresh_token"],
             ebay_username=ident["username"], ebay_email=ident["email"],
@@ -348,7 +349,7 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
         storage.write_export(f"account-deletion-{notif_id}",
                              "ebay_notification", payload)
     except Exception as exc:  # noqa: BLE001 - never fail the ack
-        print(f"[ebay] failed to record deletion notice: {exc}")
+        log.warning(f"ebay: failed to record deletion notice: {exc}")
     return Response(status_code=200)
 
 
@@ -538,12 +539,18 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                 creds["merchant_location_key"] = key
                 db.save_ebay_account(creds["_uid"], merchant_location_key=key)
         except Exception as exc:  # noqa: BLE001 - don't block publish on this
-            print(f"[ebay] location re-ensure failed: {exc}")
+            log.warning(f"ebay: location re-ensure failed: {exc}")
+    log.info("publish request: session=%s mode=%s connected=%s", req.session_id,
+             req.mode, bool(creds))
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
                           creds=creds)
     # Record the outcome: published (live), draft, or dry-run.
     if result.get("published"):
         status = "published"
+        log.info("publish OK: session=%s listing_id=%s", req.session_id, result.get("listing_id"))
+    elif result.get("error"):
+        status = req.mode
+        log.warning("publish error: session=%s step=%s", req.session_id, result.get("step"))
     elif result.get("dry_run"):
         status = "dry_run"
     else:

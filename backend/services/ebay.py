@@ -17,7 +17,8 @@ from typing import Optional
 
 import httpx
 
-from .. import config, objstore, storage
+from .. import config, ebay_errors, objstore, storage
+from ..config import log
 from ..models import Listing
 
 
@@ -217,11 +218,14 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
             if not offer_id:
                 # No offerId to publish against — stop with a clear error rather
                 # than POSTing to /offer/None/publish.
+                log.error("publish: offer create/update returned no offerId (sku=%s): %s", sku, r2_body)
                 return {
                     "dry_run": False,
                     "error": True,
                     "mode": mode,
-                    "message": "eBay offer create/update returned no offerId.",
+                    "message": "eBay didn’t return an offer id — try publishing again.",
+                    "issues": [{"target": "generic", "title": "eBay hiccup creating the offer",
+                                "fix": "Press Publish Live again."}],
                     "detail": str(r2_body),
                     "steps": steps,
                 }
@@ -240,11 +244,19 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                 listing_id = r3_body.get("listingId")
     except httpx.HTTPStatusError as exc:
         failed = steps[-1]["step"] if steps else "authentication"
+        status = exc.response.status_code
+        issues = ebay_errors.from_response(exc.response.text)
+        for it in issues:
+            log.warning("publish %s failed (sku=%s): [%s] %s | fix: %s",
+                        failed, sku, it.get("error_id", ""),
+                        it.get("ebay_message") or it["title"], it["fix"])
         return {
             "dry_run": False,
             "error": True,
             "mode": mode,
-            "message": f"eBay API error {exc.response.status_code} during {failed}",
+            "step": failed,
+            "message": ebay_errors.headline(issues, failed, status),
+            "issues": issues,
             "detail": exc.response.text,
             "steps": steps,
         }
@@ -308,14 +320,14 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
         names = listing.images or storage.list_optimized(session_id)
         opt_dir = storage.optimized_dir(session_id)
         if not names or any(not (opt_dir / n).is_file() for n in names):
+            log.warning("publish blocked: photos missing for session %s", session_id)
             return {
                 "dry_run": False,
                 "error": True,
                 "mode": mode,
-                "message": (
-                    "This listing's photos are no longer on the server, so eBay "
-                    "can't fetch them. Please re-upload the photos and try again."
-                ),
+                "message": "This listing’s photos aren’t on the server anymore.",
+                "issues": [{"target": "photos", "title": "Photos are missing",
+                            "fix": "Go back to images and re-upload the photos, then publish again."}],
                 "export_path": str(export_path),
             }
 
@@ -324,13 +336,14 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     has_location = bool((creds or {}).get("merchant_location_key")
                         or config.EBAY_MERCHANT_LOCATION_KEY)
     if not has_location:
+        log.warning("publish blocked: no ship-from location for session %s", session_id)
         return {
             "dry_run": False,
             "error": True,
             "mode": mode,
-            "message": ("eBay needs a ship-from location before it can publish. "
-                        "Open 'Listing settings', add your ship-from ZIP, save, "
-                        "then Publish Live again."),
+            "message": "eBay needs a ship-from location before it can publish.",
+            "issues": [{"target": "location", "title": "No ship-from location set",
+                        "fix": "Open Listing settings, add your ship-from ZIP, and save — then Publish Live again."}],
             "export_path": str(export_path),
         }
 
@@ -339,11 +352,16 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
         result["export_path"] = str(export_path)
         return result
     except httpx.HTTPStatusError as exc:
+        issues = ebay_errors.from_response(exc.response.text)
+        for it in issues:
+            log.warning("publish failed (session=%s): [%s] %s | fix: %s", session_id,
+                        it.get("error_id", ""), it.get("ebay_message") or it["title"], it["fix"])
         return {
             "dry_run": False,
             "error": True,
             "mode": mode,
-            "message": f"eBay API error: {exc.response.status_code}",
+            "message": ebay_errors.headline(issues, "publishing", exc.response.status_code),
+            "issues": issues,
             "detail": exc.response.text,
             "export_path": str(export_path),
         }

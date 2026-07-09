@@ -1,12 +1,26 @@
 """Central configuration loaded from environment variables / .env file."""
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# --- Logging ---------------------------------------------------------------
+# One app-wide logger ("thryft") with a consistent format, independent of
+# uvicorn's config so our lines are easy to grep in the Fly logs. Level via
+# LOG_LEVEL (default INFO).
+log = logging.getLogger("thryft")
+if not log.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s thryft: %(message)s"))
+    log.addHandler(_handler)
+    log.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    log.propagate = False
 
 # --- Paths -----------------------------------------------------------------
 # DATA_DIR can be pointed at a mounted volume (e.g. on Fly.io) so uploaded and
