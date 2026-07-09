@@ -124,8 +124,9 @@ def fetch_payments_program(access_token: str) -> dict:
 
 def ensure_inventory_location(access_token: str, postal_code: str,
                               country: str = "US") -> str:
-    """Return a usable merchantLocationKey, creating a default location if the
-    seller has none. eBay requires an inventory location to publish an offer."""
+    """Return a merchantLocationKey whose address has a country — publishOffer
+    fails with 'Item.Country empty' otherwise. Reuse an existing location only
+    if it already has a country; else create/repair our own known-good one."""
     base = config.EBAY_API_BASE
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -133,27 +134,40 @@ def ensure_inventory_location(access_token: str, postal_code: str,
         "Content-Type": "application/json",
         "Content-Language": "en-US",
     }
-    # Reuse an existing location if the seller already has one.
+    addr = {"country": country, "postalCode": postal_code}
+
+    # Reuse an existing location ONLY if its address already has a country.
     try:
         r = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=30)
         if r.status_code == 200:
-            locs = r.json().get("locations", []) or []
-            if locs:
-                return locs[0].get("merchantLocationKey", "")
+            for loc in r.json().get("locations", []) or []:
+                laddr = (loc.get("location") or {}).get("address") or {}
+                if laddr.get("country"):
+                    return loc.get("merchantLocationKey", "")
     except Exception:  # noqa: BLE001
         pass
+
+    # Otherwise create — or repair — our own location so it definitely has a
+    # country and postal code.
     key = "thryft-loc-1"
     body = {
-        "location": {"address": {"country": country, "postalCode": postal_code}},
+        "location": {"address": addr},
         "locationTypes": ["WAREHOUSE"],
         "merchantLocationStatus": "ENABLED",
         "name": "Thryft ship-from location",
     }
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)
-    if r.status_code in (200, 204, 409):  # 409 == already exists
-        return key
-    r.raise_for_status()
+    if r.status_code == 409:
+        # Already exists (possibly without a country) — force the address.
+        try:
+            httpx.post(
+                f"{base}/sell/inventory/v1/location/{key}/update_location_details",
+                headers=headers, json={"location": {"address": addr}}, timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+    elif r.status_code not in (200, 204):
+        r.raise_for_status()
     return key
 
 

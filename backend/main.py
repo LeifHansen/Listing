@@ -138,6 +138,8 @@ def _ebay_creds_for(request: Request):
         "payment_policy_id": acct.get("payment_policy_id", ""),
         "return_policy_id": acct.get("return_policy_id", ""),
         "merchant_location_key": acct.get("merchant_location_key", ""),
+        "ship_from_postal": acct.get("ship_from_postal", ""),
+        "_uid": uid,
     }
 
 
@@ -524,8 +526,21 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     storage.save_listing(req.session_id, req.listing)
+    creds = _ebay_creds_for(request)
+    # Self-heal the ship-from location on a live publish: re-ensure it from the
+    # saved ZIP so a location missing its country (eBay 'Item.Country empty')
+    # gets repaired without the user re-saving settings.
+    if req.mode == "live" and creds and creds.get("ship_from_postal"):
+        try:
+            key = ebay_auth.ensure_inventory_location(
+                creds["access_token"], creds["ship_from_postal"])
+            if key:
+                creds["merchant_location_key"] = key
+                db.save_ebay_account(creds["_uid"], merchant_location_key=key)
+        except Exception as exc:  # noqa: BLE001 - don't block publish on this
+            print(f"[ebay] location re-ensure failed: {exc}")
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
-                          creds=_ebay_creds_for(request))
+                          creds=creds)
     # Record the outcome: published (live), draft, or dry-run.
     if result.get("published"):
         status = "published"
