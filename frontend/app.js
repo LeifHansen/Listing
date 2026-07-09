@@ -328,10 +328,18 @@ async function logout() {
 }
 
 // The eBay status pill depends on two async fetches (health + per-user eBay
-// status); render from state so whichever finishes last wins correctly.
+// status); render from state so whichever finishes last wins correctly. Create
+// the pill on demand so a failed /api/health call can't hide eBay state.
 function renderEbayPill() {
-  const p = $("pill-ebay");
-  if (!p) return;
+  let p = $("pill-ebay");
+  if (!p) {
+    const bar = $("status-bar");
+    if (!bar) return;
+    p = document.createElement("span");
+    p.id = "pill-ebay";
+    p.className = "pill";
+    bar.appendChild(p);
+  }
   if (state.ebayConnected) {
     p.textContent = state.ebayUsername
       ? `eBay: ${state.ebayUsername} ✓`
@@ -580,7 +588,7 @@ function renderConditionOptions(selected) {
 function renderSpecifics(specs) {
   const box = $("specifics");
   box.innerHTML = "";
-  (specs || []).forEach((s, i) => addSpecificRow(s.name, s.value));
+  (specs || []).forEach((s) => addSpecificRow(s.name, s.value));
 }
 
 function addSpecificRow(name = "", value = "") {
@@ -915,7 +923,7 @@ function highlightFix(target, soft) {
       if (!soft) $("specifics").scrollIntoView({ behavior: "smooth", block: "center" });
       break;
     case "photos":
-      if (!soft) { showView("upload"); toast("Re-upload your photos, then Publish Live again."); }
+      if (!soft) { showView("upload"); alert("Re-upload your photos, then Publish Live again."); }
       break;
     case "location": if (!soft) openSettings("postal"); break;
     case "policies": if (!soft) openSettings("policies"); break;

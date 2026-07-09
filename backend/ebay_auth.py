@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import httpx
 
 from . import config
+from .config import log
 
 
 def authorize_url(state: str) -> str:
@@ -124,9 +125,11 @@ def fetch_payments_program(access_token: str) -> dict:
 
 def ensure_inventory_location(access_token: str, postal_code: str,
                               country: str = "US") -> str:
-    """Return a merchantLocationKey whose address has a country — publishOffer
-    fails with 'Item.Country empty' otherwise. Reuse an existing location only
-    if it already has a country; else create/repair our own known-good one."""
+    """Ensure our own ship-from location holds exactly the seller's ZIP+country
+    and return its key. publishOffer needs the location's address to carry a
+    country ('Item.Country empty' otherwise). We always use our own key rather
+    than reusing an arbitrary existing location, so the ZIP the seller entered
+    is the one eBay actually ships from (and can't silently diverge)."""
     base = config.EBAY_API_BASE
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -134,22 +137,8 @@ def ensure_inventory_location(access_token: str, postal_code: str,
         "Content-Type": "application/json",
         "Content-Language": "en-US",
     }
-    addr = {"country": country, "postalCode": postal_code}
-
-    # Reuse an existing location ONLY if its address already has a country.
-    try:
-        r = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=30)
-        if r.status_code == 200:
-            for loc in r.json().get("locations", []) or []:
-                laddr = (loc.get("location") or {}).get("address") or {}
-                if laddr.get("country"):
-                    return loc.get("merchantLocationKey", "")
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Otherwise create — or repair — our own location so it definitely has a
-    # country and postal code.
     key = "thryft-loc-1"
+    addr = {"country": country, "postalCode": postal_code}
     body = {
         "location": {"address": addr},
         "locationTypes": ["WAREHOUSE"],
@@ -159,13 +148,14 @@ def ensure_inventory_location(access_token: str, postal_code: str,
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)
     if r.status_code == 409:
-        # Already exists (possibly without a country) — force the address.
-        try:
-            httpx.post(
-                f"{base}/sell/inventory/v1/location/{key}/update_location_details",
-                headers=headers, json={"location": {"address": addr}}, timeout=30)
-        except Exception:  # noqa: BLE001
-            pass
+        # Already exists (maybe with a stale/missing address) — force it to the
+        # current ZIP+country, and surface it if the repair itself fails.
+        u = httpx.post(
+            f"{base}/sell/inventory/v1/location/{key}/update_location_details",
+            headers=headers, json={"location": {"address": addr}}, timeout=30)
+        if u.status_code not in (200, 204):
+            log.warning("update_location_details(%s) -> %s %s",
+                        key, u.status_code, u.text[:200])
     elif r.status_code not in (200, 204):
         r.raise_for_status()
     return key
@@ -232,17 +222,12 @@ def fetch_policies_and_location(access_token: str) -> dict:
         "return_policy_id": "",
         "merchant_location_key": "",
     }
-    fetchers = {
-        "fulfillment_policy_id": ("/sell/account/v1/fulfillment_policy", "fulfillmentPolicies", "fulfillmentPolicyId"),
-        "payment_policy_id": ("/sell/account/v1/payment_policy", "paymentPolicies", "paymentPolicyId"),
-        "return_policy_id": ("/sell/account/v1/return_policy", "returnPolicies", "returnPolicyId"),
-    }
-    for key, (path, list_field, id_field) in fetchers.items():
+    for kind, (path, list_field, id_field) in _POLICY_SPECS.items():
         try:
             data = _account_get(path, access_token)
             items = data.get(list_field, [])
             if items:
-                out[key] = items[0].get(id_field, "")
+                out[f"{kind}_policy_id"] = items[0].get(id_field, "")
         except Exception:  # noqa: BLE001 - best effort
             pass
     try:

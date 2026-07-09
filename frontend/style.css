@@ -44,7 +44,7 @@ header::before {
     var(--red) 0 25%, var(--blue) 25% 50%, var(--yellow) 50% 75%, var(--green) 75% 100%);
 }
 
-.header-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.header-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 
 .brand { display: flex; align-items: baseline; gap: 10px; }
 .brand-name {
@@ -71,6 +71,7 @@ header::before {
   display: inline-flex; align-items: center; gap: 8px;
   background: var(--cream); border: 2px solid var(--ink); border-radius: 999px;
   padding: 5px 12px; font-size: 0.82rem; font-weight: 800;
+  max-width: 60vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* ---------- status pills ---------- */
@@ -178,10 +179,11 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* ---------- background clean-up editor ---------- */
 .editor-overlay {
   position: fixed; inset: 0; background: rgba(32, 28, 51, 0.7);
-  display: flex; align-items: center; justify-content: center; z-index: 200; padding: 16px;
+  display: flex; align-items: flex-start; justify-content: center; z-index: 200; padding: 16px;
+  overflow-y: auto;
 }
 .editor-modal {
-  background: var(--card); border: 3px solid var(--ink); border-radius: 16px;
+  margin: auto; background: var(--card); border: 3px solid var(--ink); border-radius: 16px;
   box-shadow: 8px 8px 0 var(--ink); padding: 18px; width: 100%; max-width: 560px;
   display: flex; flex-direction: column; gap: 14px;
 }
@@ -259,10 +261,11 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* ---------- auth modal ---------- */
 .auth-overlay {
   position: fixed; inset: 0; background: rgba(32, 28, 51, 0.55);
-  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px;
+  display: flex; align-items: flex-start; justify-content: center; z-index: 100; padding: 20px;
+  overflow-y: auto;
 }
 .auth-modal {
-  position: relative; background: var(--card); border: 3px solid var(--ink); border-radius: 18px;
+  position: relative; margin: auto; background: var(--card); border: 3px solid var(--ink); border-radius: 18px;
   box-shadow: 8px 8px 0 var(--ink); padding: 30px; width: 100%; max-width: 380px;
   display: flex; flex-direction: column; gap: 14px;
 }
@@ -281,7 +284,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* ---------- listing settings ---------- */
 .settings-modal { max-width: 460px; }
 .settings-field { display: block; font-weight: 800; font-size: 0.82rem; margin-bottom: 4px; }
-.settings-field select {
+.settings-field select, .settings-field input {
   width: 100%; margin-top: 5px; padding: 10px 12px; border: 2px solid var(--ink);
   border-radius: 9px; font-size: 16px; font-weight: 600; font-family: inherit; background: #fff;
 }

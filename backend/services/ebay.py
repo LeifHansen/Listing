@@ -1,10 +1,9 @@
 """eBay Sell (Inventory) API integration.
 
-Publishing flow:
+Publishing flow (live only — drafts stay in Thryft and never touch eBay):
   1. createOrReplaceInventoryItem  (the product + condition + images)
-  2. createOffer                   (price, policies, marketplace) -> the DRAFT
-  3. publishOffer                  (only for "live"; turns the offer into a
-                                    live listing)
+  2. createOffer / updateOffer     (price, policies, marketplace, location)
+  3. publishOffer                  (turns the offer into a live listing)
 
 When credentials are not configured (see config.ebay_ready), every call is a
 "dry run": the exact payloads are returned and saved to data/exports/ so you
@@ -253,18 +252,17 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                     "steps": steps,
                 }
 
-            published = False
-            listing_id = None
-            if mode == "live":
-                r3 = client.post(
-                    f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
-                    headers=_headers(token),
-                )
-                r3_body = _body(r3)
-                steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
-                r3.raise_for_status()
-                published = True
-                listing_id = r3_body.get("listingId")
+            # publish() short-circuits drafts before ever calling _push_live, so
+            # we're always publishing a live listing here.
+            r3 = client.post(
+                f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
+                headers=_headers(token),
+            )
+            r3_body = _body(r3)
+            steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
+            r3.raise_for_status()
+            published = True
+            listing_id = r3_body.get("listingId")
     except httpx.HTTPStatusError as exc:
         failed = steps[-1]["step"] if steps else "authentication"
         status = exc.response.status_code
@@ -302,7 +300,7 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     creds: a connected user's eBay credentials (access_token + policy ids +
     location). When present we publish with those; otherwise we fall back to
     env config, and dry-run if neither is available.
-    mode: "draft" (create unpublished offer) or "live" (also publishOffer).
+    mode: "draft" saves in Thryft only (no eBay call); "live" publishes to eBay.
     """
     item = build_inventory_item(session_id, listing, base_url)
     offer = build_offer(session_id, listing, creds)
