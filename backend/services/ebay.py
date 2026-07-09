@@ -146,6 +146,30 @@ def _body(resp: httpx.Response) -> dict:
         return {"raw": resp.text[:500]}
 
 
+# updateOffer (PUT) rejects these immutable keys that createOffer (POST) needs.
+_OFFER_IMMUTABLE = ("sku", "marketplaceId", "format")
+
+
+def _existing_offer_id(client, base: str, token: str, sku: str) -> Optional[str]:
+    """Return the existing offerId for this SKU, or None. Republishing the same
+    session reuses the SKU, so we must update that offer rather than create a
+    duplicate (eBay error 25002 'Offer entity already exists')."""
+    try:
+        r = client.get(
+            f"{base}/sell/inventory/v1/offer",
+            headers=_headers(token),
+            params={"sku": sku, "marketplace_id": config.EBAY_MARKETPLACE_ID,
+                    "format": "FIXED_PRICE"},
+        )
+        if r.status_code == 200:
+            offers = r.json().get("offers", []) or []
+            if offers:
+                return offers[0].get("offerId")
+    except Exception:  # noqa: BLE001 - treat as "no existing offer"
+        pass
+    return None
+
+
 def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                creds: Optional[dict] = None) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
@@ -166,23 +190,38 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                           "body": None if r1.is_success else _body(r1)})
             r1.raise_for_status()
 
-            r2 = client.post(
-                f"{base}/sell/inventory/v1/offer",
-                headers=_headers(token),
-                json=offer,
-            )
-            r2_body = _body(r2)
-            steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
-            r2.raise_for_status()
-            offer_id = r2_body.get("offerId")
+            # Idempotent offer: update the existing one for this SKU, else create.
+            offer_id = _existing_offer_id(client, base, token, sku)
+            if offer_id:
+                update_body = {k: v for k, v in offer.items() if k not in _OFFER_IMMUTABLE}
+                r2 = client.put(
+                    f"{base}/sell/inventory/v1/offer/{offer_id}",
+                    headers=_headers(token),
+                    json=update_body,
+                )
+                # updateOffer returns 204 No Content on success.
+                r2_body = _body(r2) if r2.content else {}
+                steps.append({"step": "updateOffer", "status": r2.status_code,
+                              "offerId": offer_id, "body": r2_body})
+                r2.raise_for_status()
+            else:
+                r2 = client.post(
+                    f"{base}/sell/inventory/v1/offer",
+                    headers=_headers(token),
+                    json=offer,
+                )
+                r2_body = _body(r2)
+                steps.append({"step": "createOffer", "status": r2.status_code, "body": r2_body})
+                r2.raise_for_status()
+                offer_id = r2_body.get("offerId")
             if not offer_id:
-                # 2xx but no offerId (e.g. a non-JSON body) — publishing to
-                # /offer/None/publish would fail opaquely; stop with a clear error.
+                # No offerId to publish against — stop with a clear error rather
+                # than POSTing to /offer/None/publish.
                 return {
                     "dry_run": False,
                     "error": True,
                     "mode": mode,
-                    "message": "eBay createOffer succeeded but returned no offerId.",
+                    "message": "eBay offer create/update returned no offerId.",
                     "detail": str(r2_body),
                     "steps": steps,
                 }
