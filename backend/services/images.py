@@ -48,7 +48,7 @@ def warm() -> None:
     """
     try:
         _remove_background(Image.new("RGB", (32, 32), (200, 100, 50)))
-        print("[images] background-removal model warmed")
+        log.info("images: background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
