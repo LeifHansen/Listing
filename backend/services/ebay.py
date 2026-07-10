@@ -41,8 +41,12 @@ def _prune(value):
 
 
 def _sku(session_id: str, listing: Listing) -> str:
-    base = re.sub(r"[^A-Za-z0-9]+", "-", (listing.brand or "item")).strip("-")
-    return f"{base[:20]}-{session_id}".upper()
+    # Must be STABLE for the life of the listing: republishing the same session
+    # reuses the SKU so we update the existing offer instead of creating a
+    # duplicate. Deriving it from mutable fields (e.g. brand) would mint a new
+    # SKU whenever the user edits that field and silently create a second live
+    # listing — so key it on the immutable session id alone.
+    return f"THRYFT-{session_id}".upper()
 
 
 def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
@@ -98,7 +102,21 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
 
 def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None) -> dict:
     price = listing.price if listing.price is not None else 0.0
-    c = creds or {}
+    # A connected seller (creds present) must ONLY use their own policies and
+    # location — never fall back to the deployment owner's env-configured IDs,
+    # which belong to a different eBay account and would be rejected under the
+    # user's token. Env fallbacks apply only to the no-user (env-config) path.
+    if creds is not None:
+        c = creds
+        fulfillment = c.get("fulfillment_policy_id") or None
+        payment = c.get("payment_policy_id") or None
+        returns = c.get("return_policy_id") or None
+        location = c.get("merchant_location_key") or None
+    else:
+        fulfillment = config.EBAY_FULFILLMENT_POLICY_ID or None
+        payment = config.EBAY_PAYMENT_POLICY_ID or None
+        returns = config.EBAY_RETURN_POLICY_ID or None
+        location = config.EBAY_MERCHANT_LOCATION_KEY or None
     return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
@@ -113,11 +131,11 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
             }
         },
         "listingPolicies": {
-            "fulfillmentPolicyId": c.get("fulfillment_policy_id") or config.EBAY_FULFILLMENT_POLICY_ID or None,
-            "paymentPolicyId": c.get("payment_policy_id") or config.EBAY_PAYMENT_POLICY_ID or None,
-            "returnPolicyId": c.get("return_policy_id") or config.EBAY_RETURN_POLICY_ID or None,
+            "fulfillmentPolicyId": fulfillment,
+            "paymentPolicyId": payment,
+            "returnPolicyId": returns,
         },
-        "merchantLocationKey": c.get("merchant_location_key") or config.EBAY_MERCHANT_LOCATION_KEY or None,
+        "merchantLocationKey": location,
     })
 
 
@@ -293,6 +311,24 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
             "detail": exc.response.text,
             "steps": steps,
         }
+    except httpx.RequestError as exc:
+        # Timeout / connection / DNS failure — no HTTP status. Don't 500: a
+        # publishOffer that timed out may have SUCCEEDED on eBay, so tell the
+        # user to check before retrying rather than blindly republishing.
+        failed = steps[-1]["step"] if steps else "authentication"
+        log.warning("publish %s network error (sku=%s): %s", failed, sku, exc)
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "step": failed,
+            "message": "Couldn’t reach eBay just now — the connection timed out.",
+            "issues": [{"target": "generic", "title": "eBay didn’t respond in time",
+                        "fix": ("Check Selling → Active on eBay in a minute: if the "
+                                "listing isn’t there, press Publish Live again.")}],
+            "detail": str(exc),
+            "steps": steps,
+        }
 
     return {
         "dry_run": False,
@@ -365,9 +401,13 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             }
 
     # eBay requires a ship-from inventory location to publish an offer. Without
-    # one, publishOffer fails opaquely — catch it here with a clear fix.
-    has_location = bool((creds or {}).get("merchant_location_key")
-                        or config.EBAY_MERCHANT_LOCATION_KEY)
+    # one, publishOffer fails opaquely — catch it here with a clear fix. For a
+    # connected seller, only THEIR location counts (the env key belongs to the
+    # app owner's account and can't be used under the user's token).
+    if creds is not None:
+        has_location = bool(creds.get("merchant_location_key"))
+    else:
+        has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
     if not has_location:
         log.warning("publish blocked: no ship-from location for session %s", session_id)
         return {
@@ -396,5 +436,18 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             "message": ebay_errors.headline(issues, "publishing", exc.response.status_code),
             "issues": issues,
             "detail": exc.response.text,
+            "export_path": str(export_path),
+        }
+    except httpx.RequestError as exc:
+        # Token-refresh or other pre-publish network failure.
+        log.warning("publish network error (session=%s): %s", session_id, exc)
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "message": "Couldn’t reach eBay just now — please try again in a moment.",
+            "issues": [{"target": "generic", "title": "eBay didn’t respond",
+                        "fix": "Wait a moment and press Publish Live again."}],
+            "detail": str(exc),
             "export_path": str(export_path),
         }

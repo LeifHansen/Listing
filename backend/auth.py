@@ -79,23 +79,32 @@ def current_user(request: Request) -> Optional[dict]:
         return None
 
 
-def _state_sig(user_id: str) -> str:
-    return hmac.new(config.SECRET_KEY.encode(), user_id.encode(),
-                    hashlib.sha256).hexdigest()[:32]
+def _state_sig(user_id: str, nonce: str) -> str:
+    msg = f"{user_id}.{nonce}".encode()
+    return hmac.new(config.SECRET_KEY.encode(), msg, hashlib.sha256).hexdigest()[:32]
 
 
-def make_state(user_id: str) -> str:
-    """Sign the OAuth state so the eBay callback can't be fed an arbitrary
-    user id (the session cookie is often absent on that cross-site redirect)."""
-    return f"{user_id}.{_state_sig(user_id)}"
+def make_state(user_id: str, nonce: str) -> str:
+    """Sign the OAuth state binding the user id to a per-request nonce.
+
+    The nonce is also stored in a cookie on the browser that starts the flow;
+    the callback requires the two to match, which prevents a CSRF login-binding
+    attack (an attacker feeding a victim their own eBay authorization code).
+    """
+    return f"{user_id}.{nonce}.{_state_sig(user_id, nonce)}"
 
 
-def verify_state(state: str) -> Optional[str]:
-    """Return the user id from a signed state, or None if missing/tampered."""
-    user_id, _, sig = (state or "").partition(".")
-    if not user_id or not sig:
+def verify_state(state: str) -> Optional[tuple[str, str]]:
+    """Return (user_id, nonce) from a signed state, or None if missing/tampered."""
+    parts = (state or "").split(".")
+    if len(parts) != 3:
         return None
-    return user_id if hmac.compare_digest(sig, _state_sig(user_id)) else None
+    user_id, nonce, sig = parts
+    if not user_id or not nonce or not sig:
+        return None
+    if not hmac.compare_digest(sig, _state_sig(user_id, nonce)):
+        return None
+    return user_id, nonce
 
 
 def signup(email: str, password: str):

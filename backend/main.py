@@ -144,6 +144,9 @@ def _ebay_creds_for(request: Request):
     }
 
 
+EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
+
+
 @app.get("/api/ebay/connect")
 def ebay_connect(request: Request):
     if not config.ebay_oauth_ready():
@@ -151,13 +154,29 @@ def ebay_connect(request: Request):
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
-    return RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid)))
+    import secrets as _secrets
+    nonce = _secrets.token_urlsafe(24)
+    resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
+    # Bind the flow to this browser: the callback requires this cookie to match
+    # the nonce embedded in the signed state (CSRF protection). Lax so it rides
+    # the top-level redirect back from eBay.
+    resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
+                    samesite="lax", secure=request.url.scheme == "https")
+    return resp
 
 
 @app.get("/api/ebay/callback")
 def ebay_callback(request: Request, code: str = "", state: str = ""):
-    uid = _uid(request) or auth.verify_state(state)
-    if not code or not uid:
+    verified = auth.verify_state(state)
+    if not code or not verified:
+        return RedirectResponse("/?ebay=error")
+    uid, nonce = verified
+    # The nonce in the signed state must match the cookie set at connect time,
+    # so a callback can only bind an eBay account to the browser that started
+    # the flow (blocks CSRF authorization-code injection).
+    cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
+    if not cookie_nonce or cookie_nonce != nonce:
+        log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
         return RedirectResponse("/?ebay=error")
     try:
         tokens = ebay_auth.exchange_code(code)
@@ -174,7 +193,9 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             uid, refresh_token=tokens["refresh_token"],
             ebay_username=ident["username"], ebay_email=ident["email"],
             **policies)
-        return RedirectResponse("/?ebay=connected")
+        resp = RedirectResponse("/?ebay=connected")
+        resp.delete_cookie(EBAY_NONCE_COOKIE)
+        return resp
     except Exception:  # noqa: BLE001
         return RedirectResponse("/?ebay=error")
 
@@ -436,17 +457,31 @@ async def edit_image(
 
     def _save() -> None:
         from io import BytesIO
+        import os
         from PIL import Image
         img = Image.open(BytesIO(data)).convert("RGB")
-        img.save(path, "JPEG", quality=88, optimize=True)
+        # Write to a temp file and atomically replace, so a concurrent reader
+        # (eBay fetching /media, or a thumbnail request) never sees a
+        # half-written JPEG.
+        tmp = path.with_name(path.name + ".tmp")
+        img.save(tmp, "JPEG", quality=88, optimize=True)
+        os.replace(tmp, path)
 
     try:
         await run_in_threadpool(_save)
     except Exception as exc:  # noqa: BLE001
         log.warning("edit-image: could not process (session=%s name=%s): %s", session_id, name, exc)
         raise HTTPException(400, f"Could not process the edited image: {exc}") from exc
-    await run_in_threadpool(
-        objstore.upload_optimized, session_id, opt_dir, [name])
+    # When R2 is the source eBay fetches from, a failed re-push means the live
+    # listing would keep the OLD photo — surface it instead of reporting success.
+    if objstore.enabled():
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            log.warning("edit-image: R2 re-push failed (session=%s name=%s)", session_id, name)
+            raise HTTPException(
+                502, "Saved locally, but couldn’t update the stored copy eBay "
+                     "uses. Try saving again in a moment.")
     log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 

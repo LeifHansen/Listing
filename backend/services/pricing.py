@@ -40,8 +40,10 @@ def active_comps(query: str, category_id: Optional[str] = None,
     """Stats over live fixed-price asking prices for comparable items."""
     if not config.taxonomy_ready():
         return None
-    filters = ["buyingOptions:{FIXED_PRICE}",
-               f"priceCurrency:{config.EBAY_CURRENCY}"]
+    # eBay's Browse filter spec requires `priceCurrency` to be paired with a
+    # `price` filter; sending it alone 400s. We don't range-filter, so omit it
+    # — the marketplace header already scopes results to the US/USD site.
+    filters = ["buyingOptions:{FIXED_PRICE}"]
     bucket = _condition_bucket(condition)
     if bucket:
         filters.append("conditions:{%s}" % bucket)
