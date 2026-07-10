@@ -846,6 +846,85 @@ function renderCategorySuggestions(suggestions) {
   });
 }
 
+async function checkMarketPrice() {
+  const box = $("price-suggestions");
+  if (!state.taxonomyConfigured) {
+    box.innerHTML = `<p class="hint">Price check needs EBAY_CLIENT_ID / EBAY_CLIENT_SECRET on the server.</p>`;
+    return;
+  }
+  const l = collectListing();
+  const query = [l.brand, l.title].filter(Boolean).join(" ").trim();
+  if (!query) { box.innerHTML = `<p class="hint">Add a title or brand first.</p>`; return; }
+  try {
+    showSpinner("Checking live eBay prices…");
+    const data = await api("/api/price-suggestions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        category_id: l.category_id || null,
+        condition: l.condition || null,
+      }),
+    });
+    renderPriceSuggestions(data);
+  } catch (e) {
+    box.innerHTML = `<p class="hint">Couldn't check prices: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    hideSpinner();
+  }
+}
+
+function renderPriceSuggestions(data) {
+  const box = $("price-suggestions");
+  box.innerHTML = "";
+  const s = data.suggestion;
+  if (!s) {
+    box.innerHTML = `<p class="hint">No comparable listings found — try a simpler title or set a category first.</p>`;
+    return;
+  }
+  const usePrice = (row, price) => {
+    $("f-price").value = Number(price).toFixed(2);
+    [...box.querySelectorAll(".cat-suggestion")].forEach((c) => c.classList.remove("chosen"));
+    row.classList.add("chosen");
+  };
+  data.sources.forEach((src) => {
+    const head = document.createElement("div");
+    head.className = "cat-suggestion";
+    head.innerHTML =
+      `<span class="cat-path"><strong>${escapeHtml(src.label)}</strong> — median of ` +
+      `${src.count} listings (typical range $${src.low}–$${src.high}). Click to use.</span>` +
+      `<span class="cat-id">$${src.estimate}</span>`;
+    head.addEventListener("click", () => usePrice(head, src.estimate));
+    box.appendChild(head);
+    (src.sample || []).forEach((c) => {
+      const row = document.createElement("div");
+      row.className = "cat-suggestion";
+      row.innerHTML =
+        `<span class="cat-path">${escapeHtml(c.title)}` +
+        (c.condition ? ` <em>(${escapeHtml(c.condition)})</em>` : "") +
+        (c.url ? ` <a href="${escapeHtml(c.url)}" target="_blank" rel="noopener">view →</a>` : "") +
+        `</span><span class="cat-id">$${c.price}</span>`;
+      row.addEventListener("click", (e) => {
+        if (e.target.tagName === "A") return; // let the eBay link work
+        usePrice(row, c.price);
+      });
+      box.appendChild(row);
+    });
+    if (src.search_url) {
+      const more = document.createElement("p");
+      more.className = "hint";
+      more.innerHTML = `<a href="${escapeHtml(src.search_url)}" target="_blank" rel="noopener">See all comparable listings on eBay →</a>`;
+      box.appendChild(more);
+    }
+  });
+  if (!s.sold_data) {
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = "These are asking prices (what sellers want), not sold prices — pricing a little under the median usually sells faster.";
+    box.appendChild(note);
+  }
+}
+
 async function refine() {
   const prompt = $("refine-input").value.trim();
   if (!prompt) return;
@@ -1008,6 +1087,7 @@ function init() {
   $("btn-refine").addEventListener("click", refine);
   $("btn-add-specific").addEventListener("click", () => addSpecificRow());
   $("btn-suggest-cat").addEventListener("click", suggestCategories);
+  $("btn-price-check").addEventListener("click", checkMarketPrice);
   $("btn-draft").addEventListener("click", () => publish("draft"));
   $("btn-live").addEventListener("click", () => publish("live"));
   $("f-title").addEventListener("input", updateTitleCount);

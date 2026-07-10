@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest
-from .services import claude_ai, ebay, images, taxonomy
+from .services import claude_ai, ebay, images, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -500,6 +500,32 @@ def category_suggestions(payload: dict) -> dict:
         return taxonomy.suggest(query, limit=int(payload.get("limit", 5)))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"eBay Taxonomy API error: {exc}") from exc
+
+
+@app.post("/api/price-suggestions")
+def price_suggestions(payload: dict) -> dict:
+    """Market-price suggestion for the listing from live eBay comps.
+
+    Uses the same application token as taxonomy (no seller login needed).
+    Sources are pluggable — see services/pricing.py.
+    """
+    if not config.taxonomy_ready():
+        raise HTTPException(
+            400,
+            "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured; cannot look "
+            "up market prices.",
+        )
+    query = str(payload.get("query", "")).strip()
+    if not query:
+        raise HTTPException(400, "query is required")
+    try:
+        return pricing.suggest(
+            query,
+            category_id=str(payload.get("category_id") or "").strip() or None,
+            condition=str(payload.get("condition") or "").strip() or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
 
 
 @app.post("/api/refine")
