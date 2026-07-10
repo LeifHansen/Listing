@@ -50,6 +50,12 @@ def explain(err: dict) -> dict:
         issue.update(target="category",
                      title="This item needs a valid eBay category",
                      fix="Use “Suggest eBay categories” and pick the closest match.")
+    elif has("brandmpn", "brand/mpn"):
+        issue.update(target="specifics",
+                     title="eBay needs Brand and MPN for this category",
+                     fix=("Set a Brand (use “Unbranded” if there isn’t one) and add an "
+                          "item specific “MPN” — “Does Not Apply” works for items "
+                          "without a part number."))
     elif has("upc", "ean", "isbn", "gtin", "product identifier", "does not apply"):
         issue.update(target="specifics",
                      title="eBay wants a product identifier (UPC/EAN)",

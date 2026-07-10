@@ -144,7 +144,8 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[dict]:
     dst_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".heic"}
+    exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+            ".heic", ".heif", ".hif"}
     for i, src in enumerate(sorted(src_dir.iterdir())):
         if src.suffix.lower() not in exts:
             continue

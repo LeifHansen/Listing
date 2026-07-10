@@ -67,6 +67,17 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
             if spec.value not in aspects[spec.name]:
                 aspects[spec.name].append(spec.value)
 
+    # eBay validates brand and MPN as a pair ('Input data for tag <BrandMPN>
+    # is invalid or missing'): once a brand is present, an MPN must be too.
+    # Use the seller's MPN item specific when given, else eBay's official
+    # "no part number" sentinel.
+    brand = listing.brand or (aspects.get("Brand") or [""])[0]
+    mpn = next((s.value for s in listing.item_specifics
+                if s.name and s.value and s.name.strip().lower()
+                in ("mpn", "manufacturer part number")), "")
+    if brand and not mpn:
+        mpn = "Does Not Apply"
+
     return _prune({
         "sku": _sku(session_id, listing),
         "availability": {
@@ -79,7 +90,8 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
             "description": listing.description or listing.title,
             "aspects": aspects,
             "imageUrls": _image_urls(session_id, listing.images, base_url),
-            "brand": listing.brand or None,
+            "brand": brand or None,
+            "mpn": (mpn if brand else None) or None,
         },
     })
 

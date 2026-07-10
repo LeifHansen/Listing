@@ -97,9 +97,12 @@ function renderThumbs() {
   $("btn-process").disabled = state.files.length === 0;
 }
 
+// HEIC/HEIF often arrive with an empty MIME type (Chrome, Windows), so accept
+// by extension too — the server decodes anything Pillow can.
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp|bmp|gif|tiff?|heic|heif|hif)$/i;
 function addFiles(fileList) {
   for (const f of fileList) {
-    if (!f.type.startsWith("image/")) continue;
+    if (!f.type.startsWith("image/") && !IMAGE_EXT_RE.test(f.name || "")) continue;
     // Skip duplicates (same file picked twice) so we don't upload it twice.
     if (state.files.some((e) => e.name === f.name && e.size === f.size)) continue;
     state.files.push(f);
