@@ -151,6 +151,19 @@ async function downscaleForUpload(file) {
   }
 }
 
+// Guard against double-submits: the spinner is a non-blocking corner toast, so
+// without this a double-click or Enter-repeat fires the request twice (two AI
+// charges, two drafts, or racing publishes).
+const _inFlight = {};
+function once(key, fn) {
+  return async (...args) => {
+    if (_inFlight[key]) return;
+    _inFlight[key] = true;
+    try { return await fn(...args); }
+    finally { _inFlight[key] = false; }
+  };
+}
+
 async function processImages() {
   try {
     const removeBg = $("opt-remove-bg").checked;
@@ -316,6 +329,9 @@ async function submitAuth() {
     renderAuthArea();
     loadEbayStatus();
     $("auth-email").value = ""; $("auth-password").value = "";
+    // If the login modal was opened from an empty "My listings" view, populate
+    // it now instead of leaving the user on a blank, still-logged-out page.
+    if (!$("step-listings").classList.contains("hidden")) loadListings();
   } catch (e) {
     $("auth-error").textContent = e.message;
   } finally {
@@ -681,6 +697,21 @@ function _paintAt(e) {
   editor.ctx.fill();
 }
 
+// Close a modal on backdrop click ONLY when the press STARTED on the backdrop.
+// Without this, a press-drag-release gesture (painting in the editor, or
+// drag-selecting text in a field) that releases over the backdrop fires a
+// `click` on the overlay and destroys the modal + any unsaved work.
+function bindBackdropClose(overlayId, closeFn) {
+  const overlay = $(overlayId);
+  if (!overlay) return;
+  let downOnBackdrop = false;
+  overlay.addEventListener("mousedown", (e) => { downOnBackdrop = e.target === overlay; });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay && downOnBackdrop) closeFn();
+    downOnBackdrop = false;
+  });
+}
+
 function setupImageEditor() {
   const canvas = $("editor-canvas");
   const start = (e) => { editor.painting = true; _paintAt(e); e.preventDefault(); };
@@ -693,9 +724,7 @@ function setupImageEditor() {
   canvas.addEventListener("touchmove", move, { passive: false });
   canvas.addEventListener("touchend", end);
   $("editor-cancel").addEventListener("click", closeImageEditor);
-  $("editor-overlay").addEventListener("click", (e) => {
-    if (e.target === $("editor-overlay")) closeImageEditor();
-  });
+  bindBackdropClose("editor-overlay", closeImageEditor);
   $("editor-reset").addEventListener("click", () => { if (editor.name) openImageEditor(editor.name); });
   $("editor-save").addEventListener("click", saveEditedImage);
 }
@@ -752,9 +781,18 @@ function renderPreview(result) {
   renderImages();
   renderMissingInfo(l.missing_info);
   $("cat-suggestions").innerHTML = "";
+  // Clear any state carried over from a previous listing so it can't leak into
+  // this one (stale eBay fix-panel, price comps, or "needs fix" field rings).
+  $("price-suggestions").innerHTML = "";
+  $("publish-issues").innerHTML = "";
+  $("publish-issues").classList.add("hidden");
+  $("publish-result").classList.add("hidden");
+  clearFixHighlights();
   updateTitleCount();
 
-  const conf = (result && result.confidence) || "medium";
+  // confidence is rendered into a class + text; only ever trust the known set.
+  const rawConf = (result && result.confidence) || "medium";
+  const conf = ["low", "medium", "high"].includes(rawConf) ? rawConf : "medium";
   $("confidence").innerHTML =
     `AI confidence: <span class="badge ${conf}">${conf.toUpperCase()}</span>`;
 
@@ -1069,12 +1107,12 @@ function init() {
   // Listing settings modal
   $("nav-settings").addEventListener("click", openSettings);
   $("settings-close").addEventListener("click", closeSettings);
-  $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
+  bindBackdropClose("settings-overlay", closeSettings);
   // eBay account modal
   $("ebay-close").addEventListener("click", closeEbayModal);
   $("ebay-check-payout").addEventListener("click", () => { closeEbayModal(); checkEbayPayments(); });
   $("ebay-disconnect").addEventListener("click", disconnectEbay);
-  $("ebay-overlay").addEventListener("click", (e) => { if (e.target === $("ebay-overlay")) closeEbayModal(); });
+  bindBackdropClose("ebay-overlay", closeEbayModal);
   // Auth modal wiring (the login/logout button itself is wired by
   // renderAuthArea, which replaces it on every auth change)
   $("auth-close").addEventListener("click", closeAuthModal);
@@ -1082,16 +1120,19 @@ function init() {
   $("tab-signup").addEventListener("click", () => setAuthMode("signup"));
   $("auth-submit").addEventListener("click", submitAuth);
   $("auth-password").addEventListener("keydown", (e) => { if (e.key === "Enter") submitAuth(); });
-  $("auth-overlay").addEventListener("click", (e) => { if (e.target === $("auth-overlay")) closeAuthModal(); });
-  $("btn-process").addEventListener("click", processImages);
-  $("btn-refine").addEventListener("click", refine);
+  bindBackdropClose("auth-overlay", closeAuthModal);
+  const processImagesOnce = once("process", processImages);
+  const refineOnce = once("refine", refine);
+  const publishOnce = once("publish", publish);  // one guard covers draft+live
+  $("btn-process").addEventListener("click", processImagesOnce);
+  $("btn-refine").addEventListener("click", refineOnce);
   $("btn-add-specific").addEventListener("click", () => addSpecificRow());
   $("btn-suggest-cat").addEventListener("click", suggestCategories);
   $("btn-price-check").addEventListener("click", checkMarketPrice);
-  $("btn-draft").addEventListener("click", () => publish("draft"));
-  $("btn-live").addEventListener("click", () => publish("live"));
+  $("btn-draft").addEventListener("click", () => publishOnce("draft"));
+  $("btn-live").addEventListener("click", () => publishOnce("live"));
   $("f-title").addEventListener("input", updateTitleCount);
-  $("refine-input").addEventListener("keydown", (e) => { if (e.key === "Enter") refine(); });
+  $("refine-input").addEventListener("keydown", (e) => { if (e.key === "Enter") refineOnce(); });
   // Nav buttons
   $("nav-new").addEventListener("click", startNew);
   $("nav-listings").addEventListener("click", loadListings);

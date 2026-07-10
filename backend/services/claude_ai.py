@@ -87,11 +87,15 @@ def _extract_json(text: str) -> dict:
 
 
 def _to_listing(data: dict, image_names: list[str]) -> Listing:
+    # The model sometimes returns null (not []) for these, or entries that
+    # aren't dicts — coerce defensively so a stray shape can't crash identify.
+    raw_specs = data.get("item_specifics") or []
     specifics = [
         ItemSpecific(name=str(s.get("name", "")), value=str(s.get("value", "")))
-        for s in data.get("item_specifics", [])
-        if s.get("name")
+        for s in raw_specs
+        if isinstance(s, dict) and s.get("name")
     ]
+    raw_missing = data.get("missing_info") or []
     cond = str(data.get("condition", "USED_EXCELLENT")).upper()
     if cond not in EBAY_CONDITIONS:
         cond = "USED_EXCELLENT"
@@ -118,7 +122,7 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         quantity=quantity,
         item_specifics=specifics,
         images=image_names,
-        missing_info=[str(m) for m in data.get("missing_info", [])],
+        missing_info=[str(m) for m in raw_missing if m],
     )
 
 
@@ -141,9 +145,12 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=2000,
+        max_tokens=4096,
         messages=[{"role": "user", "content": content}],
     )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the AI response was too long and got cut off; "
+                           "try again or use fewer photos")
     text = "".join(b.text for b in resp.content if b.type == "text")
     data = _extract_json(text)
     listing = _to_listing(data, image_names)
@@ -151,9 +158,14 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
     # add it in the editor if it's worth the fee. (refine() keeps whatever
     # the seller typed, so only clear it here at first draft.)
     listing.subtitle = ""
+    # Constrain confidence to the known set — it's rendered into the UI, so a
+    # free-form (prompt-injected) value must never reach the DOM.
+    conf = str(data.get("confidence", "medium")).lower().strip()
+    if conf not in ("low", "medium", "high"):
+        conf = "medium"
     return IdentifyResult(
         listing=listing,
-        confidence=str(data.get("confidence", "medium")),
+        confidence=conf,
         raw_observations=str(data.get("raw_observations", "")),
     )
 
@@ -177,9 +189,12 @@ def refine(listing: Listing, prompt: str) -> Listing:
     )
     resp = client.messages.create(
         model=config.CONTENT_MODEL,
-        max_tokens=2000,
+        max_tokens=4096,
         messages=[{"role": "user", "content": msg}],
     )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the AI response was too long and got cut off; "
+                           "try a shorter instruction or trim the description")
     text = "".join(b.text for b in resp.content if b.type == "text")
     data = _extract_json(text)
     updated = _to_listing(data, listing.images)

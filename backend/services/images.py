@@ -26,6 +26,24 @@ TARGET_SIZE = 1600  # px, longest side per eBay zoom recommendation
 JPEG_QUALITY = 88
 CANVAS_COLOR = (248, 248, 248)  # near-white, looks clean on eBay
 WHITE = (255, 255, 255)  # pure white when the user asks to strip the background
+# Downscale anything larger than this (longest side) up front: a 150MP phone
+# panorama is under the 20MB byte cap but makes several full-res RGB copies
+# (~1GB+) during autocrop/pad and can OOM a small machine. We only ever output
+# TARGET_SIZE, so working above ~2x that buys nothing.
+MAX_WORK_SIDE = 3200
+
+
+def _flatten(img: Image.Image) -> Image.Image:
+    """Return an RGB image, compositing any alpha onto the near-white canvas
+    instead of dropping it. A plain `.convert("RGB")` discards transparency and
+    leaves formerly-transparent pixels black; product cutout PNGs need the
+    alpha composited so the background reads as the clean canvas, not black."""
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, CANVAS_COLOR + (255,))
+        canvas.alpha_composite(rgba)
+        return canvas.convert("RGB")
+    return img.convert("RGB")
 
 # rembg loads an ONNX model on first use; keep the session process-global so we
 # pay that cost once, and only when background removal is actually used.
@@ -72,7 +90,7 @@ def _remove_background(img: Image.Image) -> Image.Image:
 
 def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
     """Trim near-uniform borders (e.g. plain background) around the subject."""
-    rgb = img.convert("RGB")
+    rgb = _flatten(img)
     # Compare against the top-left corner color as the assumed background.
     bg = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
     from PIL import ImageChops
@@ -99,7 +117,7 @@ def _pad_to_square(img: Image.Image) -> Image.Image:
     w, h = img.size
     side = max(w, h)
     canvas = Image.new("RGB", (side, side), CANVAS_COLOR)
-    canvas.paste(img.convert("RGB"), ((side - w) // 2, (side - h) // 2))
+    canvas.paste(_flatten(img), ((side - w) // 2, (side - h) // 2))
     return canvas
 
 
@@ -116,6 +134,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
     with Image.open(src) as raw:
         img = ImageOps.exif_transpose(raw)  # honor camera rotation
         original_size = img.size
+
+        # Downscale oversized inputs before the memory-heavy passes below.
+        if max(img.size) > MAX_WORK_SIDE:
+            img.thumbnail((MAX_WORK_SIDE, MAX_WORK_SIDE), Image.LANCZOS)
 
         bg_removed = False
         if remove_bg:
@@ -144,8 +166,8 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[dict]:
     dst_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff",
-            ".heic", ".heif", ".hif"}
+    exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
+            ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
     for i, src in enumerate(sorted(src_dir.iterdir())):
         if src.suffix.lower() not in exts:
             continue

@@ -13,6 +13,7 @@ env/
 # Runtime data (uploaded images, generated listings, sessions)
 data/sessions/
 data/exports/
+data/.secret_key
 *.log
 
 # OS / editor
