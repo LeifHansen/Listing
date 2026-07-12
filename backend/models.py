@@ -38,7 +38,6 @@ class Listing(BaseModel):
     images: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
     missing_info: list[str] = Field(default_factory=list)
-    notes: str = ""
 
 
 class IdentifyResult(BaseModel):

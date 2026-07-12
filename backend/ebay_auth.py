@@ -201,7 +201,7 @@ def _policy_summary(kind: str, p: dict) -> str:
                 cost = (svcs[0].get("shippingCost") or {}).get("value")
                 if cost in ("0.0", "0.00", 0, "0"):
                     return "Free shipping"
-                return f"Flat/calculated shipping" if cost else "Shipping configured"
+                return "Flat/calculated shipping" if cost else "Shipping configured"
             return "Shipping configured"
         if kind == "payment":
             return "Managed payments"

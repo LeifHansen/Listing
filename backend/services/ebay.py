@@ -11,7 +11,6 @@ can inspect them and push later once you have a developer account.
 """
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 import httpx
