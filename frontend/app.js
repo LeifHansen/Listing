@@ -20,7 +20,13 @@ const state = {
   taxonomyConfigured: false,
   user: null,
   authMode: "login",
+  mode: "sell",            // "shop" | "sell"
+  shopSession: null,       // session id of the item currently being scanned
+  shopListing: null,       // the scanned item's identified listing
 };
+
+// Set when "Buy" is tapped while logged out, so the action resumes after login.
+let pendingBuy = false;
 
 // Publishing is live if EITHER the user connected their eBay account or the
 // server has env-level credentials.
@@ -188,6 +194,210 @@ async function processImages() {
   }
 }
 
+// ---------- mode toggle (Shop vs Sell) ----------
+const SELL_VIEWS = ["step-upload", "step-preview", "step-listings"];
+const SELL_NAV = ["nav-new", "nav-listings", "nav-images", "nav-edit"];
+
+function setMode(mode) {
+  state.mode = mode;
+  const shop = mode === "shop";
+  $("mode-shop").classList.toggle("active", shop);
+  $("mode-sell").classList.toggle("active", !shop);
+  $("step-shop").classList.toggle("hidden", !shop);
+  // Sell-only nav buttons don't apply in Shop mode.
+  SELL_NAV.forEach((id) => $(id).classList.toggle("hidden", shop));
+  if (shop) {
+    SELL_VIEWS.forEach((id) => $(id).classList.add("hidden"));
+  } else {
+    // Back to Sell: resume wherever the seller was (preview if a draft is open).
+    showView(state.listing ? "preview" : "upload");
+  }
+}
+
+// ---------- Shop Mode ----------
+async function shopScan(file) {
+  if (!file) return;
+  try {
+    showSpinner("Scanning item…");
+    const prepped = await downscaleForUpload(file);
+    const fd = new FormData();
+    fd.append("files", prepped);
+    fd.append("remove_bg", "false");
+    const up = await api("/api/upload", { method: "POST", body: fd });
+    state.shopSession = up.session_id;
+
+    showSpinner("Identifying with AI lens…");
+    const res = await api(`/api/identify/${up.session_id}`, { method: "POST" });
+    state.shopListing = res.listing;
+
+    // Best-effort market price (never block the scan on it).
+    let price = null;
+    if (state.taxonomyConfigured) {
+      showSpinner("Checking eBay prices…");
+      try {
+        const l = res.listing;
+        const query = [l.brand, l.title].filter(Boolean).join(" ").trim();
+        const pd = await api("/api/price-suggestions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query, category_id: l.category_id || null, condition: l.condition || null }),
+        });
+        price = pd.suggestion;
+      } catch (e) { /* price is optional */ }
+    }
+    renderShopResult(res, price);
+  } catch (e) {
+    alert("Scan error: " + e.message);
+  } finally {
+    hideSpinner();
+  }
+}
+const shopScanOnce = once("shop", shopScan);
+
+function renderShopResult(res, price) {
+  const l = res.listing || {};
+  const box = $("shop-result");
+  const img = (l.images && l.images[0])
+    ? `/media/${state.shopSession}/optimized/${l.images[0]}` : "";
+  const conf = ["low", "medium", "high"].includes(res.confidence) ? res.confidence : "medium";
+  const priceHtml = price
+    ? `<div class="shop-price">≈ $${price.price}</div>
+       <div class="hint">typical $${price.low}–$${price.high} · ${price.count} comps · ${escapeHtml(price.basis)}${price.sold_data ? "" : " (asking, not sold)"}</div>`
+    : `<div class="hint">No price estimate yet — you can set one later.</div>`;
+  box.innerHTML =
+    (img ? `<img class="shop-photo" src="${img}" alt="scanned item" />` : "") +
+    `<div class="shop-info">
+       <div class="shop-title">${escapeHtml(l.title || "(couldn't identify — try another angle)")}</div>
+       <div class="hint">${escapeHtml(l.condition || "")} · AI confidence:
+         <span class="badge ${conf}">${conf.toUpperCase()}</span></div>
+       ${priceHtml}
+     </div>
+     <div class="shop-actions">
+       <button id="shop-buy" class="primary" type="button">＋ Buy — add to inventory</button>
+       <button id="shop-again" class="ghost" type="button">↻ Scan another</button>
+     </div>`;
+  box.classList.remove("hidden");
+  $("shop-buy").addEventListener("click", buyItemOnce);
+  $("shop-again").addEventListener("click", resetShop);
+}
+
+function resetShop() {
+  state.shopSession = null;
+  state.shopListing = null;
+  $("shop-input").value = "";
+  $("shop-result").classList.add("hidden");
+  $("shop-result").innerHTML = "";
+}
+
+async function buyItem() {
+  if (!state.shopSession || !state.shopListing) return;
+  if (!state.user) { pendingBuy = true; openAuthModal(); return; }
+  try {
+    showSpinner("Adding to your inventory…");
+    await api("/api/inventory/add", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: state.shopSession, listing: state.shopListing }),
+    });
+    resetShop();
+    alert("Added to your inventory! Switch to Sell → My listings to finish and publish it.");
+  } catch (e) {
+    alert("Couldn't add to inventory: " + e.message);
+  } finally {
+    hideSpinner();
+  }
+}
+const buyItemOnce = once("buy", buyItem);
+
+// ---------- Shop Mode: shelf scan (video → frames → triage) ----------
+// Sample up to `maxFrames` evenly-spaced JPEG frames from a recorded video,
+// scaled down so the upload stays small. Runs entirely in the browser.
+async function extractFrames(file, maxFrames = 6) {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = url;
+  try {
+    await new Promise((res, rej) => {
+      video.onloadedmetadata = () => res();
+      video.onerror = () => rej(new Error("Couldn't read that video."));
+    });
+    const dur = (isFinite(video.duration) && video.duration > 0) ? video.duration : 0;
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    const scale = Math.min(1, 1024 / Math.max(vw, vh));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(vw * scale));
+    canvas.height = Math.max(1, Math.round(vh * scale));
+    const ctx = canvas.getContext("2d");
+    const grab = (t) => new Promise((res) => {
+      let done = false;
+      const finish = (b) => { if (!done) { done = true; video.removeEventListener("seeked", onSeeked); res(b); } };
+      const onSeeked = () => {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((b) => finish(b), "image/jpeg", 0.85);
+      };
+      video.addEventListener("seeked", onSeeked);
+      setTimeout(() => finish(null), 4000);  // don't hang if 'seeked' never fires
+      video.currentTime = t;
+    });
+    const frames = [];
+    if (dur) {
+      const n = Math.max(1, maxFrames);
+      for (let i = 0; i < n; i++) {
+        const t = Math.min(dur - 0.05, (dur * (i + 0.5)) / n);
+        const b = await grab(Math.max(0, t));
+        if (b) frames.push(b);
+      }
+    } else {
+      const b = await grab(0);
+      if (b) frames.push(b);
+    }
+    return frames;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function shelfScan(file) {
+  if (!file) return;
+  try {
+    showSpinner("Reading the video…");
+    const frames = await extractFrames(file);
+    if (!frames.length) { alert("Couldn't get any frames from that video."); return; }
+    showSpinner("Scanning the shelf for gems…");
+    const fd = new FormData();
+    frames.forEach((b, i) => fd.append("files", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" })));
+    const res = await api("/api/shelf-scan", { method: "POST", body: fd });
+    renderShelfResult(res.items || []);
+  } catch (e) {
+    alert("Shelf scan error: " + e.message);
+  } finally {
+    hideSpinner();
+  }
+}
+const shelfScanOnce = once("shelf", shelfScan);
+
+function renderShelfResult(items) {
+  const box = $("shelf-result");
+  $("shop-result").classList.add("hidden");  // one result panel at a time
+  if (!items.length) {
+    box.innerHTML = `<p class="hint">Nothing jumped out as a clear resale win. Try a slower pan or better light — or scan individual items.</p>`;
+    box.classList.remove("hidden");
+    return;
+  }
+  const rows = items.map((it) =>
+    `<li class="shelf-item">
+       <div class="shelf-item-head">
+         <span class="shelf-name">${escapeHtml(it.name)}</span>
+         <span class="badge ${it.confidence}">${(it.confidence || "medium").toUpperCase()}</span>
+       </div>
+       ${it.reason ? `<div class="hint">${escapeHtml(it.reason)}</div>` : ""}
+       ${it.location ? `<div class="shelf-loc">📍 ${escapeHtml(it.location)}</div>` : ""}
+     </li>`).join("");
+  box.innerHTML =
+    `<p class="shelf-head">👀 ${items.length} item${items.length === 1 ? "" : "s"} worth a closer look:</p>
+     <ul class="shelf-list">${rows}</ul>
+     <p class="hint">Point your camera at one and tap <strong>📷 Scan an item</strong> for a full ID + price.</p>`;
+  box.classList.remove("hidden");
+}
+
 // ---------- navigation ----------
 function showView(view) {
   $("step-upload").classList.toggle("hidden", view !== "upload");
@@ -225,28 +435,48 @@ async function loadListings() {
   }
 }
 
+function listingCard(it, inventory) {
+  const l = it.listing || {};
+  const thumb = (l.images && l.images[0]) ? `/media/${it.id}/optimized/${l.images[0]}` : "";
+  const card = document.createElement("div");
+  card.className = "listing-card" + (inventory ? " inventory" : "");
+  const sub = inventory
+    ? `Unlisted · ${l.price != null ? "≈$" + l.price : "no price yet"}`
+    : `${escapeHtml(it.status)} · ${l.price != null ? "$" + l.price : "no price"}`;
+  card.innerHTML =
+    (thumb ? `<img src="${thumb}" onerror="this.style.display='none'"/>` : `<div class="noimg">no image</div>`) +
+    `<div class="listing-meta">
+       <strong>${escapeHtml(l.title || it.title || "(untitled)")}</strong>
+       <span class="listing-sub">${sub}</span>
+       ${inventory ? `<span class="list-it">Finish &amp; list →</span>` : ""}
+     </div>`;
+  card.addEventListener("click", () => openListing(it.id));
+  return card;
+}
+
 function renderListings(items) {
   const grid = $("listings-grid");
   if (!items.length) {
-    grid.innerHTML = "<p class='hint'>No saved listings yet. Create one to see it here.</p>";
+    grid.innerHTML = "<p class='hint'>No saved listings yet. Scan an item in Shop mode, or start a new listing.</p>";
     return;
   }
+  const inv = items.filter((it) => it.status === "unlisted");
+  const rest = items.filter((it) => it.status !== "unlisted");
   grid.innerHTML = "";
-  items.forEach((it) => {
-    const l = it.listing || {};
-    const thumb = (l.images && l.images[0])
-      ? `/media/${it.id}/optimized/${l.images[0]}` : "";
-    const card = document.createElement("div");
-    card.className = "listing-card";
-    card.innerHTML =
-      (thumb ? `<img src="${thumb}" onerror="this.style.display='none'"/>` : `<div class="noimg">no image</div>`) +
-      `<div class="listing-meta">
-         <strong>${escapeHtml(l.title || it.title || "(untitled)")}</strong>
-         <span class="listing-sub">${escapeHtml(it.status)} · ${l.price != null ? "$" + l.price : "no price"}</span>
-       </div>`;
-    card.addEventListener("click", () => openListing(it.id));
-    grid.appendChild(card);
-  });
+  if (inv.length) {
+    const h = document.createElement("h3"); h.className = "listings-section"; h.textContent = "📦 Unlisted inventory";
+    const p = document.createElement("p"); p.className = "hint";
+    p.textContent = "Items you bought in Shop mode. Open one to finish the details and publish.";
+    grid.appendChild(h); grid.appendChild(p);
+    inv.forEach((it) => grid.appendChild(listingCard(it, true)));
+  }
+  if (rest.length) {
+    if (inv.length) {
+      const h = document.createElement("h3"); h.className = "listings-section"; h.textContent = "🏷️ Listings";
+      grid.appendChild(h);
+    }
+    rest.forEach((it) => grid.appendChild(listingCard(it, false)));
+  }
 }
 
 async function openListing(id) {
@@ -332,6 +562,8 @@ async function submitAuth() {
     // If the login modal was opened from an empty "My listings" view, populate
     // it now instead of leaving the user on a blank, still-logged-out page.
     if (!$("step-listings").classList.contains("hidden")) loadListings();
+    // Resume a Shop-mode "Buy" that prompted login.
+    if (pendingBuy) { pendingBuy = false; buyItem(); }
   } catch (e) {
     $("auth-error").textContent = e.message;
   } finally {
@@ -1151,6 +1383,11 @@ function init() {
   $("nav-images").addEventListener("click", () => showView("upload"));
   $("nav-edit").addEventListener("click", () => showView("preview"));
   $("nav-restart").addEventListener("click", () => location.reload());
+  // Shop / Sell mode toggle + Shop-mode capture inputs.
+  $("mode-shop").addEventListener("click", () => setMode("shop"));
+  $("mode-sell").addEventListener("click", () => setMode("sell"));
+  $("shop-input").addEventListener("change", (e) => shopScanOnce(e.target.files[0]));
+  $("shelf-input").addEventListener("change", (e) => shelfScanOnce(e.target.files[0]));
   showView("upload");
 }
 

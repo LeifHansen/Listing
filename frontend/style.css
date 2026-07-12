@@ -358,3 +358,90 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .refine-row { flex-direction: column; }
   .refine-row button { width: 100%; }
 }
+
+/* ---------- Shop / Sell mode toggle ---------- */
+.mode-toggle {
+  display: flex;
+  gap: 0;
+  justify-content: center;
+  margin: 0.5rem auto 0.25rem;
+  width: max-content;
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+.mode-btn {
+  font-family: var(--font-head);
+  letter-spacing: 0.5px;
+  font-size: 1rem;
+  padding: 0.5rem 1.4rem;
+  background: var(--card);
+  color: var(--ink);
+  border: none;
+  cursor: pointer;
+}
+.mode-btn.active { background: var(--blue); color: #fff; }
+
+/* ---------- Shop Mode ---------- */
+.shop-capture-row { display: flex; flex-wrap: wrap; gap: 1rem; }
+.shop-capture {
+  flex: 1 1 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 120px;
+  padding: 1.1rem;
+  font-family: var(--font-head);
+  font-size: 1.3rem;
+  text-align: center;
+  background: var(--yellow);
+  color: var(--ink);
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+.shop-capture.secondary-capture { background: var(--cream); }
+.shop-capture small { font-family: var(--font-body); font-size: 0.8rem; font-weight: 600; color: var(--muted); }
+
+.shop-result {
+  margin-top: 1.2rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  padding: 1rem;
+  box-shadow: var(--shadow-sm);
+  background: var(--card);
+}
+.shop-photo { width: 120px; height: 120px; object-fit: cover; border: 2px solid var(--ink); border-radius: 10px; }
+.shop-info { flex: 1 1 200px; }
+.shop-title { font-family: var(--font-head); font-size: 1.2rem; }
+.shop-price { font-family: var(--font-head); font-size: 1.6rem; color: var(--green); }
+.shop-actions { display: flex; flex-direction: column; gap: 0.5rem; }
+
+/* ---------- Shelf scan ---------- */
+.shelf-result {
+  margin-top: 1.2rem;
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  padding: 1rem;
+  box-shadow: var(--shadow-sm);
+  background: var(--card);
+}
+.shelf-head { font-family: var(--font-head); font-size: 1.2rem; margin: 0 0 0.6rem; }
+.shelf-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.shelf-item { border: 2px solid var(--ink); border-radius: 10px; padding: 0.6rem 0.8rem; }
+.shelf-item-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.shelf-name { font-family: var(--font-head); font-size: 1.05rem; }
+.shelf-loc { font-size: 0.85rem; font-weight: 700; color: var(--blue); }
+
+/* Unlisted inventory cards in the Sell dashboard */
+.listings-section { font-family: var(--font-head); margin: 1rem 0 0.25rem; grid-column: 1 / -1; }
+.listing-card.inventory { border-style: dashed; }
+.list-it { color: var(--blue); font-weight: 800; font-size: 0.85rem; }
