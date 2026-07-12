@@ -674,7 +674,7 @@ async function openSettings(focus) {
     const data = await api("/api/ebay/policies");
     state.ebayPoliciesData = data;
     renderSettingsBody(data);
-    if (focus === "postal") { markFix($("settings-postal")); if ($("settings-postal")) $("settings-postal").focus(); }
+    if (focus === "postal") { const p = $("settings-postal"); if (p) { markFix(p); p.focus(); } }
     else if (focus === "policies") { document.querySelectorAll("#settings-body select[data-field]").forEach(markFix); }
   } catch (e) {
     body.innerHTML = `<p class="hint">Couldn't load policies: ${escapeHtml(e.message)}</p>`;

@@ -7,6 +7,7 @@ upscale to target, and apply mild brightness/contrast/sharpness enhancement.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
@@ -50,8 +51,6 @@ def _flatten(img: Image.Image) -> Image.Image:
 # Default to the lightweight "u2netp" model (~4.7MB): the full "u2net" (176MB)
 # is too slow to download and too memory-hungry for a shared-cpu-1x machine.
 # Override with REMBG_MODEL if the box ever gets a bigger VM.
-import os
-
 _REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 _rembg_session = None
 
