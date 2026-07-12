@@ -61,6 +61,26 @@ def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
     return [f"{base_url}/media/{session_id}/optimized/{n}" for n in names]
 
 
+def _package_weight_and_size(listing: Listing) -> dict:
+    """Build eBay's packageWeightAndSize. Publishing requires a valid weight;
+    dimensions are optional and only included when all three are set."""
+    total_lb = round((listing.package_weight_lb or 0)
+                     + (listing.package_weight_oz or 0) / 16.0, 2)
+    pkg: dict = {}
+    if total_lb > 0:
+        pkg["weight"] = {"value": total_lb, "unit": "POUND"}
+    dims = (listing.package_length_in, listing.package_width_in,
+            listing.package_height_in)
+    if all(d and d > 0 for d in dims):
+        pkg["dimensions"] = {
+            "length": round(listing.package_length_in, 2),
+            "width": round(listing.package_width_in, 2),
+            "height": round(listing.package_height_in, 2),
+            "unit": "INCH",
+        }
+    return {"packageWeightAndSize": pkg} if pkg else {}
+
+
 def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> dict:
     aspects: dict[str, list[str]] = {}
     if listing.brand:
@@ -83,6 +103,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
         mpn = "Does Not Apply"
 
     return _prune({
+        **_package_weight_and_size(listing),
         "sku": _sku(session_id, listing),
         "availability": {
             "shipToLocationAvailability": {"quantity": max(1, listing.quantity)}
@@ -380,6 +401,22 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             ),
             "export_path": str(export_path),
             "payload": payload,
+        }
+
+    # eBay requires a valid package weight to publish; without it publishOffer
+    # fails ('package weight is not valid or is missing'). Catch it here with a
+    # clear, field-targeted fix instead of a round trip to eBay.
+    total_lb = (listing.package_weight_lb or 0) + (listing.package_weight_oz or 0) / 16.0
+    if total_lb <= 0:
+        log.warning("publish blocked: no package weight for session %s", session_id)
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "message": "eBay needs a package weight to publish.",
+            "issues": [{"target": "weight", "title": "Package weight is missing",
+                        "fix": "Enter the shipping weight (lb / oz) in the listing, then Publish Live again."}],
+            "export_path": str(export_path),
         }
 
     # eBay fetches every image URL when the inventory item is created; if the

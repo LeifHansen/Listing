@@ -42,6 +42,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "description": "string, 2-4 short paragraphs, buyer-friendly, no false claims",
   "price": number or null (suggested USD price based on item & condition),
   "quantity": integer (default 1),
+  "package_weight_oz": number (estimated TOTAL shipping weight in ounces, packed; best-effort estimate the seller can correct),
   "item_specifics": [{"name": "string", "value": "string"}],
   "missing_info": ["names of fields a human should verify/fill, e.g. 'exact model number', 'size'"],
   "confidence": "low|medium|high",
@@ -109,6 +110,21 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         quantity = max(1, int(float(data.get("quantity") or 1)))
     except (TypeError, ValueError):
         quantity = 1
+    def _f(key: str) -> float:
+        try:
+            return max(0.0, float(data.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    # identify returns a single estimated total (package_weight_oz); refine
+    # echoes the split fields (package_weight_lb + package_weight_oz). Detect
+    # which shape we got so a refine round-trip doesn't drop the pounds.
+    if "package_weight_lb" in data:
+        weight_lb = int(_f("package_weight_lb"))
+        weight_oz = round(_f("package_weight_oz"), 1)
+    else:
+        total_oz = _f("package_weight_oz")
+        weight_lb = int(total_oz // 16)
+        weight_oz = round(total_oz - weight_lb * 16, 1)
     return Listing(
         title=title,
         subtitle=(data.get("subtitle") or "").strip(),
@@ -120,6 +136,11 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         price=price,
         currency=config.EBAY_CURRENCY,
         quantity=quantity,
+        package_weight_lb=weight_lb,
+        package_weight_oz=weight_oz,
+        package_length_in=_f("package_length_in"),
+        package_width_in=_f("package_width_in"),
+        package_height_in=_f("package_height_in"),
         item_specifics=specifics,
         images=image_names,
         missing_info=[str(m) for m in raw_missing if m],

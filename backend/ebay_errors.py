@@ -50,6 +50,10 @@ def explain(err: dict) -> dict:
         issue.update(target="category",
                      title="This item needs a valid eBay category",
                      fix="Use “Suggest eBay categories” and pick the closest match.")
+    elif has("weight", "package", "shipping package", "dimensions"):
+        issue.update(target="weight",
+                     title="eBay needs a valid shipping weight",
+                     fix="Enter the package weight (lb / oz) in the listing, then publish again.")
     elif has("brandmpn", "brand/mpn"):
         issue.update(target="specifics",
                      title="eBay needs Brand and MPN for this category",

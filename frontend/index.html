@@ -139,6 +139,27 @@
             <div id="cat-suggestions" class="cat-suggestions"></div>
           </div>
 
+          <h3>Shipping package <span class="hint">(eBay needs a weight to publish)</span></h3>
+          <div class="row">
+            <label>Weight — lb
+              <input type="number" id="f-weight-lb" min="0" step="1" />
+            </label>
+            <label>Weight — oz
+              <input type="number" id="f-weight-oz" min="0" max="15" step="0.1" />
+            </label>
+          </div>
+          <div class="row">
+            <label>Length (in) <span class="hint">optional</span>
+              <input type="number" id="f-len" min="0" step="0.1" />
+            </label>
+            <label>Width (in) <span class="hint">optional</span>
+              <input type="number" id="f-wid" min="0" step="0.1" />
+            </label>
+            <label>Height (in) <span class="hint">optional</span>
+              <input type="number" id="f-hei" min="0" step="0.1" />
+            </label>
+          </div>
+
           <label>Condition description
             <textarea id="f-condition-desc" rows="2"></textarea>
           </label>
