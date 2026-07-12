@@ -191,6 +191,67 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
     )
 
 
+_SHELF_SCHEMA = """
+Return ONLY a JSON object (no markdown fences) with this shape:
+{
+  "items": [
+    {
+      "name": "short name of the item you spotted",
+      "reason": "one concise phrase on why it could be worth reselling",
+      "location": "rough position so the shopper can find it (e.g. 'top shelf, left')",
+      "confidence": "low|medium|high"
+    }
+  ]
+}
+Rules:
+- These frames are sampled from a video panning across a shelf/rack/table at a
+  thrift store, estate sale, or garage sale. GOAL: narrow the shopper's search —
+  flag the few items MOST likely to be worth reselling (brand names, vintage,
+  collectibles, electronics, designer, unusual/quality pieces).
+- Do NOT estimate prices. Do NOT invent brands or details you can't see.
+- Skip obvious low-value clutter. Prefer 3-8 of the strongest candidates.
+- If nothing stands out, return an empty items array.
+"""
+
+
+def scan_shelf(images: list[bytes]) -> dict:
+    """Triage a shelf: look across sampled video frames and flag items that
+    might be worth reselling. No pricing — just narrows where to look."""
+    client = _client()
+    content: list[dict] = []
+    for data in images[:8]:
+        b64 = base64.standard_b64encode(data).decode("ascii")
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": b64}})
+    content.append({"type": "text", "text": (
+        "You are an expert reseller scanning a shelf for hidden gems. The images "
+        "are frames from one video panning across the same shelf.\n\n" + _SHELF_SCHEMA)})
+
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=1500,
+        messages=[{"role": "user", "content": content}],
+    )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the scan returned too much; try a shorter video")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    data = _extract_json(text)
+    items = []
+    for it in (data.get("items") or []):
+        if not isinstance(it, dict) or not it.get("name"):
+            continue
+        conf = str(it.get("confidence", "medium")).lower().strip()
+        if conf not in ("low", "medium", "high"):
+            conf = "medium"
+        items.append({
+            "name": str(it.get("name", "")).strip(),
+            "reason": str(it.get("reason", "")).strip(),
+            "location": str(it.get("location", "")).strip(),
+            "confidence": conf,
+        })
+    return {"items": items}
+
+
 def refine(listing: Listing, prompt: str) -> Listing:
     """Apply a free-form user instruction to an existing listing draft."""
     client = _client()

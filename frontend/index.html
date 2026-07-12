@@ -21,6 +21,10 @@
       </div>
     </div>
     <p class="tagline">Snap it · AI writes it · list it on eBay</p>
+    <div class="mode-toggle" role="tablist" aria-label="Mode">
+      <button id="mode-shop" class="mode-btn" type="button" role="tab">🛍️ Shop</button>
+      <button id="mode-sell" class="mode-btn active" type="button" role="tab">🏷️ Sell</button>
+    </div>
     <div id="status-bar" class="status-bar"></div>
     <nav class="nav">
       <button id="nav-new" class="nav-btn" type="button">＋ New listing</button>
@@ -61,6 +65,27 @@
   </div>
 
   <main>
+    <!-- Shop Mode: scan an item while thrifting -->
+    <section id="step-shop" class="card hidden">
+      <h2>🛍️ Shop Mode</h2>
+      <p class="hint">Out hunting for deals? Snap an item to instantly identify it
+        and see what it typically sells for on eBay. Like it? Tap <strong>Buy</strong>
+        to drop it into your inventory and finish the listing later from Sell mode.</p>
+      <div class="shop-capture-row">
+        <label id="shop-capture" class="shop-capture">
+          📷 Scan an item
+          <input type="file" id="shop-input" accept="image/*,.heic,.heif,.hif" capture="environment" hidden />
+        </label>
+        <label id="shelf-capture" class="shop-capture secondary-capture">
+          🎥 Scan a shelf
+          <input type="file" id="shelf-input" accept="video/*" capture="environment" hidden />
+          <small>Record a shelf/rack — we'll flag items worth a closer look.</small>
+        </label>
+      </div>
+      <div id="shop-result" class="shop-result hidden"></div>
+      <div id="shelf-result" class="shelf-result hidden"></div>
+    </section>
+
     <!-- Step 1: Upload -->
     <section id="step-upload" class="card">
       <h2>1. Upload product photos</h2>

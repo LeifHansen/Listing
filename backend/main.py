@@ -580,6 +580,48 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     return {"saved": True}
 
 
+@app.post("/api/shelf-scan")
+async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
+    """Shop Mode 'Scan a shelf': the client samples frames from a recorded
+    video and posts them here; Claude flags items worth a closer look. No
+    pricing, no persistence — pure triage."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    if not files:
+        raise HTTPException(400, "No frames provided.")
+    frames: list[bytes] = []
+    for f in files[:8]:
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, "A frame was too large.")
+        if data:
+            frames.append(data)
+    if not frames:
+        raise HTTPException(400, "No readable frames.")
+    try:
+        result = await run_in_threadpool(claude_ai.scan_shelf, frames)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Shelf scan failed: {exc}") from exc
+    log.info("shelf scan: %d frames -> %d candidates", len(frames),
+             len(result.get("items", [])))
+    return result
+
+
+@app.post("/api/inventory/add")
+def inventory_add(req: PublishRequest, request: Request) -> dict:
+    """Shop Mode 'Buy': save a scanned item to the user's unlisted inventory
+    (status='unlisted'), so it shows up in the Sell dashboard to finish + list
+    later. Reuses the listing record; mode is ignored."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to save items to your inventory.")
+    storage.save_listing(req.session_id, req.listing)
+    db.upsert_listing(req.session_id, req.listing.model_dump(),
+                      status="unlisted", user_id=uid)
+    log.info("inventory add: session=%s user=%s", req.session_id, uid)
+    return {"ok": True, "id": req.session_id}
+
+
 @app.get("/api/listings")
 def listings(request: Request, limit: int = 50) -> dict:
     """History of the current user's saved listings (most recent first)."""
