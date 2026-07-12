@@ -771,6 +771,11 @@ function renderPreview(result) {
   $("f-brand").value = l.brand || "";
   $("f-price").value = l.price != null ? l.price : "";
   $("f-qty").value = l.quantity || 1;
+  $("f-weight-lb").value = l.package_weight_lb || "";
+  $("f-weight-oz").value = l.package_weight_oz || "";
+  $("f-len").value = l.package_length_in || "";
+  $("f-wid").value = l.package_width_in || "";
+  $("f-hei").value = l.package_height_in || "";
   $("f-category").value = l.category_suggestion || "";
   $("f-category-id").value = l.category_id || "";
   $("f-condition-desc").value = l.condition_description || "";
@@ -816,6 +821,7 @@ function collectListing() {
 
   const base = state.listing || {};
   const price = $("f-price").value;
+  const num = (id) => parseFloat($(id).value) || 0;
   return {
     ...base,
     title: $("f-title").value,
@@ -823,6 +829,11 @@ function collectListing() {
     brand: $("f-brand").value,
     price: price === "" ? null : parseFloat(price),
     quantity: parseInt($("f-qty").value || "1", 10),
+    package_weight_lb: num("f-weight-lb"),
+    package_weight_oz: num("f-weight-oz"),
+    package_length_in: num("f-len"),
+    package_width_in: num("f-wid"),
+    package_height_in: num("f-hei"),
     category_suggestion: $("f-category").value,
     category_id: $("f-category-id").value,
     condition: $("f-condition").value,
@@ -1036,6 +1047,7 @@ function highlightFix(target, soft) {
   switch (target) {
     case "category": markFix($("f-category-id")); markFix($("f-category")); jump($("f-category-id")); break;
     case "price": markFix($("f-price")); jump($("f-price")); break;
+    case "weight": markFix($("f-weight-lb")); markFix($("f-weight-oz")); jump($("f-weight-lb")); break;
     case "title": markFix($("f-title")); jump($("f-title")); break;
     case "description": markFix($("f-description")); jump($("f-description")); break;
     case "specifics":
