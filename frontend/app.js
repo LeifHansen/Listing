@@ -23,6 +23,7 @@ const state = {
   mode: "sell",            // "shop" | "sell"
   shopSession: null,       // session id of the item currently being scanned
   shopListing: null,       // the scanned item's identified listing
+  bulkItems: null,         // bulk-mode queue items
 };
 
 // Set when "Buy" is tapped while logged out, so the action resumes after login.
@@ -171,6 +172,7 @@ function once(key, fn) {
 }
 
 async function processImages() {
+  if ($("opt-bulk").checked) return bulkStart();
   try {
     const removeBg = $("opt-remove-bg").checked;
     showSpinner("Preparing photos…");
@@ -403,9 +405,174 @@ function showView(view) {
   $("step-upload").classList.toggle("hidden", view !== "upload");
   $("step-preview").classList.toggle("hidden", view !== "preview");
   $("step-listings").classList.toggle("hidden", view !== "listings");
+  $("step-bulk").classList.toggle("hidden", view !== "bulk");
   // Contextual nav buttons.
   $("nav-images").classList.toggle("hidden", view !== "preview");
   $("nav-edit").classList.toggle("hidden", !(view !== "preview" && state.listing));
+}
+
+// ---------- bulk mode ----------
+async function bulkStart() {
+  if (!state.files.length) return;
+  const mode = (document.querySelector('input[name="bulk-mode"]:checked') || {}).value || "draft";
+  if (mode === "live" && !confirm(
+    "Auto-publish ALL detected items live to eBay? Each will go straight to your store.")) return;
+  try {
+    showSpinner("Uploading photos…");
+    const prepped = await Promise.all(state.files.map(downscaleForUpload));
+    const fd = new FormData();
+    prepped.forEach((f) => fd.append("files", f));
+    fd.append("mode", mode);
+    fd.append("remove_bg", $("opt-remove-bg").checked ? "true" : "false");
+    const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
+    hideSpinner();
+    showView("bulk");
+    $("bulk-queue").innerHTML = "";
+    $("bulk-queue-bar").classList.add("hidden");
+    bulkPoll(job_id, mode);
+  } catch (e) {
+    hideSpinner();
+    alert("Bulk upload failed: " + e.message);
+  }
+}
+
+const BULK_PHASE_LABEL = {
+  uploading: "Uploading…", optimizing: "Optimizing photos…",
+  grouping: "Sorting photos into items…", identifying: "Identifying items…",
+  done: "Done", none: "Working…",
+};
+async function bulkPoll(jobId, mode) {
+  try {
+    const job = await api(`/api/bulk/status/${jobId}`);
+    const label = BULK_PHASE_LABEL[job.phase] || "Working…";
+    let detail = "";
+    if (job.phase === "identifying" && job.total_items)
+      detail = ` (${job.current}/${job.total_items})`;
+    else if (job.phase === "grouping" && job.total_photos)
+      detail = ` (${job.total_photos} photos)`;
+    $("bulk-progress").innerHTML = job.done
+      ? "" : `<div class="spin-inline"></div><span>${escapeHtml(label)}${escapeHtml(detail)}</span>`;
+    // Render items as they arrive (live-mode statuses update in place too).
+    if (job.items && job.items.length) renderBulkQueue(job.items, mode);
+    if (job.done) {
+      if (job.error) $("bulk-progress").innerHTML = `<p class="hint">⚠ ${escapeHtml(job.error)}</p>`;
+      else $("bulk-progress").innerHTML =
+        `<p class="hint">✅ ${job.items.length} item${job.items.length === 1 ? "" : "s"} ${mode === "live" ? "processed" : "queued as drafts"}. Review below.</p>`;
+      return;
+    }
+    setTimeout(() => bulkPoll(jobId, mode), 1500);
+  } catch (e) {
+    $("bulk-progress").innerHTML = `<p class="hint">⚠ Lost the bulk job: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderBulkQueue(items, mode) {
+  state.bulkItems = items;
+  const box = $("bulk-queue");
+  box.innerHTML = "";
+  // Only draft items are selectable/publishable from the queue.
+  const anyDraft = items.some((it) => it.status === "draft");
+  $("bulk-queue-bar").classList.toggle("hidden", !anyDraft);
+  items.forEach((it) => box.appendChild(bulkCard(it)));
+}
+
+function bulkPublishSelected() {
+  const cards = [...document.querySelectorAll("#bulk-queue .bulk-card")]
+    .filter((c) => { const cb = c.querySelector(".bulk-check"); return cb && cb.checked; });
+  bulkPublish(cards);
+}
+function bulkPublishAll() {
+  bulkPublish([...document.querySelectorAll("#bulk-queue .bulk-card")]);
+}
+
+function bulkCard(it) {
+  const card = document.createElement("div");
+  card.className = "bulk-card status-" + it.status;
+  card.dataset.session = it.session_id;
+  const l = it.listing || {};
+  const statusPill = {
+    draft: `<span class="pill">draft</span>`,
+    published: `<span class="pill ok">✓ live${it.listing_id ? " · " + escapeHtml(it.listing_id) : ""}</span>`,
+    error: `<span class="pill warn">needs attention</span>`,
+  }[it.status] || "";
+  const checkbox = it.status === "draft"
+    ? `<input type="checkbox" class="bulk-check" checked />` : "";
+  const editable = it.status !== "error";
+  card.innerHTML =
+    `<div class="bulk-card-top">${checkbox}
+       <img class="bulk-thumb" src="${escapeHtml(it.thumb)}?v=${Date.now()}" onerror="this.style.display='none'"/>
+       ${statusPill}</div>` +
+    (editable ? `<input class="bulk-title" type="text" value="${escapeHtml(l.title || it.title || "")}" placeholder="Title" />
+       <div class="bulk-row">
+         <input class="bulk-price" type="number" step="0.01" min="0" value="${l.price != null ? l.price : ""}" placeholder="Price" />
+         <select class="bulk-cond"></select>
+       </div>` : `<div class="hint">${escapeHtml(it.error || "Couldn't identify this item.")}</div>`) +
+    `<div class="bulk-card-actions">
+       ${editable ? `<button class="ghost bulk-open" type="button">Open full editor →</button>` : ""}
+       ${it.status === "draft" ? `<button class="secondary bulk-pub-one" type="button">Publish</button>` : ""}
+     </div>`;
+  if (editable) {
+    const condSel = card.querySelector(".bulk-cond");
+    CONDITIONS.forEach((c) => {
+      const o = document.createElement("option");
+      o.value = c; o.textContent = c.replaceAll("_", " ");
+      if (c === l.condition) o.selected = true;
+      condSel.appendChild(o);
+    });
+    card.querySelector(".bulk-open").addEventListener("click", () => bulkOpen(it));
+  }
+  const pub = card.querySelector(".bulk-pub-one");
+  if (pub) pub.addEventListener("click", () => bulkPublish([card]));
+  return card;
+}
+
+// Persist a card's inline edits back onto the item's listing, then return it.
+async function bulkSaveCard(card, it) {
+  if (it.status === "error" || !it.listing) return it.listing;
+  const l = { ...it.listing };
+  l.title = card.querySelector(".bulk-title").value;
+  const p = card.querySelector(".bulk-price").value;
+  l.price = p === "" ? null : parseFloat(p);
+  l.condition = card.querySelector(".bulk-cond").value;
+  it.listing = l;
+  await api(`/api/save/${it.session_id}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(l),
+  });
+  return l;
+}
+
+function bulkOpen(it) {
+  // Load this bulk item into the normal single-item editor.
+  state.sessionId = it.session_id;
+  state.listing = it.listing;
+  renderPreview({ confidence: "medium" });
+  showView("preview");
+}
+
+async function bulkPublish(cards) {
+  const targets = cards.filter((c) => c.dataset.session);
+  if (!targets.length) { alert("Nothing selected to publish."); return; }
+  let ok = 0, failed = 0;
+  for (const card of targets) {
+    const sid = card.dataset.session;
+    const it = (state.bulkItems || []).find((x) => x.session_id === sid);
+    if (!it || it.status !== "draft") continue;
+    try {
+      showSpinner(`Publishing ${ok + failed + 1}/${targets.length}…`);
+      const listing = await bulkSaveCard(card, it);
+      const res = await api("/api/publish", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid, listing, mode: "live" }),
+      });
+      if (res.published) { it.status = "published"; it.listing_id = res.listing_id; ok++; }
+      else { it.status = "error"; it.error = res.message || "Publish blocked — open the full editor to fix."; failed++; }
+    } catch (e) {
+      it.status = "error"; it.error = e.message; failed++;
+    }
+  }
+  hideSpinner();
+  renderBulkQueue(state.bulkItems, "draft");
+  alert(`Published ${ok} listing${ok === 1 ? "" : "s"}.` + (failed ? ` ${failed} need attention — see the queue.` : ""));
 }
 
 // ---------- my listings ----------
@@ -650,6 +817,67 @@ function connectEbay() {
   window.location.href = "/api/ebay/connect";
 }
 
+// ---------- profile (in Settings) ----------
+async function loadProfile() {
+  const box = $("profile-body");
+  if (!state.user) { box.innerHTML = `<p class="hint">Log in to customize your profile.</p>`; return; }
+  box.innerHTML = `<p class="hint">Loading…</p>`;
+  try {
+    const p = await api("/api/profile");
+    renderProfileBody(p);
+  } catch (e) {
+    box.innerHTML = `<p class="hint">Couldn't load profile: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderProfileBody(p) {
+  const box = $("profile-body");
+  const e = p.ebay || {};
+  const conn = e.connected
+    ? `<p class="hint">eBay: <strong>${escapeHtml(e.username || "connected")}</strong>${e.email ? " · " + escapeHtml(e.email) : ""}</p>`
+    : `<p class="hint">eBay not connected — connect it to auto-fill your details.</p>`;
+  box.innerHTML =
+    `<label class="settings-field">Display name
+       <input type="text" id="profile-name" maxlength="80" value="${escapeHtml((p.user && p.user.display_name) || "")}" placeholder="e.g. your shop name" />
+     </label>
+     <p class="hint">Email: ${escapeHtml((p.user && p.user.email) || "")}</p>
+     ${conn}
+     <div class="profile-actions">
+       <button id="profile-save" class="primary" type="button">Save profile</button>
+       ${e.connected ? `<button id="profile-sync" class="secondary" type="button">↻ Sync from eBay</button>` : ""}
+     </div>`;
+  $("profile-save").addEventListener("click", saveProfile);
+  if (e.connected && $("profile-sync")) $("profile-sync").addEventListener("click", syncProfileFromEbay);
+}
+
+async function saveProfile() {
+  try {
+    showSpinner("Saving profile…");
+    const res = await api("/api/profile", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: $("profile-name").value.trim() }),
+    });
+    if (state.user) state.user.display_name = res.user.display_name;
+    renderAuthArea();
+    alert("Profile saved.");
+  } catch (e) {
+    alert("Couldn't save profile: " + e.message);
+  } finally { hideSpinner(); }
+}
+
+async function syncProfileFromEbay() {
+  try {
+    showSpinner("Pulling your info from eBay…");
+    const p = await api("/api/profile/sync-ebay", { method: "POST" });
+    renderProfileBody(p);
+    if (state.user && p.user) state.user.display_name = p.user.display_name;
+    renderAuthArea();
+    alert("Synced from eBay.");
+  } catch (e) {
+    alert("Sync failed: " + e.message);
+  } finally { hideSpinner(); }
+}
+
 // ---------- listing settings (default eBay business policies) ----------
 const POLICY_KINDS = [
   { key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy" },
@@ -661,6 +889,7 @@ async function openSettings(focus) {
   focus = (typeof focus === "string") ? focus : null;  // ignore click events
   const body = $("settings-body");
   $("settings-overlay").classList.remove("hidden");
+  loadProfile();
   if (!state.user) {
     body.innerHTML = `<p class="hint">Log in and connect eBay to set your listing defaults.</p>`;
     return;
@@ -1566,6 +1795,16 @@ function init() {
   $("mode-sell").addEventListener("click", () => setMode("sell"));
   $("shop-input").addEventListener("change", (e) => shopScanOnce(e.target.files[0]));
   $("shelf-input").addEventListener("change", (e) => shelfScanOnce(e.target.files[0]));
+  // Bulk mode
+  $("opt-bulk").addEventListener("change", (e) => {
+    $("bulk-options").classList.toggle("hidden", !e.target.checked);
+    $("btn-process").textContent = e.target.checked ? "Sort & create listings →" : "Optimize & Identify →";
+  });
+  $("bulk-publish-selected").addEventListener("click", bulkPublishSelected);
+  $("bulk-publish-all").addEventListener("click", bulkPublishAll);
+  $("bulk-select-all").addEventListener("change", (e) => {
+    document.querySelectorAll("#bulk-queue .bulk-check").forEach((c) => { c.checked = e.target.checked; });
+  });
   showView("upload");
 }
 

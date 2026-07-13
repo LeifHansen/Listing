@@ -486,3 +486,27 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   background: var(--card); color: var(--muted);
 }
 .req-badge.required { background: var(--red); color: #fff; border-color: var(--red); }
+
+/* ---------- bulk mode ---------- */
+.bulk-options { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 12px; padding-left: 4px; }
+.bulk-options label { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }
+.bulk-progress { display: flex; align-items: center; gap: 10px; min-height: 28px; font-weight: 700; }
+.spin-inline { width: 18px; height: 18px; border: 3px solid var(--border); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.bulk-queue-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 14px 0; padding: 10px 12px; border: 2px solid var(--ink); border-radius: 11px; background: var(--cream); }
+.bulk-selectall { display: flex; align-items: center; gap: 6px; font-weight: 700; margin-right: auto; }
+.bulk-queue { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+.bulk-card { border: 2px solid var(--ink); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow-sm); background: var(--card); }
+.bulk-card.status-error { border-color: var(--red); }
+.bulk-card.status-published { opacity: 0.85; }
+.bulk-card-top { display: flex; align-items: center; gap: 8px; }
+.bulk-thumb { width: 46px; height: 46px; object-fit: cover; border: 2px solid var(--ink); border-radius: 8px; }
+.bulk-title { font-weight: 700; }
+.bulk-row { display: flex; gap: 8px; }
+.bulk-row .bulk-price { width: 90px; }
+.bulk-row .bulk-cond { flex: 1; }
+.bulk-card input, .bulk-card select { padding: 6px 8px; border: 2px solid var(--ink); border-radius: 8px; font-family: var(--font-body); background: var(--card); }
+.bulk-card-actions { display: flex; justify-content: space-between; gap: 8px; margin-top: auto; }
+
+/* ---------- profile (settings) ---------- */
+.profile-actions { display: flex; gap: 10px; margin: 10px 0 18px; flex-wrap: wrap; }
