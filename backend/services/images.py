@@ -163,6 +163,17 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
     }
 
 
+def thumb_jpeg(path: Path, side: int = 512) -> bytes:
+    """Small JPEG bytes for AI grouping calls — keeps a 40-photo request light."""
+    from io import BytesIO
+    with Image.open(path) as img:
+        img = _flatten(ImageOps.exif_transpose(img))
+        img.thumbnail((side, side), Image.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=72)
+        return buf.getvalue()
+
+
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[dict]:
     dst_dir.mkdir(parents=True, exist_ok=True)
     results = []

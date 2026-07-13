@@ -191,6 +191,77 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
     )
 
 
+_GROUP_SCHEMA = """
+Return ONLY a JSON object (no markdown fences) with this shape:
+{
+  "groups": [
+    {"name": "short item name", "indices": [0, 3, 4]}
+  ]
+}
+Rules:
+- The numbered photos are one bulk upload containing MULTIPLE distinct items
+  for sale. Group photos that show the SAME physical item (different angles,
+  close-ups of tags/labels, flaws).
+- Every photo index appears in EXACTLY ONE group. A group may have 1 photo.
+- When unsure whether two photos show the same item, prefer keeping them
+  together only if strong visual evidence matches (same color/pattern/brand);
+  otherwise split them.
+- Order each group's indices with the best overview shot first.
+"""
+
+
+def group_photos(images: list[bytes]) -> dict:
+    """Bulk mode: split a pile of photos into per-item groups.
+
+    Returns {"groups": [{"name", "indices"}]} covering every input index
+    exactly once (indices the model dropped/duplicated are repaired here).
+    """
+    client = _client()
+    content: list[dict] = []
+    for i, data in enumerate(images):
+        content.append({"type": "text", "text": f"Photo {i}:"})
+        b64 = base64.standard_b64encode(data).decode("ascii")
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": b64}})
+    content.append({"type": "text", "text": (
+        "You are sorting a reseller's bulk photo dump into individual items "
+        "to list on eBay.\n\n" + _GROUP_SCHEMA)})
+
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=1500,
+        messages=[{"role": "user", "content": content}],
+    )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("grouping response was cut off; try fewer photos")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    data = _extract_json(text)
+
+    n = len(images)
+    groups: list[dict] = []
+    seen: set[int] = set()
+    for g in (data.get("groups") or []):
+        if not isinstance(g, dict):
+            continue
+        idxs = []
+        for i in (g.get("indices") or []):
+            try:
+                i = int(i)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < n and i not in seen:
+                seen.add(i)
+                idxs.append(i)
+        if idxs:
+            groups.append({"name": str(g.get("name", "")).strip() or f"Item {len(groups) + 1}",
+                           "indices": idxs})
+    # Any photo the model missed becomes its own item rather than vanishing.
+    for i in range(n):
+        if i not in seen:
+            groups.append({"name": f"Item {len(groups) + 1}", "indices": [i]})
+    return {"groups": groups}
+
+
 _SHELF_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this shape:
 {

@@ -80,15 +80,26 @@ def _package_weight_and_size(listing: Listing) -> dict:
     return {"packageWeightAndSize": pkg} if pkg else {}
 
 
+# Product identifiers live in dedicated product.* fields, not as free aspects.
+_IDENTIFIER_KEYS = {"upc": "upc", "ean": "ean", "isbn": "isbn"}
+
+
 def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> dict:
     aspects: dict[str, list[str]] = {}
+    identifiers: dict[str, str] = {}
     if listing.brand:
         aspects["Brand"] = [listing.brand]
     for spec in listing.item_specifics:
-        if spec.name and spec.value:
-            aspects.setdefault(spec.name, [])
-            if spec.value not in aspects[spec.name]:
-                aspects[spec.name].append(spec.value)
+        if not (spec.name and spec.value):
+            continue
+        key = spec.name.strip().lower()
+        # Route UPC/EAN/ISBN to the canonical product fields rather than aspects.
+        if key in _IDENTIFIER_KEYS:
+            identifiers.setdefault(_IDENTIFIER_KEYS[key], spec.value.strip())
+            continue
+        aspects.setdefault(spec.name, [])
+        if spec.value not in aspects[spec.name]:
+            aspects[spec.name].append(spec.value)
 
     # eBay validates brand and MPN as a pair ('Input data for tag <BrandMPN>
     # is invalid or missing'): once a brand is present, an MPN must be too.
@@ -101,6 +112,19 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
     if brand and not mpn:
         mpn = "Does Not Apply"
 
+    product = {
+        "title": listing.title[:80],
+        "description": listing.description or listing.title,
+        "aspects": aspects,
+        "imageUrls": _image_urls(session_id, listing.images, base_url),
+        "brand": brand or None,
+        "mpn": (mpn if brand else None) or None,
+    }
+    # eBay expects identifiers as arrays; "Does Not Apply" is the accepted
+    # sentinel for items without one.
+    for field, value in identifiers.items():
+        product[field] = [value]
+
     return _prune({
         **_package_weight_and_size(listing),
         "sku": _sku(session_id, listing),
@@ -109,14 +133,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
         },
         "condition": listing.condition,
         "conditionDescription": listing.condition_description or None,
-        "product": {
-            "title": listing.title[:80],
-            "description": listing.description or listing.title,
-            "aspects": aspects,
-            "imageUrls": _image_urls(session_id, listing.images, base_url),
-            "brand": brand or None,
-            "mpn": (mpn if brand else None) or None,
-        },
+        "product": product,
     })
 
 
