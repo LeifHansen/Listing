@@ -1,4 +1,4 @@
-# Thryft
+# QuickFlip
 
 **Snap it · AI writes it · list it on eBay.**
 
@@ -155,7 +155,7 @@ errors on a DB problem. Tables are auto-created on first use.
 1. **Persistence** ✅ — Neon-backed listing history + My listings.
 2. **Reliability & UX** ✅ — HEIC uploads, clear errors, nav.
 3. **Accounts & auth** ✅ — email/password login; listings scoped per user.
-4. **Brand & UX design** ✅ — Thryft identity: eBay palette, retro-modern,
+4. **Brand & UX design** ✅ — QuickFlip identity: eBay palette, retro-modern,
    90s Jordan/Nike energy, cursive wordmark. (Ongoing design pass each phase.)
 5. **eBay OAuth** ✅ — "Sign in with eBay" (Authorization Code flow) with
    per-user tokens + auto-fetched business policies/location. Set
@@ -183,11 +183,17 @@ backend/
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
     ebay.py          Inventory API payloads + publish/dry-run
-frontend/
-  index.html         upload + editable preview UI
-  app.js             client logic
-  style.css          styling
+frontend/            React + Vite + Tailwind app (built to frontend/dist)
+  src/
+    styles/tokens.css  design tokens (colors, radii, shadows, dark mode)
+    components/        reusable UI library (buttons, cards, dialogs, badges…)
+    views/             dashboard, listing workflow, shop mode, settings
+    store.jsx          app state (auth, eBay connection, listings)
 ```
+
+Frontend dev with hot reload: `cd frontend && npm run dev` (proxies `/api` and
+`/media` to the backend on :8000). `./run.sh` and the Dockerfile build the
+production bundle automatically.
 
 ## Notes & limitations
 

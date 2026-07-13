@@ -21,3 +21,7 @@ data/.secret_key
 .idea/
 .vscode/
 .claude/
+
+# Frontend build
+frontend/node_modules/
+frontend/dist/

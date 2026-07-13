@@ -1,6 +1,6 @@
 """eBay Sell (Inventory) API integration.
 
-Publishing flow (live only — drafts stay in Thryft and never touch eBay):
+Publishing flow (live only — drafts stay in QuickFlip and never touch eBay):
   1. createOrReplaceInventoryItem  (the product + condition + images)
   2. createOffer / updateOffer     (price, policies, marketplace, location)
   3. publishOffer                  (turns the offer into a live listing)
@@ -376,7 +376,7 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     creds: a connected user's eBay credentials (access_token + policy ids +
     location). When present we publish with those; otherwise we fall back to
     env config, and dry-run if neither is available.
-    mode: "draft" saves in Thryft only (no eBay call); "live" publishes to eBay.
+    mode: "draft" saves in QuickFlip only (no eBay call); "live" publishes to eBay.
     """
     item = build_inventory_item(session_id, listing, base_url)
     offer = build_offer(session_id, listing, creds)
@@ -385,14 +385,14 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
 
     ready = bool((creds or {}).get("access_token")) or config.ebay_ready()
     if not ready:
-        # No eBay connection: a draft stays in Thryft only (we can't reach
+        # No eBay connection: a draft stays in QuickFlip only (we can't reach
         # eBay), and a live publish returns the dry-run payload to inspect.
         if mode == "draft":
             return {
                 "dry_run": False,
                 "draft": True,
                 "mode": mode,
-                "message": ("Saved to your Thryft drafts (see 'My listings'). "
+                "message": ("Saved to your QuickFlip drafts (see 'My listings'). "
                             "Connect eBay to save drafts directly on eBay."),
                 "export_path": str(export_path),
             }

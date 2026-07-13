@@ -143,7 +143,7 @@ def ensure_inventory_location(access_token: str, postal_code: str,
         "location": {"address": addr},
         "locationTypes": ["WAREHOUSE"],
         "merchantLocationStatus": "ENABLED",
-        "name": "Thryft ship-from location",
+        "name": "QuickFlip ship-from location",
     }
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)

@@ -22,7 +22,9 @@ from .services import claude_ai, ebay, images, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
 
-FRONTEND_DIR = config.ROOT_DIR / "frontend"
+# The frontend is a Vite/React app; serve its build output. (The Dockerfile
+# builds it in a node stage; run.sh builds it for local dev.)
+FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
 
 
 @app.on_event("startup")
