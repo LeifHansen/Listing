@@ -33,6 +33,9 @@ class Listing(BaseModel):
     package_length_in: float = 0.0
     package_width_in: float = 0.0
     package_height_in: float = 0.0
+    # Per-listing shipping service, as an eBay fulfillment-policy id. Empty
+    # means "use the account default from Settings".
+    fulfillment_policy_id: str = ""
     item_specifics: list[ItemSpecific] = Field(default_factory=list)
     # filenames (relative to the session image dir) of optimized images
     images: list[str] = Field(default_factory=list)

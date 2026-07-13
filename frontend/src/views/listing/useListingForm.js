@@ -12,6 +12,7 @@ const EMPTY = {
   title: "", subtitle: "", brand: "", price: "", quantity: 1,
   package_weight_lb: "", package_weight_oz: "",
   package_length_in: "", package_width_in: "", package_height_in: "",
+  fulfillment_policy_id: "",
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
   condition_description: "", description: "", item_specifics: [],
   images: [], currency: "USD", missing_info: [],
@@ -230,6 +231,31 @@ export function useListingForm() {
     }
   }, [form.images, sessionId, toast]);
 
+  // ---------- pre-publish checklist ----------
+  const runPreflight = useCallback(async () => {
+    setAiBusy(["Checking everything eBay requires…"]);
+    try {
+      const res = await postJson("/api/publish-preflight", {
+        session_id: sessionId, listing: collect(), mode: "live",
+      });
+      const errors = (res.issues || []).filter((i) => i.level !== "warn");
+      setPublishResult({
+        preflight: true,
+        error: errors.length > 0,
+        issues: res.issues || [],
+        message: errors.length
+          ? `Not quite ready — ${errors.length} thing${errors.length === 1 ? "" : "s"} to fix before eBay will accept it:`
+          : "All checks passed — this listing is ready to publish. 🎉",
+      });
+      const first = errors.find((x) => x.target && x.target !== "generic");
+      if (first) setFixTarget(first.target);
+    } catch (e) {
+      toast(`Couldn't run the check: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }, [collect, sessionId, toast]);
+
   // ---------- publish ----------
   const publish = useMemo(() => once("publish", async (mode) => {
     setFixTarget(null);
@@ -277,7 +303,7 @@ export function useListingForm() {
   return {
     sessionId, form, set, setForm, collect,
     aiBusy, setAiBusy,
-    publish, publishResult, setPublishResult,
+    publish, publishResult, setPublishResult, runPreflight,
     fixTarget, setFixTarget,
     refine,
     suggestCategories, catSuggestions, chooseCategory,

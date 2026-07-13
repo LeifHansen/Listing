@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { motion } from "framer-motion";
-import { Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye } from "lucide-react";
+import { Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApp } from "@/store";
 import { WorkflowCard } from "./WorkflowCard";
@@ -29,7 +29,8 @@ export function PublishCard({ w }) {
     requestAnimationFrame(() => w.setFixTarget(target));
   };
 
-  const publishedOk = r && !r.error && (r.published || r.draft || r.ebay_draft || r.dry_run);
+  const publishedOk = r && !r.error
+    && (r.published || r.draft || r.ebay_draft || r.dry_run || r.preflight);
 
   return (
     <WorkflowCard
@@ -59,6 +60,9 @@ export function PublishCard({ w }) {
         )}
 
         <div className="flex flex-wrap gap-2.5">
+          <Button variant="ghost" size="lg" onClick={w.runPreflight}>
+            <ListChecks aria-hidden /> Check before publishing
+          </Button>
           <Button variant="secondary" size="lg" onClick={() => w.publish("draft")}>
             <Save aria-hidden /> Save as Draft
           </Button>
@@ -121,7 +125,12 @@ export function PublishCard({ w }) {
                 : [{ target: "generic", title: r.message || "eBay rejected the listing", fix: typeof r.detail === "string" ? r.detail : "" }]
               ).map((it, i) => (
                 <li key={i} className="text-sm">
-                  <p className="font-semibold text-ink">{it.title}</p>
+                  <p className="font-semibold text-ink">
+                    {it.title}
+                    {it.level === "warn" && (
+                      <span className="ml-2 text-xs font-medium text-ink-faint">nice to have</span>
+                    )}
+                  </p>
                   {it.fix && <p className="text-ink-secondary mt-0.5">{it.fix}</p>}
                   {it.target && it.target !== "generic" && (
                     <Button variant="soft" size="sm" className="mt-2" onClick={() => onFix(it.target)}>

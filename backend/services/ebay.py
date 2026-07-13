@@ -137,6 +137,8 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
         payment = config.EBAY_PAYMENT_POLICY_ID or None
         returns = config.EBAY_RETURN_POLICY_ID or None
         location = config.EBAY_MERCHANT_LOCATION_KEY or None
+    # A shipping service chosen on the listing overrides the account default.
+    fulfillment = listing.fulfillment_policy_id or fulfillment
     return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,

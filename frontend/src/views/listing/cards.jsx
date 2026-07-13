@@ -1,14 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
-  AlignLeft, Search, Plus, X, TrendingUp, ExternalLink,
+  AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
+import { api, postJson } from "@/lib/api";
+import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusInline } from "@/components/ui/AIStatus";
+import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
 
@@ -272,7 +275,8 @@ export function PricingCard({ w }) {
     <WorkflowCard
       id="pricing" icon={Coins} title="Pricing & condition"
       hint="Check live comps so you never guess"
-      state={w.completion.pricing} flagged={w.fixTarget === "price"}
+      state={w.completion.pricing}
+      flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
     >
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
@@ -381,12 +385,113 @@ export function PricingCard({ w }) {
   );
 }
 
+// Weight caps (oz) for services that silently kill a publish, mirrored from
+// the backend preflight so the warning shows the moment the weight is typed.
+const SERVICE_CAPS_OZ = [
+  ["standardenvelope", 3, "eBay Standard Envelope"],
+  ["firstclass", 15.9, "USPS First Class"],
+];
+
+function capIssueFor(services, weightOz) {
+  if (!weightOz) return null;
+  for (const code of services || []) {
+    const c = code.toLowerCase().replaceAll("_", "");
+    for (const [frag, cap, name] of SERVICE_CAPS_OZ) {
+      if (c.includes(frag) && weightOz > cap) {
+        return `${name} maxes out at ${cap} oz — this package is ${+weightOz.toFixed(1)} oz. Pick a different service or eBay will reject the publish.`;
+      }
+    }
+  }
+  return null;
+}
+
+// Per-listing shipping service = an eBay fulfillment policy on the offer.
+function ShippingServicePicker({ w }) {
+  const { ebay, policiesData, setPoliciesData } = useApp();
+  const { toast } = useToast();
+  const [settingUp, setSettingUp] = useState(false);
+
+  useEffect(() => {
+    if (!ebay.connected || policiesData) return;
+    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
+  }, [ebay.connected, policiesData, setPoliciesData]);
+
+  if (!ebay.connected) return null;
+  const policies = policiesData?.policies?.fulfillment || [];
+  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
+  const defaultName = policies.find((p) => p.id === accountDefault)?.name;
+  const hasGround = policies.some((p) =>
+    (p.services || []).some((s) => s.toLowerCase().replaceAll("_", "").includes("groundadvantage")));
+
+  const chosen = w.form.fulfillment_policy_id || accountDefault;
+  const services = policies.find((p) => p.id === chosen)?.services || [];
+  const weightOz = (parseFloat(w.form.package_weight_lb) || 0) * 16
+    + (parseFloat(w.form.package_weight_oz) || 0);
+  const capIssue = capIssueFor(services, weightOz);
+
+  const setupGround = async () => {
+    setSettingUp(true);
+    try {
+      const pol = await postJson("/api/ebay/ensure-ground-policy", {});
+      setPoliciesData(null); // reload with the new policy
+      w.set("fulfillment_policy_id", pol.id);
+      toast(pol.created
+        ? "Created a USPS Ground Advantage shipping policy on your eBay account and selected it."
+        : `Selected your existing "${pol.name}" policy.`, { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't set up USPS Ground Advantage: ${e.message}`, { kind: "error" });
+    } finally {
+      setSettingUp(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3 max-w-md">
+      <Field
+        label={
+          <span className="inline-flex items-center gap-1.5">
+            <Truck size={14} aria-hidden /> Shipping service
+          </span>
+        }
+        help="How this item ships (an eBay shipping policy). USPS Ground Advantage is the cheapest option for most packages — up to 70 lb."
+      >
+        <Select
+          value={w.form.fulfillment_policy_id}
+          onChange={(e) => w.set("fulfillment_policy_id", e.target.value)}
+        >
+          <option value="">
+            Account default{defaultName ? ` — ${defaultName}` : ""}
+          </option>
+          {policies.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}{p.summary ? ` · ${p.summary}` : ""}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {capIssue && (
+        <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
+          <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden /> {capIssue}
+        </p>
+      )}
+      {!hasGround && (
+        <div>
+          <Button variant="soft" size="sm" onClick={setupGround} loading={settingUp}>
+            <Truck aria-hidden /> Set up USPS Ground Advantage
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ShippingCard({ w }) {
   return (
     <WorkflowCard
       id="shipping" icon={PackageOpen} title="Shipping package"
-      hint="eBay needs a weight to publish"
-      state={w.completion.shipping} flagged={w.fixTarget === "weight"}
+      hint="Weight, size, and how it ships — eBay needs a weight to publish"
+      state={w.completion.shipping}
+      flagged={w.fixTarget === "weight" || w.fixTarget === "shipping"}
     >
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-4 max-w-md">
@@ -422,6 +527,7 @@ export function ShippingCard({ w }) {
             </Field>
           ))}
         </div>
+        <ShippingServicePicker w={w} />
       </div>
     </WorkflowCard>
   );

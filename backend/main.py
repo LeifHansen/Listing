@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest
-from .services import claude_ai, ebay, images, pricing, taxonomy
+from .services import claude_ai, ebay, images, preflight, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -246,6 +246,67 @@ def get_ebay_policies(request: Request) -> dict:
         "ship_from_postal": acct.get("ship_from_postal", ""),
         "manage_url": "https://www.bizpolicy.ebay.com/businesspolicy/manage",
     }
+
+
+@app.post("/api/ebay/ensure-ground-policy")
+def ensure_ground_policy(request: Request) -> dict:
+    """Find — or create — a USPS Ground Advantage fulfillment policy (the
+    cheapest broadly-applicable USPS service) and make it the account default
+    if none is set yet."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        pol = ebay_auth.ensure_ground_policy(creds["access_token"])
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
+    if pol.get("id") and not creds.get("fulfillment_policy_id"):
+        db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
+    return pol
+
+
+def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
+    """Run the full pre-publish checklist for this user's account state."""
+    creds = _ebay_creds_for(request)
+    connected = bool(creds) or config.ebay_ready()
+    if creds:
+        fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
+        has_payment = bool(creds.get("payment_policy_id"))
+        has_return = bool(creds.get("return_policy_id"))
+        has_location = bool(creds.get("merchant_location_key"))
+    else:
+        fulfillment = listing.fulfillment_policy_id or config.EBAY_FULFILLMENT_POLICY_ID or ""
+        has_payment = bool(config.EBAY_PAYMENT_POLICY_ID)
+        has_return = bool(config.EBAY_RETURN_POLICY_ID)
+        has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
+
+    # What the chosen shipping policy actually ships with (per-service weight
+    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz).
+    services = (ebay_auth.fulfillment_policy_services(creds["access_token"], fulfillment)
+                if creds and fulfillment else [])
+
+    required = None
+    if config.taxonomy_ready() and (listing.category_id or "").strip().isdigit():
+        try:
+            asp = taxonomy.item_aspects(listing.category_id)
+            required = [a["name"] for a in asp.get("aspects", []) if a.get("required")]
+        except Exception:  # noqa: BLE001 - aspects are a best-effort check
+            required = None
+
+    return preflight.validate(
+        listing, mode,
+        has_fulfillment=bool(fulfillment), has_payment=has_payment,
+        has_return=has_return, has_location=has_location, connected=connected,
+        policy_services=services, required_aspects=required)
+
+
+@app.post("/api/publish-preflight")
+async def publish_preflight(req: PublishRequest, request: Request) -> dict:
+    """The full 'ready to publish?' checklist, without touching the listing."""
+    issues = await run_in_threadpool(
+        _preflight_issues, request, req.listing, req.mode or "live")
+    return {"ok": not preflight.errors_only(issues), "issues": issues}
 
 
 @app.post("/api/ebay/policies")
@@ -815,6 +876,24 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
+    # Pre-publish checklist: catch everything eBay would reject BEFORE the
+    # round-trip, with field-targeted fixes. Only gates a real (connected)
+    # live publish — dry-runs and drafts stay permissive.
+    if req.mode == "live" and (creds or config.ebay_ready()):
+        problems = preflight.errors_only(_preflight_issues(request, req.listing, "live"))
+        if problems:
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="draft", user_id=_uid(request))
+            log.info("publish blocked by preflight: session=%s issues=%d",
+                     req.session_id, len(problems))
+            return JSONResponse({
+                "dry_run": False,
+                "error": True,
+                "mode": req.mode,
+                "message": f"Not quite ready — {len(problems)} thing"
+                           f"{'s' if len(problems) != 1 else ''} to fix before eBay will accept it:",
+                "issues": problems,
+            })
     # Self-heal the ship-from location on a live publish: re-ensure it from the
     # saved ZIP so a location missing its country (eBay 'Item.Country empty')
     # gets repaired without the user re-saving settings.
