@@ -81,7 +81,7 @@ export function Dashboard() {
           <div className="flex flex-wrap items-start gap-6 justify-between">
             <div className="min-w-0">
               <h1 className="text-2xl sm:text-[28px] font-bold tracking-tight text-ink">
-                {greeting()}{user ? `, ${user.email.split("@")[0]}` : ""} 👋
+                {greeting()}{user ? `, ${user.display_name || user.email.split("@")[0]}` : ""} 👋
               </h1>
               <p className="mt-1.5 text-[15px] text-ink-secondary">
                 {todays.length > 0

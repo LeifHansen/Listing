@@ -8,6 +8,7 @@ import { ConfidenceBadge } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
+import { BulkQueue } from "./listing/BulkMode";
 import { ImageEditor } from "./listing/ImageEditor";
 import { PublishCard } from "./listing/PublishCard";
 import {
@@ -132,6 +133,27 @@ function Workflow() {
 
 export function NewListing() {
   const { session } = useApp();
+  // { jobId, mode } while a bulk batch is processing / under review.
+  const [bulkJob, setBulkJob] = useState(null);
+
+  if (!session && bulkJob) {
+    return (
+      <div className="flex flex-col gap-4">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Bulk listing</h1>
+          <p className="text-sm text-ink-secondary mt-1">
+            One photo pile, many listings — review each item below.
+          </p>
+        </div>
+        <BulkQueue
+          jobId={bulkJob.jobId}
+          mode={bulkJob.mode}
+          onExit={() => setBulkJob(null)}
+        />
+      </div>
+    );
+  }
+
   if (!session) {
     return (
       <div className="flex flex-col gap-4">
@@ -141,7 +163,7 @@ export function NewListing() {
             Start with photos — the AI handles the boring parts.
           </p>
         </div>
-        <UploadPhase />
+        <UploadPhase onBulkStarted={(jobId, mode) => setBulkJob({ jobId, mode })} />
       </div>
     );
   }

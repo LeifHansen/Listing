@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
-  MapPin, Settings as SettingsIcon, LogIn,
+  MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
 } from "lucide-react";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -124,6 +124,8 @@ export function SettingsView() {
 
   return (
     <SettingsShell>
+      <ProfileCard />
+
       {/* eBay account */}
       <Card>
         <SectionHeader
@@ -265,6 +267,72 @@ export function SettingsView() {
         )}
       </Card>
     </SettingsShell>
+  );
+}
+
+// Profile: display name (shown in greetings) + one-tap sync from eBay.
+function ProfileCard() {
+  const { user, setUser, ebay } = useApp();
+  const { toast } = useToast();
+  const [name, setName] = useState(user?.display_name || "");
+  const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => { setName(user?.display_name || ""); }, [user?.display_name]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await postJson("/api/profile", { display_name: name.trim() });
+      setUser((u) => ({ ...u, display_name: res.user.display_name }));
+      toast("Profile saved.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't save profile: ${e.message}`, { kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const sync = async () => {
+    setSyncing(true);
+    try {
+      const p = await api("/api/profile/sync-ebay", { method: "POST" });
+      setUser((u) => ({ ...u, display_name: p.user.display_name }));
+      setName(p.user.display_name || "");
+      toast("Synced from eBay — username, policies, and location pulled in.", { kind: "success" });
+    } catch (e) {
+      toast(`Sync failed: ${e.message}`, { kind: "error" });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <Card>
+      <SectionHeader
+        icon={UserRound}
+        title="Profile"
+        hint="How QuickFlip greets you — sync pulls your eBay username and settings"
+      />
+      <div className="flex flex-col gap-4 max-w-lg">
+        <Field label="Display name" help={`Email: ${user?.email || ""}`}>
+          <Input
+            maxLength={80}
+            placeholder="e.g. your shop name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        </Field>
+        <div className="flex flex-wrap gap-2.5">
+          <Button variant="primary" onClick={save} loading={saving}>Save profile</Button>
+          {ebay.connected && (
+            <Button variant="secondary" onClick={sync} loading={syncing}>
+              <RefreshCw aria-hidden /> Sync from eBay
+            </Button>
+          )}
+        </div>
+      </div>
+    </Card>
   );
 }
 

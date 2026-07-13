@@ -13,14 +13,17 @@ import { CameraIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
-// rounded photo cards, then one tap to let the AI take over.
-export function UploadPhase() {
+// rounded photo cards, then one tap to let the AI take over. With several
+// photos it can also run in bulk mode: one pile, many listings.
+export function UploadPhase({ onBulkStarted }) {
   const { setSession } = useApp();
-  const { toast } = useToast();
+  const { toast, confirm } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
   const [files, setFiles] = useState([]); // { file, url }
   const [removeBg, setRemoveBg] = useState(false);
+  const [bulk, setBulk] = useState(false);
+  const [bulkLive, setBulkLive] = useState(false);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -45,8 +48,35 @@ export function UploadPhase() {
     });
   };
 
+  const startBulk = once("bulk", async () => {
+    if (!files.length) return;
+    const mode = bulkLive ? "live" : "draft";
+    if (mode === "live" && !(await confirm({
+      title: "Auto-publish ALL detected items?",
+      message: "Each item the AI finds goes straight to your eBay store, live.",
+      confirmLabel: "Publish everything",
+    }))) return;
+    setBusy(true);
+    try {
+      const prepped = await Promise.all(files.map((f) => downscaleForUpload(f.file)));
+      const fd = new FormData();
+      prepped.forEach((f) => fd.append("files", f));
+      fd.append("mode", mode);
+      fd.append("remove_bg", removeBg ? "true" : "false");
+      const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
+      files.forEach((f) => URL.revokeObjectURL(f.url));
+      setFiles([]);
+      onBulkStarted(job_id, mode);
+    } catch (e) {
+      toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
+    } finally {
+      setBusy(false);
+    }
+  });
+
   const process = once("process", async () => {
     if (!files.length) return;
+    if (bulk) return startBulk();
     setBusy(true);
     try {
       const prepped = await Promise.all(files.map((f) => downscaleForUpload(f.file)));
@@ -69,6 +99,9 @@ export function UploadPhase() {
     }
   });
 
+  if (busy && bulk) {
+    return <AIStatusCard messages={["Uploading your photo pile…", "This may take a moment…"]} />;
+  }
   if (busy) {
     return (
       <div className="flex flex-col gap-5">
@@ -173,8 +206,29 @@ export function UploadPhase() {
                 help="Cleaner, eBay-friendly product shots. Adds a few seconds per photo."
               />
 
+              {files.length >= 2 && (
+                <Toggle
+                  checked={bulk}
+                  onChange={setBulk}
+                  label="Bulk mode — this pile has multiple items"
+                  help="The AI sorts the photos into items and drafts a listing for each one."
+                />
+              )}
+
+              {bulk && (
+                <Toggle
+                  checked={bulkLive}
+                  onChange={setBulkLive}
+                  label="Auto-publish everything live"
+                  help="Off = every item queues as a draft for review (recommended)."
+                />
+              )}
+
               <Button variant="primary" size="lg" className="self-start" onClick={process}>
-                <Sparkles aria-hidden /> Identify with AI
+                <Sparkles aria-hidden />
+                {bulk
+                  ? `Split ${files.length} photos into listings`
+                  : "Identify with AI"}
               </Button>
             </Card>
           </motion.div>

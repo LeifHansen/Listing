@@ -116,11 +116,13 @@ export function Sidebar() {
             )}
           >
             <span className="grid place-items-center size-8 rounded-full bg-green-soft text-green font-bold text-xs uppercase shrink-0">
-              {user.email.slice(0, 2)}
+              {(user.display_name || user.email).slice(0, 2)}
             </span>
             {!collapsed && (
               <span className="flex-1 min-w-0 text-left">
-                <span className="block truncate font-semibold text-ink text-[13px]">{user.email}</span>
+                <span className="block truncate font-semibold text-ink text-[13px]">
+                  {user.display_name || user.email}
+                </span>
                 <span className="text-xs text-ink-faint inline-flex items-center gap-1">
                   <LogOut size={11} aria-hidden /> Log out
                 </span>
