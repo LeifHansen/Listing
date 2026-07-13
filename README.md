@@ -46,6 +46,21 @@ cp .env.example .env
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
 
+### Onboarding emails (optional)
+
+Users who signed up 3 days ago (`NUDGE_AFTER_DAYS`) with zero listings get one
+friendly "create your first listing" email, sent once per user by a daily
+in-process pass. Enable it with:
+
+```bash
+fly secrets set SENDGRID_API_KEY=SG.xxx "EMAIL_FROM=QuickFlip <hello@yourdomain.com>"
+```
+
+`EMAIL_FROM` must be a **SendGrid-verified sender** (Single Sender or an
+authenticated domain), or SendGrid rejects the send. `APP_PUBLIC_URL` controls
+the link in the email (defaults to the Fly URL). Without both secrets the
+automation stays off.
+
 ## Deploy to Fly.io
 
 A `Dockerfile` and `fly.toml` are included. eBay requires **publicly reachable

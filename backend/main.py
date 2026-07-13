@@ -22,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest
-from .services import claude_ai, ebay, images, preflight, pricing, taxonomy
+from .services import claude_ai, ebay, emails, images, preflight, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -57,6 +57,8 @@ def _warm_models() -> None:
     import threading
 
     threading.Thread(target=images.warm, daemon=True).start()
+    # Onboarding emails: daily "no listings yet" nudge (no-op without SendGrid).
+    emails.start_scheduler()
 
 
 def _base_url(request: Request) -> str:

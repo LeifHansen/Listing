@@ -1,11 +1,11 @@
 name: Deploy to Fly.io
 
-# Auto-deploy: every push to the default branch (i.e. every merged PR) deploys
-# the app to Fly. Can also be run manually from the Actions tab.
+# Auto-deploy: every push to main (i.e. every merged PR) deploys the app to
+# Fly. Can also be run manually from the Actions tab on any branch.
 on:
   push:
     branches:
-      - claude/ebay-listing-generator-se7lao
+      - main
   workflow_dispatch:
 
 # Never run two deploys at once; a newer push supersedes an in-progress one.
