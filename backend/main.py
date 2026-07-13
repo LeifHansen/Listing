@@ -271,22 +271,35 @@ def get_ebay_policies(request: Request) -> dict:
     }
 
 
-@app.post("/api/ebay/ensure-ground-policy")
-def ensure_ground_policy(request: Request) -> dict:
-    """Find — or create — a USPS Ground Advantage fulfillment policy (the
-    cheapest broadly-applicable USPS service) and make it the account default
-    if none is set yet."""
+@app.post("/api/ebay/ensure-defaults")
+def ensure_ebay_defaults(request: Request) -> dict:
+    """Make sure the account has sane policy defaults without any setup work:
+    a USPS Ground Advantage shipping policy (cheapest broadly-applicable
+    service; created if missing) and an eBay Managed Payments payment policy —
+    each saved as the account default only where none is set yet."""
     creds = _ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
+    token = creds["access_token"]
+    out: dict = {"fulfillment": None, "payment": None}
+    saves: dict = {}
     try:
-        pol = ebay_auth.ensure_ground_policy(creds["access_token"])
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
-    if pol.get("id") and not creds.get("fulfillment_policy_id"):
-        db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
-    return pol
+        ground = ebay_auth.ensure_ground_policy(token)
+        out["fulfillment"] = ground
+        if ground.get("id") and not creds.get("fulfillment_policy_id"):
+            saves["fulfillment_policy_id"] = ground["id"]
+    except Exception as exc:  # noqa: BLE001 - each default is best-effort
+        log.warning("ensure-defaults: ground policy failed: %s", exc)
+    try:
+        payment = ebay_auth.ensure_payment_policy(token)
+        out["payment"] = payment
+        if payment.get("id") and not creds.get("payment_policy_id"):
+            saves["payment_policy_id"] = payment["id"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ensure-defaults: payment policy failed: %s", exc)
+    if saves:
+        db.save_ebay_account(creds["_uid"], **saves)
+    return out
 
 
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
@@ -352,6 +365,8 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
         try:
             key = ebay_auth.ensure_inventory_location(creds["access_token"], postal)
+        except RuntimeError as exc:  # our own friendly message
+            raise HTTPException(400, str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 400, f"eBay rejected that ship-from location: {exc}") from exc
@@ -387,18 +402,36 @@ def get_profile(request: Request) -> dict:
     }
 
 
+# Per-user listing defaults stored in users.prefs. Package defaults pre-fill
+# the Shipping card when the AI didn't measure anything.
+PREF_FIELDS = ("default_weight_lb", "default_weight_oz", "default_length_in",
+               "default_width_in", "default_height_in")
+
+
 @app.post("/api/profile")
 def save_profile(request: Request, payload: dict) -> dict:
-    """Save profile customizations (currently: display name)."""
+    """Save profile customizations: display name and/or listing defaults."""
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    display_name = str(payload.get("display_name", "")).strip()[:80]
-    updated = db.update_user(uid, display_name=display_name)
+    kwargs: dict = {}
+    if "display_name" in payload:
+        kwargs["display_name"] = str(payload.get("display_name", "")).strip()[:80]
+    prefs = {}
+    for key in PREF_FIELDS:
+        if key in payload:
+            try:
+                prefs[key] = max(0.0, float(payload[key] or 0))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{key} must be a number")
+    if prefs:
+        kwargs["prefs"] = prefs
+    if not kwargs:
+        raise HTTPException(400, "Nothing to save.")
+    updated = db.update_user(uid, **kwargs)
     if not updated:
         raise HTTPException(503, "Couldn't save your profile — try again shortly.")
-    return {"ok": True, "user": {"email": updated["email"],
-                                 "display_name": updated["display_name"]}}
+    return {"ok": True, "user": updated}
 
 
 @app.post("/api/profile/sync-ebay")

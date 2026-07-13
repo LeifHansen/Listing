@@ -13,33 +13,50 @@ const EMPTY = {
   package_weight_lb: "", package_weight_oz: "",
   package_length_in: "", package_width_in: "", package_height_in: "",
   fulfillment_policy_id: "",
+  best_offer_enabled: false, best_offer_min: "", best_offer_accept: "",
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
   condition_description: "", description: "", item_specifics: [],
   images: [], currency: "USD", missing_info: [],
 };
 
-function fromListing(l) {
+// System-wide package defaults, overridable per user in Settings.
+const SYSTEM_PKG_DEFAULTS = {
+  default_weight_lb: 2, default_weight_oz: 8,
+  default_length_in: 8, default_width_in: 8, default_height_in: 8,
+};
+
+function pkgDefaults(prefs) {
+  return { ...SYSTEM_PKG_DEFAULTS, ...(prefs || {}) };
+}
+
+function fromListing(l, prefs) {
   if (!l) return { ...EMPTY };
+  const d = pkgDefaults(prefs);
+  // The AI's measurements win; the user's defaults fill what it left blank.
+  const noWeight = !(l.package_weight_lb || l.package_weight_oz);
+  const noDims = !(l.package_length_in || l.package_width_in || l.package_height_in);
   return {
     ...EMPTY,
     ...l,
     price: l.price != null ? l.price : "",
+    best_offer_min: l.best_offer_min != null ? l.best_offer_min : "",
+    best_offer_accept: l.best_offer_accept != null ? l.best_offer_accept : "",
     quantity: l.quantity || 1,
-    package_weight_lb: l.package_weight_lb || "",
-    package_weight_oz: l.package_weight_oz || "",
-    package_length_in: l.package_length_in || "",
-    package_width_in: l.package_width_in || "",
-    package_height_in: l.package_height_in || "",
+    package_weight_lb: noWeight ? (d.default_weight_lb || "") : (l.package_weight_lb || ""),
+    package_weight_oz: noWeight ? (d.default_weight_oz || "") : (l.package_weight_oz || ""),
+    package_length_in: noDims ? (d.default_length_in || "") : (l.package_length_in || ""),
+    package_width_in: noDims ? (d.default_width_in || "") : (l.package_width_in || ""),
+    package_height_in: noDims ? (d.default_height_in || "") : (l.package_height_in || ""),
     item_specifics: (l.item_specifics || []).map((s) => ({ ...s })),
     images: l.images || [],
   };
 }
 
 export function useListingForm() {
-  const { session, setSession, health, loadListings } = useApp();
+  const { session, setSession, health, loadListings, setView, user } = useApp();
   const { toast } = useToast();
 
-  const [form, setForm] = useState(() => fromListing(session?.listing));
+  const [form, setForm] = useState(() => fromListing(session?.listing, user?.prefs));
   const [aiBusy, setAiBusy] = useState(null); // string[] of friendly messages, or null
   const [publishResult, setPublishResult] = useState(null);
   const [fixTarget, setFixTarget] = useState(null); // which field group eBay flagged
@@ -55,7 +72,7 @@ export function useListingForm() {
   useEffect(() => {
     if (seededFor.current !== sessionId) {
       seededFor.current = sessionId;
-      setForm(fromListing(session?.listing));
+      setForm(fromListing(session?.listing, user?.prefs));
       setPublishResult(null);
       setFixTarget(null);
       setCatSuggestions(null);
@@ -81,6 +98,9 @@ export function useListingForm() {
       package_length_in: num(form.package_length_in),
       package_width_in: num(form.package_width_in),
       package_height_in: num(form.package_height_in),
+      best_offer_enabled: !!form.best_offer_enabled,
+      best_offer_min: form.best_offer_min === "" ? null : parseFloat(form.best_offer_min),
+      best_offer_accept: form.best_offer_accept === "" ? null : parseFloat(form.best_offer_accept),
       item_specifics: form.item_specifics
         .map((s) => ({ name: s.name.trim(), value: s.value.trim() }))
         .filter((s) => s.name),
@@ -257,12 +277,15 @@ export function useListingForm() {
   }, [collect, sessionId, toast]);
 
   // ---------- publish ----------
+  // publishing drives the full-screen "pushing to eBay" overlay; celebration
+  // drives the success screen once eBay confirms the listing is live.
+  const [publishing, setPublishing] = useState(null); // "draft" | "live" | null
+  const [celebration, setCelebration] = useState(null); // { listingId }
+
   const publish = useMemo(() => once("publish", async (mode) => {
     setFixTarget(null);
     setPublishResult(null);
-    setAiBusy(mode === "live"
-      ? ["Publishing to eBay…", "Uploading photos…", "Crossing the t's…"]
-      : ["Saving your draft…"]);
+    setPublishing(mode);
     try {
       const listing = collect();
       setSession((s) => ({ ...s, listing }));
@@ -275,12 +298,24 @@ export function useListingForm() {
         if (first) setFixTarget(first.target);
       }
       loadListings({ quiet: true });
+      if (result.published) {
+        setCelebration({ listingId: result.listing_id || "" });
+      }
     } catch (e) {
       toast(`Publish error: ${e.message}`, { kind: "error" });
     } finally {
-      setAiBusy(null);
+      setPublishing(null);
     }
   }), [collect, sessionId, setSession, loadListings, toast]);
+
+  // Success screen dismissed: the listing is done being edited — close the
+  // workflow and land on Listings, where it wears its "Live on eBay" badge
+  // (and is gone from Drafts).
+  const finishCelebration = useCallback(() => {
+    setCelebration(null);
+    setSession(null);
+    setView("listings");
+  }, [setSession, setView]);
 
   // ---------- completion per workflow card ----------
   const completion = useMemo(() => {
@@ -304,6 +339,7 @@ export function useListingForm() {
     sessionId, form, set, setForm, collect,
     aiBusy, setAiBusy,
     publish, publishResult, setPublishResult, runPreflight,
+    publishing, celebration, finishCelebration,
     fixTarget, setFixTarget,
     refine,
     suggestCategories, catSuggestions, chooseCategory,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
@@ -8,7 +8,7 @@ import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Textarea, Select } from "@/components/ui/fields";
+import { Field, Input, Textarea, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
@@ -19,21 +19,47 @@ import { PhotoTile } from "./PhotoTile";
    useListingForm (passed down as `w`). */
 
 export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
+  // Drag-to-reorder: swap live as the drag passes over other tiles.
+  const dragIndex = useRef(null);
+  const [draggingIdx, setDraggingIdx] = useState(null);
+
+  const move = (from, to) => {
+    if (from === to || to < 0 || to >= w.form.images.length) return;
+    const images = [...w.form.images];
+    const [x] = images.splice(from, 1);
+    images.splice(to, 0, x);
+    w.set("images", images);
+  };
+
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="Hover a photo to clean up its background, smart-crop it, or remove it"
+      hint="Drag to reorder — the first photo is your cover. Hover for clean-up, smart crop, or delete"
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {(w.form.images || []).length ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
           <AnimatePresence>
-            {w.form.images.map((name) => (
+            {w.form.images.map((name, i) => (
               <PhotoTile
                 key={name}
                 sessionId={w.sessionId}
                 name={name}
                 version={w.imageVersion}
+                index={i}
+                count={w.form.images.length}
+                isCover={i === 0}
+                dragging={draggingIdx === i}
+                onMove={move}
+                onDragStart={() => { dragIndex.current = i; setDraggingIdx(i); }}
+                onDragEnter={() => {
+                  if (dragIndex.current !== null && dragIndex.current !== i) {
+                    move(dragIndex.current, i);
+                    dragIndex.current = i;
+                    setDraggingIdx(i);
+                  }
+                }}
+                onDragEnd={() => { dragIndex.current = null; setDraggingIdx(null); }}
                 onEdit={() => onEdit(name)}
                 onSmartCrop={() => onSmartCrop(name)}
                 onDelete={() => onDelete(name)}
@@ -310,6 +336,51 @@ export function PricingCard({ w }) {
           />
         </Field>
 
+        <div className="flex flex-col gap-3">
+          <Toggle
+            checked={w.form.best_offer_enabled}
+            onChange={(v) => w.set("best_offer_enabled", v)}
+            label="Allow offers"
+            help="Buyers can negotiate — listings with offers enabled usually sell faster."
+          />
+          <AnimatePresence initial={false}>
+            {w.form.best_offer_enabled && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="overflow-hidden"
+              >
+                <div className="grid grid-cols-2 gap-4 max-w-md pt-1">
+                  <Field
+                    label="Minimum offer"
+                    help="Offers below this auto-decline."
+                  >
+                    <Input
+                      type="number" step="0.01" min="0" inputMode="decimal"
+                      value={w.form.best_offer_min}
+                      placeholder="optional"
+                      onChange={(e) => w.set("best_offer_min", e.target.value)}
+                    />
+                  </Field>
+                  <Field
+                    label="Auto-accept at"
+                    help="Offers at or above this accept instantly."
+                  >
+                    <Input
+                      type="number" step="0.01" min="0" inputMode="decimal"
+                      value={w.form.best_offer_accept}
+                      placeholder="optional"
+                      onChange={(e) => w.set("best_offer_accept", e.target.value)}
+                    />
+                  </Field>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
         <div>
           <Button variant="soft" onClick={w.checkMarketPrice}>
             <TrendingUp aria-hidden /> Check market price
@@ -405,45 +476,56 @@ function capIssueFor(services, weightOz) {
   return null;
 }
 
+const isGroundPolicy = (p) => (p.services || []).some(
+  (s) => s.toLowerCase().replaceAll("_", "").includes("groundadvantage"));
+
 // Per-listing shipping service = an eBay fulfillment policy on the offer.
+// The dropdown lists every policy on the account; USPS Ground Advantage
+// (cheapest broadly-applicable service) is selected by default — created
+// silently on the account if it doesn't exist yet.
 function ShippingServicePicker({ w }) {
   const { ebay, policiesData, setPoliciesData } = useApp();
-  const { toast } = useToast();
-  const [settingUp, setSettingUp] = useState(false);
+  const ensured = useRef(false);
 
   useEffect(() => {
     if (!ebay.connected || policiesData) return;
     api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
   }, [ebay.connected, policiesData, setPoliciesData]);
 
-  if (!ebay.connected) return null;
   const policies = policiesData?.policies?.fulfillment || [];
   const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
-  const defaultName = policies.find((p) => p.id === accountDefault)?.name;
-  const hasGround = policies.some((p) =>
-    (p.services || []).some((s) => s.toLowerCase().replaceAll("_", "").includes("groundadvantage")));
+
+  // Default this listing to Ground Advantage; quietly create the policy first
+  // if the account has none. Runs once per mount and never overrides a choice.
+  useEffect(() => {
+    if (!ebay.connected || !policiesData || w.form.fulfillment_policy_id) return;
+    const ground = policies.find(isGroundPolicy);
+    if (ground) {
+      w.set("fulfillment_policy_id", ground.id);
+    } else if (!ensured.current) {
+      ensured.current = true;
+      postJson("/api/ebay/ensure-defaults", {})
+        .then((res) => {
+          const pol = res.fulfillment;
+          if (pol?.id) w.set("fulfillment_policy_id", pol.id);
+          setPoliciesData(null); // reload so any new policies show in the list
+        })
+        .catch(() => {
+          // Couldn't create (e.g. sandbox limits) — fall back to the account
+          // default so publishing still works.
+          if (accountDefault) w.set("fulfillment_policy_id", accountDefault);
+        });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ebay.connected, policiesData, w.form.fulfillment_policy_id]);
+
+  if (!ebay.connected) return null;
 
   const chosen = w.form.fulfillment_policy_id || accountDefault;
   const services = policies.find((p) => p.id === chosen)?.services || [];
   const weightOz = (parseFloat(w.form.package_weight_lb) || 0) * 16
     + (parseFloat(w.form.package_weight_oz) || 0);
   const capIssue = capIssueFor(services, weightOz);
-
-  const setupGround = async () => {
-    setSettingUp(true);
-    try {
-      const pol = await postJson("/api/ebay/ensure-ground-policy", {});
-      setPoliciesData(null); // reload with the new policy
-      w.set("fulfillment_policy_id", pol.id);
-      toast(pol.created
-        ? "Created a USPS Ground Advantage shipping policy on your eBay account and selected it."
-        : `Selected your existing "${pol.name}" policy.`, { kind: "success" });
-    } catch (e) {
-      toast(`Couldn't set up USPS Ground Advantage: ${e.message}`, { kind: "error" });
-    } finally {
-      setSettingUp(false);
-    }
-  };
 
   return (
     <div className="flex flex-col gap-3 max-w-md">
@@ -456,15 +538,13 @@ function ShippingServicePicker({ w }) {
         help="How this item ships (an eBay shipping policy). USPS Ground Advantage is the cheapest option for most packages — up to 70 lb."
       >
         <Select
-          value={w.form.fulfillment_policy_id}
+          value={chosen}
           onChange={(e) => w.set("fulfillment_policy_id", e.target.value)}
         >
-          <option value="">
-            Account default{defaultName ? ` — ${defaultName}` : ""}
-          </option>
           {policies.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}{p.summary ? ` · ${p.summary}` : ""}
+              {p.id === accountDefault ? " · account default" : ""}
             </option>
           ))}
         </Select>
@@ -473,13 +553,6 @@ function ShippingServicePicker({ w }) {
         <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
           <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden /> {capIssue}
         </p>
-      )}
-      {!hasGround && (
-        <div>
-          <Button variant="soft" size="sm" onClick={setupGround} loading={settingUp}>
-            <Truck aria-hidden /> Set up USPS Ground Advantage
-          </Button>
-        </div>
       )}
     </div>
   );

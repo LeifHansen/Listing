@@ -129,6 +129,16 @@ def validate(listing: Listing, mode: str, *,
             "eBay accepts it (we fall back to the title), but a real description sells better.",
             level="warn")
 
+    # --- best offer ---
+    if listing.best_offer_enabled and listing.price:
+        if listing.best_offer_min and listing.best_offer_min >= listing.price:
+            add("price", "Minimum offer is at or above the asking price",
+                "Set the auto-decline minimum below the Buy It Now price.")
+        if (listing.best_offer_min and listing.best_offer_accept
+                and listing.best_offer_accept < listing.best_offer_min):
+            add("price", "Auto-accept price is below the minimum offer",
+                "Auto-accept must be at least the auto-decline minimum.")
+
     # --- shipping ---
     if weight_oz(listing) <= 0:
         add("weight", "eBay needs a package weight to publish",

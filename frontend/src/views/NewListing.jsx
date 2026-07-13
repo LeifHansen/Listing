@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Sparkles, AlertTriangle, RotateCcw } from "lucide-react";
+import { Sparkles, RotateCcw } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
@@ -9,7 +9,9 @@ import { AIStatusCard } from "@/components/ui/AIStatus";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
 import { BulkQueue } from "./listing/BulkMode";
+import { MissingInfo } from "./listing/MissingInfo";
 import { ImageEditor } from "./listing/ImageEditor";
+import { PublishOverlay } from "./listing/PublishOverlay";
 import { PublishCard } from "./listing/PublishCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
@@ -79,20 +81,9 @@ function Workflow() {
         </Button>
       </motion.div>
 
-      {(w.form.missing_info || []).length > 0 && (
-        <motion.div
-          variants={rise}
-          className="rounded-card bg-warning-soft border border-warning/30 p-4 flex gap-3"
-        >
-          <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
-          <div className="text-sm">
-            <p className="font-bold text-ink">Please verify / fill in:</p>
-            <ul className="mt-1 list-disc list-inside text-ink-secondary">
-              {w.form.missing_info.map((m, i) => <li key={i}>{m}</li>)}
-            </ul>
-          </div>
-        </motion.div>
-      )}
+      <motion.div variants={rise}>
+        <MissingInfo w={w} />
+      </motion.div>
 
       {w.aiBusy ? (
         <motion.div variants={rise}>
@@ -127,6 +118,7 @@ function Workflow() {
         onClose={() => setEditing(null)}
         onSaved={() => w.setImageVersion((v) => v + 1)}
       />
+      <PublishOverlay w={w} />
     </motion.div>
   );
 }

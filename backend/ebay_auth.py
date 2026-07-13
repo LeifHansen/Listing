@@ -148,18 +148,33 @@ def ensure_inventory_location(access_token: str, postal_code: str,
     }
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)
-    if r.status_code == 409:
-        # Already exists (maybe with a stale/missing address) — force it to the
-        # current ZIP+country, and surface it if the repair itself fails.
-        u = httpx.post(
-            f"{base}/sell/inventory/v1/location/{key}/update_location_details",
-            headers=headers, json={"location": {"address": addr}}, timeout=30)
-        if u.status_code not in (200, 204):
-            log.warning("update_location_details(%s) -> %s %s",
-                        key, u.status_code, u.text[:200])
-    elif r.status_code not in (200, 204):
-        r.raise_for_status()
-    return key
+    if r.status_code in (200, 204):
+        return key
+    # Create failed — usually because the location already exists. eBay signals
+    # that as 409 OR as 400 with errorId 25803, so don't try to distinguish:
+    # attempt the address update, and only fail if THAT also fails (a genuinely
+    # bad ZIP fails the update too, with a clearer message).
+    log.info("ebay location create(%s) -> %s; trying update: %s",
+             key, r.status_code, r.text[:200])
+    u = httpx.post(
+        f"{base}/sell/inventory/v1/location/{key}/update_location_details",
+        headers=headers, json={"location": {"address": addr}}, timeout=30)
+    if u.status_code in (200, 204):
+        return key
+    log.warning("update_location_details(%s) -> %s %s", key, u.status_code, u.text[:300])
+    detail = _ebay_error_message(u.text) or _ebay_error_message(r.text) \
+        or f"HTTP {u.status_code}"
+    raise RuntimeError(f"eBay couldn't save that ship-from location: {detail}")
+
+
+def _ebay_error_message(body: str) -> str:
+    """The human part of an eBay error body, if there is one."""
+    try:
+        import json as _json
+        errs = _json.loads(body).get("errors") or []
+        return "; ".join(e.get("message", "") for e in errs if e.get("message"))[:300]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 _POLICY_SPECS = {
@@ -235,6 +250,9 @@ def fetch_policies_and_location(access_token: str) -> dict:
                 pick = items[0]
                 if kind == "fulfillment":
                     pick = next((p for p in items if _is_ground_policy(p)), pick)
+                elif kind == "payment":
+                    pick = next((p for p in items
+                                 if "managed" in (p.get("name", "") or "").lower()), pick)
                 out[f"{kind}_policy_id"] = pick.get(id_field, "")
         except Exception:  # noqa: BLE001 - best effort
             pass
@@ -379,3 +397,40 @@ def _friendly_service(code: str) -> str:
         if frag in c:
             return name
     return code
+
+
+PAYMENT_POLICY_NAME = "eBay Managed Payments (QuickFlip)"
+
+
+def ensure_payment_policy(access_token: str) -> dict:
+    """Find — or create — a payment policy, preferring one named for managed
+    payments (which is what every policy is in practice). {id, name, created}."""
+    path, list_field, id_field = _POLICY_SPECS["payment"]
+    try:
+        items = _account_get(path, access_token).get(list_field, [])
+    except Exception:  # noqa: BLE001
+        items = []
+    if items:
+        pick = next((p for p in items
+                     if "managed" in (p.get("name", "") or "").lower()), items[0])
+        return {"id": pick.get(id_field, ""),
+                "name": pick.get("name", ""), "created": False}
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}/sell/account/v1/payment_policy",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={
+            "name": PAYMENT_POLICY_NAME,
+            "marketplaceId": config.EBAY_MARKETPLACE_ID,
+            "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    created = resp.json()
+    log.info("ebay: created payment policy %s", created.get("paymentPolicyId", ""))
+    return {"id": created.get("paymentPolicyId", ""),
+            "name": created.get("name", PAYMENT_POLICY_NAME), "created": True}

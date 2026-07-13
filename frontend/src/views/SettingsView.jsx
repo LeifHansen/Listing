@@ -20,9 +20,19 @@ const POLICY_KINDS = [
 ];
 
 // Settings — eBay account + the listing defaults applied to every publish.
+// Package defaults (weight/dims) pre-fill the Shipping card on new listings
+// when the AI didn't measure anything. System fallback: 2 lb 8 oz, 8×8×8 in.
+const PKG_FIELDS = [
+  ["default_weight_lb", "Weight — lb", 2],
+  ["default_weight_oz", "Weight — oz", 8],
+  ["default_length_in", "Length (in)", 8],
+  ["default_width_in", "Width (in)", 8],
+  ["default_height_in", "Height (in)", 8],
+];
+
 export function SettingsView() {
   const {
-    user, openAuth, ebay, loadEbayStatus, policiesData, setPoliciesData,
+    user, setUser, openAuth, ebay, loadEbayStatus, policiesData, setPoliciesData,
   } = useApp();
   const { toast, confirm } = useToast();
   const [data, setData] = useState(policiesData);
@@ -31,6 +41,8 @@ export function SettingsView() {
   const [checking, setChecking] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
+  const [pkg, setPkg] = useState(() => Object.fromEntries(
+    PKG_FIELDS.map(([key, , dflt]) => [key, user?.prefs?.[key] ?? dflt])));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -52,14 +64,21 @@ export function SettingsView() {
   }, [user, ebay.connected, load]);
 
   const save = async () => {
-    const payload = { ...selected };
-    if (postal.trim()) payload.ship_from_postal = postal.trim();
     setSaving(true);
     try {
-      await postJson("/api/ebay/policies", payload);
-      setPoliciesData(null); // refresh the publish-step summary next time
+      // Package defaults live on the user profile; policies live on eBay.
+      const prefs = Object.fromEntries(
+        Object.entries(pkg).map(([k, v]) => [k, parseFloat(v) || 0]));
+      const res = await postJson("/api/profile", prefs);
+      setUser((u) => ({ ...u, prefs: res.user.prefs }));
+      if (ebay.connected) {
+        const payload = { ...selected };
+        if (postal.trim()) payload.ship_from_postal = postal.trim();
+        await postJson("/api/ebay/policies", payload);
+        setPoliciesData(null); // refresh the publish-step summary next time
+        load();
+      }
       toast("Saved. These now apply to every listing you publish.", { kind: "success" });
-      load();
     } catch (e) {
       toast(`Couldn't save: ${e.message}`, { kind: "error" });
     } finally {
@@ -187,10 +206,31 @@ export function SettingsView() {
           title="Listing defaults"
           hint="Applied to every listing you publish — shipping, payment & returns come from your eBay business policies"
         />
+        <div className="flex flex-col gap-5 max-w-lg mb-5">
+          <div>
+            <p className="text-[13px] font-semibold text-ink mb-1.5">Default package</p>
+            <p className="text-xs text-ink-secondary mb-3">
+              Pre-fills the Shipping card whenever the AI couldn't tell the size from
+              the photos.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              {PKG_FIELDS.map(([key, label]) => (
+                <Field key={key} label={label}>
+                  <Input
+                    type="number" min="0" step="0.1" inputMode="decimal"
+                    value={pkg[key]}
+                    onChange={(e) => setPkg((c) => ({ ...c, [key]: e.target.value }))}
+                  />
+                </Field>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {!ebay.connected ? (
           <p className="text-sm text-ink-secondary">
-            Connect your eBay account first — your shipping, payment, and return templates
-            come from there.
+            Connect your eBay account to also pick shipping, payment, and return
+            policies — they come from there.
           </p>
         ) : loading || !data ? (
           <div className="ai-shimmer h-32 rounded-tile" aria-hidden />
@@ -258,13 +298,14 @@ export function SettingsView() {
               </div>
             )}
 
-            <div>
-              <Button variant="primary" size="lg" onClick={save} loading={saving}>
-                Save defaults
-              </Button>
-            </div>
           </div>
         )}
+
+        <div className="mt-5">
+          <Button variant="primary" size="lg" onClick={save} loading={saving}>
+            Save defaults
+          </Button>
+        </div>
       </Card>
     </SettingsShell>
   );
