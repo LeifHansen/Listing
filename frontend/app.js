@@ -1082,30 +1082,82 @@ function renderRequiredFields(aspects) {
   wrap.className = "req-fields";
   wrap.innerHTML = `<strong>eBay item specifics for this category</strong>
     <p class="hint">Required fields must be filled to publish. Edit any value freely.</p>`;
+  const IDENTIFIERS = ["upc", "ean", "isbn", "gtin"];
   rows.forEach((a) => {
-    const cur = getSpecificValue(a.name);
+    let cur = getSpecificValue(a.name);
+    // Product identifiers eBay may require: default to the accepted
+    // "Does Not Apply" sentinel so a thrifted item isn't blocked (overridable).
+    if (!cur && IDENTIFIERS.includes(a.name.trim().toLowerCase())) {
+      cur = "Does Not Apply";
+      upsertSpecific(a.name, cur);
+    }
     const field = document.createElement("div");
     field.className = "req-field";
+    const req = a.required ? ' data-required="1"' : "";
     const badge = a.required ? `<span class="req-badge required">Required</span>` : `<span class="req-badge">Recommended</span>`;
     let control;
     if (a.mode === "SELECTION_ONLY" && a.values && a.values.length) {
       const opts = [`<option value="">— select —</option>`]
         .concat(a.values.map((v) => `<option value="${escapeHtml(v)}" ${v === cur ? "selected" : ""}>${escapeHtml(v)}</option>`))
         .join("");
-      control = `<select data-aspect="${escapeHtml(a.name)}">${opts}</select>`;
+      control = `<select data-aspect="${escapeHtml(a.name)}"${req}>${opts}</select>`;
     } else {
-      control = `<input type="text" data-aspect="${escapeHtml(a.name)}" value="${escapeHtml(cur)}" placeholder="${escapeHtml(a.name)}" />`;
+      control = `<input type="text" data-aspect="${escapeHtml(a.name)}"${req} value="${escapeHtml(cur)}" placeholder="${escapeHtml(a.name)}" />`;
     }
     field.innerHTML = `<label>${escapeHtml(a.name)} ${badge}</label>${control}`;
     wrap.appendChild(field);
   });
   box.appendChild(wrap);
-  // Wire changes back into the specifics rows (single source of truth).
+  // Wire changes back into the specifics rows (single source of truth) and clear
+  // the "needs fix" ring once a required field gets a value.
   wrap.querySelectorAll("[data-aspect]").forEach((el) => {
-    const handler = () => upsertSpecific(el.dataset.aspect, el.value.trim());
+    const handler = () => {
+      upsertSpecific(el.dataset.aspect, el.value.trim());
+      if (el.value.trim()) el.classList.remove("needs-fix");
+    };
     el.addEventListener("change", handler);
     el.addEventListener("input", handler);
   });
+}
+
+// Local pre-publish check so the seller fixes everything in one pass instead of
+// round-tripping to eBay. Returns true if OK; otherwise highlights gaps and
+// shows a fix panel. `forLive` applies the publish-only requirements.
+function validateForPublish(forLive) {
+  const missing = [];
+  const clear = () => document.querySelectorAll(".needs-fix").forEach((el) => el.classList.remove("needs-fix"));
+  clear();
+  const flag = (el, label) => { if (el) markFix(el); missing.push(label); };
+
+  if (!$("f-title").value.trim()) flag($("f-title"), "Title");
+  if (!$("f-category-id").value.trim()) flag($("f-category-id"), "eBay category");
+  const price = parseFloat($("f-price").value);
+  if (!(price > 0)) flag($("f-price"), "Price greater than $0");
+  const imgs = (state.listing && state.listing.images) || [];
+  if (!imgs.length) missing.push("At least one photo");
+
+  if (forLive) {
+    const lb = parseFloat($("f-weight-lb").value) || 0;
+    const oz = parseFloat($("f-weight-oz").value) || 0;
+    if (lb + oz / 16 <= 0) flag($("f-weight-lb"), "Package weight");
+  }
+  // Required category item specifics still empty.
+  document.querySelectorAll('#required-fields [data-required="1"]').forEach((el) => {
+    if (!el.value.trim()) {
+      el.classList.add("needs-fix");
+      missing.push(el.dataset.aspect);
+    }
+  });
+
+  if (!missing.length) return true;
+  const panel = $("publish-issues");
+  const uniq = [...new Set(missing)];
+  panel.innerHTML =
+    `<p class="fix-head">⚠️ Fill these in before publishing:</p>` +
+    `<ul class="fix-list">${uniq.map((m) => `<li class="fix-item"><div class="fix-title">${escapeHtml(m)}</div></li>`).join("")}</ul>`;
+  panel.classList.remove("hidden");
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return false;
 }
 
 function renderPreview(result) {
@@ -1346,6 +1398,10 @@ async function refine() {
 }
 
 async function publish(mode) {
+  // Pre-publish validation: catch missing required fields locally so the seller
+  // fixes them in one pass instead of round-tripping to eBay. Drafts are allowed
+  // to be incomplete, so only gate live publishes.
+  if (mode === "live" && !validateForPublish(true)) return;
   try {
     showSpinner(mode === "live" ? "Publishing live…" : "Saving draft…");
     clearFixHighlights();
