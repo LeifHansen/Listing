@@ -156,6 +156,16 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
         location = config.EBAY_MERCHANT_LOCATION_KEY or None
     # A shipping service chosen on the listing overrides the account default.
     fulfillment = listing.fulfillment_policy_id or fulfillment
+    currency = listing.currency or config.EBAY_CURRENCY
+    best_offer = None
+    if listing.best_offer_enabled:
+        best_offer = {"bestOfferEnabled": True}
+        if listing.best_offer_min and listing.best_offer_min > 0:
+            best_offer["autoDeclinePrice"] = {
+                "value": f"{listing.best_offer_min:.2f}", "currency": currency}
+        if listing.best_offer_accept and listing.best_offer_accept > 0:
+            best_offer["autoAcceptPrice"] = {
+                "value": f"{listing.best_offer_accept:.2f}", "currency": currency}
     return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
@@ -173,6 +183,7 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
             "fulfillmentPolicyId": fulfillment,
             "paymentPolicyId": payment,
             "returnPolicyId": returns,
+            "bestOfferTerms": best_offer,
         },
         "merchantLocationKey": location,
     })

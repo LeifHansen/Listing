@@ -153,6 +153,14 @@ export function AppProvider({ children }) {
     loadListings({ quiet: true });
   }, [user, loadListings]);
 
+  // Re-fetch when navigating to a data view, so statuses are never stale
+  // (e.g. a just-published draft must not linger in Drafts).
+  useEffect(() => {
+    if (["dashboard", "inventory", "drafts", "listings"].includes(view)) {
+      loadListings({ quiet: true });
+    }
+  }, [view, loadListings]);
+
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView,

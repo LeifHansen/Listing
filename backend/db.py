@@ -40,6 +40,8 @@ class User(Base):
     # (null = not sent). One-shot marker so a user is never nudged twice.
     nudge_sent_at: Mapped[Optional[_dt.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None)
+    # Per-user listing defaults (package weight/dimensions, future knobs).
+    prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=None)
 
 
 class EbayAccount(Base):
@@ -104,6 +106,7 @@ def _get_engine():
             "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
             "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
             "ALTER TABLE users ADD COLUMN nudge_sent_at TIMESTAMP",
+            "ALTER TABLE users ADD COLUMN prefs JSON",
         ):
             try:
                 with _engine.begin() as conn:
@@ -175,11 +178,13 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
 def _user_to_dict(u: User) -> dict:
     return {"id": u.id, "email": u.email,
             "display_name": getattr(u, "display_name", "") or "",
+            "prefs": getattr(u, "prefs", None) or {},
             "created_at": u.created_at.isoformat()}
 
 
-def update_user(user_id: str, display_name: Optional[str] = None) -> Optional[dict]:
-    """Update profile fields; returns the updated user dict (or None)."""
+def update_user(user_id: str, display_name: Optional[str] = None,
+                prefs: Optional[dict] = None) -> Optional[dict]:
+    """Update profile fields; prefs keys are merged. Returns the user dict."""
     try:
         eng = _get_engine()
         if eng is None:
@@ -190,6 +195,8 @@ def update_user(user_id: str, display_name: Optional[str] = None) -> Optional[di
                 return None
             if display_name is not None:
                 u.display_name = display_name[:80]
+            if prefs is not None:
+                u.prefs = {**(u.prefs or {}), **prefs}
             s.commit()
             return _user_to_dict(u)
     except Exception as exc:  # noqa: BLE001
