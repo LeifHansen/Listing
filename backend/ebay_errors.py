@@ -27,6 +27,13 @@ def _parse(text: str) -> list[dict]:
     return errs if isinstance(errs, list) else []
 
 
+def _looks_like_weight(value: str) -> bool:
+    """True for values like '3 oz', '1.5 lb', '70 lbs'."""
+    parts = value.strip().lower().split()
+    return (len(parts) == 2 and parts[1] in ("oz", "lb", "lbs", "ounces", "pounds")
+            and parts[0].replace(".", "", 1).isdigit())
+
+
 def explain(err: dict) -> dict:
     """Map one eBay error to {title, fix, target, ebay_message, error_id}."""
     error_id = str(err.get("errorId", "") or "")
@@ -57,6 +64,23 @@ def explain(err: dict) -> dict:
         issue.update(target="category",
                      title="This item needs a valid eBay category",
                      fix="Use “Suggest eBay categories” and pick the closest match.")
+    elif has("over the weight limit", "weight limit for service"):
+        # 25007: the shipping policy includes a service with a max weight
+        # (e.g. eBay Standard Envelope, 3 oz) that this package exceeds. The
+        # weight itself is usually fine — the policy is the problem.
+        limit = next((str(p.get("value")) for p in params
+                      if _looks_like_weight(str(p.get("value", "")))), "")
+        service = next((str(p.get("value")) for p in params
+                        if " " in str(p.get("value", ""))
+                        and not str(p.get("value", "")).startswith("err:")
+                        and not _looks_like_weight(str(p.get("value", "")))), "a service in it")
+        issue.update(
+            target="policies",
+            title="This package is too heavy for the shipping policy",
+            fix=(f"The selected shipping policy includes {service}, which maxes out at "
+                 f"{limit or 'a lower weight'}. Either switch this listing to a shipping "
+                 "policy that supports heavier packages (Settings → Listing defaults, or "
+                 "edit the policy on eBay), or lower the package weight to fit."))
     elif has("weight", "package", "shipping package", "dimensions"):
         issue.update(target="weight",
                      title="eBay needs a valid shipping weight",

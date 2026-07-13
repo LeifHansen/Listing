@@ -1,9 +1,9 @@
 import { motion } from "framer-motion";
-import { Trash2, Brush } from "lucide-react";
+import { Trash2, Brush, Crop } from "lucide-react";
 import { mediaUrl } from "@/lib/utils";
 
 // PhotoTile — an uploaded photo as a rounded card with hover actions.
-export function PhotoTile({ sessionId, name, version, onDelete, onEdit }) {
+export function PhotoTile({ sessionId, name, version, onDelete, onEdit, onSmartCrop }) {
   return (
     <motion.div
       layout
@@ -28,6 +28,13 @@ export function PhotoTile({ sessionId, name, version, onDelete, onEdit }) {
           className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
         >
           <Brush size={13} aria-hidden /> Clean up
+        </button>
+        <button
+          type="button"
+          onClick={onSmartCrop}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
+        >
+          <Crop size={13} aria-hidden /> Smart crop
         </button>
         <button
           type="button"

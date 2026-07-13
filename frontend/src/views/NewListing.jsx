@@ -50,7 +50,9 @@ function Workflow() {
   const { session, startNew } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
-  const [editing, setEditing] = useState(null); // image name in the editor
+  // { name, action? } — the photo open in the studio; action "crop" runs
+  // smart crop as soon as the photo loads.
+  const [editing, setEditing] = useState(null);
 
   const restart = async () => {
     if (await confirm({
@@ -104,7 +106,8 @@ function Workflow() {
       <motion.div variants={rise} className="flex flex-col gap-4">
         <PhotosCard
           w={w}
-          onEdit={setEditing}
+          onEdit={(name) => setEditing({ name })}
+          onSmartCrop={(name) => setEditing({ name, action: "crop" })}
           onDelete={(name) => w.deleteImage(name, confirm)}
         />
         <TitleCard w={w} />
@@ -118,7 +121,8 @@ function Workflow() {
 
       <ImageEditor
         sessionId={w.sessionId}
-        name={editing}
+        name={editing?.name}
+        initialAction={editing?.action}
         onClose={() => setEditing(null)}
         onSaved={() => w.setImageVersion((v) => v + 1)}
       />

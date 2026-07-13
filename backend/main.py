@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -486,6 +487,117 @@ async def edit_image(
                      "uses. Try saving again in a moment.")
     log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# Photo studio: AI-assisted clean-up + smart crop for the in-browser editor.
+# All three endpoints accept an optional `file` (the editor's current canvas,
+# including unsaved brush strokes); without it they read the saved photo.
+# Nothing here writes to disk — the editor previews the result and saves via
+# /api/edit-image, so every AI action stays reviewable and cancellable.
+# ---------------------------------------------------------------------------
+
+def _studio_load(session_id: str, name: str, data: Optional[bytes]):
+    from io import BytesIO
+    from PIL import Image
+
+    if data:
+        img = Image.open(BytesIO(data))
+        img.load()
+        return img
+    session_id = (session_id or "").strip()
+    name = (name or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents or not path.is_file():
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    return Image.open(path)
+
+
+def _data_url(img, fmt: str = "JPEG") -> str:
+    import base64
+    from io import BytesIO
+
+    buf = BytesIO()
+    if fmt == "PNG":
+        img.save(buf, "PNG", optimize=True)
+        mime = "image/png"
+    else:
+        img.save(buf, "JPEG", quality=88, optimize=True)
+        mime = "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+
+@app.post("/api/image/analyze")
+async def image_analyze(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """Re-check the item's borders: returns a mask of leftover background
+    (non-white areas outside the detected subject) for the editor to highlight."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        res = images.analyze_cleanup(img)
+        return {
+            "ok": True,
+            "residue_pct": res["residue_pct"],
+            "bbox": res["bbox"],
+            "mask": _data_url(res["residue_mask"], "PNG") if res["residue_pct"] > 0 else None,
+            "width": res["residue_mask"].width,
+            "height": res["residue_mask"].height,
+        }
+
+    return await run_in_threadpool(_run)
+
+
+@app.post("/api/image/auto-clean")
+async def image_auto_clean(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """AI clean-up: re-detect the subject and whiten everything outside it.
+    Returns the cleaned image for the editor to preview (not saved yet)."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        return {"ok": True, "image": _data_url(images.auto_clean(img))}
+
+    return await run_in_threadpool(_run)
+
+
+@app.post("/api/image/smart-crop")
+async def image_smart_crop(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """Crop to the detected subject with a clean margin, padded to a square.
+    Returns the cropped image for preview, or applied=False if the frame is
+    already tight (so the UI can say so instead of degrading the photo)."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        cropped = images.smart_crop(img)
+        if cropped is None:
+            return {"ok": True, "applied": False,
+                    "message": "Already nicely framed — no crop needed."}
+        return {"ok": True, "applied": True, "image": _data_url(cropped)}
+
+    return await run_in_threadpool(_run)
 
 
 @app.post("/api/identify/{session_id}")

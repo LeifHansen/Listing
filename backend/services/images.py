@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
@@ -176,3 +177,110 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             results.append({"file": src.name, "error": str(exc)})
     return results
+
+
+# ---------------------------------------------------------------------------
+# Photo studio: AI subject detection powering smart crop, leftover-background
+# highlighting, and one-tap auto clean-up in the in-browser editor.
+# ---------------------------------------------------------------------------
+
+# How far a channel may fall below pure white and still count as "clean".
+RESIDUE_WHITE_TOL = 22
+# The subject's soft edge is grown by this many px before looking for residue,
+# so anti-aliased borders aren't flagged.
+SUBJECT_GROW_PX = 9
+
+
+def _subject_mask(img: Image.Image) -> Image.Image:
+    """Soft alpha mask (mode L, same size as img) of the detected subject."""
+    global _rembg_session
+    from rembg import new_session, remove
+
+    if _rembg_session is None:
+        _rembg_session = new_session(_REMBG_MODEL)
+    return remove(img.convert("RGB"), session=_rembg_session, only_mask=True).convert("L")
+
+
+def analyze_cleanup(img: Image.Image) -> dict:
+    """Re-check the item's borders: find the subject and any non-white
+    leftovers outside it (the bits a background removal missed).
+
+    Returns the subject bbox, a binary residue mask (mode L), and how much of
+    the frame that residue covers.
+    """
+    from PIL import ImageChops
+
+    rgb = _flatten(img)
+    mask = _subject_mask(rgb)
+    subject = mask.point(lambda a: 255 if a >= 96 else 0)
+    bbox = subject.getbbox()
+
+    # Grow the subject so its soft edge isn't counted as residue.
+    grown = subject.filter(ImageFilter.MaxFilter(SUBJECT_GROW_PX))
+    # Residue = meaningfully non-white pixels outside the (grown) subject.
+    white = Image.new("RGB", rgb.size, WHITE)
+    nonwhite = ImageChops.difference(rgb, white).convert("L").point(
+        lambda d: 255 if d > RESIDUE_WHITE_TOL else 0)
+    residue = ImageChops.subtract(nonwhite, grown)
+    # Knock out 1-2px speckle so the highlight shows real leftovers, not noise.
+    residue = residue.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+
+    total = rgb.size[0] * rgb.size[1]
+    residue_px = sum(residue.histogram()[128:])
+    return {
+        "residue_mask": residue,
+        "bbox": list(bbox) if bbox else None,
+        "residue_pct": round(100.0 * residue_px / total, 2),
+    }
+
+
+def auto_clean(img: Image.Image) -> Image.Image:
+    """Re-detect the item's borders and whiten everything outside them.
+
+    The mask edge is grown slightly then feathered so we never eat into the
+    subject and the transition stays soft.
+    """
+    rgb = _flatten(img)
+    mask = _subject_mask(rgb)
+    mask = mask.point(lambda a: 255 if a >= 96 else 0)
+    mask = mask.filter(ImageFilter.MaxFilter(7))
+    mask = mask.filter(ImageFilter.GaussianBlur(2))
+    white = Image.new("RGB", rgb.size, WHITE)
+    return Image.composite(rgb, white, mask)
+
+
+def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
+    """Crop to the detected subject (plus a margin), re-padded to a square.
+
+    Returns None when there's no confident subject or the frame is already
+    tight, so the caller can say "nothing to crop" instead of degrading the
+    photo.
+    """
+    rgb = _flatten(img)
+    mask = _subject_mask(rgb)
+    bbox = mask.point(lambda a: 255 if a >= 96 else 0).getbbox()
+    if not bbox:
+        return None
+    left, top, right, bottom = bbox
+    mx = int((right - left) * margin)
+    my = int((bottom - top) * margin)
+    left = max(0, left - mx)
+    top = max(0, top - my)
+    right = min(rgb.width, right + mx)
+    bottom = min(rgb.height, bottom + my)
+    # Already tight? Don't churn the image for a <8% trim.
+    if (right - left) * (bottom - top) > 0.92 * rgb.width * rgb.height:
+        return None
+
+    crop = rgb.crop((left, top, right, bottom))
+    # Pad back to a square using the image's own border color (pure white on a
+    # cleaned photo; approximates the backdrop otherwise).
+    corners = [rgb.getpixel((x, y)) for x, y in
+               ((0, 0), (rgb.width - 1, 0), (0, rgb.height - 1), (rgb.width - 1, rgb.height - 1))]
+    pad_color = tuple(sum(c[i] for c in corners) // 4 for i in range(3))
+    side = max(crop.size)
+    canvas = Image.new("RGB", (side, side), pad_color)
+    canvas.paste(crop, ((side - crop.width) // 2, (side - crop.height) // 2))
+    if side != TARGET_SIZE:
+        canvas = canvas.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
+    return canvas

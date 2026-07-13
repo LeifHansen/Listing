@@ -361,9 +361,11 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
         "published": published,
         "ebay_draft": not published,  # unpublished offer created on eBay
         "message": (None if published else
-                    "Saved as a draft on eBay (unpublished offer). Finish it and "
-                    "Publish Live when ready. Note: eBay's Inventory-API drafts "
-                    "live in the API, not the Seller Hub drafts page."),
+                    "Draft saved — it's staged on your eBay account as an "
+                    "unpublished offer, ready for a one-click publish. Heads-up: "
+                    "eBay does NOT show unpublished offers anywhere in Seller Hub "
+                    "(not even the Drafts page), so you won't see it on eBay until "
+                    "you press Publish Live here."),
         "listing_id": listing_id,
         "steps": steps,
     }
@@ -392,8 +394,9 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                 "dry_run": False,
                 "draft": True,
                 "mode": mode,
-                "message": ("Saved to your QuickFlip drafts (see 'My listings'). "
-                            "Connect eBay to save drafts directly on eBay."),
+                "message": ("Saved to your QuickFlip drafts — find it under Drafts. "
+                            "It is NOT on eBay: connect your eBay account and press "
+                            "Publish Live when you're ready to list it."),
                 "export_path": str(export_path),
             }
         return {
