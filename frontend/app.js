@@ -825,15 +825,25 @@ function handleEbayRedirect() {
 }
 
 // ---------- step 2: preview ----------
-function renderConditionOptions(selected) {
+// allowed: optional [{enum,label}] from eBay for the category. When present we
+// show ONLY those (with eBay's own labels) so the seller can't pick a condition
+// eBay rejects for the category (publish error 25021).
+function renderConditionOptions(selected, allowed) {
   const sel = $("f-condition");
   sel.innerHTML = "";
-  CONDITIONS.forEach((c) => {
-    const o = document.createElement("option");
-    o.value = c; o.textContent = c.replaceAll("_", " ");
-    if (c === selected) o.selected = true;
-    sel.appendChild(o);
+  const opts = (allowed && allowed.length)
+    ? allowed.map((c) => ({ value: c.enum, label: c.label || c.enum.replaceAll("_", " ") }))
+    : CONDITIONS.map((c) => ({ value: c, label: c.replaceAll("_", " ") }));
+  const hasSelected = opts.some((o) => o.value === selected);
+  opts.forEach((o) => {
+    const el = document.createElement("option");
+    el.value = o.value; el.textContent = o.label;
+    if (o.value === selected) el.selected = true;
+    sel.appendChild(el);
   });
+  // If the AI's condition isn't valid for this category, default to the first
+  // allowed one so we never submit an invalid condition.
+  if (!hasSelected && opts.length) sel.value = opts[0].value;
 }
 
 function renderSpecifics(specs) {
@@ -868,15 +878,44 @@ function renderImages() {
     const img = document.createElement("img");
     // Cache-bust so a just-edited image shows the new version.
     img.src = `/media/${state.sessionId}/optimized/${name}?v=${Date.now()}`;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "img-del-btn";
+    del.title = "Delete this photo";
+    del.textContent = "🗑";
+    del.addEventListener("click", () => deleteImage(name));
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "ghost edit-img-btn";
     btn.textContent = "🖌️ Clean up background";
     btn.addEventListener("click", () => openImageEditor(name));
+    wrap.appendChild(del);
     wrap.appendChild(img);
     wrap.appendChild(btn);
     box.appendChild(wrap);
   });
+}
+
+async function deleteImage(name) {
+  const imgs = (state.listing && state.listing.images) || [];
+  if (imgs.length <= 1) {
+    alert("A listing needs at least one photo — add another before deleting this one.");
+    return;
+  }
+  if (!confirm("Delete this photo? This can't be undone.")) return;
+  try {
+    showSpinner("Deleting photo…");
+    await api("/api/delete-image", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: state.sessionId, name }),
+    });
+    state.listing.images = imgs.filter((n) => n !== name);
+    renderImages();
+  } catch (e) {
+    alert("Couldn't delete the photo: " + e.message);
+  } finally {
+    hideSpinner();
+  }
 }
 
 // ---------- background clean-up editor ----------
@@ -994,6 +1033,81 @@ function renderMissingInfo(missing) {
     <ul>${missing.map((m) => `<li>${escapeHtml(m)}</li>`).join("")}</ul></div>`;
 }
 
+// ---------- category-driven fields (conditions + required item specifics) ----------
+// Read/write an item specific by name, keeping the specifics rows as the single
+// source of truth so collectListing picks these up.
+function getSpecificValue(name) {
+  const rows = [...document.querySelectorAll("#specifics .specific-row")];
+  const row = rows.find((r) => r.querySelectorAll("input")[0].value.trim().toLowerCase() === name.toLowerCase());
+  return row ? row.querySelectorAll("input")[1].value.trim() : "";
+}
+function upsertSpecific(name, value) {
+  const rows = [...document.querySelectorAll("#specifics .specific-row")];
+  const row = rows.find((r) => r.querySelectorAll("input")[0].value.trim().toLowerCase() === name.toLowerCase());
+  if (row) { row.querySelectorAll("input")[1].value = value; }
+  else if (value) { addSpecificRow(name, value); }
+}
+
+// Fetch the category's valid conditions + required/recommended aspects and
+// render inline fields, so the seller completes everything without leaving.
+async function loadCategoryMeta() {
+  const cid = ($("f-category-id").value || "").trim();
+  const box = $("required-fields");
+  if (!state.taxonomyConfigured || !cid) { box.innerHTML = ""; return; }
+  try {
+    const [cond, asp] = await Promise.all([
+      api("/api/item-conditions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category_id: cid }) }).catch(() => ({ conditions: [] })),
+      api("/api/item-aspects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category_id: cid }) }).catch(() => ({ aspects: [] })),
+    ]);
+    if (cond.conditions && cond.conditions.length) {
+      renderConditionOptions($("f-condition").value, cond.conditions);
+    }
+    renderRequiredFields(asp.aspects || []);
+  } catch (e) {
+    box.innerHTML = "";
+  }
+}
+
+function renderRequiredFields(aspects) {
+  const box = $("required-fields");
+  box.innerHTML = "";
+  if (!aspects.length) return;
+  // Show all required, plus up to 8 recommended, to keep it manageable.
+  const required = aspects.filter((a) => a.required);
+  const recommended = aspects.filter((a) => !a.required).slice(0, 8);
+  const rows = required.concat(recommended);
+  if (!rows.length) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "req-fields";
+  wrap.innerHTML = `<strong>eBay item specifics for this category</strong>
+    <p class="hint">Required fields must be filled to publish. Edit any value freely.</p>`;
+  rows.forEach((a) => {
+    const cur = getSpecificValue(a.name);
+    const field = document.createElement("div");
+    field.className = "req-field";
+    const badge = a.required ? `<span class="req-badge required">Required</span>` : `<span class="req-badge">Recommended</span>`;
+    let control;
+    if (a.mode === "SELECTION_ONLY" && a.values && a.values.length) {
+      const opts = [`<option value="">— select —</option>`]
+        .concat(a.values.map((v) => `<option value="${escapeHtml(v)}" ${v === cur ? "selected" : ""}>${escapeHtml(v)}</option>`))
+        .join("");
+      control = `<select data-aspect="${escapeHtml(a.name)}">${opts}</select>`;
+    } else {
+      control = `<input type="text" data-aspect="${escapeHtml(a.name)}" value="${escapeHtml(cur)}" placeholder="${escapeHtml(a.name)}" />`;
+    }
+    field.innerHTML = `<label>${escapeHtml(a.name)} ${badge}</label>${control}`;
+    wrap.appendChild(field);
+  });
+  box.appendChild(wrap);
+  // Wire changes back into the specifics rows (single source of truth).
+  wrap.querySelectorAll("[data-aspect]").forEach((el) => {
+    const handler = () => upsertSpecific(el.dataset.aspect, el.value.trim());
+    el.addEventListener("change", handler);
+    el.addEventListener("input", handler);
+  });
+}
+
 function renderPreview(result) {
   // Guard against a record with a null/absent listing (e.g. opening a saved
   // listing whose data didn't load) so we render an empty form, not a crash.
@@ -1017,6 +1131,9 @@ function renderPreview(result) {
   renderSpecifics(l.item_specifics);
   renderImages();
   renderMissingInfo(l.missing_info);
+  $("required-fields").innerHTML = "";
+  // Pull the category's valid conditions + required specifics (async, best-effort).
+  loadCategoryMeta();
   $("cat-suggestions").innerHTML = "";
   // Clear any state carried over from a previous listing so it can't leak into
   // this one (stale eBay fix-panel, price comps, or "needs fix" field rings).
@@ -1122,6 +1239,7 @@ function renderCategorySuggestions(suggestions) {
       $("f-category").value = s.path || s.category_name;
       [...box.children].forEach((c) => c.classList.remove("chosen"));
       row.classList.add("chosen");
+      loadCategoryMeta();  // refresh valid conditions + required fields
     });
     box.appendChild(row);
   });
@@ -1246,6 +1364,8 @@ async function publish(mode) {
         JSON.stringify(result.payload, null, 2);
     } else if (result.draft) {
       out.textContent = `✅ ${result.message}`;
+    } else if (result.ebay_draft) {
+      out.textContent = `✅ ${result.message || "Saved as a draft on eBay."}`;
     } else if (result.error) {
       out.classList.add("hidden");
       renderPublishIssues(result);   // friendly "what to fix" panel + field highlight
@@ -1376,6 +1496,8 @@ function init() {
   $("btn-draft").addEventListener("click", () => publishOnce("draft"));
   $("btn-live").addEventListener("click", () => publishOnce("live"));
   $("f-title").addEventListener("input", updateTitleCount);
+  // Re-pull valid conditions + required specifics when the category id is edited.
+  $("f-category-id").addEventListener("change", loadCategoryMeta);
   $("refine-input").addEventListener("keydown", (e) => { if (e.key === "Enter") refineOnce(); });
   // Nav buttons
   $("nav-new").addEventListener("click", startNew);

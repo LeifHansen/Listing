@@ -580,6 +580,60 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     return {"saved": True}
 
 
+@app.post("/api/item-aspects")
+def item_aspects(payload: dict) -> dict:
+    """Required + recommended item specifics eBay defines for a category."""
+    if not config.taxonomy_ready():
+        raise HTTPException(400, "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured.")
+    cid = str(payload.get("category_id", "")).strip()
+    if not cid:
+        raise HTTPException(400, "category_id is required")
+    try:
+        return taxonomy.item_aspects(cid)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"eBay aspects lookup failed: {exc}") from exc
+
+
+@app.post("/api/item-conditions")
+def item_conditions(payload: dict, request: Request) -> dict:
+    """The conditions eBay allows for a category (prevents publish error 25021).
+    Uses the connected seller's token when available, else the app token."""
+    if not config.taxonomy_ready():
+        raise HTTPException(400, "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured.")
+    cid = str(payload.get("category_id", "")).strip()
+    if not cid:
+        raise HTTPException(400, "category_id is required")
+    creds = _ebay_creds_for(request)
+    token = creds.get("access_token") if creds else None
+    try:
+        return taxonomy.item_conditions(cid, access_token=token)
+    except Exception as exc:  # noqa: BLE001 - optional enhancement; fail soft
+        log.info("item-conditions(cat=%s) failed: %s", cid, exc)
+        return {"conditions": []}
+
+
+@app.post("/api/delete-image")
+def delete_image(payload: dict, request: Request) -> dict:
+    """Remove one optimized image from a session (local disk + R2)."""
+    session_id = str(payload.get("session_id", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    if not session_id or not name:
+        raise HTTPException(400, "session_id and name are required")
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents:  # path-traversal guard
+        raise HTTPException(400, "Invalid image name")
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise HTTPException(500, f"Couldn't delete the image: {exc}") from exc
+    if objstore.enabled():
+        objstore.delete(objstore.key_for(session_id, name))
+    log.info("delete-image: session=%s name=%s", session_id, name)
+    return {"ok": True, "remaining": storage.list_optimized(session_id)}
+
+
 @app.post("/api/shelf-scan")
 async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
     """Shop Mode 'Scan a shelf': the client samples frames from a recorded

@@ -233,7 +233,7 @@ def _offer_id_from_error(body: dict) -> Optional[str]:
 
 
 def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
-               creds: Optional[dict] = None) -> dict:
+               creds: Optional[dict] = None, do_publish: bool = True) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
     sku = _sku(session_id, listing)
     item = build_inventory_item(session_id, listing, base_url)
@@ -302,17 +302,20 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                     "steps": steps,
                 }
 
-            # publish() short-circuits drafts before ever calling _push_live, so
-            # we're always publishing a live listing here.
-            r3 = client.post(
-                f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
-                headers=_headers(token),
-            )
-            r3_body = _body(r3)
-            steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
-            r3.raise_for_status()
-            published = True
-            listing_id = r3_body.get("listingId")
+            # Draft mode stops here: the inventory item + unpublished offer now
+            # live on eBay (ready to publish), but we don't call publishOffer.
+            published = False
+            listing_id = None
+            if do_publish:
+                r3 = client.post(
+                    f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
+                    headers=_headers(token),
+                )
+                r3_body = _body(r3)
+                steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
+                r3.raise_for_status()
+                published = True
+                listing_id = r3_body.get("listingId")
     except httpx.HTTPStatusError as exc:
         failed = steps[-1]["step"] if steps else "authentication"
         status = exc.response.status_code
@@ -356,6 +359,11 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
         "sku": sku,
         "offer_id": offer_id,
         "published": published,
+        "ebay_draft": not published,  # unpublished offer created on eBay
+        "message": (None if published else
+                    "Saved as a draft on eBay (unpublished offer). Finish it and "
+                    "Publish Live when ready. Note: eBay's Inventory-API drafts "
+                    "live in the API, not the Seller Hub drafts page."),
         "listing_id": listing_id,
         "steps": steps,
     }
@@ -375,22 +383,19 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     payload = {"inventory_item": item, "offer": offer, "mode": mode}
     export_path = storage.write_export(session_id, "ebay_payload", payload)
 
-    # "Draft" saves in Thryft only. An Inventory-API unpublished offer never
-    # appears in the eBay Seller Hub, so pushing a draft to eBay is pure
-    # downside (and leaves a stale offer that trips the duplicate check on a
-    # later live publish). Only "Publish Live" posts to eBay.
-    if mode == "draft":
-        return {
-            "dry_run": False,
-            "draft": True,
-            "mode": mode,
-            "message": ("Saved to your Thryft drafts (see 'My listings'). Drafts "
-                        "stay here — click Publish Live to post it to eBay."),
-            "export_path": str(export_path),
-        }
-
     ready = bool((creds or {}).get("access_token")) or config.ebay_ready()
     if not ready:
+        # No eBay connection: a draft stays in Thryft only (we can't reach
+        # eBay), and a live publish returns the dry-run payload to inspect.
+        if mode == "draft":
+            return {
+                "dry_run": False,
+                "draft": True,
+                "mode": mode,
+                "message": ("Saved to your Thryft drafts (see 'My listings'). "
+                            "Connect eBay to save drafts directly on eBay."),
+                "export_path": str(export_path),
+            }
         return {
             "dry_run": True,
             "mode": mode,
@@ -402,25 +407,10 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             "payload": payload,
         }
 
-    # eBay requires a valid package weight to publish; without it publishOffer
-    # fails ('package weight is not valid or is missing'). Catch it here with a
-    # clear, field-targeted fix instead of a round trip to eBay.
-    total_lb = (listing.package_weight_lb or 0) + (listing.package_weight_oz or 0) / 16.0
-    if total_lb <= 0:
-        log.warning("publish blocked: no package weight for session %s", session_id)
-        return {
-            "dry_run": False,
-            "error": True,
-            "mode": mode,
-            "message": "eBay needs a package weight to publish.",
-            "issues": [{"target": "weight", "title": "Package weight is missing",
-                        "fix": "Enter the shipping weight (lb / oz) in the listing, then Publish Live again."}],
-            "export_path": str(export_path),
-        }
-
     # eBay fetches every image URL when the inventory item is created; if the
     # local files are gone (session predates a restart/deploy) it fails with
-    # an opaque 25001 'system error'. Fail clearly instead.
+    # an opaque 25001 'system error'. Applies to drafts too (both create the
+    # inventory item). Fail clearly instead.
     if not objstore.enabled():
         names = listing.images or storage.list_optimized(session_id)
         opt_dir = storage.optimized_dir(session_id)
@@ -436,28 +426,41 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                 "export_path": str(export_path),
             }
 
-    # eBay requires a ship-from inventory location to publish an offer. Without
-    # one, publishOffer fails opaquely — catch it here with a clear fix. For a
-    # connected seller, only THEIR location counts (the env key belongs to the
-    # app owner's account and can't be used under the user's token).
-    if creds is not None:
-        has_location = bool(creds.get("merchant_location_key"))
-    else:
-        has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
-    if not has_location:
-        log.warning("publish blocked: no ship-from location for session %s", session_id)
-        return {
-            "dry_run": False,
-            "error": True,
-            "mode": mode,
-            "message": "eBay needs a ship-from location before it can publish.",
-            "issues": [{"target": "location", "title": "No ship-from location set",
-                        "fix": "Open Listing settings, add your ship-from ZIP, and save — then Publish Live again."}],
-            "export_path": str(export_path),
-        }
+    # Package weight and a ship-from location are publish-time requirements, so
+    # only gate a LIVE publish on them — an incomplete draft can still be saved
+    # to eBay and finished later.
+    if mode == "live":
+        total_lb = (listing.package_weight_lb or 0) + (listing.package_weight_oz or 0) / 16.0
+        if total_lb <= 0:
+            log.warning("publish blocked: no package weight for session %s", session_id)
+            return {
+                "dry_run": False,
+                "error": True,
+                "mode": mode,
+                "message": "eBay needs a package weight to publish.",
+                "issues": [{"target": "weight", "title": "Package weight is missing",
+                            "fix": "Enter the shipping weight (lb / oz) in the listing, then Publish Live again."}],
+                "export_path": str(export_path),
+            }
+        # For a connected seller, only THEIR location counts (the env key
+        # belongs to the app owner's account, unusable under the user's token).
+        has_location = (bool(creds.get("merchant_location_key")) if creds is not None
+                        else bool(config.EBAY_MERCHANT_LOCATION_KEY))
+        if not has_location:
+            log.warning("publish blocked: no ship-from location for session %s", session_id)
+            return {
+                "dry_run": False,
+                "error": True,
+                "mode": mode,
+                "message": "eBay needs a ship-from location before it can publish.",
+                "issues": [{"target": "location", "title": "No ship-from location set",
+                            "fix": "Open Listing settings, add your ship-from ZIP, and save — then Publish Live again."}],
+                "export_path": str(export_path),
+            }
 
     try:
-        result = _push_live(session_id, listing, mode, base_url, creds)
+        result = _push_live(session_id, listing, mode, base_url, creds,
+                            do_publish=(mode == "live"))
         result["export_path"] = str(export_path)
         return result
     except httpx.HTTPStatusError as exc:
