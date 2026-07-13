@@ -7,6 +7,7 @@ eBay", grants access, and we store a refresh token + their policy IDs.
 from __future__ import annotations
 
 import time
+from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -143,7 +144,7 @@ def ensure_inventory_location(access_token: str, postal_code: str,
         "location": {"address": addr},
         "locationTypes": ["WAREHOUSE"],
         "merchantLocationStatus": "ENABLED",
-        "name": "Thryft ship-from location",
+        "name": "QuickFlip ship-from location",
     }
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)
@@ -176,11 +177,16 @@ def list_business_policies(access_token: str) -> dict:
         try:
             data = _account_get(path, access_token)
             for p in data.get(list_field, []):
-                out[key].append({
+                entry = {
                     "id": p.get(id_field, ""),
                     "name": p.get("name", "") or p.get(id_field, ""),
                     "summary": _policy_summary(key, p),
-                })
+                }
+                # The shipping-service picker needs to know what each
+                # fulfillment policy actually ships with.
+                if key == "fulfillment":
+                    entry["services"] = [s["code"] for s in _policy_services(p)]
+                out[key].append(entry)
         except Exception:  # noqa: BLE001 - best effort per type
             pass
     return out
@@ -195,13 +201,10 @@ def _policy_summary(kind: str, p: dict) -> str:
             days = (p.get("returnPeriod") or {}).get("value")
             return f"{days}-day returns" if days else "Returns accepted"
         if kind == "fulfillment":
-            opts = p.get("shippingOptions") or []
-            svcs = (opts[0].get("shippingServices") if opts else []) or []
-            if svcs:
-                cost = (svcs[0].get("shippingCost") or {}).get("value")
-                if cost in ("0.0", "0.00", 0, "0"):
-                    return "Free shipping"
-                return f"Flat/calculated shipping" if cost else "Shipping configured"
+            codes = [s_["code"] for s_ in _policy_services(p)]
+            if codes:
+                pretty = ", ".join(_friendly_service(c) for c in codes[:3])
+                return pretty + ("…" if len(codes) > 3 else "")
             return "Shipping configured"
         if kind == "payment":
             return "Managed payments"
@@ -227,7 +230,12 @@ def fetch_policies_and_location(access_token: str) -> dict:
             data = _account_get(path, access_token)
             items = data.get(list_field, [])
             if items:
-                out[f"{kind}_policy_id"] = items[0].get(id_field, "")
+                # Fulfillment: prefer a USPS Ground Advantage policy (cheapest
+                # broadly-applicable service) over whatever happens to be first.
+                pick = items[0]
+                if kind == "fulfillment":
+                    pick = next((p for p in items if _is_ground_policy(p)), pick)
+                out[f"{kind}_policy_id"] = pick.get(id_field, "")
         except Exception:  # noqa: BLE001 - best effort
             pass
     try:
@@ -243,3 +251,131 @@ def fetch_policies_and_location(access_token: str) -> dict:
     except Exception:  # noqa: BLE001
         pass
     return out
+
+
+# ---------------------------------------------------------------------------
+# Shipping services (per-listing selection + USPS Ground Advantage default)
+# ---------------------------------------------------------------------------
+
+GROUND_POLICY_NAME = "USPS Ground Advantage (QuickFlip)"
+
+
+def _policy_services(p: dict) -> list[dict]:
+    """[{code, name}] for every shipping service in a fulfillment policy."""
+    services = []
+    for opt in p.get("shippingOptions") or []:
+        for svc in opt.get("shippingServices") or []:
+            code = svc.get("shippingServiceCode", "") or ""
+            if code:
+                services.append({
+                    "code": code,
+                    "name": svc.get("shippingCarrierCode", "") or "",
+                })
+    return services
+
+
+def _is_ground_policy(p: dict) -> bool:
+    return any("groundadvantage" in s["code"].lower().replace("_", "")
+               for s in _policy_services(p))
+
+
+def list_fulfillment_policies(access_token: str) -> list[dict]:
+    """Fulfillment policies with their shipping services, for the per-listing
+    shipping-service picker: [{id, name, services: [code, ...]}]."""
+    path, list_field, id_field = _POLICY_SPECS["fulfillment"]
+    data = _account_get(path, access_token)
+    out = []
+    for p in data.get(list_field, []):
+        out.append({
+            "id": p.get(id_field, ""),
+            "name": p.get("name", "") or p.get(id_field, ""),
+            "services": [s["code"] for s in _policy_services(p)],
+        })
+    return out
+
+
+def find_ground_policy(access_token: str) -> Optional[dict]:
+    """The seller's first fulfillment policy that ships USPS Ground Advantage."""
+    path, list_field, id_field = _POLICY_SPECS["fulfillment"]
+    try:
+        data = _account_get(path, access_token)
+    except Exception:  # noqa: BLE001
+        return None
+    for p in data.get(list_field, []):
+        if _is_ground_policy(p):
+            return {"id": p.get(id_field, ""), "name": p.get("name", "")}
+    return None
+
+
+def ensure_ground_policy(access_token: str) -> dict:
+    """Find — or create — a fulfillment policy that ships USPS Ground Advantage
+    (calculated cost, up to 70 lb; the cheapest broadly-applicable USPS
+    service). Returns {id, name, created}."""
+    existing = find_ground_policy(access_token)
+    if existing and existing["id"]:
+        return {**existing, "created": False}
+    body = {
+        "name": GROUND_POLICY_NAME,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "handlingTime": {"value": 2, "unit": "DAY"},
+        "shippingOptions": [{
+            "costType": "CALCULATED",
+            "optionType": "DOMESTIC",
+            "shippingServices": [{
+                "sortOrder": 1,
+                "shippingCarrierCode": "USPS",
+                "shippingServiceCode": "USPSGroundAdvantage",
+            }],
+        }],
+    }
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}/sell/account/v1/fulfillment_policy",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    created = resp.json()
+    log.info("ebay: created Ground Advantage fulfillment policy %s",
+             created.get("fulfillmentPolicyId", ""))
+    return {"id": created.get("fulfillmentPolicyId", ""),
+            "name": created.get("name", GROUND_POLICY_NAME), "created": True}
+
+
+def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:
+    """[{code, name}] for one fulfillment policy (empty on any failure —
+    preflight treats unknown services as unconstrained)."""
+    if not policy_id:
+        return []
+    try:
+        p = _account_get(f"/sell/account/v1/fulfillment_policy/{policy_id}",
+                         access_token)
+        return _policy_services(p)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+_SERVICE_FRIENDLY = [
+    ("standardenvelope", "eBay Standard Envelope (3 oz max)"),
+    ("groundadvantage", "USPS Ground Advantage"),
+    ("firstclass", "USPS First Class (<1 lb)"),
+    ("uspspriorityflatrate", "USPS Priority Flat Rate"),
+    ("uspspriorityexpress", "USPS Priority Express"),
+    ("uspspriority", "USPS Priority"),
+    ("mediamail", "USPS Media Mail"),
+    ("upsground", "UPS Ground"),
+    ("fedex", "FedEx"),
+]
+
+
+def _friendly_service(code: str) -> str:
+    c = (code or "").lower().replace("_", "")
+    for frag, name in _SERVICE_FRIENDLY:
+        if frag in c:
+            return name
+    return code

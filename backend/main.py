@@ -7,7 +7,11 @@ Pipeline:
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
+import threading
 from pathlib import Path
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -18,11 +22,31 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest
-from .services import claude_ai, ebay, images, taxonomy
+from .services import claude_ai, ebay, emails, images, preflight, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
 
-FRONTEND_DIR = config.ROOT_DIR / "frontend"
+# The frontend is a Vite/React app; serve its build output. (The Dockerfile
+# builds it in a node stage; run.sh builds it for local dev.)
+FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
+
+
+@app.middleware("http")
+async def _cache_headers(request: Request, call_next):
+    """Cache policy: index.html must always revalidate so a deploy is visible
+    on the next load, while Vite's content-hashed /assets/ bundles are immutable
+    and can cache forever; /media images are content-stable, so let browsers
+    keep them a bit (the UI cache-busts edited photos with ?v=)."""
+    response = await call_next(request)
+    path = request.url.path
+    ctype = response.headers.get("content-type", "")
+    if path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/media/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=3600")
+    elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.on_event("startup")
@@ -33,6 +57,8 @@ def _warm_models() -> None:
     import threading
 
     threading.Thread(target=images.warm, daemon=True).start()
+    # Onboarding emails: daily "no listings yet" nudge (no-op without SendGrid).
+    emails.start_scheduler()
 
 
 def _base_url(request: Request) -> str:
@@ -144,6 +170,9 @@ def _ebay_creds_for(request: Request):
     }
 
 
+EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
+
+
 @app.get("/api/ebay/connect")
 def ebay_connect(request: Request):
     if not config.ebay_oauth_ready():
@@ -151,13 +180,29 @@ def ebay_connect(request: Request):
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
-    return RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid)))
+    import secrets as _secrets
+    nonce = _secrets.token_urlsafe(24)
+    resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
+    # Bind the flow to this browser: the callback requires this cookie to match
+    # the nonce embedded in the signed state (CSRF protection). Lax so it rides
+    # the top-level redirect back from eBay.
+    resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
+                    samesite="lax", secure=request.url.scheme == "https")
+    return resp
 
 
 @app.get("/api/ebay/callback")
 def ebay_callback(request: Request, code: str = "", state: str = ""):
-    uid = _uid(request) or auth.verify_state(state)
-    if not code or not uid:
+    verified = auth.verify_state(state)
+    if not code or not verified:
+        return RedirectResponse("/?ebay=error")
+    uid, nonce = verified
+    # The nonce in the signed state must match the cookie set at connect time,
+    # so a callback can only bind an eBay account to the browser that started
+    # the flow (blocks CSRF authorization-code injection).
+    cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
+    if not cookie_nonce or cookie_nonce != nonce:
+        log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
         return RedirectResponse("/?ebay=error")
     try:
         tokens = ebay_auth.exchange_code(code)
@@ -174,7 +219,9 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             uid, refresh_token=tokens["refresh_token"],
             ebay_username=ident["username"], ebay_email=ident["email"],
             **policies)
-        return RedirectResponse("/?ebay=connected")
+        resp = RedirectResponse("/?ebay=connected")
+        resp.delete_cookie(EBAY_NONCE_COOKIE)
+        return resp
     except Exception:  # noqa: BLE001
         return RedirectResponse("/?ebay=error")
 
@@ -224,6 +271,67 @@ def get_ebay_policies(request: Request) -> dict:
     }
 
 
+@app.post("/api/ebay/ensure-ground-policy")
+def ensure_ground_policy(request: Request) -> dict:
+    """Find — or create — a USPS Ground Advantage fulfillment policy (the
+    cheapest broadly-applicable USPS service) and make it the account default
+    if none is set yet."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        pol = ebay_auth.ensure_ground_policy(creds["access_token"])
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
+    if pol.get("id") and not creds.get("fulfillment_policy_id"):
+        db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
+    return pol
+
+
+def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
+    """Run the full pre-publish checklist for this user's account state."""
+    creds = _ebay_creds_for(request)
+    connected = bool(creds) or config.ebay_ready()
+    if creds:
+        fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
+        has_payment = bool(creds.get("payment_policy_id"))
+        has_return = bool(creds.get("return_policy_id"))
+        has_location = bool(creds.get("merchant_location_key"))
+    else:
+        fulfillment = listing.fulfillment_policy_id or config.EBAY_FULFILLMENT_POLICY_ID or ""
+        has_payment = bool(config.EBAY_PAYMENT_POLICY_ID)
+        has_return = bool(config.EBAY_RETURN_POLICY_ID)
+        has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
+
+    # What the chosen shipping policy actually ships with (per-service weight
+    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz).
+    services = (ebay_auth.fulfillment_policy_services(creds["access_token"], fulfillment)
+                if creds and fulfillment else [])
+
+    required = None
+    if config.taxonomy_ready() and (listing.category_id or "").strip().isdigit():
+        try:
+            asp = taxonomy.item_aspects(listing.category_id)
+            required = [a["name"] for a in asp.get("aspects", []) if a.get("required")]
+        except Exception:  # noqa: BLE001 - aspects are a best-effort check
+            required = None
+
+    return preflight.validate(
+        listing, mode,
+        has_fulfillment=bool(fulfillment), has_payment=has_payment,
+        has_return=has_return, has_location=has_location, connected=connected,
+        policy_services=services, required_aspects=required)
+
+
+@app.post("/api/publish-preflight")
+async def publish_preflight(req: PublishRequest, request: Request) -> dict:
+    """The full 'ready to publish?' checklist, without touching the listing."""
+    issues = await run_in_threadpool(
+        _preflight_issues, request, req.listing, req.mode or "live")
+    return {"ok": not preflight.errors_only(issues), "issues": issues}
+
+
 @app.post("/api/ebay/policies")
 def set_ebay_policies(request: Request, payload: dict) -> dict:
     """Save the account's default shipping/payment/return policy selections and
@@ -253,6 +361,77 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "No settings provided.")
     db.save_ebay_account(uid, **fields)
     return {"ok": True, "selected": fields}
+
+
+@app.get("/api/profile")
+def get_profile(request: Request) -> dict:
+    """The logged-in user's profile + eBay connection summary for Settings."""
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    acct = db.get_ebay_account(user["id"]) or {}
+    connected = bool(acct.get("refresh_token"))
+    return {
+        "user": {"email": user["email"],
+                 "display_name": user.get("display_name", "")},
+        "ebay": {
+            "connected": connected,
+            "username": acct.get("ebay_username", "") if connected else "",
+            "email": acct.get("ebay_email", "") if connected else "",
+            "ship_from_postal": acct.get("ship_from_postal", ""),
+            "policies_set": bool(acct.get("fulfillment_policy_id")
+                                 and acct.get("payment_policy_id")
+                                 and acct.get("return_policy_id")),
+            "location_set": bool(acct.get("merchant_location_key")),
+        },
+    }
+
+
+@app.post("/api/profile")
+def save_profile(request: Request, payload: dict) -> dict:
+    """Save profile customizations (currently: display name)."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    display_name = str(payload.get("display_name", "")).strip()[:80]
+    updated = db.update_user(uid, display_name=display_name)
+    if not updated:
+        raise HTTPException(503, "Couldn't save your profile — try again shortly.")
+    return {"ok": True, "user": {"email": updated["email"],
+                                 "display_name": updated["display_name"]}}
+
+
+@app.post("/api/profile/sync-ebay")
+def sync_profile_from_ebay(request: Request) -> dict:
+    """Auto-pull profile info from the connected eBay account: identity
+    (username/email), business policies, and inventory location."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    access = creds["access_token"]
+    fields: dict = {}
+    try:
+        ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
+        fields["ebay_username"] = ident["username"]
+        fields["ebay_email"] = ident["email"]
+    except Exception as exc:  # noqa: BLE001 - identity scope may be missing
+        log.info("profile sync: identity fetch failed for %s: %s", uid, exc)
+    # Only fill policy/location gaps — never overwrite explicit selections.
+    acct = db.get_ebay_account(uid) or {}
+    discovered = ebay_auth.fetch_policies_and_location(access)
+    for key, val in discovered.items():
+        if val and not acct.get(key):
+            fields[key] = val
+    if fields:
+        db.save_ebay_account(uid, **fields)
+    # Default the display name to the eBay username if none is set yet.
+    user = auth.current_user(request) or {}
+    if fields.get("ebay_username") and not user.get("display_name"):
+        db.update_user(uid, display_name=fields["ebay_username"])
+    return get_profile(request)
 
 
 @app.post("/api/ebay/disconnect")
@@ -436,19 +615,144 @@ async def edit_image(
 
     def _save() -> None:
         from io import BytesIO
+        import os
         from PIL import Image
         img = Image.open(BytesIO(data)).convert("RGB")
-        img.save(path, "JPEG", quality=88, optimize=True)
+        # Write to a temp file and atomically replace, so a concurrent reader
+        # (eBay fetching /media, or a thumbnail request) never sees a
+        # half-written JPEG.
+        tmp = path.with_name(path.name + ".tmp")
+        img.save(tmp, "JPEG", quality=88, optimize=True)
+        os.replace(tmp, path)
 
     try:
         await run_in_threadpool(_save)
     except Exception as exc:  # noqa: BLE001
         log.warning("edit-image: could not process (session=%s name=%s): %s", session_id, name, exc)
         raise HTTPException(400, f"Could not process the edited image: {exc}") from exc
-    await run_in_threadpool(
-        objstore.upload_optimized, session_id, opt_dir, [name])
+    # When R2 is the source eBay fetches from, a failed re-push means the live
+    # listing would keep the OLD photo — surface it instead of reporting success.
+    if objstore.enabled():
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            log.warning("edit-image: R2 re-push failed (session=%s name=%s)", session_id, name)
+            raise HTTPException(
+                502, "Saved locally, but couldn’t update the stored copy eBay "
+                     "uses. Try saving again in a moment.")
     log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# Photo studio: AI-assisted clean-up + smart crop for the in-browser editor.
+# All three endpoints accept an optional `file` (the editor's current canvas,
+# including unsaved brush strokes); without it they read the saved photo.
+# Nothing here writes to disk — the editor previews the result and saves via
+# /api/edit-image, so every AI action stays reviewable and cancellable.
+# ---------------------------------------------------------------------------
+
+def _studio_load(session_id: str, name: str, data: Optional[bytes]):
+    from io import BytesIO
+    from PIL import Image
+
+    if data:
+        img = Image.open(BytesIO(data))
+        img.load()
+        return img
+    session_id = (session_id or "").strip()
+    name = (name or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents or not path.is_file():
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    return Image.open(path)
+
+
+def _data_url(img, fmt: str = "JPEG") -> str:
+    import base64
+    from io import BytesIO
+
+    buf = BytesIO()
+    if fmt == "PNG":
+        img.save(buf, "PNG", optimize=True)
+        mime = "image/png"
+    else:
+        img.save(buf, "JPEG", quality=88, optimize=True)
+        mime = "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+
+@app.post("/api/image/analyze")
+async def image_analyze(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """Re-check the item's borders: returns a mask of leftover background
+    (non-white areas outside the detected subject) for the editor to highlight."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        res = images.analyze_cleanup(img)
+        return {
+            "ok": True,
+            "residue_pct": res["residue_pct"],
+            "bbox": res["bbox"],
+            "mask": _data_url(res["residue_mask"], "PNG") if res["residue_pct"] > 0 else None,
+            "width": res["residue_mask"].width,
+            "height": res["residue_mask"].height,
+        }
+
+    return await run_in_threadpool(_run)
+
+
+@app.post("/api/image/auto-clean")
+async def image_auto_clean(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """AI clean-up: re-detect the subject and whiten everything outside it.
+    Returns the cleaned image for the editor to preview (not saved yet)."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        return {"ok": True, "image": _data_url(images.auto_clean(img))}
+
+    return await run_in_threadpool(_run)
+
+
+@app.post("/api/image/smart-crop")
+async def image_smart_crop(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """Crop to the detected subject with a clean margin, padded to a square.
+    Returns the cropped image for preview, or applied=False if the frame is
+    already tight (so the UI can say so instead of degrading the photo)."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        cropped = images.smart_crop(img)
+        if cropped is None:
+            return {"ok": True, "applied": False,
+                    "message": "Already nicely framed — no crop needed."}
+        return {"ok": True, "applied": True, "image": _data_url(cropped)}
+
+    return await run_in_threadpool(_run)
 
 
 @app.post("/api/identify/{session_id}")
@@ -502,6 +806,32 @@ def category_suggestions(payload: dict) -> dict:
         raise HTTPException(502, f"eBay Taxonomy API error: {exc}") from exc
 
 
+@app.post("/api/price-suggestions")
+def price_suggestions(payload: dict) -> dict:
+    """Market-price suggestion for the listing from live eBay comps.
+
+    Uses the same application token as taxonomy (no seller login needed).
+    Sources are pluggable — see services/pricing.py.
+    """
+    if not config.taxonomy_ready():
+        raise HTTPException(
+            400,
+            "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured; cannot look "
+            "up market prices.",
+        )
+    query = str(payload.get("query", "")).strip()
+    if not query:
+        raise HTTPException(400, "query is required")
+    try:
+        return pricing.suggest(
+            query,
+            category_id=str(payload.get("category_id") or "").strip() or None,
+            condition=str(payload.get("condition") or "").strip() or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
+
+
 @app.post("/api/refine")
 def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
@@ -517,6 +847,250 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     storage.save_listing(session_id, listing)
     db.upsert_listing(session_id, listing.model_dump(), status="draft", user_id=_uid(request))
     return {"saved": True}
+
+
+@app.post("/api/item-aspects")
+def item_aspects(payload: dict) -> dict:
+    """Required + recommended item specifics eBay defines for a category."""
+    if not config.taxonomy_ready():
+        raise HTTPException(400, "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured.")
+    cid = str(payload.get("category_id", "")).strip()
+    if not cid:
+        raise HTTPException(400, "category_id is required")
+    try:
+        return taxonomy.item_aspects(cid)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"eBay aspects lookup failed: {exc}") from exc
+
+
+@app.post("/api/item-conditions")
+def item_conditions(payload: dict, request: Request) -> dict:
+    """The conditions eBay allows for a category (prevents publish error 25021).
+    Uses the connected seller's token when available, else the app token."""
+    if not config.taxonomy_ready():
+        raise HTTPException(400, "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured.")
+    cid = str(payload.get("category_id", "")).strip()
+    if not cid:
+        raise HTTPException(400, "category_id is required")
+    creds = _ebay_creds_for(request)
+    token = creds.get("access_token") if creds else None
+    try:
+        return taxonomy.item_conditions(cid, access_token=token)
+    except Exception as exc:  # noqa: BLE001 - optional enhancement; fail soft
+        log.info("item-conditions(cat=%s) failed: %s", cid, exc)
+        return {"conditions": []}
+
+
+@app.post("/api/delete-image")
+def delete_image(payload: dict, request: Request) -> dict:
+    """Remove one optimized image from a session (local disk + R2)."""
+    session_id = str(payload.get("session_id", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    if not session_id or not name:
+        raise HTTPException(400, "session_id and name are required")
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents:  # path-traversal guard
+        raise HTTPException(400, "Invalid image name")
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise HTTPException(500, f"Couldn't delete the image: {exc}") from exc
+    if objstore.enabled():
+        objstore.delete(objstore.key_for(session_id, name))
+    log.info("delete-image: session=%s name=%s", session_id, name)
+    return {"ok": True, "remaining": storage.list_optimized(session_id)}
+
+
+# ---------- Bulk mode: one photo dump -> many listings ----------
+# Jobs are in-memory: the app runs a single always-on machine (fly.toml), and a
+# lost job only means re-running the upload — listings themselves persist.
+_BULK_JOBS: dict[str, dict] = {}
+_BULK_LOCK = threading.Lock()
+BULK_MAX_FILES = 40
+
+
+def _bulk_set(job_id: str, **fields) -> None:
+    with _BULK_LOCK:
+        job = _BULK_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
+                  uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
+    """Background worker: optimize -> group -> per-item identify (-> publish)."""
+    try:
+        _bulk_set(job_id, phase="optimizing")
+        images.optimize_all(storage.original_dir(staging_id),
+                            storage.optimized_dir(staging_id), strip_bg)
+        names = storage.list_optimized(staging_id)
+        if not names:
+            _bulk_set(job_id, done=True, error="No usable photos in the upload.")
+            return
+        opt_dir = storage.optimized_dir(staging_id)
+
+        _bulk_set(job_id, phase="grouping", total_photos=len(names))
+        thumbs = [images.thumb_jpeg(opt_dir / n) for n in names]
+        groups = claude_ai.group_photos(thumbs)["groups"]
+        _bulk_set(job_id, total_items=len(groups))
+
+        items: list[dict] = []
+        for gi, group in enumerate(groups):
+            _bulk_set(job_id, phase="identifying", current=gi + 1, items=list(items))
+            sid = storage.new_session_id()
+            item_dir = storage.optimized_dir(sid)
+            item_names = []
+            for j, idx in enumerate(group["indices"]):
+                src = opt_dir / names[idx]
+                dst_name = f"img_{j:02d}.jpg"
+                shutil.copyfile(src, item_dir / dst_name)
+                item_names.append(dst_name)
+            objstore.upload_optimized(sid, item_dir, item_names)
+
+            item = {"session_id": sid, "name": group["name"], "status": "draft",
+                    "error": None, "listing_id": None,
+                    "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
+            try:
+                result = claude_ai.identify([item_dir / n for n in item_names], item_names)
+                listing = result.listing
+                if config.taxonomy_ready() and not listing.category_id:
+                    try:
+                        best = taxonomy.best_category_id(_category_query(listing))
+                        if best.get("category_id"):
+                            listing.category_id = best["category_id"]
+                            if best.get("path"):
+                                listing.category_suggestion = best["path"]
+                    except Exception:  # noqa: BLE001
+                        pass
+                storage.save_listing(sid, listing)
+                status = "draft"
+                if mode == "live":
+                    pub = ebay.publish(sid, listing, "live", base_url, creds=creds)
+                    if pub.get("published"):
+                        status = "published"
+                        item["status"] = "published"
+                        item["listing_id"] = pub.get("listing_id")
+                    else:
+                        # Stay a draft; surface why it couldn't go live.
+                        item["error"] = pub.get("message") or "Couldn't publish automatically."
+                db.upsert_listing(sid, listing.model_dump(), status=status, user_id=uid)
+                item["listing"] = listing.model_dump()
+                item["title"] = listing.title
+            except Exception as exc:  # noqa: BLE001 - one bad item shouldn't kill the batch
+                log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
+                item["status"] = "error"
+                item["error"] = str(exc)
+                item["listing"] = None
+                item["title"] = group["name"]
+            items.append(item)
+
+        _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
+        log.info("bulk %s: %d photos -> %d items (%s)", job_id, len(names), len(items), mode)
+    except Exception as exc:  # noqa: BLE001 - job-level failure
+        log.warning("bulk %s failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
+
+
+@app.post("/api/bulk/upload")
+async def bulk_upload(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    mode: str = Form("draft"),
+    remove_bg: str = Form("false"),
+) -> dict:
+    """Bulk mode: accept a photo dump spanning multiple items, then process in
+    the background (poll /api/bulk/status/{job_id}). mode: 'draft' queues every
+    item for review; 'live' also attempts to publish each one."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    if mode not in ("draft", "live"):
+        raise HTTPException(400, "mode must be 'draft' or 'live'")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+    if len(files) > BULK_MAX_FILES:
+        raise HTTPException(400, f"Too many files (max {BULK_MAX_FILES} in bulk mode)")
+
+    staging_id = storage.new_session_id()
+    orig = storage.original_dir(staging_id)
+    for i, f in enumerate(files):
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
+        suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
+        (orig / f"src_{i:02d}{suffix}").write_bytes(data)
+
+    # Capture per-request context now — the worker thread has no Request.
+    uid = _uid(request)
+    creds = _ebay_creds_for(request) if mode == "live" else None
+    job_id = storage.new_session_id()
+    with _BULK_LOCK:
+        _BULK_JOBS[job_id] = {
+            "id": job_id, "mode": mode, "phase": "uploading", "done": False,
+            "error": None, "items": [], "total_items": 0, "current": 0,
+            "total_photos": len(files),
+        }
+    threading.Thread(
+        target=_run_bulk_job,
+        args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
+              mode, uid, creds, _base_url(request)),
+        daemon=True,
+    ).start()
+    log.info("bulk %s: started (%d files, mode=%s)", job_id, len(files), mode)
+    return {"job_id": job_id}
+
+
+@app.get("/api/bulk/status/{job_id}")
+def bulk_status(job_id: str) -> dict:
+    with _BULK_LOCK:
+        job = _BULK_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
+        return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
+
+
+@app.post("/api/shelf-scan")
+async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
+    """Shop Mode 'Scan a shelf': the client samples frames from a recorded
+    video and posts them here; Claude flags items worth a closer look. No
+    pricing, no persistence — pure triage."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    if not files:
+        raise HTTPException(400, "No frames provided.")
+    frames: list[bytes] = []
+    for f in files[:8]:
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, "A frame was too large.")
+        if data:
+            frames.append(data)
+    if not frames:
+        raise HTTPException(400, "No readable frames.")
+    try:
+        result = await run_in_threadpool(claude_ai.scan_shelf, frames)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Shelf scan failed: {exc}") from exc
+    log.info("shelf scan: %d frames -> %d candidates", len(frames),
+             len(result.get("items", [])))
+    return result
+
+
+@app.post("/api/inventory/add")
+def inventory_add(req: PublishRequest, request: Request) -> dict:
+    """Shop Mode 'Buy': save a scanned item to the user's unlisted inventory
+    (status='unlisted'), so it shows up in the Sell dashboard to finish + list
+    later. Reuses the listing record; mode is ignored."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to save items to your inventory.")
+    storage.save_listing(req.session_id, req.listing)
+    db.upsert_listing(req.session_id, req.listing.model_dump(),
+                      status="unlisted", user_id=uid)
+    log.info("inventory add: session=%s user=%s", req.session_id, uid)
+    return {"ok": True, "id": req.session_id}
 
 
 @app.get("/api/listings")
@@ -544,6 +1118,24 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
+    # Pre-publish checklist: catch everything eBay would reject BEFORE the
+    # round-trip, with field-targeted fixes. Only gates a real (connected)
+    # live publish — dry-runs and drafts stay permissive.
+    if req.mode == "live" and (creds or config.ebay_ready()):
+        problems = preflight.errors_only(_preflight_issues(request, req.listing, "live"))
+        if problems:
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="draft", user_id=_uid(request))
+            log.info("publish blocked by preflight: session=%s issues=%d",
+                     req.session_id, len(problems))
+            return JSONResponse({
+                "dry_run": False,
+                "error": True,
+                "mode": req.mode,
+                "message": f"Not quite ready — {len(problems)} thing"
+                           f"{'s' if len(problems) != 1 else ''} to fix before eBay will accept it:",
+                "issues": problems,
+            })
     # Self-heal the ship-from location on a live publish: re-ensure it from the
     # saved ZIP so a location missing its country (eBay 'Item.Country empty')
     # gets repaired without the user re-saving settings.

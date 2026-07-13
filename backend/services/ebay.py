@@ -1,6 +1,6 @@
 """eBay Sell (Inventory) API integration.
 
-Publishing flow (live only — drafts stay in Thryft and never touch eBay):
+Publishing flow (live only — drafts stay in QuickFlip and never touch eBay):
   1. createOrReplaceInventoryItem  (the product + condition + images)
   2. createOffer / updateOffer     (price, policies, marketplace, location)
   3. publishOffer                  (turns the offer into a live listing)
@@ -11,7 +11,6 @@ can inspect them and push later once you have a developer account.
 """
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 import httpx
@@ -41,8 +40,12 @@ def _prune(value):
 
 
 def _sku(session_id: str, listing: Listing) -> str:
-    base = re.sub(r"[^A-Za-z0-9]+", "-", (listing.brand or "item")).strip("-")
-    return f"{base[:20]}-{session_id}".upper()
+    # Must be STABLE for the life of the listing: republishing the same session
+    # reuses the SKU so we update the existing offer instead of creating a
+    # duplicate. Deriving it from mutable fields (e.g. brand) would mint a new
+    # SKU whenever the user edits that field and silently create a second live
+    # listing — so key it on the immutable session id alone.
+    return f"THRYFT-{session_id}".upper()
 
 
 def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
@@ -57,36 +60,102 @@ def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
     return [f"{base_url}/media/{session_id}/optimized/{n}" for n in names]
 
 
+def _package_weight_and_size(listing: Listing) -> dict:
+    """Build eBay's packageWeightAndSize. Publishing requires a valid weight;
+    dimensions are optional and only included when all three are set."""
+    total_lb = round((listing.package_weight_lb or 0)
+                     + (listing.package_weight_oz or 0) / 16.0, 2)
+    pkg: dict = {}
+    if total_lb > 0:
+        pkg["weight"] = {"value": total_lb, "unit": "POUND"}
+    dims = (listing.package_length_in, listing.package_width_in,
+            listing.package_height_in)
+    if all(d and d > 0 for d in dims):
+        pkg["dimensions"] = {
+            "length": round(listing.package_length_in, 2),
+            "width": round(listing.package_width_in, 2),
+            "height": round(listing.package_height_in, 2),
+            "unit": "INCH",
+        }
+    return {"packageWeightAndSize": pkg} if pkg else {}
+
+
+# Product identifiers live in dedicated product.* fields, not as free aspects.
+_IDENTIFIER_KEYS = {"upc": "upc", "ean": "ean", "isbn": "isbn"}
+
+
 def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> dict:
     aspects: dict[str, list[str]] = {}
+    identifiers: dict[str, str] = {}
     if listing.brand:
         aspects["Brand"] = [listing.brand]
     for spec in listing.item_specifics:
-        if spec.name and spec.value:
-            aspects.setdefault(spec.name, [])
-            if spec.value not in aspects[spec.name]:
-                aspects[spec.name].append(spec.value)
+        if not (spec.name and spec.value):
+            continue
+        key = spec.name.strip().lower()
+        # Route UPC/EAN/ISBN to the canonical product fields rather than aspects.
+        if key in _IDENTIFIER_KEYS:
+            identifiers.setdefault(_IDENTIFIER_KEYS[key], spec.value.strip())
+            continue
+        aspects.setdefault(spec.name, [])
+        if spec.value not in aspects[spec.name]:
+            aspects[spec.name].append(spec.value)
+
+    # eBay validates brand and MPN as a pair ('Input data for tag <BrandMPN>
+    # is invalid or missing'): once a brand is present, an MPN must be too.
+    # Use the seller's MPN item specific when given, else eBay's official
+    # "no part number" sentinel.
+    brand = listing.brand or (aspects.get("Brand") or [""])[0]
+    mpn = next((s.value for s in listing.item_specifics
+                if s.name and s.value and s.name.strip().lower()
+                in ("mpn", "manufacturer part number")), "")
+    if brand and not mpn:
+        mpn = "Does Not Apply"
+
+    product = {
+        "title": listing.title[:80],
+        "description": listing.description or listing.title,
+        "aspects": aspects,
+        "imageUrls": _image_urls(session_id, listing.images, base_url),
+        "brand": brand or None,
+        "mpn": (mpn if brand else None) or None,
+    }
+    # eBay expects identifiers as arrays; "Does Not Apply" is the accepted
+    # sentinel for items without one.
+    for field, value in identifiers.items():
+        product[field] = [value]
 
     return _prune({
+        **_package_weight_and_size(listing),
         "sku": _sku(session_id, listing),
         "availability": {
             "shipToLocationAvailability": {"quantity": max(1, listing.quantity)}
         },
         "condition": listing.condition,
         "conditionDescription": listing.condition_description or None,
-        "product": {
-            "title": listing.title[:80],
-            "description": listing.description or listing.title,
-            "aspects": aspects,
-            "imageUrls": _image_urls(session_id, listing.images, base_url),
-            "brand": listing.brand or None,
-        },
+        "product": product,
     })
 
 
 def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None) -> dict:
     price = listing.price if listing.price is not None else 0.0
-    c = creds or {}
+    # A connected seller (creds present) must ONLY use their own policies and
+    # location — never fall back to the deployment owner's env-configured IDs,
+    # which belong to a different eBay account and would be rejected under the
+    # user's token. Env fallbacks apply only to the no-user (env-config) path.
+    if creds is not None:
+        c = creds
+        fulfillment = c.get("fulfillment_policy_id") or None
+        payment = c.get("payment_policy_id") or None
+        returns = c.get("return_policy_id") or None
+        location = c.get("merchant_location_key") or None
+    else:
+        fulfillment = config.EBAY_FULFILLMENT_POLICY_ID or None
+        payment = config.EBAY_PAYMENT_POLICY_ID or None
+        returns = config.EBAY_RETURN_POLICY_ID or None
+        location = config.EBAY_MERCHANT_LOCATION_KEY or None
+    # A shipping service chosen on the listing overrides the account default.
+    fulfillment = listing.fulfillment_policy_id or fulfillment
     return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
@@ -101,11 +170,11 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
             }
         },
         "listingPolicies": {
-            "fulfillmentPolicyId": c.get("fulfillment_policy_id") or config.EBAY_FULFILLMENT_POLICY_ID or None,
-            "paymentPolicyId": c.get("payment_policy_id") or config.EBAY_PAYMENT_POLICY_ID or None,
-            "returnPolicyId": c.get("return_policy_id") or config.EBAY_RETURN_POLICY_ID or None,
+            "fulfillmentPolicyId": fulfillment,
+            "paymentPolicyId": payment,
+            "returnPolicyId": returns,
         },
-        "merchantLocationKey": c.get("merchant_location_key") or config.EBAY_MERCHANT_LOCATION_KEY or None,
+        "merchantLocationKey": location,
     })
 
 
@@ -183,7 +252,7 @@ def _offer_id_from_error(body: dict) -> Optional[str]:
 
 
 def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
-               creds: Optional[dict] = None) -> dict:
+               creds: Optional[dict] = None, do_publish: bool = True) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
     sku = _sku(session_id, listing)
     item = build_inventory_item(session_id, listing, base_url)
@@ -252,17 +321,20 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                     "steps": steps,
                 }
 
-            # publish() short-circuits drafts before ever calling _push_live, so
-            # we're always publishing a live listing here.
-            r3 = client.post(
-                f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
-                headers=_headers(token),
-            )
-            r3_body = _body(r3)
-            steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
-            r3.raise_for_status()
-            published = True
-            listing_id = r3_body.get("listingId")
+            # Draft mode stops here: the inventory item + unpublished offer now
+            # live on eBay (ready to publish), but we don't call publishOffer.
+            published = False
+            listing_id = None
+            if do_publish:
+                r3 = client.post(
+                    f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
+                    headers=_headers(token),
+                )
+                r3_body = _body(r3)
+                steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
+                r3.raise_for_status()
+                published = True
+                listing_id = r3_body.get("listingId")
     except httpx.HTTPStatusError as exc:
         failed = steps[-1]["step"] if steps else "authentication"
         status = exc.response.status_code
@@ -281,6 +353,24 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
             "detail": exc.response.text,
             "steps": steps,
         }
+    except httpx.RequestError as exc:
+        # Timeout / connection / DNS failure — no HTTP status. Don't 500: a
+        # publishOffer that timed out may have SUCCEEDED on eBay, so tell the
+        # user to check before retrying rather than blindly republishing.
+        failed = steps[-1]["step"] if steps else "authentication"
+        log.warning("publish %s network error (sku=%s): %s", failed, sku, exc)
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "step": failed,
+            "message": "Couldn’t reach eBay just now — the connection timed out.",
+            "issues": [{"target": "generic", "title": "eBay didn’t respond in time",
+                        "fix": ("Check Selling → Active on eBay in a minute: if the "
+                                "listing isn’t there, press Publish Live again.")}],
+            "detail": str(exc),
+            "steps": steps,
+        }
 
     return {
         "dry_run": False,
@@ -288,6 +378,13 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
         "sku": sku,
         "offer_id": offer_id,
         "published": published,
+        "ebay_draft": not published,  # unpublished offer created on eBay
+        "message": (None if published else
+                    "Draft saved — it's staged on your eBay account as an "
+                    "unpublished offer, ready for a one-click publish. Heads-up: "
+                    "eBay does NOT show unpublished offers anywhere in Seller Hub "
+                    "(not even the Drafts page), so you won't see it on eBay until "
+                    "you press Publish Live here."),
         "listing_id": listing_id,
         "steps": steps,
     }
@@ -300,29 +397,27 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     creds: a connected user's eBay credentials (access_token + policy ids +
     location). When present we publish with those; otherwise we fall back to
     env config, and dry-run if neither is available.
-    mode: "draft" saves in Thryft only (no eBay call); "live" publishes to eBay.
+    mode: "draft" saves in QuickFlip only (no eBay call); "live" publishes to eBay.
     """
     item = build_inventory_item(session_id, listing, base_url)
     offer = build_offer(session_id, listing, creds)
     payload = {"inventory_item": item, "offer": offer, "mode": mode}
     export_path = storage.write_export(session_id, "ebay_payload", payload)
 
-    # "Draft" saves in Thryft only. An Inventory-API unpublished offer never
-    # appears in the eBay Seller Hub, so pushing a draft to eBay is pure
-    # downside (and leaves a stale offer that trips the duplicate check on a
-    # later live publish). Only "Publish Live" posts to eBay.
-    if mode == "draft":
-        return {
-            "dry_run": False,
-            "draft": True,
-            "mode": mode,
-            "message": ("Saved to your Thryft drafts (see 'My listings'). Drafts "
-                        "stay here — click Publish Live to post it to eBay."),
-            "export_path": str(export_path),
-        }
-
     ready = bool((creds or {}).get("access_token")) or config.ebay_ready()
     if not ready:
+        # No eBay connection: a draft stays in QuickFlip only (we can't reach
+        # eBay), and a live publish returns the dry-run payload to inspect.
+        if mode == "draft":
+            return {
+                "dry_run": False,
+                "draft": True,
+                "mode": mode,
+                "message": ("Saved to your QuickFlip drafts — find it under Drafts. "
+                            "It is NOT on eBay: connect your eBay account and press "
+                            "Publish Live when you're ready to list it."),
+                "export_path": str(export_path),
+            }
         return {
             "dry_run": True,
             "mode": mode,
@@ -336,7 +431,8 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
 
     # eBay fetches every image URL when the inventory item is created; if the
     # local files are gone (session predates a restart/deploy) it fails with
-    # an opaque 25001 'system error'. Fail clearly instead.
+    # an opaque 25001 'system error'. Applies to drafts too (both create the
+    # inventory item). Fail clearly instead.
     if not objstore.enabled():
         names = listing.images or storage.list_optimized(session_id)
         opt_dir = storage.optimized_dir(session_id)
@@ -352,24 +448,41 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                 "export_path": str(export_path),
             }
 
-    # eBay requires a ship-from inventory location to publish an offer. Without
-    # one, publishOffer fails opaquely — catch it here with a clear fix.
-    has_location = bool((creds or {}).get("merchant_location_key")
-                        or config.EBAY_MERCHANT_LOCATION_KEY)
-    if not has_location:
-        log.warning("publish blocked: no ship-from location for session %s", session_id)
-        return {
-            "dry_run": False,
-            "error": True,
-            "mode": mode,
-            "message": "eBay needs a ship-from location before it can publish.",
-            "issues": [{"target": "location", "title": "No ship-from location set",
-                        "fix": "Open Listing settings, add your ship-from ZIP, and save — then Publish Live again."}],
-            "export_path": str(export_path),
-        }
+    # Package weight and a ship-from location are publish-time requirements, so
+    # only gate a LIVE publish on them — an incomplete draft can still be saved
+    # to eBay and finished later.
+    if mode == "live":
+        total_lb = (listing.package_weight_lb or 0) + (listing.package_weight_oz or 0) / 16.0
+        if total_lb <= 0:
+            log.warning("publish blocked: no package weight for session %s", session_id)
+            return {
+                "dry_run": False,
+                "error": True,
+                "mode": mode,
+                "message": "eBay needs a package weight to publish.",
+                "issues": [{"target": "weight", "title": "Package weight is missing",
+                            "fix": "Enter the shipping weight (lb / oz) in the listing, then Publish Live again."}],
+                "export_path": str(export_path),
+            }
+        # For a connected seller, only THEIR location counts (the env key
+        # belongs to the app owner's account, unusable under the user's token).
+        has_location = (bool(creds.get("merchant_location_key")) if creds is not None
+                        else bool(config.EBAY_MERCHANT_LOCATION_KEY))
+        if not has_location:
+            log.warning("publish blocked: no ship-from location for session %s", session_id)
+            return {
+                "dry_run": False,
+                "error": True,
+                "mode": mode,
+                "message": "eBay needs a ship-from location before it can publish.",
+                "issues": [{"target": "location", "title": "No ship-from location set",
+                            "fix": "Open Listing settings, add your ship-from ZIP, and save — then Publish Live again."}],
+                "export_path": str(export_path),
+            }
 
     try:
-        result = _push_live(session_id, listing, mode, base_url, creds)
+        result = _push_live(session_id, listing, mode, base_url, creds,
+                            do_publish=(mode == "live"))
         result["export_path"] = str(export_path)
         return result
     except httpx.HTTPStatusError as exc:
@@ -384,5 +497,18 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             "message": ebay_errors.headline(issues, "publishing", exc.response.status_code),
             "issues": issues,
             "detail": exc.response.text,
+            "export_path": str(export_path),
+        }
+    except httpx.RequestError as exc:
+        # Token-refresh or other pre-publish network failure.
+        log.warning("publish network error (session=%s): %s", session_id, exc)
+        return {
+            "dry_run": False,
+            "error": True,
+            "mode": mode,
+            "message": "Couldn’t reach eBay just now — please try again in a moment.",
+            "issues": [{"target": "generic", "title": "eBay didn’t respond",
+                        "fix": "Wait a moment and press Publish Live again."}],
+            "detail": str(exc),
             "export_path": str(export_path),
         }

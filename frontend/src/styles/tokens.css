@@ -1,0 +1,206 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Thryft design tokens
+   eBay brand colors are used as *accents* on an airy neutral canvas.
+   Every component reads from these variables — change them here, restyle
+   the whole app (including dark mode below).
+--------------------------------------------------------------------------- */
+:root {
+  /* Brand accents (eBay color language) */
+  --brand-blue: #0064d2;
+  --brand-blue-strong: #0053ae;
+  --brand-blue-soft: #e7f1fc;
+  --brand-red: #e53238;
+  --brand-red-soft: #fdeceb;
+  --brand-yellow: #f5af02;
+  --brand-yellow-soft: #fdf3d7;
+  --brand-green: #86b817;
+  --brand-green-soft: #f0f7dd;
+
+  /* Neutral canvas */
+  --bg: #fafafb;
+  --bg-sunken: #f3f4f6;
+  --card: #ffffff;
+  --card-hover: #ffffff;
+  --border: #ececec;
+  --border-strong: #dcdce0;
+
+  /* Text */
+  --text: #1f2937;
+  --text-secondary: #6b7280;
+  --text-faint: #9ca3af;
+  --text-on-accent: #ffffff;
+
+  /* Semantic */
+  --success: #16a34a;
+  --success-soft: #e8f7ee;
+  --warning: #f59e0b;
+  --warning-soft: #fdf3d7;
+  --error: #dc2626;
+  --error-soft: #fdeceb;
+
+  /* Radii */
+  --radius-card: 22px;
+  --radius-button: 15px;
+  --radius-input: 16px;
+  --radius-tile: 18px;
+
+  /* Shadows — very soft, almost invisible */
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.04);
+  --shadow-card-hover: 0 4px 10px rgb(16 24 40 / 0.06), 0 2px 4px rgb(16 24 40 / 0.05);
+  --shadow-float: 0 8px 28px rgb(16 24 40 / 0.09), 0 2px 8px rgb(16 24 40 / 0.05);
+  --shadow-pop: 0 16px 48px rgb(16 24 40 / 0.16), 0 4px 12px rgb(16 24 40 / 0.08);
+}
+
+.dark {
+  --brand-blue: #4a9ceb;
+  --brand-blue-strong: #6cb0f0;
+  --brand-blue-soft: #14263c;
+  --brand-red: #f0666b;
+  --brand-red-soft: #351b1d;
+  --brand-yellow: #f5b93c;
+  --brand-yellow-soft: #33290f;
+  --brand-green: #9fcc38;
+  --brand-green-soft: #22300c;
+
+  --bg: #101114;
+  --bg-sunken: #17181c;
+  --card: #1b1d22;
+  --card-hover: #1f2127;
+  --border: #2a2c33;
+  --border-strong: #383b44;
+
+  --text: #eceef2;
+  --text-secondary: #9aa1ad;
+  --text-faint: #6b7280;
+  --text-on-accent: #0d1117;
+
+  --success: #34c26b;
+  --success-soft: #12301d;
+  --warning: #f5b93c;
+  --warning-soft: #33290f;
+  --error: #f0666b;
+  --error-soft: #351b1d;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-card-hover: 0 4px 10px rgb(0 0 0 / 0.45);
+  --shadow-float: 0 8px 28px rgb(0 0 0 / 0.5);
+  --shadow-pop: 0 16px 48px rgb(0 0 0 / 0.6);
+}
+
+/* Expose tokens to Tailwind utilities (bg-card, text-secondary, rounded-card…) */
+@theme inline {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  --color-blue: var(--brand-blue);
+  --color-blue-strong: var(--brand-blue-strong);
+  --color-blue-soft: var(--brand-blue-soft);
+  --color-red: var(--brand-red);
+  --color-red-soft: var(--brand-red-soft);
+  --color-yellow: var(--brand-yellow);
+  --color-yellow-soft: var(--brand-yellow-soft);
+  --color-green: var(--brand-green);
+  --color-green-soft: var(--brand-green-soft);
+
+  --color-bg: var(--bg);
+  --color-bg-sunken: var(--bg-sunken);
+  --color-card: var(--card);
+  --color-card-hover: var(--card-hover);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+
+  --color-ink: var(--text);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-faint: var(--text-faint);
+  --color-on-accent: var(--text-on-accent);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-error: var(--error);
+  --color-error-soft: var(--error-soft);
+
+  --radius-card: var(--radius-card);
+  --radius-button: var(--radius-button);
+  --radius-input: var(--radius-input);
+  --radius-tile: var(--radius-tile);
+
+  --shadow-card: var(--shadow-card);
+  --shadow-card-hover: var(--shadow-card-hover);
+  --shadow-float: var(--shadow-float);
+  --shadow-pop: var(--shadow-pop);
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------- */
+
+html {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  min-height: 100dvh;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+/* Visible, on-brand focus for keyboard users (WCAG). */
+:focus-visible {
+  outline: 2px solid var(--brand-blue);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--brand-blue) 22%, transparent);
+}
+
+/* AI shimmer — the "magic is happening" texture used instead of spinners. */
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.ai-shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--bg-sunken) 40%,
+    color-mix(in srgb, var(--brand-blue) 12%, var(--bg-sunken)) 50%,
+    var(--bg-sunken) 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+.ai-shimmer-text {
+  background: linear-gradient(
+    100deg,
+    var(--text-secondary) 40%,
+    var(--brand-blue) 50%,
+    var(--text-secondary) 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s linear infinite;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes sparkle-pulse {
+  0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
+  50% { transform: scale(1.25) rotate(12deg); opacity: 0.75; }
+}
+.ai-sparkle {
+  animation: sparkle-pulse 1.2s ease-in-out infinite;
+}
+
+/* Reduced motion: kill the ambient animations. */
+@media (prefers-reduced-motion: reduce) {
+  .ai-shimmer, .ai-shimmer-text, .ai-sparkle { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}

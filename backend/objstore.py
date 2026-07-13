@@ -69,3 +69,14 @@ def upload_optimized(session_id: str, local_dir: Path, names: list[str]) -> None
         path = local_dir / name
         if path.is_file():
             upload(path, key_for(session_id, name))
+
+
+def delete(key: str) -> None:
+    """Best-effort delete of an object from R2. Never raises."""
+    try:
+        client = _get_client()
+        if client is None:
+            return
+        client.delete_object(Bucket=config.R2_BUCKET, Key=key)
+    except Exception as exc:  # noqa: BLE001 - never break the request
+        log.warning(f"objstore: delete failed: {exc}")

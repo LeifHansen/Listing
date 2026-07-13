@@ -1,4 +1,14 @@
-# eBay Listing Generator - container image (used by Fly.io and any Docker host)
+# QuickFlip - container image (used by Fly.io and any Docker host)
+
+# Stage 1: build the React frontend (Vite outputs static files to dist/).
+FROM node:22-slim AS frontend
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
+# Stage 2: the Python backend serves the API + the built frontend.
 FROM python:3.11-slim
 
 # Pillow 11 ships manylinux wheels, so no system build deps are needed.
@@ -16,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "from rembg import new_session; new_session('u2netp')"
 
 COPY backend ./backend
-COPY frontend ./frontend
+COPY --from=frontend /app/frontend/dist ./frontend/dist
 
 EXPOSE 8080
 

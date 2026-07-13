@@ -34,7 +34,12 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    # When the "you haven't listed anything yet" onboarding email went out
+    # (null = not sent). One-shot marker so a user is never nudged twice.
+    nudge_sent_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None)
 
 
 class EbayAccount(Base):
@@ -97,6 +102,8 @@ def _get_engine():
             "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
             "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
             "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN nudge_sent_at TIMESTAMP",
         ):
             try:
                 with _engine.begin() as conn:
@@ -166,7 +173,28 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
 # --- users -----------------------------------------------------------------
 
 def _user_to_dict(u: User) -> dict:
-    return {"id": u.id, "email": u.email, "created_at": u.created_at.isoformat()}
+    return {"id": u.id, "email": u.email,
+            "display_name": getattr(u, "display_name", "") or "",
+            "created_at": u.created_at.isoformat()}
+
+
+def update_user(user_id: str, display_name: Optional[str] = None) -> Optional[dict]:
+    """Update profile fields; returns the updated user dict (or None)."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if not u:
+                return None
+            if display_name is not None:
+                u.display_name = display_name[:80]
+            s.commit()
+            return _user_to_dict(u)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: update_user failed: {exc}")
+        return None
 
 
 # Sentinel so callers can tell "email taken" (user error, 409) apart from
@@ -309,3 +337,43 @@ def db_status() -> dict:
         return {"configured": True, "connected": True}
     except Exception as exc:  # noqa: BLE001
         return {"configured": True, "connected": False, "error": str(exc)}
+
+
+# --- onboarding nudge email --------------------------------------------------
+
+def users_needing_nudge(days: int) -> list[dict]:
+    """Users who signed up at least `days` days ago, have ZERO listings, and
+    haven't been nudged yet. Empty list on any DB problem (never raises)."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        cutoff = _now() - _dt.timedelta(days=days)
+        with Session(eng) as s:
+            listed = select(ListingRecord.user_id).where(
+                ListingRecord.user_id == User.id)
+            rows = s.execute(
+                select(User)
+                .where(User.created_at <= cutoff)
+                .where(User.nudge_sent_at.is_(None))
+                .where(~listed.exists())
+            ).scalars().all()
+            return [_user_to_dict(u) for u in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: users_needing_nudge failed: {exc}")
+        return []
+
+
+def mark_nudge_sent(user_id: str) -> None:
+    """Record that the onboarding email went out. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u:
+                u.nudge_sent_at = _now()
+                s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: mark_nudge_sent failed: {exc}")

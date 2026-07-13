@@ -122,3 +122,92 @@ def best_category_id(query: str, marketplace_id: Optional[str] = None) -> dict:
     result = suggest(query, marketplace_id, limit=1)
     suggs = result.get("suggestions") or []
     return suggs[0] if suggs else {}
+
+
+# eBay conditionId -> the Inventory API condition enum the offer must send.
+_CONDITION_ID_TO_ENUM = {
+    "1000": "NEW", "1500": "NEW_OTHER", "1750": "NEW_WITH_DEFECTS",
+    "2000": "CERTIFIED_REFURBISHED", "2010": "CERTIFIED_REFURBISHED",
+    "2020": "SELLER_REFURBISHED", "2030": "SELLER_REFURBISHED",
+    "2500": "SELLER_REFURBISHED", "2750": "LIKE_NEW",
+    "3000": "USED_EXCELLENT", "4000": "USED_VERY_GOOD",
+    "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
+    "7000": "FOR_PARTS_OR_NOT_WORKING",
+}
+
+
+def item_conditions(category_id: str, access_token: Optional[str] = None,
+                    marketplace_id: Optional[str] = None) -> dict:
+    """The item conditions eBay allows for a category, so the UI can offer only
+    valid choices (eBay rejects an out-of-category condition with error 25021).
+
+    Uses the Sell Metadata API. Prefers the connected seller's token; falls back
+    to the application token. Returns {"conditions": [{enum, id, label}]}.
+    """
+    if not category_id:
+        return {"conditions": []}
+    marketplace_id = marketplace_id or config.EBAY_MARKETPLACE_ID
+    token = access_token or _app_token()
+    resp = httpx.get(
+        f"{config.EBAY_API_BASE}/sell/metadata/v1/marketplace/{marketplace_id}"
+        "/get_item_condition_policies",
+        params={"filter": f"categoryIds:{{{category_id}}}"},
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    policies = data.get("itemConditionPolicies") or []
+    conditions = []
+    seen = set()
+    for pol in policies:
+        for c in pol.get("itemConditions", []) or []:
+            cid = str(c.get("conditionId", ""))
+            enum = _CONDITION_ID_TO_ENUM.get(cid)
+            if not enum or enum in seen:
+                continue
+            seen.add(enum)
+            conditions.append({
+                "enum": enum,
+                "id": cid,
+                "label": c.get("conditionDescription", "") or enum.replace("_", " ").title(),
+            })
+    return {"conditions": conditions}
+
+
+def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict:
+    """The item specifics (aspects) eBay defines for a leaf category, so the UI
+    can show exactly which fields are required vs recommended and whether each
+    is free-text or a fixed set of values.
+
+    Returns {"aspects": [{name, required, mode, values}]} where mode is
+    "SELECTION_ONLY" (must pick from `values`) or "FREE_TEXT".
+    """
+    if not category_id:
+        return {"aspects": []}
+    tree_id = default_tree_id(marketplace_id)
+    resp = httpx.get(
+        f"{config.EBAY_API_BASE}/commerce/taxonomy/v1/category_tree/{tree_id}"
+        "/get_item_aspects_for_category",
+        params={"category_id": category_id},
+        headers=_headers(),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    aspects = []
+    for a in data.get("aspects", []):
+        constraint = a.get("aspectConstraint", {}) or {}
+        values = [v.get("localizedValue", "")
+                  for v in (a.get("aspectValues") or []) if v.get("localizedValue")]
+        aspects.append({
+            "name": a.get("localizedAspectName", ""),
+            "required": bool(constraint.get("aspectRequired")),
+            "mode": constraint.get("aspectMode", "FREE_TEXT"),
+            # Cap the value list so a huge enum (e.g. Brand) doesn't bloat the
+            # payload; free-text is still allowed client-side past the cap.
+            "values": values[:60],
+        })
+    # Required first, then by name, so the UI can show must-haves up top.
+    aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
+    return {"aspects": aspects}

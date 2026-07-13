@@ -64,9 +64,36 @@ DATABASE_URL = (_clean_db_url(os.getenv("DATABASE_URL", ""))
                 or _clean_db_url(os.getenv("NEON_PRODUCTION_DATABASE_URL", "")))
 
 # --- Auth ------------------------------------------------------------------
-# Used to sign session JWTs. Set a stable value in production so sessions
-# survive restarts; otherwise a random per-process key is generated.
-SECRET_KEY = os.getenv("SECRET_KEY", "").strip() or os.urandom(32).hex()
+# Used to sign session JWTs and the eBay OAuth state. A stable value is
+# required so cookies and in-flight OAuth flows survive restarts and work
+# across multiple machines. Prefer the env var; otherwise persist a generated
+# key under DATA_DIR (a Fly volume) so it stays stable across restarts instead
+# of logging every user out and breaking the connect→callback round trip.
+def _load_secret_key() -> str:
+    env = os.getenv("SECRET_KEY", "").strip()
+    if env:
+        return env
+    key_file = DATA_DIR / ".secret_key"
+    try:
+        if key_file.is_file():
+            saved = key_file.read_text().strip()
+            if saved:
+                return saved
+        generated = os.urandom(32).hex()
+        key_file.write_text(generated)
+        key_file.chmod(0o600)
+        log.warning("SECRET_KEY not set; generated and persisted one at %s. "
+                    "Set SECRET_KEY in the environment for a stable value.", key_file)
+        return generated
+    except OSError:
+        # DATA_DIR not writable — fall back to an ephemeral key (sessions won't
+        # survive a restart, but the app still runs).
+        log.warning("SECRET_KEY not set and %s not writable; using an "
+                    "ephemeral key (users will be logged out on restart).", key_file)
+        return os.urandom(32).hex()
+
+
+SECRET_KEY = _load_secret_key()
 
 # --- Object storage (Cloudflare R2 / any S3, optional) ---------------------
 # Store optimized images in R2 so they survive restarts and are publicly
@@ -171,3 +198,16 @@ def ebay_ready() -> bool:
 def taxonomy_ready() -> bool:
     """The Taxonomy API only needs an application token (client id/secret)."""
     return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
+
+# --- transactional email (SendGrid) -----------------------------------------
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "").strip()
+# Must be a SendGrid-verified sender, e.g. "QuickFlip <hello@yourdomain.com>".
+EMAIL_FROM = os.getenv("EMAIL_FROM", "").strip()
+# Public URL used in email links (and anywhere else we need an absolute link).
+APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://listing-lfwjrg.fly.dev").strip().rstrip("/")
+# Nudge users who still have zero listings this many days after signup.
+NUDGE_AFTER_DAYS = int(os.getenv("NUDGE_AFTER_DAYS", "3") or 3)
+
+
+def email_ready() -> bool:
+    return bool(SENDGRID_API_KEY and EMAIL_FROM)
