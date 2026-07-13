@@ -7,7 +7,11 @@ Pipeline:
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
+import threading
 from pathlib import Path
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -274,6 +278,77 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "No settings provided.")
     db.save_ebay_account(uid, **fields)
     return {"ok": True, "selected": fields}
+
+
+@app.get("/api/profile")
+def get_profile(request: Request) -> dict:
+    """The logged-in user's profile + eBay connection summary for Settings."""
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    acct = db.get_ebay_account(user["id"]) or {}
+    connected = bool(acct.get("refresh_token"))
+    return {
+        "user": {"email": user["email"],
+                 "display_name": user.get("display_name", "")},
+        "ebay": {
+            "connected": connected,
+            "username": acct.get("ebay_username", "") if connected else "",
+            "email": acct.get("ebay_email", "") if connected else "",
+            "ship_from_postal": acct.get("ship_from_postal", ""),
+            "policies_set": bool(acct.get("fulfillment_policy_id")
+                                 and acct.get("payment_policy_id")
+                                 and acct.get("return_policy_id")),
+            "location_set": bool(acct.get("merchant_location_key")),
+        },
+    }
+
+
+@app.post("/api/profile")
+def save_profile(request: Request, payload: dict) -> dict:
+    """Save profile customizations (currently: display name)."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    display_name = str(payload.get("display_name", "")).strip()[:80]
+    updated = db.update_user(uid, display_name=display_name)
+    if not updated:
+        raise HTTPException(503, "Couldn't save your profile — try again shortly.")
+    return {"ok": True, "user": {"email": updated["email"],
+                                 "display_name": updated["display_name"]}}
+
+
+@app.post("/api/profile/sync-ebay")
+def sync_profile_from_ebay(request: Request) -> dict:
+    """Auto-pull profile info from the connected eBay account: identity
+    (username/email), business policies, and inventory location."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    access = creds["access_token"]
+    fields: dict = {}
+    try:
+        ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
+        fields["ebay_username"] = ident["username"]
+        fields["ebay_email"] = ident["email"]
+    except Exception as exc:  # noqa: BLE001 - identity scope may be missing
+        log.info("profile sync: identity fetch failed for %s: %s", uid, exc)
+    # Only fill policy/location gaps — never overwrite explicit selections.
+    acct = db.get_ebay_account(uid) or {}
+    discovered = ebay_auth.fetch_policies_and_location(access)
+    for key, val in discovered.items():
+        if val and not acct.get(key):
+            fields[key] = val
+    if fields:
+        db.save_ebay_account(uid, **fields)
+    # Default the display name to the eBay username if none is set yet.
+    user = auth.current_user(request) or {}
+    if fields.get("ebay_username") and not user.get("display_name"):
+        db.update_user(uid, display_name=fields["ebay_username"])
+    return get_profile(request)
 
 
 @app.post("/api/ebay/disconnect")
@@ -632,6 +707,154 @@ def delete_image(payload: dict, request: Request) -> dict:
         objstore.delete(objstore.key_for(session_id, name))
     log.info("delete-image: session=%s name=%s", session_id, name)
     return {"ok": True, "remaining": storage.list_optimized(session_id)}
+
+
+# ---------- Bulk mode: one photo dump -> many listings ----------
+# Jobs are in-memory: the app runs a single always-on machine (fly.toml), and a
+# lost job only means re-running the upload — listings themselves persist.
+_BULK_JOBS: dict[str, dict] = {}
+_BULK_LOCK = threading.Lock()
+BULK_MAX_FILES = 40
+
+
+def _bulk_set(job_id: str, **fields) -> None:
+    with _BULK_LOCK:
+        job = _BULK_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
+                  uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
+    """Background worker: optimize -> group -> per-item identify (-> publish)."""
+    try:
+        _bulk_set(job_id, phase="optimizing")
+        images.optimize_all(storage.original_dir(staging_id),
+                            storage.optimized_dir(staging_id), strip_bg)
+        names = storage.list_optimized(staging_id)
+        if not names:
+            _bulk_set(job_id, done=True, error="No usable photos in the upload.")
+            return
+        opt_dir = storage.optimized_dir(staging_id)
+
+        _bulk_set(job_id, phase="grouping", total_photos=len(names))
+        thumbs = [images.thumb_jpeg(opt_dir / n) for n in names]
+        groups = claude_ai.group_photos(thumbs)["groups"]
+        _bulk_set(job_id, total_items=len(groups))
+
+        items: list[dict] = []
+        for gi, group in enumerate(groups):
+            _bulk_set(job_id, phase="identifying", current=gi + 1, items=list(items))
+            sid = storage.new_session_id()
+            item_dir = storage.optimized_dir(sid)
+            item_names = []
+            for j, idx in enumerate(group["indices"]):
+                src = opt_dir / names[idx]
+                dst_name = f"img_{j:02d}.jpg"
+                shutil.copyfile(src, item_dir / dst_name)
+                item_names.append(dst_name)
+            objstore.upload_optimized(sid, item_dir, item_names)
+
+            item = {"session_id": sid, "name": group["name"], "status": "draft",
+                    "error": None, "listing_id": None,
+                    "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
+            try:
+                result = claude_ai.identify([item_dir / n for n in item_names], item_names)
+                listing = result.listing
+                if config.taxonomy_ready() and not listing.category_id:
+                    try:
+                        best = taxonomy.best_category_id(_category_query(listing))
+                        if best.get("category_id"):
+                            listing.category_id = best["category_id"]
+                            if best.get("path"):
+                                listing.category_suggestion = best["path"]
+                    except Exception:  # noqa: BLE001
+                        pass
+                storage.save_listing(sid, listing)
+                status = "draft"
+                if mode == "live":
+                    pub = ebay.publish(sid, listing, "live", base_url, creds=creds)
+                    if pub.get("published"):
+                        status = "published"
+                        item["status"] = "published"
+                        item["listing_id"] = pub.get("listing_id")
+                    else:
+                        # Stay a draft; surface why it couldn't go live.
+                        item["error"] = pub.get("message") or "Couldn't publish automatically."
+                db.upsert_listing(sid, listing.model_dump(), status=status, user_id=uid)
+                item["listing"] = listing.model_dump()
+                item["title"] = listing.title
+            except Exception as exc:  # noqa: BLE001 - one bad item shouldn't kill the batch
+                log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
+                item["status"] = "error"
+                item["error"] = str(exc)
+                item["listing"] = None
+                item["title"] = group["name"]
+            items.append(item)
+
+        _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
+        log.info("bulk %s: %d photos -> %d items (%s)", job_id, len(names), len(items), mode)
+    except Exception as exc:  # noqa: BLE001 - job-level failure
+        log.warning("bulk %s failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
+
+
+@app.post("/api/bulk/upload")
+async def bulk_upload(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    mode: str = Form("draft"),
+    remove_bg: str = Form("false"),
+) -> dict:
+    """Bulk mode: accept a photo dump spanning multiple items, then process in
+    the background (poll /api/bulk/status/{job_id}). mode: 'draft' queues every
+    item for review; 'live' also attempts to publish each one."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    if mode not in ("draft", "live"):
+        raise HTTPException(400, "mode must be 'draft' or 'live'")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+    if len(files) > BULK_MAX_FILES:
+        raise HTTPException(400, f"Too many files (max {BULK_MAX_FILES} in bulk mode)")
+
+    staging_id = storage.new_session_id()
+    orig = storage.original_dir(staging_id)
+    for i, f in enumerate(files):
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
+        suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
+        (orig / f"src_{i:02d}{suffix}").write_bytes(data)
+
+    # Capture per-request context now — the worker thread has no Request.
+    uid = _uid(request)
+    creds = _ebay_creds_for(request) if mode == "live" else None
+    job_id = storage.new_session_id()
+    with _BULK_LOCK:
+        _BULK_JOBS[job_id] = {
+            "id": job_id, "mode": mode, "phase": "uploading", "done": False,
+            "error": None, "items": [], "total_items": 0, "current": 0,
+            "total_photos": len(files),
+        }
+    threading.Thread(
+        target=_run_bulk_job,
+        args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
+              mode, uid, creds, _base_url(request)),
+        daemon=True,
+    ).start()
+    log.info("bulk %s: started (%d files, mode=%s)", job_id, len(files), mode)
+    return {"job_id": job_id}
+
+
+@app.get("/api/bulk/status/{job_id}")
+def bulk_status(job_id: str) -> dict:
+    with _BULK_LOCK:
+        job = _BULK_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
+        return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
 
 
 @app.post("/api/shelf-scan")
