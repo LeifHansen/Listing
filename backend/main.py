@@ -29,6 +29,22 @@ app = FastAPI(title="eBay Listing Generator")
 FRONTEND_DIR = config.ROOT_DIR / "frontend"
 
 
+@app.middleware("http")
+async def _cache_headers(request: Request, call_next):
+    """Cache policy: the app shell (HTML/JS/CSS) must always revalidate so a
+    deploy is visible on the next load (ETag makes unchanged files a cheap
+    304); /media images are content-stable, so let browsers keep them a bit
+    (the UI cache-busts edited photos with ?v=)."""
+    response = await call_next(request)
+    path = request.url.path
+    ctype = response.headers.get("content-type", "")
+    if path.startswith("/media/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=3600")
+    elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.on_event("startup")
 def _warm_models() -> None:
     """Warm the background-removal model in a daemon thread so uvicorn binds
