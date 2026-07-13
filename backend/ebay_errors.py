@@ -46,6 +46,13 @@ def explain(err: dict) -> dict:
         issue.update(target="location",
                      title="eBay needs a valid ship-from location",
                      fix="Open Listing settings and add (or re-save) your ship-from ZIP.")
+    elif has("condition"):
+        # Check condition BEFORE category: eBay's 25021 message mentions both
+        # ("condition id is invalid for the selected primary category").
+        issue.update(target="condition",
+                     title="This condition isn’t valid for the selected category",
+                     fix="Pick a condition from the dropdown — it now lists only the "
+                         "conditions eBay allows for this category.")
     elif has("category"):
         issue.update(target="category",
                      title="This item needs a valid eBay category",

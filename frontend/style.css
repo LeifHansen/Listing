@@ -445,3 +445,44 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .listings-section { font-family: var(--font-head); margin: 1rem 0 0.25rem; grid-column: 1 / -1; }
 .listing-card.inventory { border-style: dashed; }
 .list-it { color: var(--blue); font-weight: 800; font-size: 0.85rem; }
+
+/* ---------- delete photo button ---------- */
+.opt-image { position: relative; }
+.img-del-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 34px;
+  height: 34px;
+  border: 2px solid var(--ink);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--red);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+.img-del-btn:hover { background: var(--red); color: #fff; }
+
+/* ---------- category-driven required / recommended fields ---------- */
+.req-fields {
+  margin: 14px 0;
+  padding: 12px 15px;
+  border: 2px solid var(--ink);
+  border-radius: 11px;
+  background: #eef4ff;
+}
+.req-fields > strong { font-family: var(--font-head); letter-spacing: 0.4px; }
+.req-field { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.req-field label { font-weight: 700; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; }
+.req-field input, .req-field select {
+  padding: 8px 10px; border: 2px solid var(--ink); border-radius: 9px;
+  font-family: var(--font-body); font-size: 0.95rem; background: var(--card);
+}
+.req-badge {
+  font-size: 0.68rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 7px; border-radius: 999px; border: 1.5px solid var(--ink);
+  background: var(--card); color: var(--muted);
+}
+.req-badge.required { background: var(--red); color: #fff; border-color: var(--red); }
