@@ -198,16 +198,3 @@ def ebay_ready() -> bool:
 def taxonomy_ready() -> bool:
     """The Taxonomy API only needs an application token (client id/secret)."""
     return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
-
-# --- transactional email (SendGrid) -----------------------------------------
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "").strip()
-# Must be a SendGrid-verified sender, e.g. "QuickFlip <hello@yourdomain.com>".
-EMAIL_FROM = os.getenv("EMAIL_FROM", "").strip()
-# Public URL used in email links (and anywhere else we need an absolute link).
-APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", "https://listing-lfwjrg.fly.dev").strip().rstrip("/")
-# Nudge users who still have zero listings this many days after signup.
-NUDGE_AFTER_DAYS = int(os.getenv("NUDGE_AFTER_DAYS", "3") or 3)
-
-
-def email_ready() -> bool:
-    return bool(SENDGRID_API_KEY and EMAIL_FROM)
