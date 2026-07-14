@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 from ..config import log
 
@@ -71,18 +71,62 @@ def warm() -> None:
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
 
-def _remove_background(img: Image.Image) -> Image.Image:
+def _remove_background(img: Image.Image, add_shadow: bool = False) -> Image.Image:
     """Cut out the subject and composite it onto a pure-white canvas.
 
     Uses rembg (U^2-Net) for the raw subject mask, then refines it: stray
     background blobs the model mistook for subject are dropped, and
     background showing THROUGH the item (a pitcher handle's opening, a mug
     handle, a strap loop) is punched out by color.
+
+    add_shadow: drop a soft studio contact shadow beneath the item, cast
+    opposite the detected light direction, so the cutout doesn't look like it
+    floats on flat white.
     """
     rgb = img.convert("RGB")
     alpha = _refined_alpha(rgb)
     canvas = Image.new("RGB", rgb.size, WHITE)
+    if add_shadow:
+        canvas = _cast_shadow(canvas, rgb, alpha)
     return Image.composite(rgb, canvas, alpha)
+
+
+def _light_offset(rgb: Image.Image, alpha: Image.Image) -> tuple[int, int]:
+    """Where the drop shadow should fall, in px: opposite the light source
+    (inferred from which side of the item is brighter), with a downward bias
+    so it reads as a shadow resting on a surface."""
+    import numpy as np
+
+    a = np.asarray(alpha) >= 128
+    if not a.any():
+        return (0, int(0.03 * rgb.size[1]))
+    lum = np.asarray(rgb.convert("L"), dtype=np.float32)
+    ys, xs = np.nonzero(a)
+    cx, cy = xs.mean(), ys.mean()
+    w = lum[ys, xs]
+    wsum = w.sum() or 1.0
+    # Brightness-weighted centroid vs geometric centroid → points toward light.
+    lx = (xs * w).sum() / wsum - cx
+    ly = (ys * w).sum() / wsum - cy
+    span = max(1.0, np.hypot(np.ptp(xs), np.ptp(ys)))
+    scale = 0.10 * span  # shadow throw ≈ 10% of the item's diagonal
+    n = np.hypot(lx, ly) or 1.0
+    # Opposite the light horizontally; always downward (gravity) vertically.
+    dx = -lx / n * scale
+    dy = abs(ly / n) * scale + 0.05 * span
+    return (int(round(dx)), int(round(dy)))
+
+
+def _cast_shadow(canvas: Image.Image, rgb: Image.Image,
+                 alpha: Image.Image) -> Image.Image:
+    """Paint a soft grey shadow onto the white canvas beneath the subject."""
+    dx, dy = _light_offset(rgb, alpha)
+    blur = max(6, int(0.02 * max(rgb.size)))
+    shadow_mask = alpha.point(lambda v: int(v * 0.42))  # max ~42% opacity
+    shadow_mask = ImageChops.offset(shadow_mask, dx, dy)
+    shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(blur))
+    grey = Image.new("RGB", canvas.size, (150, 150, 150))
+    return Image.composite(grey, canvas, shadow_mask)
 
 
 # --- mask refinement --------------------------------------------------------
@@ -185,7 +229,8 @@ def _enhance(img: Image.Image) -> Image.Image:
     return img
 
 
-def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
+def optimize(src: Path, dst: Path, remove_bg: bool = False,
+             add_shadow: bool = False) -> dict:
     """Optimize a single image. Returns metadata about what was done."""
     with Image.open(src) as raw:
         img = ImageOps.exif_transpose(raw)  # honor camera rotation
@@ -197,7 +242,7 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
 
         bg_removed = False
         if remove_bg:
-            img = _remove_background(img)
+            img = _remove_background(img, add_shadow=add_shadow)
             bg_removed = True
         else:
             img = _autocrop_borders(img)
@@ -230,7 +275,8 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
         return buf.getvalue()
 
 
-def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[dict]:
+def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
+                 add_shadow: bool = False) -> list[dict]:
     dst_dir.mkdir(parents=True, exist_ok=True)
     results = []
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
@@ -240,7 +286,7 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[
             continue
         dst = dst_dir / f"img_{i:02d}.jpg"
         try:
-            results.append(optimize(src, dst, remove_bg))
+            results.append(optimize(src, dst, remove_bg, add_shadow))
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             results.append({"file": src.name, "error": str(exc)})
     return results

@@ -14,6 +14,7 @@ const EMPTY = {
   package_length_in: "", package_width_in: "", package_height_in: "",
   fulfillment_policy_id: "",
   best_offer_enabled: false, best_offer_min: "", best_offer_accept: "",
+  promote_enabled: false, promote_recommended: true, promote_percent: "",
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
   condition_description: "", description: "", item_specifics: [],
   images: [], currency: "USD", missing_info: [],
@@ -41,6 +42,7 @@ function fromListing(l, prefs) {
     price: l.price != null ? l.price : "",
     best_offer_min: l.best_offer_min != null ? l.best_offer_min : "",
     best_offer_accept: l.best_offer_accept != null ? l.best_offer_accept : "",
+    promote_percent: l.promote_percent != null ? l.promote_percent : "",
     quantity: l.quantity || 1,
     package_weight_lb: noWeight ? (d.default_weight_lb || "") : (l.package_weight_lb || ""),
     package_weight_oz: noWeight ? (d.default_weight_oz || "") : (l.package_weight_oz || ""),
@@ -102,6 +104,9 @@ export function useListingForm() {
       best_offer_enabled: !!form.best_offer_enabled,
       best_offer_min: form.best_offer_min === "" ? null : parseFloat(form.best_offer_min),
       best_offer_accept: form.best_offer_accept === "" ? null : parseFloat(form.best_offer_accept),
+      promote_enabled: !!form.promote_enabled,
+      promote_recommended: !!form.promote_recommended,
+      promote_percent: form.promote_percent === "" ? null : parseFloat(form.promote_percent),
       item_specifics: form.item_specifics
         .map((s) => ({ name: s.name.trim(), value: s.value.trim() }))
         .filter((s) => s.name),

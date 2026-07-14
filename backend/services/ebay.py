@@ -595,3 +595,169 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             "detail": str(exc),
             "export_path": str(export_path),
         }
+
+
+def withdraw(session_id: str, listing: dict, creds: Optional[dict]) -> bool:
+    """End a live eBay listing for this session's SKU (best-effort). Used when
+    the seller deletes a published listing from QuickFlip so we don't leave an
+    orphaned live listing on eBay. Returns True if an offer was withdrawn."""
+    token = (creds or {}).get("access_token") or _access_token()
+    from ..models import Listing as _Listing
+    lst = listing if isinstance(listing, _Listing) else _Listing(**(listing or {}))
+    sku = _sku(session_id, lst)
+    base = config.EBAY_API_BASE
+    try:
+        with httpx.Client(timeout=30) as client:
+            offer_id = _existing_offer_id(client, base, token, sku)
+            if not offer_id:
+                return False
+            r = client.post(
+                f"{base}/sell/inventory/v1/offer/{offer_id}/withdraw",
+                headers=_headers(token),
+            )
+            log.info("withdraw offer %s (sku=%s) -> %s", offer_id, sku, r.status_code)
+            return r.is_success
+    except Exception as exc:  # noqa: BLE001 - never block a local delete
+        log.warning("withdraw(sku=%s) failed: %s", sku, exc)
+        return False
+
+
+# --- Promoted Listings + dashboard data (Marketing / Fulfillment APIs) ------
+
+_PL_CAMPAIGN_NAME = "QuickFlip Promoted"
+
+
+def _find_or_create_campaign(client, base: str, token: str) -> Optional[str]:
+    """A single always-on Promoted Listings Standard campaign to hang ads on."""
+    r = client.get(f"{base}/sell/marketing/v1/ad_campaign",
+                   headers=_headers(token), params={"limit": 50})
+    if r.status_code == 200:
+        for c in r.json().get("campaigns", []) or []:
+            if c.get("campaignStatus") in ("RUNNING", "PAUSED") or \
+               c.get("campaignName") == _PL_CAMPAIGN_NAME:
+                return c.get("campaignId")
+    body = {
+        "campaignName": _PL_CAMPAIGN_NAME,
+        "fundingStrategy": {"fundingModel": "COST_PER_SALE"},
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "startDate": None,
+    }
+    r = client.post(f"{base}/sell/marketing/v1/ad_campaign",
+                    headers=_headers(token), json=_prune(body))
+    if r.status_code in (200, 201):
+        loc = r.headers.get("Location", "")
+        return loc.rstrip("/").split("/")[-1] or _body(r).get("campaignId")
+    log.info("createCampaign -> %s %s", r.status_code, r.text[:300])
+    return None
+
+
+def _suggested_bid(client, base: str, token: str, campaign_id: str,
+                   listing_id: str) -> Optional[str]:
+    """eBay's recommended ad rate (%) for a listing, if available."""
+    try:
+        r = client.post(
+            f"{base}/sell/marketing/v1/ad_campaign/{campaign_id}/get_ads_by_inventory_reference",
+            headers=_headers(token), json={})
+    except Exception:  # noqa: BLE001
+        return None
+    return None  # suggestion endpoint varies by program; fall back to a default
+
+
+def promote(session_id: str, listing: Listing, listing_id: str,
+            creds: Optional[dict]) -> dict:
+    """Best-effort: advertise a just-published listing via Promoted Listings.
+    Returns {promoted: bool, percent, message}. Never raises."""
+    if not listing.promote_enabled or not listing_id:
+        return {"promoted": False}
+    token = (creds or {}).get("access_token") or _access_token()
+    base = config.EBAY_API_BASE
+    # Default rate when the user picked "recommended" but we can't fetch one.
+    percent = (listing.promote_percent if not listing.promote_recommended
+               and listing.promote_percent else None)
+    try:
+        with httpx.Client(timeout=30) as client:
+            campaign_id = _find_or_create_campaign(client, base, token)
+            if not campaign_id:
+                return {"promoted": False,
+                        "message": "Couldn't set up a Promoted Listings campaign."}
+            rate = percent if percent else 2.0  # sensible default ad rate
+            body = {
+                "listingId": listing_id,
+                "bidPercentage": f"{float(rate):.1f}",
+            }
+            r = client.post(
+                f"{base}/sell/marketing/v1/ad_campaign/{campaign_id}/ad",
+                headers=_headers(token), json=body)
+            if r.status_code in (200, 201):
+                log.info("promoted listing %s @ %.1f%% (campaign %s)",
+                         listing_id, float(rate), campaign_id)
+                return {"promoted": True, "percent": float(rate),
+                        "message": f"Promoted at {float(rate):.1f}% ad rate."}
+            log.info("createAd(%s) -> %s %s", listing_id, r.status_code, r.text[:300])
+            return {"promoted": False,
+                    "message": "Listing published; couldn't start the ad "
+                               "(you can promote it from eBay Seller Hub)."}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("promote(%s) failed: %s", listing_id, exc)
+        return {"promoted": False}
+
+
+def fetch_sold_count(creds: dict, days: int = 90) -> dict:
+    """Count of orders in the last `days` for the dashboard tile. Best-effort;
+    returns {count, days} or {count: None} on any failure."""
+    token = creds["access_token"]
+    base = config.EBAY_API_BASE
+    import datetime as _dt
+    since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days))
+    since_s = since.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    try:
+        with httpx.Client(timeout=15) as client:
+            r = client.get(
+                f"{base}/sell/fulfillment/v1/order",
+                headers=_headers(token),
+                params={"filter": f"creationdate:[{since_s}..]", "limit": 200})
+            if r.status_code == 200:
+                return {"count": r.json().get("total", 0), "days": days}
+            log.info("getOrders -> %s %s", r.status_code, r.text[:200])
+    except Exception as exc:  # noqa: BLE001
+        log.info("fetch_sold_count failed: %s", exc)
+    return {"count": None, "days": days}
+
+
+def fetch_live_listings(creds: dict, limit: int = 100) -> list[dict]:
+    """Published offers on the seller's account, as listing cards flagged
+    from_ebay. Covers Inventory-API-managed listings. Best-effort."""
+    token = creds["access_token"]
+    base = config.EBAY_API_BASE
+    out: list[dict] = []
+    try:
+        with httpx.Client(timeout=20) as client:
+            r = client.get(f"{base}/sell/inventory/v1/offer",
+                           headers=_headers(token),
+                           params={"limit": limit, "offset": 0,
+                                   "marketplace_id": config.EBAY_MARKETPLACE_ID})
+            if r.status_code != 200:
+                # eBay requires a sku filter on some accounts; fall back quietly.
+                log.info("getOffers(all) -> %s %s", r.status_code, r.text[:200])
+                return []
+            for off in r.json().get("offers", []) or []:
+                if off.get("status") != "PUBLISHED":
+                    continue
+                lid = off.get("listing", {}).get("listingId", "")
+                price = (off.get("pricingSummary", {}) or {}).get("price", {})
+                out.append({
+                    "id": f"ebay-{off.get('offerId', lid)}",
+                    "from_ebay": True,
+                    "status": "published",
+                    "title": off.get("sku", ""),
+                    "listing": {
+                        "title": off.get("sku", ""),
+                        "price": float(price.get("value")) if price.get("value") else None,
+                        "currency": price.get("currency", "USD"),
+                        "images": [],
+                    },
+                    "view_url": (f"https://www.ebay.com/itm/{lid}" if lid else None),
+                })
+    except Exception as exc:  # noqa: BLE001
+        log.info("fetch_live_listings failed: %s", exc)
+    return out

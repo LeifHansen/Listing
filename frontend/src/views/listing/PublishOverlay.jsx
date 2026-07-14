@@ -1,9 +1,30 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { CheckCircle2, ExternalLink, Sparkles } from "lucide-react";
+import { CheckCircle2, ExternalLink, Zap } from "lucide-react";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
+
+// Branded loader mark: the QuickFlip lightning bolt pulsing inside a ring
+// that sweeps as it works.
+function BrandLoader() {
+  return (
+    <span className="relative mx-auto grid place-items-center size-20">
+      <motion.span
+        className="absolute inset-0 rounded-full border-[3px] border-blue/20 border-t-blue"
+        animate={{ rotate: 360 }}
+        transition={{ duration: 1, ease: "linear", repeat: Infinity }}
+      />
+      <motion.span
+        className="grid place-items-center size-14 rounded-[18px] bg-blue text-on-accent shadow-float"
+        animate={{ scale: [1, 1.08, 1] }}
+        transition={{ duration: 1.1, ease: "easeInOut", repeat: Infinity }}
+      >
+        <Zap size={30} strokeWidth={2.4} aria-hidden />
+      </motion.span>
+    </span>
+  );
+}
 
 /* Full-screen moments for the highest-stakes action in the app:
    - while eBay is processing: an unmissable "publishing…" screen
@@ -60,9 +81,7 @@ export function PublishOverlay({ w }) {
             exit={{ opacity: 0, scale: 0.97 }}
             className="bg-card rounded-card shadow-pop border border-line p-8 w-full max-w-sm text-center"
           >
-            <span className="mx-auto grid place-items-center size-16 rounded-[20px] bg-blue-soft text-blue">
-              <Sparkles size={30} className="ai-sparkle" aria-hidden />
-            </span>
+            <BrandLoader />
             <AnimatePresence mode="wait">
               <motion.p
                 key={messages[msgIdx]}

@@ -7,7 +7,7 @@ import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Select } from "@/components/ui/fields";
+import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { RobotIllustration } from "@/components/ui/illustrations";
@@ -343,13 +343,27 @@ export function SettingsView() {
 
 // Profile: display name (shown in greetings) + one-tap sync from eBay.
 function ProfileCard() {
-  const { user, setUser, ebay } = useApp();
+  const { user, setUser, ebay, loadEbaySync } = useApp();
   const { toast } = useToast();
   const [name, setName] = useState(user?.display_name || "");
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
   useEffect(() => { setName(user?.display_name || ""); }, [user?.display_name]);
+
+  const toggleSync = async (on) => {
+    setUser((u) => ({ ...u, prefs: { ...(u.prefs || {}), sync_ebay_listings: on } }));
+    try {
+      await postJson("/api/profile", { sync_ebay_listings: on });
+      loadEbaySync();
+      toast(on
+        ? "eBay sync on — your live listings and items-sold count will show up shortly."
+        : "eBay sync off.", { kind: "success" });
+    } catch (e) {
+      setUser((u) => ({ ...u, prefs: { ...(u.prefs || {}), sync_ebay_listings: !on } }));
+      toast(`Couldn't update: ${e.message}`, { kind: "error" });
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -402,6 +416,17 @@ function ProfileCard() {
             </Button>
           )}
         </div>
+
+        {ebay.connected && (
+          <div className="border-t border-line pt-4">
+            <Toggle
+              checked={!!user?.prefs?.sync_ebay_listings}
+              onChange={toggleSync}
+              label="Sync my eBay listings & sales"
+              help="Pulls your active eBay listings into the Listings tab (marked with an eBay badge) and shows an items-sold tile on the dashboard."
+            />
+          </div>
+        )}
       </div>
     </Card>
   );
