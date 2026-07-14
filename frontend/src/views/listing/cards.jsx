@@ -35,7 +35,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
       hint="Drag to reorder — the first photo is your cover. Hover for clean-up, smart crop, or delete"
-      state={w.completion.photos} flagged={w.fixTarget === "photos"}
+      state={w.completion.photos} focus={w.cardFocus} flagged={w.fixTarget === "photos"}
     >
       {(w.form.images || []).length ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
@@ -82,7 +82,7 @@ export function TitleCard({ w }) {
     <WorkflowCard
       id="title" icon={Type} title="Title"
       hint="What buyers see first in search"
-      state={w.completion.title} flagged={w.fixTarget === "title"}
+      state={w.completion.title} focus={w.cardFocus} flagged={w.fixTarget === "title"}
     >
       <div className="flex flex-col gap-4">
         <Field
@@ -151,7 +151,7 @@ export function CategoryCard({ w }) {
     <WorkflowCard
       id="category" icon={FolderTree} title="Category"
       hint="The right category unlocks eBay's required fields"
-      state={w.completion.category} flagged={w.fixTarget === "category"}
+      state={w.completion.category} focus={w.cardFocus} flagged={w.fixTarget === "category"}
     >
       <div className="flex flex-col gap-4">
         <div className="grid sm:grid-cols-[1fr_auto] gap-4">
@@ -172,9 +172,12 @@ export function CategoryCard({ w }) {
             />
           </Field>
         </div>
-        <div>
-          <Button variant="soft" onClick={w.suggestCategories}>
-            <Search aria-hidden /> Suggest eBay categories
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[13px] font-semibold text-ink">
+            Suggested eBay categories <span className="font-normal text-ink-faint">— best guess selected</span>
+          </p>
+          <Button variant="ghost" size="sm" onClick={w.suggestCategories}>
+            <Search aria-hidden /> Refresh
           </Button>
         </div>
         {s?.loading && <AIStatusInline message="Matching eBay categories…" />}
@@ -225,7 +228,7 @@ export function SpecificsCard({ w }) {
     <WorkflowCard
       id="specifics" icon={ListChecks} title="Item specifics"
       hint="Details buyers filter by — required ones gate publishing"
-      state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
+      state={w.completion.specifics} focus={w.cardFocus} flagged={w.fixTarget === "specifics"}
     >
       <div className="flex flex-col gap-5">
         {(required.length > 0 || recommended.length > 0) && (
@@ -301,7 +304,7 @@ export function PricingCard({ w }) {
     <WorkflowCard
       id="pricing" icon={Coins} title="Pricing & condition"
       hint="Check live comps so you never guess"
-      state={w.completion.pricing}
+      state={w.completion.pricing} focus={w.cardFocus}
       flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
     >
       <div className="flex flex-col gap-4">
@@ -564,7 +567,7 @@ export function ShippingCard({ w }) {
     <WorkflowCard
       id="shipping" icon={PackageOpen} title="Shipping package"
       hint="Weight, size, and how it ships — eBay needs a weight to publish"
-      state={w.completion.shipping}
+      state={w.completion.shipping} focus={w.cardFocus}
       flagged={w.fixTarget === "weight" || w.fixTarget === "shipping"}
     >
       <div className="flex flex-col gap-4">
@@ -612,7 +615,7 @@ export function DescriptionCard({ w }) {
     <WorkflowCard
       id="description" icon={AlignLeft} title="Description"
       hint="The story buyers read before they commit"
-      state={w.completion.description} flagged={w.fixTarget === "description"}
+      state={w.completion.description} focus={w.cardFocus} flagged={w.fixTarget === "description"}
     >
       <Textarea
         rows={7}

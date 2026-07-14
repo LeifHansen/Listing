@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Sparkles, RotateCcw } from "lucide-react";
+import { Sparkles, RotateCcw, AlertTriangle, CheckCircle2, ArrowRight } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
@@ -45,6 +45,55 @@ function RefineBar({ w }) {
       <Button variant="primary" size="md" onClick={apply} disabled={!prompt.trim()}>
         Apply
       </Button>
+    </div>
+  );
+}
+
+const SECTION_LABELS = {
+  photos: "Photos", title: "Title", category: "Category",
+  specifics: "Item specifics", pricing: "Pricing", shipping: "Shipping",
+  description: "Description",
+};
+
+// Cards are collapsed by default, so this banner is the workflow's status
+// line: which sections still need attention (tap one to jump in), or a green
+// all-clear pointing at Publish.
+function AttentionBanner({ w }) {
+  const incomplete = Object.entries(w.completion)
+    .filter(([, v]) => v === "attention")
+    .map(([k]) => k);
+
+  if (!incomplete.length) {
+    return (
+      <div className="rounded-card bg-success-soft border border-success/25 px-5 py-3.5 flex flex-wrap items-center gap-3">
+        <p className="text-sm font-semibold text-ink flex items-center gap-2">
+          <CheckCircle2 size={17} className="text-success" aria-hidden />
+          All sections complete — this listing is ready to go.
+        </p>
+        <Button variant="ghost" size="sm" className="ml-auto" onClick={() => w.focusCard("publish")}>
+          Go to Publish <ArrowRight aria-hidden />
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-card bg-warning-soft border border-warning/30 px-5 py-3.5">
+      <div className="flex flex-wrap items-center gap-2.5">
+        <p className="text-sm font-semibold text-ink flex items-center gap-2">
+          <AlertTriangle size={16} className="text-warning" aria-hidden />
+          {incomplete.length} section{incomplete.length === 1 ? "" : "s"} need{incomplete.length === 1 ? "s" : ""} attention:
+        </p>
+        {incomplete.map((id) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => w.focusCard(id)}
+            className="rounded-full bg-card border border-warning/40 px-3 py-1 text-[13px] font-semibold text-ink cursor-pointer hover:border-warning transition-colors duration-150"
+          >
+            {SECTION_LABELS[id]}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -94,6 +143,10 @@ function Workflow() {
           <RefineBar w={w} />
         </motion.div>
       )}
+
+      <motion.div variants={rise}>
+        <AttentionBanner w={w} />
+      </motion.div>
 
       <motion.div variants={rise} className="flex flex-col gap-4">
         <PhotosCard

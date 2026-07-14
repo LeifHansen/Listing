@@ -4,10 +4,11 @@ import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ProgressChip } from "@/components/ui/badges";
 
-// WorkflowCard — one collapsible step of the listing workflow. Shows a
+// WorkflowCard — one collapsible step of the listing workflow. Collapsed by
+// default (the attention banner calls out anything incomplete); shows a
 // ✔ Complete / Needs attention chip and expands itself when eBay flags it.
-export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, children }) {
-  const [open, setOpen] = useState(true);
+export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, focus, children }) {
+  const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
   // When a publish error points here, expand and scroll into view.
@@ -17,6 +18,16 @@ export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, chil
       ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [flagged]);
+
+  // The attention banner (or "review" links) can focus a card the same way,
+  // without the error styling.
+  useEffect(() => {
+    if (focus?.id === id && focus.n) {
+      setOpen(true);
+      ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.n]);
 
   return (
     <section

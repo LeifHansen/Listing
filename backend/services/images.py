@@ -74,18 +74,74 @@ def warm() -> None:
 def _remove_background(img: Image.Image) -> Image.Image:
     """Cut out the subject and composite it onto a pure-white canvas.
 
-    Uses rembg (U^2-Net). Imported lazily so the dependency/model is only
-    loaded when a user actually checks the box.
+    Uses rembg (U^2-Net) for the raw subject mask, then refines it: stray
+    background blobs the model mistook for subject are dropped, and
+    background showing THROUGH the item (a pitcher handle's opening, a mug
+    handle, a strap loop) is punched out by color.
     """
-    global _rembg_session
-    from rembg import new_session, remove
+    rgb = img.convert("RGB")
+    alpha = _refined_alpha(rgb)
+    canvas = Image.new("RGB", rgb.size, WHITE)
+    return Image.composite(rgb, canvas, alpha)
 
-    if _rembg_session is None:
-        _rembg_session = new_session(_REMBG_MODEL)
-    cutout = remove(img.convert("RGBA"), session=_rembg_session)  # transparent bg
-    canvas = Image.new("RGBA", cutout.size, WHITE + (255,))
-    canvas.alpha_composite(cutout)
-    return canvas.convert("RGB")
+
+# --- mask refinement --------------------------------------------------------
+# The lightweight u2netp model leaves two classes of artifacts:
+#   1. detached background blobs it thought were salient, and
+#   2. enclosed background regions inside the item's outline (handle holes).
+# Both are fixed on the mask itself so every consumer (upload-time removal,
+# Auto clean, the studio's border re-check) benefits.
+
+MIN_COMPONENT_FRACTION = 0.08   # keep subject blobs >= 8% of the largest
+MIN_HOLE_PX = 24                # ignore speckle "holes" smaller than this
+BG_TOL_MIN, BG_TOL_MAX = 16, 46 # per-channel background color tolerance
+
+
+def _refined_alpha(rgb: Image.Image) -> Image.Image:
+    """A cleaned-up, feathered subject alpha (mode L) for compositing."""
+    import numpy as np
+    from scipy import ndimage
+
+    raw = _subject_mask(rgb)
+    m = np.asarray(raw) >= 96
+    if not m.any():
+        # No subject found: keep the whole image rather than blanking it.
+        return Image.new("L", rgb.size, 255)
+    arr = np.asarray(rgb, dtype=np.int16)
+
+    # 1. Drop stray blobs: keep components comparable to the largest one
+    # (multi-item photos keep every real item; distant specks vanish).
+    labels, n = ndimage.label(m)
+    if n > 1:
+        sizes = ndimage.sum(m, labels, range(1, n + 1))
+        keep = sizes >= max(sizes.max() * MIN_COMPONENT_FRACTION, 64)
+        m = np.isin(labels, np.nonzero(keep)[0] + 1)
+
+    # 2. Punch background-colored regions inside the mask (handle holes, and
+    # background the mask bled onto around the edges).
+    outside = ~m
+    if outside.sum() > 500:
+        bg = np.median(arr[outside], axis=0)
+        spread = np.abs(arr[outside] - bg).mean(axis=0).max()
+        tol = float(np.clip(2.5 * spread, BG_TOL_MIN, BG_TOL_MAX))
+        subject_px = arr[m]
+        subj_med = np.median(subject_px, axis=0)
+        # Guard: if the item itself is background-colored (white-on-white),
+        # color can't separate them — don't punch anything.
+        if np.abs(subj_med - bg).max() > tol * 1.5:
+            near_bg = (np.abs(arr - bg) <= tol).all(axis=2)
+            holes = m & near_bg
+            hlabels, hn = ndimage.label(holes)
+            if hn:
+                hsizes = ndimage.sum(holes, hlabels, range(1, hn + 1))
+                drop = hsizes >= MIN_HOLE_PX
+                if drop.any():
+                    m &= ~np.isin(hlabels, np.nonzero(drop)[0] + 1)
+
+    # Slight grow to protect the item's edge, then feather the cut.
+    mask_img = Image.fromarray((m * 255).astype("uint8"), "L")
+    mask_img = mask_img.filter(ImageFilter.MaxFilter(5))
+    return mask_img.filter(ImageFilter.GaussianBlur(1.5))
 
 
 def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
@@ -222,8 +278,7 @@ def analyze_cleanup(img: Image.Image) -> dict:
     from PIL import ImageChops
 
     rgb = _flatten(img)
-    mask = _subject_mask(rgb)
-    subject = mask.point(lambda a: 255 if a >= 96 else 0)
+    subject = _refined_alpha(rgb).point(lambda a: 255 if a >= 128 else 0)
     bbox = subject.getbbox()
 
     # Grow the subject so its soft edge isn't counted as residue.
@@ -252,12 +307,8 @@ def auto_clean(img: Image.Image) -> Image.Image:
     subject and the transition stays soft.
     """
     rgb = _flatten(img)
-    mask = _subject_mask(rgb)
-    mask = mask.point(lambda a: 255 if a >= 96 else 0)
-    mask = mask.filter(ImageFilter.MaxFilter(7))
-    mask = mask.filter(ImageFilter.GaussianBlur(2))
     white = Image.new("RGB", rgb.size, WHITE)
-    return Image.composite(rgb, white, mask)
+    return Image.composite(rgb, white, _refined_alpha(rgb))
 
 
 def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:

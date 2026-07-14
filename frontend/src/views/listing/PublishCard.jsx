@@ -38,7 +38,7 @@ export function PublishCard({ w }) {
       hint={canPublishLive
         ? "Save as Draft keeps it here in QuickFlip; Publish Live posts it to your eBay account"
         : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
-      state={publishedOk ? "complete" : "todo"}
+      state={publishedOk ? "complete" : "todo"} focus={w.cardFocus}
     >
       <div className="flex flex-col gap-5">
         {ebay.connected && policiesData && (
