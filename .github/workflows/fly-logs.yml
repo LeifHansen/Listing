@@ -1,0 +1,19 @@
+name: Fetch Fly logs
+# Ops helper: push to this branch (or run manually) to dump recent production
+# logs into the Actions run output for debugging.
+on:
+  push:
+    branches:
+      - ops/fetch-logs
+  workflow_dispatch:
+
+jobs:
+  logs:
+    name: Dump recent app logs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Recent logs
+        run: flyctl logs -a listing-lfwjrg --no-tail | tail -400
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
