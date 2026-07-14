@@ -365,15 +365,22 @@ def ensure_ground_policy(access_token: str) -> dict:
             "name": created.get("name", GROUND_POLICY_NAME), "created": True}
 
 
-def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:
+def fulfillment_policy_services(access_token: str, policy_id: str,
+                                timeout: float = 30) -> list[dict]:
     """[{code, name}] for one fulfillment policy (empty on any failure —
     preflight treats unknown services as unconstrained)."""
     if not policy_id:
         return []
     try:
-        p = _account_get(f"/sell/account/v1/fulfillment_policy/{policy_id}",
-                         access_token)
-        return _policy_services(p)
+        resp = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/account/v1/fulfillment_policy/{policy_id}",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Accept": "application/json"},
+            params={"marketplace_id": config.EBAY_MARKETPLACE_ID},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return _policy_services(resp.json())
     except Exception:  # noqa: BLE001
         return []
 
@@ -434,3 +441,43 @@ def ensure_payment_policy(access_token: str) -> dict:
     log.info("ebay: created payment policy %s", created.get("paymentPolicyId", ""))
     return {"id": created.get("paymentPolicyId", ""),
             "name": created.get("name", PAYMENT_POLICY_NAME), "created": True}
+
+
+RETURN_POLICY_NAME = "30-day returns (QuickFlip)"
+
+
+def ensure_return_policy(access_token: str) -> dict:
+    """Find — or create — a return policy (30-day, buyer pays return shipping,
+    the common resale default). {id, name, created}."""
+    path, list_field, id_field = _POLICY_SPECS["return"]
+    try:
+        items = _account_get(path, access_token).get(list_field, [])
+    except Exception:  # noqa: BLE001
+        items = []
+    if items:
+        pick = items[0]
+        return {"id": pick.get(id_field, ""),
+                "name": pick.get("name", ""), "created": False}
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}/sell/account/v1/return_policy",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={
+            "name": RETURN_POLICY_NAME,
+            "marketplaceId": config.EBAY_MARKETPLACE_ID,
+            "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+            "returnsAccepted": True,
+            "returnPeriod": {"value": 30, "unit": "DAY"},
+            "returnShippingCostPayer": "BUYER",
+            "refundMethod": "MONEY_BACK",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    created = resp.json()
+    log.info("ebay: created return policy %s", created.get("returnPolicyId", ""))
+    return {"id": created.get("returnPolicyId", ""),
+            "name": created.get("name", RETURN_POLICY_NAME), "created": True}

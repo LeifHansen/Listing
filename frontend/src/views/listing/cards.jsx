@@ -495,10 +495,15 @@ function ShippingServicePicker({ w }) {
   const policies = policiesData?.policies?.fulfillment || [];
   const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
 
-  // Default this listing to Ground Advantage; quietly create the policy first
-  // if the account has none. Runs once per mount and never overrides a choice.
+  // Default this listing's service: the account preference saved in Settings
+  // wins; otherwise USPS Ground Advantage (quietly created when the account
+  // has no policies at all). Never overrides a per-listing choice.
   useEffect(() => {
     if (!ebay.connected || !policiesData || w.form.fulfillment_policy_id) return;
+    if (accountDefault) {
+      w.set("fulfillment_policy_id", accountDefault);
+      return;
+    }
     const ground = policies.find(isGroundPolicy);
     if (ground) {
       w.set("fulfillment_policy_id", ground.id);
@@ -510,11 +515,7 @@ function ShippingServicePicker({ w }) {
           if (pol?.id) w.set("fulfillment_policy_id", pol.id);
           setPoliciesData(null); // reload so any new policies show in the list
         })
-        .catch(() => {
-          // Couldn't create (e.g. sandbox limits) — fall back to the account
-          // default so publishing still works.
-          if (accountDefault) w.set("fulfillment_policy_id", accountDefault);
-        });
+        .catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ebay.connected, policiesData, w.form.fulfillment_policy_id]);
