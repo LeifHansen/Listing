@@ -165,6 +165,10 @@ EBAY_OAUTH_SCOPES = [
     # Real Seller Hub drafts (Listing API createItemDraft). Connections made
     # before this scope was added keep their old grant — reconnect to enable.
     "https://api.ebay.com/oauth/api_scope/sell.item.draft",
+    # Promoted Listings (Marketing API) and reading orders/live listings for
+    # the dashboard "items sold" tile + pulled-from-eBay listings.
+    "https://api.ebay.com/oauth/api_scope/sell.marketing",
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
 ]
 
 

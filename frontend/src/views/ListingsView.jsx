@@ -1,6 +1,8 @@
 import { motion } from "framer-motion";
 import { PlusCircle, Store, LogIn } from "lucide-react";
 import { useApp } from "@/store";
+import { api } from "@/lib/api";
+import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
@@ -45,10 +47,36 @@ const CONFIGS = {
 
 export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
-  const { listingsState, openListing, setView, startNew, user, openAuth } = useApp();
+  const { listingsState, loadListings, openListing, setView, startNew, user, openAuth,
+    ebayListings } = useApp();
+  const { toast, confirm } = useToast();
+
+  const onDelete = async (item) => {
+    const live = item.status === "published" || item.status === "live";
+    if (!(await confirm({
+      title: "Delete this listing?",
+      message: live
+        ? "This will also end the live listing on eBay. This can't be undone."
+        : "This removes it from QuickFlip. This can't be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+    }))) return;
+    try {
+      await api(`/api/listings/${item.id}`, { method: "DELETE" });
+      toast("Listing deleted.", { kind: "success" });
+      loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+    }
+  };
 
   const q = search.trim().toLowerCase();
-  const items = listingsState.items
+  // On the Listings tab, fold in live listings pulled from eBay (when the
+  // user enabled Sync in Settings); other tabs stay QuickFlip-only.
+  const base = kind === "listings"
+    ? [...listingsState.items, ...(ebayListings || [])]
+    : listingsState.items;
+  const items = base
     .filter(cfg.filter)
     .filter((i) => !q
       || (i.listing?.title || i.title || "").toLowerCase().includes(q)
@@ -111,7 +139,7 @@ export function ListingsView({ kind, search = "" }) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
-            <ListingCard item={item} onOpen={openListing} />
+            <ListingCard item={item} onOpen={openListing} onDelete={onDelete} />
           </motion.div>
         ))}
       </div>

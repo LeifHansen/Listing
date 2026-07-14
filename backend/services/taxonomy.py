@@ -211,13 +211,17 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None,
         constraint = a.get("aspectConstraint", {}) or {}
         values = [v.get("localizedValue", "")
                   for v in (a.get("aspectValues") or []) if v.get("localizedValue")]
+        mode = constraint.get("aspectMode", "FREE_TEXT")
+        # SELECTION_ONLY aspects (e.g. Country/Region of Manufacture, ~250
+        # countries) MUST keep every value — the user can only pick from the
+        # list, so truncating drops valid choices. Only cap free-text enums,
+        # where the list is a suggestion and typing past it is allowed.
+        cap = 1000 if mode == "SELECTION_ONLY" else 60
         aspects.append({
             "name": a.get("localizedAspectName", ""),
             "required": bool(constraint.get("aspectRequired")),
-            "mode": constraint.get("aspectMode", "FREE_TEXT"),
-            # Cap the value list so a huge enum (e.g. Brand) doesn't bloat the
-            # payload; free-text is still allowed client-side past the cap.
-            "values": values[:60],
+            "mode": mode,
+            "values": values[:cap],
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))

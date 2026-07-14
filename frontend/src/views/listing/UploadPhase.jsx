@@ -22,6 +22,7 @@ export function UploadPhase({ onBulkStarted }) {
   const cameraRef = useRef(null);
   const [files, setFiles] = useState([]); // { file, url }
   const [removeBg, setRemoveBg] = useState(false);
+  const [addShadow, setAddShadow] = useState(false);
   const [bulk, setBulk] = useState(false);
   const [bulkLive, setBulkLive] = useState(false);
   const [drag, setDrag] = useState(false);
@@ -63,6 +64,7 @@ export function UploadPhase({ onBulkStarted }) {
       prepped.forEach((f) => fd.append("files", f));
       fd.append("mode", mode);
       fd.append("remove_bg", removeBg ? "true" : "false");
+      fd.append("add_shadow", removeBg && addShadow ? "true" : "false");
       const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
       files.forEach((f) => URL.revokeObjectURL(f.url));
       setFiles([]);
@@ -83,6 +85,7 @@ export function UploadPhase({ onBulkStarted }) {
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
+      fd.append("add_shadow", removeBg && addShadow ? "true" : "false");
       const up = await api("/api/upload", { method: "POST", body: fd });
 
       const result = await api(`/api/identify/${up.session_id}`, { method: "POST" });
@@ -205,6 +208,25 @@ export function UploadPhase({ onBulkStarted }) {
                 label="Remove background & replace with white"
                 help="Cleaner, eBay-friendly product shots. Adds a few seconds per photo."
               />
+
+              <AnimatePresence initial={false}>
+                {removeBg && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="overflow-hidden pl-11"
+                  >
+                    <Toggle
+                      checked={addShadow}
+                      onChange={setAddShadow}
+                      label="Add studio shadow"
+                      help="Casts a soft drop shadow from the detected light direction, so the item looks studio-shot instead of floating."
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {files.length >= 2 && (
                 <Toggle

@@ -152,8 +152,7 @@ def ensure_inventory_location(access_token: str, postal_code: str,
         return key
     # Create failed — usually because the location already exists. eBay signals
     # that as 409 OR as 400 with errorId 25803, so don't try to distinguish:
-    # attempt the address update, and only fail if THAT also fails (a genuinely
-    # bad ZIP fails the update too, with a clearer message).
+    # attempt the address update first.
     log.info("ebay location create(%s) -> %s; trying update: %s",
              key, r.status_code, r.text[:200])
     u = httpx.post(
@@ -162,6 +161,20 @@ def ensure_inventory_location(access_token: str, postal_code: str,
     if u.status_code in (200, 204):
         return key
     log.warning("update_location_details(%s) -> %s %s", key, u.status_code, u.text[:300])
+    # Last resort: an existing location created by an older/buggy version can be
+    # un-updatable (missing country, wrong type). Delete it and create fresh.
+    d = httpx.delete(f"{base}/sell/inventory/v1/location/{key}",
+                     headers=headers, timeout=30)
+    log.info("ebay location delete(%s) -> %s", key, d.status_code)
+    if d.status_code in (200, 204, 404):
+        r2 = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
+                        headers=headers, json=body, timeout=30)
+        if r2.status_code in (200, 204):
+            log.info("ebay location recreated cleanly (%s)", key)
+            return key
+        log.warning("ebay location recreate(%s) -> %s %s",
+                    key, r2.status_code, r2.text[:300])
+        r = r2  # surface the recreate error below
     detail = _ebay_error_message(u.text) or _ebay_error_message(r.text) \
         or f"HTTP {u.status_code}"
     raise RuntimeError(f"eBay couldn't save that ship-from location: {detail}")

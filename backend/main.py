@@ -307,6 +307,28 @@ def ensure_ebay_defaults(request: Request) -> dict:
     return out
 
 
+@app.get("/api/ebay/stats")
+def ebay_stats(request: Request) -> dict:
+    """Dashboard tile data pulled live from eBay (items sold). Cheap + cached
+    client-side; returns {sold: {count, days}} or nulls when not connected."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        return {"connected": False, "sold": {"count": None}}
+    sold = ebay.fetch_sold_count(creds)
+    return {"connected": True, "sold": sold}
+
+
+@app.get("/api/ebay/live-listings")
+def ebay_live_listings(request: Request) -> dict:
+    """Active listings pulled from the connected eBay account (flagged
+    from_ebay). Optional — the UI only calls this when the user enables
+    'Sync eBay listings' in Settings."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        return {"listings": []}
+    return {"listings": ebay.fetch_live_listings(creds)}
+
+
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = _ebay_creds_for(request)
@@ -412,6 +434,7 @@ def get_profile(request: Request) -> dict:
 # the Shipping card when the AI didn't measure anything.
 PREF_FIELDS = ("default_weight_lb", "default_weight_oz", "default_length_in",
                "default_width_in", "default_height_in")
+BOOL_PREF_FIELDS = ("sync_ebay_listings",)
 
 
 @app.post("/api/profile")
@@ -430,6 +453,9 @@ def save_profile(request: Request, payload: dict) -> dict:
                 prefs[key] = max(0.0, float(payload[key] or 0))
             except (TypeError, ValueError):
                 raise HTTPException(400, f"{key} must be a number")
+    for key in BOOL_PREF_FIELDS:
+        if key in payload:
+            prefs[key] = bool(payload[key])
     if prefs:
         kwargs["prefs"] = prefs
     if not kwargs:
@@ -579,6 +605,7 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # per file
 async def upload(
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
+    add_shadow: str = Form("false"),
 ) -> dict:
     """Accept images, optimize them, and return a session id.
 
@@ -591,6 +618,7 @@ async def upload(
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    shadow = strip_bg and str(add_shadow).lower() in ("true", "1", "yes", "on")
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
@@ -605,7 +633,8 @@ async def upload(
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
     opt_results = await run_in_threadpool(
-        images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
+        images.optimize_all, orig, storage.optimized_dir(session_id),
+        strip_bg, shadow)
     optimized = storage.list_optimized(session_id)
     if not optimized:
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
@@ -957,13 +986,14 @@ def _bulk_set(job_id: str, **fields) -> None:
             job.update(fields)
 
 
-def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
-                  uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
+def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, add_shadow: bool,
+                  mode: str, uid: Optional[str], creds: Optional[dict],
+                  base_url: str) -> None:
     """Background worker: optimize -> group -> per-item identify (-> publish)."""
     try:
         _bulk_set(job_id, phase="optimizing")
         images.optimize_all(storage.original_dir(staging_id),
-                            storage.optimized_dir(staging_id), strip_bg)
+                            storage.optimized_dir(staging_id), strip_bg, add_shadow)
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
@@ -1038,6 +1068,7 @@ async def bulk_upload(
     files: list[UploadFile] = File(...),
     mode: str = Form("draft"),
     remove_bg: str = Form("false"),
+    add_shadow: str = Form("false"),
 ) -> dict:
     """Bulk mode: accept a photo dump spanning multiple items, then process in
     the background (poll /api/bulk/status/{job_id}). mode: 'draft' queues every
@@ -1073,7 +1104,10 @@ async def bulk_upload(
         }
     threading.Thread(
         target=_run_bulk_job,
-        args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
+        args=(job_id, staging_id,
+              str(remove_bg).lower() in ("true", "1", "yes", "on"),
+              (str(remove_bg).lower() in ("true", "1", "yes", "on")
+               and str(add_shadow).lower() in ("true", "1", "yes", "on")),
               mode, uid, creds, _base_url(request)),
         daemon=True,
     ).start()
@@ -1151,6 +1185,30 @@ def get_listing(listing_id: str, request: Request) -> dict:
     return rec
 
 
+@app.delete("/api/listings/{listing_id}")
+def delete_listing_route(listing_id: str, request: Request) -> dict:
+    """Delete a draft/listing from QuickFlip. Best-effort withdraws a live eBay
+    offer too, so a delete here doesn't leave an orphaned live listing."""
+    uid = _uid(request)
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != uid:
+        raise HTTPException(404, "Listing not found")
+    # If it went live, try to end the eBay listing first (never block delete).
+    if rec.get("status") in ("published", "live"):
+        creds = _ebay_creds_for(request)
+        if creds:
+            try:
+                ebay.withdraw(listing_id, rec.get("listing", {}), creds)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("delete: eBay withdraw failed for %s: %s", listing_id, exc)
+    ok = db.delete_listing(listing_id, user_id=uid)
+    if not ok:
+        raise HTTPException(400, "Couldn't delete that listing.")
+    return {"ok": True}
+
+
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
@@ -1202,6 +1260,13 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if result.get("published"):
         status = "published"
         log.info("publish OK: session=%s listing_id=%s", req.session_id, result.get("listing_id"))
+        # Promoted Listings, best-effort (never fails the publish).
+        if req.listing.promote_enabled and creds:
+            try:
+                result["promotion"] = ebay.promote(
+                    req.session_id, req.listing, result.get("listing_id"), creds)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("promote failed: %s", exc)
     elif result.get("error"):
         status = req.mode
         log.warning("publish error: session=%s step=%s", req.session_id, result.get("step"))

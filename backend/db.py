@@ -340,3 +340,24 @@ def db_status() -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"configured": True, "connected": False, "error": str(exc)}
 
+
+
+def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
+    """Delete a listing row. If user_id is given, only deletes when it matches
+    (ownership check). Returns True if a row was removed."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            rec = s.get(ListingRecord, listing_id)
+            if rec is None:
+                return False
+            if user_id is not None and rec.user_id and rec.user_id != user_id:
+                return False
+            s.delete(rec)
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_listing failed: {exc}")
+        return False

@@ -41,6 +41,12 @@ class Listing(BaseModel):
     best_offer_enabled: bool = False
     best_offer_min: Optional[float] = None
     best_offer_accept: Optional[float] = None
+    # Promoted Listings: advertise this listing at an ad rate. When
+    # promote_recommended is true, eBay's suggested bid is used and
+    # promote_percent is ignored.
+    promote_enabled: bool = False
+    promote_recommended: bool = True
+    promote_percent: Optional[float] = None
     item_specifics: list[ItemSpecific] = Field(default_factory=list)
     # filenames (relative to the session image dir) of optimized images
     images: list[str] = Field(default_factory=list)

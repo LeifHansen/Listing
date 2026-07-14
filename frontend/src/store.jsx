@@ -148,6 +148,25 @@ export function AppProvider({ children }) {
     loadEbayStatus();
   }, [loadHealth, loadAuth, loadEbayStatus]);
 
+  // ---------- eBay-synced data (opt-in via Settings) ----------
+  const [ebayStats, setEbayStats] = useState({ sold: { count: null } });
+  const [ebayListings, setEbayListings] = useState([]);
+  const syncEbay = !!user?.prefs?.sync_ebay_listings;
+
+  const loadEbaySync = useCallback(async () => {
+    if (!syncEbay) { setEbayListings([]); return; }
+    try {
+      const [stats, live] = await Promise.all([
+        api("/api/ebay/stats").catch(() => null),
+        api("/api/ebay/live-listings").catch(() => null),
+      ]);
+      if (stats) setEbayStats(stats);
+      if (live) setEbayListings(live.listings || []);
+    } catch (e) { /* optional */ }
+  }, [syncEbay]);
+
+  useEffect(() => { loadEbaySync(); }, [loadEbaySync, ebay.connected]);
+
   // Refresh the listings cache when auth changes (login/logout).
   useEffect(() => {
     loadListings({ quiet: true });
@@ -169,11 +188,13 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     policiesData, setPoliciesData,
     listingsState, loadListings,
+    ebayStats, ebayListings, syncEbay, loadEbaySync,
     session, setSession, startNew, openListing,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, session, startNew, openListing,
+    ebayStats, ebayListings, syncEbay, loadEbaySync,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

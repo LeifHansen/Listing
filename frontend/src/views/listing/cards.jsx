@@ -384,6 +384,56 @@ export function PricingCard({ w }) {
           </AnimatePresence>
         </div>
 
+        <div className="flex flex-col gap-3">
+          <Toggle
+            checked={w.form.promote_enabled}
+            onChange={(v) => w.set("promote_enabled", v)}
+            label="Promote this listing"
+            help="Promoted Listings put your item in front of more buyers — you only pay the ad rate when it sells."
+          />
+          <AnimatePresence initial={false}>
+            {w.form.promote_enabled && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="overflow-hidden"
+              >
+                <div className="flex flex-col gap-2.5 pt-1 max-w-md">
+                  <label className="flex items-center gap-2.5 text-sm cursor-pointer">
+                    <input
+                      type="radio" name="promote-rate" className="accent-(--brand-blue)"
+                      checked={w.form.promote_recommended}
+                      onChange={() => w.set("promote_recommended", true)}
+                    />
+                    <span className="text-ink">Use eBay's recommended ad rate</span>
+                  </label>
+                  <label className="flex items-center gap-2.5 text-sm cursor-pointer">
+                    <input
+                      type="radio" name="promote-rate" className="accent-(--brand-blue)"
+                      checked={!w.form.promote_recommended}
+                      onChange={() => w.set("promote_recommended", false)}
+                    />
+                    <span className="text-ink">Set a custom rate</span>
+                    <span className="inline-flex items-center gap-1">
+                      <Input
+                        type="number" step="0.1" min="0" max="100" inputMode="decimal"
+                        className="w-20 h-9"
+                        value={w.form.promote_percent}
+                        placeholder="2.0"
+                        disabled={w.form.promote_recommended}
+                        onChange={(e) => { w.set("promote_recommended", false); w.set("promote_percent", e.target.value); }}
+                      />
+                      <span className="text-ink-secondary text-sm">%</span>
+                    </span>
+                  </label>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
         <div>
           <Button variant="soft" onClick={w.checkMarketPrice}>
             <TrendingUp aria-hidden /> Check market price

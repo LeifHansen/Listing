@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Timer, Coins,
+  Tags, Timer, Coins, ShoppingBag,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
@@ -11,7 +11,7 @@ import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
-import { formatMoney } from "@/lib/utils";
+import { cn, formatMoney } from "@/lib/utils";
 
 function greeting() {
   const h = new Date().getHours();
@@ -40,7 +40,8 @@ const rise = {
 };
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, startNew, openListing, setView, session } = useApp();
+  const { user, openAuth, listingsState, startNew, openListing, setView, session, ebayStats } = useApp();
+  const soldCount = ebayStats?.sold?.count;
   const items = listingsState.items;
 
   const todays = items.filter((i) => isToday(i.created_at));
@@ -137,7 +138,12 @@ export function Dashboard() {
       </motion.div>
 
       {/* Performance */}
-      <motion.div variants={rise} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <motion.div variants={rise} className={cn("grid grid-cols-2 gap-4",
+        soldCount != null ? "lg:grid-cols-3 xl:grid-cols-5" : "lg:grid-cols-4")}>
+        {soldCount != null && (
+          <StatCard icon={ShoppingBag} tone="green" label="Items sold" value={soldCount}
+            sub={`on eBay · last ${ebayStats.sold?.days || 90} days`} />
+        )}
         <StatCard icon={Rocket} tone="blue" label="Today's listings" value={todays.length} />
         <StatCard icon={FileText} tone="yellow" label="Drafts" value={drafts.length}
           sub={inventory.length ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"}` : undefined} />
