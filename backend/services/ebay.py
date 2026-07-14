@@ -262,6 +262,63 @@ def _offer_id_from_error(body: dict) -> Optional[str]:
     return None
 
 
+def create_seller_hub_draft(session_id: str, listing: Listing, base_url: str,
+                            access_token: str) -> Optional[dict]:
+    """Create a REAL eBay Seller Hub draft (Listing API createItemDraft) —
+    the kind that shows up under Selling → Drafts on eBay itself.
+
+    Returns {"item_draft_id", "message"} on success, or None when the token
+    lacks the sell.item.draft scope / the API isn't enabled for this keyset,
+    so the caller can fall back to staging an unpublished offer instead.
+    """
+    price = listing.price if listing.price is not None else None
+    body = _prune({
+        "product": {
+            "title": listing.title[:80],
+            "description": listing.description or listing.title,
+            "imageUrls": _image_urls(session_id, listing.images, base_url),
+            "brand": listing.brand or None,
+            "aspects": {s.name: [s.value] for s in listing.item_specifics
+                        if s.name and s.value} or None,
+        },
+        "categoryId": listing.category_id or None,
+        "condition": listing.condition or None,
+        "format": "FIXED_PRICE",
+        "pricingSummary": ({"price": {
+            "value": f"{price:.2f}",
+            "currency": listing.currency or config.EBAY_CURRENCY,
+        }} if price else None),
+    })
+    try:
+        resp = httpx.post(
+            f"{config.EBAY_API_BASE}/sell/listing/v1_beta/item_draft/",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID,
+            },
+            json=body,
+            timeout=30,
+        )
+    except httpx.RequestError as exc:
+        log.warning("item_draft: network error: %s", exc)
+        return None
+    if resp.status_code in (200, 201):
+        data = _body(resp)
+        log.info("item_draft created: session=%s id=%s", session_id,
+                 data.get("itemDraftId", ""))
+        return {
+            "item_draft_id": data.get("itemDraftId", ""),
+            "message": ("Draft created on eBay! Find it under Selling → Drafts "
+                        "in Seller Hub (or the eBay app) to finish or publish "
+                        "it there — or Publish Live from here anytime."),
+        }
+    # 401/403: token lacks the sell.item.draft scope (connections made before
+    # the scope was added) or the beta API isn't enabled for this keyset.
+    log.info("item_draft unavailable (%s): %s", resp.status_code, resp.text[:300])
+    return None
+
+
 def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                creds: Optional[dict] = None, do_publish: bool = True) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
@@ -391,11 +448,10 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
         "published": published,
         "ebay_draft": not published,  # unpublished offer created on eBay
         "message": (None if published else
-                    "Draft saved — it's staged on your eBay account as an "
-                    "unpublished offer, ready for a one-click publish. Heads-up: "
-                    "eBay does NOT show unpublished offers anywhere in Seller Hub "
-                    "(not even the Drafts page), so you won't see it on eBay until "
-                    "you press Publish Live here."),
+                    "Draft staged on eBay as an unpublished offer (not visible "
+                    "in Seller Hub). To get REAL Seller Hub drafts, disconnect "
+                    "and reconnect your eBay account in Settings — that grants "
+                    "the extra permission eBay needs."),
         "listing_id": listing_id,
         "steps": steps,
     }
@@ -490,6 +546,22 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                             "fix": "Open Listing settings, add your ship-from ZIP, and save — then Publish Live again."}],
                 "export_path": str(export_path),
             }
+
+    if mode == "draft" and creds and creds.get("access_token"):
+        hub = create_seller_hub_draft(session_id, listing, base_url,
+                                      creds["access_token"])
+        if hub:
+            return {
+                "dry_run": False,
+                "draft": True,
+                "ebay_draft": True,
+                "seller_hub_draft": True,
+                "item_draft_id": hub["item_draft_id"],
+                "mode": mode,
+                "message": hub["message"],
+                "export_path": str(export_path),
+            }
+        # Fall through to the unpublished-offer staging below.
 
     try:
         result = _push_live(session_id, listing, mode, base_url, creds,

@@ -175,7 +175,14 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
     return {"conditions": conditions}
 
 
-def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict:
+# Aspects are static per category; cache them so publish preflight never
+# repeats the lookup (12h TTL, small bounded map).
+_ASPECTS_CACHE: dict = {}
+_ASPECTS_TTL_S = 12 * 3600
+
+
+def item_aspects(category_id: str, marketplace_id: Optional[str] = None,
+                 timeout: float = 30) -> dict:
     """The item specifics (aspects) eBay defines for a leaf category, so the UI
     can show exactly which fields are required vs recommended and whether each
     is free-text or a fixed set of values.
@@ -185,13 +192,17 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     """
     if not category_id:
         return {"aspects": []}
+    import time as _time
+    cached = _ASPECTS_CACHE.get(category_id)
+    if cached and _time.time() - cached[0] < _ASPECTS_TTL_S:
+        return cached[1]
     tree_id = default_tree_id(marketplace_id)
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/commerce/taxonomy/v1/category_tree/{tree_id}"
         "/get_item_aspects_for_category",
         params={"category_id": category_id},
         headers=_headers(),
-        timeout=30,
+        timeout=timeout,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -210,4 +221,9 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
-    return {"aspects": aspects}
+    result = {"aspects": aspects}
+    import time as _time
+    if len(_ASPECTS_CACHE) > 500:  # bounded: drop everything, repopulate lazily
+        _ASPECTS_CACHE.clear()
+    _ASPECTS_CACHE[category_id] = (_time.time(), result)
+    return result

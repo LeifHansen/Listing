@@ -104,6 +104,29 @@ export function SettingsView() {
     }
   };
 
+  const [creating, setCreating] = useState(false);
+
+  // One tap pushes sensible starter policy templates to the user's eBay
+  // account (only creating whatever kinds are missing) and re-pulls the lists.
+  const createStarters = async () => {
+    setCreating(true);
+    try {
+      const res = await postJson("/api/ebay/ensure-defaults", {});
+      const made = ["fulfillment", "payment", "return"]
+        .filter((k) => res[k]?.created).map((k) => res[k].name);
+      toast(made.length
+        ? `Created on eBay: ${made.join(", ")} — and set as your defaults.`
+        : "Your eBay account already had the policies it needs — defaults updated.",
+        { kind: "success" });
+      setPoliciesData(null);
+      load();
+    } catch (e) {
+      toast(`Couldn't create the starter policies: ${e.message}`, { kind: "error" });
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const checkPayout = async () => {
     setChecking(true);
     try {
@@ -285,16 +308,23 @@ export function SettingsView() {
                 <p className="text-ink flex gap-2">
                   <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
                   <span>
-                    Missing a policy? eBay requires shipping, payment &amp; return policies to
-                    publish. Create them on eBay, then reopen this page.
+                    eBay requires shipping, payment &amp; return policies to publish, and
+                    your account is missing some. One tap creates sensible starter
+                    templates on your eBay account: USPS Ground Advantage shipping,
+                    Managed Payments, and 30-day returns.
                   </span>
                 </p>
-                <a
-                  href={data.manage_url} target="_blank" rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 mt-2 font-semibold text-blue"
-                >
-                  Manage eBay business policies <ExternalLink size={13} aria-hidden />
-                </a>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <Button variant="primary" size="sm" onClick={createStarters} loading={creating}>
+                    Create starter policies on eBay
+                  </Button>
+                  <a
+                    href={data.manage_url} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[13px] font-semibold text-blue"
+                  >
+                    or manage them on eBay <ExternalLink size={13} aria-hidden />
+                  </a>
+                </div>
               </div>
             )}
 

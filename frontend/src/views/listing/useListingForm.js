@@ -289,9 +289,11 @@ export function useListingForm() {
     try {
       const listing = collect();
       setSession((s) => ({ ...s, listing }));
+      // Publishing legitimately takes a while (photos + several eBay calls) —
+      // give it a generous ceiling instead of hanging forever.
       const result = await postJson("/api/publish", {
         session_id: sessionId, listing, mode,
-      });
+      }, { timeoutMs: 150_000 });
       setPublishResult(result);
       if (result.error && result.issues && result.issues.length) {
         const first = result.issues.find((x) => x.target && x.target !== "generic");
@@ -302,7 +304,17 @@ export function useListingForm() {
         setCelebration({ listingId: result.listing_id || "" });
       }
     } catch (e) {
-      toast(`Publish error: ${e.message}`, { kind: "error" });
+      if (e.timedOut) {
+        // The publish may have SUCCEEDED server-side even though the response
+        // never arrived — steer away from a blind retry (duplicate risk).
+        toast(
+          "eBay is taking unusually long. The listing may still have gone through — check Listings (or your eBay account) in a minute before trying again.",
+          { kind: "warning", ttl: 12000 },
+        );
+        loadListings({ quiet: true });
+      } else {
+        toast(`Publish error: ${e.message}`, { kind: "error" });
+      }
     } finally {
       setPublishing(null);
     }

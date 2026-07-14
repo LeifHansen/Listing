@@ -1,11 +1,24 @@
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
-// messages the UI can toast.
+// messages the UI can toast. Every request carries a timeout — a fetch with
+// no timeout can hang forever and freeze whatever overlay is waiting on it.
+const DEFAULT_TIMEOUT_MS = 60_000;
+
 export async function api(path, opts = {}) {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...fetchOpts } = opts;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
   try {
-    res = await fetch(path, opts);
+    res = await fetch(path, { ...fetchOpts, signal: ctrl.signal });
   } catch (e) {
+    if (e.name === "AbortError") {
+      const err = new Error("The server is taking unusually long to respond.");
+      err.timedOut = true;
+      throw err;
+    }
     throw new Error("Network error — the server may be starting up. Try again in a few seconds.");
+  } finally {
+    clearTimeout(timer);
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -17,11 +30,12 @@ export async function api(path, opts = {}) {
   return res.json();
 }
 
-export function postJson(path, body) {
+export function postJson(path, body, opts = {}) {
   return api(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    ...opts,
   });
 }
 

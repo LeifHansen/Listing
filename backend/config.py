@@ -162,6 +162,9 @@ EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.account",
     "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+    # Real Seller Hub drafts (Listing API createItemDraft). Connections made
+    # before this scope was added keep their old grant — reconnect to enable.
+    "https://api.ebay.com/oauth/api_scope/sell.item.draft",
 ]
 
 

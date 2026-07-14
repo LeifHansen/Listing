@@ -279,7 +279,7 @@ def ensure_ebay_defaults(request: Request) -> dict:
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     token = creds["access_token"]
-    out: dict = {"fulfillment": None, "payment": None}
+    out: dict = {"fulfillment": None, "payment": None, "return": None}
     saves: dict = {}
     try:
         ground = ebay_auth.ensure_ground_policy(token)
@@ -295,6 +295,13 @@ def ensure_ebay_defaults(request: Request) -> dict:
             saves["payment_policy_id"] = payment["id"]
     except Exception as exc:  # noqa: BLE001
         log.warning("ensure-defaults: payment policy failed: %s", exc)
+    try:
+        ret = ebay_auth.ensure_return_policy(token)
+        out["return"] = ret
+        if ret.get("id") and not creds.get("return_policy_id"):
+            saves["return_policy_id"] = ret["id"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ensure-defaults: return policy failed: %s", exc)
     if saves:
         db.save_ebay_account(creds["_uid"], **saves)
     return out
@@ -317,13 +324,14 @@ def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dic
 
     # What the chosen shipping policy actually ships with (per-service weight
     # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz).
-    services = (ebay_auth.fulfillment_policy_services(creds["access_token"], fulfillment)
+    services = (ebay_auth.fulfillment_policy_services(
+                    creds["access_token"], fulfillment, timeout=8)
                 if creds and fulfillment else [])
 
     required = None
     if config.taxonomy_ready() and (listing.category_id or "").strip().isdigit():
         try:
-            asp = taxonomy.item_aspects(listing.category_id)
+            asp = taxonomy.item_aspects(listing.category_id, timeout=8)
             required = [a["name"] for a in asp.get("aspects", []) if a.get("required")]
         except Exception:  # noqa: BLE001 - aspects are a best-effort check
             required = None
@@ -1152,8 +1160,12 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     # Pre-publish checklist: catch everything eBay would reject BEFORE the
     # round-trip, with field-targeted fixes. Only gates a real (connected)
     # live publish — dry-runs and drafts stay permissive.
+    import time as _time
+    _t0 = _time.monotonic()
     if req.mode == "live" and (creds or config.ebay_ready()):
         problems = preflight.errors_only(_preflight_issues(request, req.listing, "live"))
+        log.info("publish preflight took %.1fs (session=%s)",
+                 _time.monotonic() - _t0, req.session_id)
         if problems:
             db.upsert_listing(req.session_id, req.listing.model_dump(),
                               status="draft", user_id=_uid(request))
@@ -1181,8 +1193,11 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
             log.warning(f"ebay: location re-ensure failed: {exc}")
     log.info("publish request: session=%s mode=%s connected=%s", req.session_id,
              req.mode, bool(creds))
+    _t1 = _time.monotonic()
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
                           creds=creds)
+    log.info("publish eBay round-trip took %.1fs (session=%s, total %.1fs)",
+             _time.monotonic() - _t1, req.session_id, _time.monotonic() - _t0)
     # Record the outcome: published (live), draft, or dry-run.
     if result.get("published"):
         status = "published"
