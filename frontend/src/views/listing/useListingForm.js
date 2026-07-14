@@ -60,6 +60,7 @@ export function useListingForm() {
   const [aiBusy, setAiBusy] = useState(null); // string[] of friendly messages, or null
   const [publishResult, setPublishResult] = useState(null);
   const [fixTarget, setFixTarget] = useState(null); // which field group eBay flagged
+  const [cardFocus, setCardFocus] = useState({ id: null, n: 0 }); // banner → card
   const [catSuggestions, setCatSuggestions] = useState(null);
   const [priceData, setPriceData] = useState(null);
   const [categoryMeta, setCategoryMeta] = useState({ conditions: [], aspects: [] });
@@ -170,11 +171,37 @@ export function useListingForm() {
     setCatSuggestions({ loading: true });
     try {
       const res = await postJson("/api/category-suggestions", { query, limit: 5 });
-      setCatSuggestions({ items: res.suggestions || [] });
+      const items = res.suggestions || [];
+      setCatSuggestions({ items });
+      return items;
     } catch (e) {
       setCatSuggestions({ error: `Couldn't fetch categories: ${e.message}` });
+      return [];
     }
   }, [collect, health.taxonomy_configured]);
+
+  // Suggestions load themselves when a listing opens (no button to press);
+  // if the AI didn't already pick a category, the best guess is selected.
+  const suggestedFor = useRef(null);
+  useEffect(() => {
+    if (!sessionId || !health.taxonomy_configured) return;
+    if (suggestedFor.current === sessionId) return;
+    if (!(form.title.trim() || form.brand.trim())) return;
+    suggestedFor.current = sessionId;
+    const hadCategory = !!form.category_id.trim();
+    (async () => {
+      const items = await suggestCategories();
+      if (!hadCategory && items && items.length) {
+        setForm((f) => f.category_id.trim() ? f : {
+          ...f,
+          category_id: items[0].category_id,
+          category_suggestion: items[0].path || items[0].category_name,
+        });
+        loadCategoryMeta(items[0].category_id);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, health.taxonomy_configured, form.title, form.brand]);
 
   const chooseCategory = useCallback((s) => {
     setForm((f) => ({
@@ -347,8 +374,13 @@ export function useListingForm() {
     };
   }, [form, categoryMeta.aspects, getSpecific]);
 
+  const focusCard = useCallback((id) => {
+    setCardFocus((c) => ({ id, n: c.n + 1 }));
+  }, []);
+
   return {
     sessionId, form, set, setForm, collect,
+    cardFocus, focusCard,
     aiBusy, setAiBusy,
     publish, publishResult, setPublishResult, runPreflight,
     publishing, celebration, finishCelebration,
