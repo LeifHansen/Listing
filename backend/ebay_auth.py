@@ -341,6 +341,35 @@ def find_ground_policy(access_token: str) -> Optional[dict]:
     return None
 
 
+def opt_in_business_policies(access_token: str) -> bool:
+    """Opt the seller into eBay's Business Policies program
+    (SELLING_POLICY_MANAGEMENT). Creating any shipping/payment/return policy
+    fails with errorId 20403 'User is not eligible for Business Policy' until
+    this one-time opt-in happens. Idempotent: already-opted-in returns an
+    error we ignore. Best-effort — returns True when the program is (now)
+    available."""
+    try:
+        r = httpx.post(
+            f"{config.EBAY_API_BASE}/sell/account/v1/program/opt_in",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Content-Type": "application/json",
+                     "Accept": "application/json"},
+            json={"programType": "SELLING_POLICY_MANAGEMENT"},
+            timeout=30,
+        )
+        if r.is_success:
+            log.info("ebay: opted seller into Business Policies")
+            return True
+        body = r.text[:300]
+        if "already" in body.lower():
+            return True
+        log.warning("ebay: business-policies opt-in -> %s %s", r.status_code, body)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ebay: business-policies opt-in failed: %s", exc)
+        return False
+
+
 def ensure_ground_policy(access_token: str) -> dict:
     """Find — or create — a fulfillment policy that ships USPS Ground Advantage
     (calculated cost, up to 70 lb; the cheapest broadly-applicable USPS

@@ -314,6 +314,10 @@ def ensure_ebay_defaults(request: Request) -> dict:
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     token = creds["access_token"]
+    # New seller accounts aren't in the Business Policies program yet, and
+    # every policy create fails with 20403 "not eligible" until they opt in.
+    # One API call fixes it — do it up front (idempotent).
+    ebay_auth.opt_in_business_policies(token)
     out: dict = {"fulfillment": None, "payment": None, "return": None}
     saves: dict = {}
     try:
