@@ -340,14 +340,57 @@ def ebay_stats(request: Request) -> dict:
 
 
 @app.get("/api/ebay/live-listings")
-def ebay_live_listings(request: Request) -> dict:
-    """Active listings pulled from the connected eBay account (flagged
-    from_ebay). Optional — the UI only calls this when the user enables
-    'Sync eBay listings' in Settings."""
+async def ebay_live_listings(request: Request) -> dict:
+    """Every active listing on the connected eBay account (flagged from_ebay),
+    for the inventory manager. Optional — the UI only calls this when the user
+    turns on 'Sync all eBay listings' in Settings. Uses the Trading API for the
+    full inventory, falling back to Inventory-API offers if that comes back
+    empty (e.g. a keyset without Trading access)."""
     creds = _ebay_creds_for(request)
     if not creds:
         return {"listings": []}
-    return {"listings": ebay.fetch_live_listings(creds)}
+    items = await run_in_threadpool(ebay.fetch_active_inventory, creds)
+    if not items:
+        items = await run_in_threadpool(ebay.fetch_live_listings, creds)
+    return {"listings": items}
+
+
+@app.post("/api/ebay/listing/{item_id}/revise")
+async def ebay_revise_listing(item_id: str, request: Request, payload: dict) -> dict:
+    """Update price and/or quantity of a live eBay listing (inventory manager)."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    price = payload.get("price", None)
+    quantity = payload.get("quantity", None)
+    try:
+        price = float(price) if price is not None and price != "" else None
+        quantity = int(quantity) if quantity is not None and quantity != "" else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Price must be a number and quantity a whole number.")
+    if price is None and quantity is None:
+        raise HTTPException(400, "Nothing to update.")
+    if price is not None and price <= 0:
+        raise HTTPException(400, "Price must be greater than 0.")
+    if quantity is not None and quantity < 0:
+        raise HTTPException(400, "Quantity can't be negative.")
+    result = await run_in_threadpool(
+        ebay.revise_live_listing, creds, item_id, price, quantity)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("message") or "Couldn't update the listing.")
+    return result
+
+
+@app.post("/api/ebay/listing/{item_id}/end")
+async def ebay_end_listing(item_id: str, request: Request) -> dict:
+    """End a live eBay listing (inventory manager)."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    result = await run_in_threadpool(ebay.end_item, creds, item_id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("message") or "Couldn't end the listing.")
+    return result
 
 
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:

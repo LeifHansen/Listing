@@ -161,6 +161,24 @@ export function AppProvider({ children }) {
 
   useEffect(() => { loadEbaySync(); }, [loadEbaySync, ebay.connected]);
 
+  // Inventory-manager actions on a live eBay listing (Trading API).
+  const reviseEbayListing = useCallback(async (itemId, { price, quantity }) => {
+    const r = await api(`/api/ebay/listing/${encodeURIComponent(itemId)}/revise`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ price, quantity }),
+    });
+    await loadEbaySync();
+    return r;
+  }, [loadEbaySync]);
+
+  const endEbayListing = useCallback(async (itemId) => {
+    const r = await api(`/api/ebay/listing/${encodeURIComponent(itemId)}/end`,
+      { method: "POST" });
+    await loadEbaySync();
+    return r;
+  }, [loadEbaySync]);
+
   // Refresh the listings cache when auth changes (login/logout).
   useEffect(() => {
     loadListings({ quiet: true });
@@ -183,12 +201,14 @@ export function AppProvider({ children }) {
     policiesData, setPoliciesData,
     listingsState, loadListings,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
+    reviseEbayListing, endEbayListing,
     session, setSession, startNew, openListing,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, session, startNew, openListing,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
+    reviseEbayListing, endEbayListing,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
