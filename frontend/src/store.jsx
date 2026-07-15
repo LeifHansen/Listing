@@ -179,6 +179,16 @@ export function AppProvider({ children }) {
     return r;
   }, [loadEbaySync]);
 
+  // Delete a QuickFlip listing/draft. Crucially, if the deleted draft is the
+  // one currently open in the editor, clear the in-memory session too —
+  // otherwise a later autosave/refine/publish would re-create the row and the
+  // draft would "come back".
+  const removeListing = useCallback(async (id) => {
+    await api(`/api/listings/${id}`, { method: "DELETE" });
+    setSession((s) => (s?.sessionId === id ? null : s));
+    await loadListings({ quiet: true });
+  }, [loadListings]);
+
   // Refresh the listings cache when auth changes (login/logout).
   useEffect(() => {
     loadListings({ quiet: true });
@@ -201,14 +211,14 @@ export function AppProvider({ children }) {
     policiesData, setPoliciesData,
     listingsState, loadListings,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
-    reviseEbayListing, endEbayListing,
+    reviseEbayListing, endEbayListing, removeListing,
     session, setSession, startNew, openListing,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, session, startNew, openListing,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
-    reviseEbayListing, endEbayListing,
+    reviseEbayListing, endEbayListing, removeListing,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

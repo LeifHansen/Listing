@@ -481,7 +481,7 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                 "dry_run": False,
                 "draft": True,
                 "mode": mode,
-                "message": ("Saved to your QuickFlip drafts — find it under Drafts. "
+                "message": ("Saved to your Thryft drafts — find it under Drafts. "
                             "It is NOT on eBay: connect your eBay account and press "
                             "Publish Live when you're ready to list it."),
                 "export_path": str(export_path),

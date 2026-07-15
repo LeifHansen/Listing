@@ -1,44 +1,48 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   QuickFlip design tokens
-   eBay brand colors are used as *accents* on an airy neutral canvas.
+   Thryft design tokens
+   A vintage-psychedelic take on eBay's red/yellow/green/blue: retro-saturated
+   accents on a warm cream canvas, with an ambient multi-colour undertone.
    Every component reads from these variables — change them here, restyle
    the whole app (including dark mode below).
 --------------------------------------------------------------------------- */
 :root {
-  /* Brand accents (eBay color language) */
-  --brand-blue: #0064d2;
-  --brand-blue-strong: #0053ae;
-  --brand-blue-soft: #e7f1fc;
-  --brand-red: #e53238;
-  --brand-red-soft: #fdeceb;
-  --brand-yellow: #f5af02;
-  --brand-yellow-soft: #fdf3d7;
-  --brand-green: #86b817;
-  --brand-green-soft: #f0f7dd;
+  /* Brand accents — vintage-psychedelic red / yellow / green / blue (+ a
+     magenta pop for gradients). */
+  --brand-blue: #1789a6;        /* retro teal-blue */
+  --brand-blue-strong: #106b83;
+  --brand-blue-soft: #d7eef3;
+  --brand-red: #e0491f;         /* burnt orange-red */
+  --brand-red-soft: #fce3d7;
+  --brand-yellow: #e0a012;      /* mustard gold */
+  --brand-yellow-soft: #f9ecc8;
+  --brand-green: #6f9526;       /* avocado */
+  --brand-green-soft: #e9f1d4;
+  --brand-purple: #9b3f9e;      /* psychedelic magenta */
+  --brand-purple-soft: #f2e2f2;
 
-  /* Neutral canvas */
-  --bg: #fafafb;
-  --bg-sunken: #f3f4f6;
-  --card: #ffffff;
-  --card-hover: #ffffff;
-  --border: #ececec;
-  --border-strong: #dcdce0;
+  /* Warm cream canvas */
+  --bg: #fbf6ec;
+  --bg-sunken: #f2eadb;
+  --card: #fffdf8;
+  --card-hover: #fffdf8;
+  --border: #eaded0;
+  --border-strong: #dccdb6;
 
-  /* Text */
-  --text: #1f2937;
-  --text-secondary: #6b7280;
-  --text-faint: #9ca3af;
+  /* Text — warm near-black */
+  --text: #2a2320;
+  --text-secondary: #6d6155;
+  --text-faint: #a1958a;
   --text-on-accent: #ffffff;
 
   /* Semantic */
-  --success: #16a34a;
-  --success-soft: #e8f7ee;
-  --warning: #f59e0b;
-  --warning-soft: #fdf3d7;
-  --error: #dc2626;
-  --error-soft: #fdeceb;
+  --success: #5f8a1e;
+  --success-soft: #e9f1d4;
+  --warning: #e0a012;
+  --warning-soft: #f9ecc8;
+  --error: #d23b1a;
+  --error-soft: #fce3d7;
 
   /* Radii */
   --radius-card: 22px;
@@ -54,34 +58,37 @@
 }
 
 .dark {
-  --brand-blue: #4a9ceb;
-  --brand-blue-strong: #6cb0f0;
-  --brand-blue-soft: #14263c;
-  --brand-red: #f0666b;
-  --brand-red-soft: #351b1d;
-  --brand-yellow: #f5b93c;
-  --brand-yellow-soft: #33290f;
-  --brand-green: #9fcc38;
-  --brand-green-soft: #22300c;
+  --brand-blue: #3fb4cf;        /* bright retro teal */
+  --brand-blue-strong: #63c6dd;
+  --brand-blue-soft: #123038;
+  --brand-red: #f0754a;         /* warm orange */
+  --brand-red-soft: #3a1c11;
+  --brand-yellow: #f2bd4a;      /* amber gold */
+  --brand-yellow-soft: #332813;
+  --brand-green: #a6c94e;       /* lime avocado */
+  --brand-green-soft: #232f10;
+  --brand-purple: #d178d3;      /* neon magenta */
+  --brand-purple-soft: #2f1730;
 
-  --bg: #101114;
-  --bg-sunken: #17181c;
-  --card: #1b1d22;
-  --card-hover: #1f2127;
-  --border: #2a2c33;
-  --border-strong: #383b44;
+  /* Warm charcoal canvas */
+  --bg: #16130f;
+  --bg-sunken: #1e1a15;
+  --card: #221d17;
+  --card-hover: #28221b;
+  --border: #362f26;
+  --border-strong: #473e31;
 
-  --text: #eceef2;
-  --text-secondary: #9aa1ad;
-  --text-faint: #6b7280;
-  --text-on-accent: #0d1117;
+  --text: #f2ece2;
+  --text-secondary: #a99e8f;
+  --text-faint: #756a5d;
+  --text-on-accent: #16130f;
 
-  --success: #34c26b;
-  --success-soft: #12301d;
-  --warning: #f5b93c;
-  --warning-soft: #33290f;
-  --error: #f0666b;
-  --error-soft: #351b1d;
+  --success: #9ac24a;
+  --success-soft: #232f10;
+  --warning: #f2bd4a;
+  --warning-soft: #332813;
+  --error: #f0754a;
+  --error-soft: #3a1c11;
 
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35);
   --shadow-card-hover: 0 4px 10px rgb(0 0 0 / 0.45);
@@ -102,6 +109,8 @@
   --color-yellow-soft: var(--brand-yellow-soft);
   --color-green: var(--brand-green);
   --color-green-soft: var(--brand-green-soft);
+  --color-purple: var(--brand-purple);
+  --color-purple-soft: var(--brand-purple-soft);
 
   --color-bg: var(--bg);
   --color-bg-sunken: var(--bg-sunken);
@@ -145,10 +154,35 @@ html {
   text-rendering: optimizeLegibility;
 }
 
+/* Ambient vintage-psychedelic undertone: a few very soft colour blooms fixed
+   behind everything, so the warm canvas is never flat. Kept low-opacity so
+   text contrast is unaffected. */
 body {
   min-height: 100dvh;
   font-size: 15px;
   line-height: 1.55;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(42rem 42rem at 8% -8%, color-mix(in srgb, var(--brand-yellow) 20%, transparent), transparent 60%),
+    radial-gradient(38rem 38rem at 105% 0%, color-mix(in srgb, var(--brand-red) 16%, transparent), transparent 60%),
+    radial-gradient(46rem 46rem at 100% 108%, color-mix(in srgb, var(--brand-blue) 16%, transparent), transparent 60%),
+    radial-gradient(40rem 40rem at -8% 112%, color-mix(in srgb, var(--brand-green) 16%, transparent), transparent 62%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Colourful wordmark / accent text — the retro four-colour sweep. */
+.brand-gradient-text {
+  background-image: linear-gradient(
+    92deg,
+    var(--brand-red) 0%,
+    var(--brand-yellow) 32%,
+    var(--brand-green) 64%,
+    var(--brand-blue) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 /* Visible, on-brand focus for keyboard users (WCAG). */

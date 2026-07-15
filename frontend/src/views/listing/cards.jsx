@@ -84,6 +84,7 @@ export function TitleCard({ w }) {
       id="title" icon={Type} title="Title"
       hint="What buyers see first in search"
       state={w.completion.title} focus={w.cardFocus} flagged={w.fixTarget === "title"}
+      defaultOpen
     >
       <div className="flex flex-col gap-4">
         <Field
@@ -230,6 +231,7 @@ export function SpecificsCard({ w }) {
       id="specifics" icon={ListChecks} title="Item specifics"
       hint="Details buyers filter by — required ones gate publishing"
       state={w.completion.specifics} focus={w.cardFocus} flagged={w.fixTarget === "specifics"}
+      defaultOpen
     >
       <div className="flex flex-col gap-5">
         {(required.length > 0 || recommended.length > 0) && (
@@ -307,6 +309,7 @@ export function PricingCard({ w }) {
       hint="Check live comps so you never guess"
       state={w.completion.pricing} focus={w.cardFocus}
       flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
+      defaultOpen
     >
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
@@ -667,6 +670,7 @@ export function DescriptionCard({ w }) {
       id="description" icon={AlignLeft} title="Description"
       hint="The story buyers read before they commit"
       state={w.completion.description} focus={w.cardFocus} flagged={w.fixTarget === "description"}
+      defaultOpen
     >
       <Textarea
         rows={7}

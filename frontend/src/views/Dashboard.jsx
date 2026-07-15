@@ -4,7 +4,6 @@ import {
   Tags, Timer, Coins, ShoppingBag,
 } from "lucide-react";
 import { useApp } from "@/store";
-import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/Toaster";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -42,7 +41,7 @@ const rise = {
 };
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, session, ebayStats } = useApp();
+  const { user, openAuth, listingsState, startNew, openListing, setView, session, ebayStats, removeListing } = useApp();
   const { toast, confirm } = useToast();
   const soldCount = ebayStats?.sold?.count;
   const items = listingsState.items;
@@ -53,14 +52,13 @@ export function Dashboard() {
       title: "Delete this listing?",
       message: live
         ? "This will also end the live listing on eBay. This can't be undone."
-        : "This removes it from QuickFlip. This can't be undone.",
+        : "This removes it from Thryft. This can't be undone.",
       confirmLabel: "Delete",
       danger: true,
     }))) return;
     try {
-      await api(`/api/listings/${item.id}`, { method: "DELETE" });
+      await removeListing(item.id);
       toast("Listing deleted.", { kind: "success" });
-      loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't delete: ${e.message}`, { kind: "error" });
     }

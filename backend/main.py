@@ -498,7 +498,7 @@ def get_profile(request: Request) -> dict:
 # the Shipping card when the AI didn't measure anything.
 PREF_FIELDS = ("default_weight_lb", "default_weight_oz", "default_length_in",
                "default_width_in", "default_height_in")
-BOOL_PREF_FIELDS = ("sync_ebay_listings",)
+BOOL_PREF_FIELDS = ("sync_ebay_listings", "auto_promote")
 
 
 @app.post("/api/profile")

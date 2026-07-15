@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApp } from "@/store";
 import { WorkflowCard } from "./WorkflowCard";
+import { PublishPreview } from "./PublishPreview";
 import { Button } from "@/components/ui/Button";
 
 function nameFor(data, key, field) {
@@ -15,6 +16,11 @@ function nameFor(data, key, field) {
 export function PublishCard({ w }) {
   const { canPublishLive, ebay, setView, policiesData, setPoliciesData } = useApp();
   const r = w.publishResult;
+  const [preview, setPreview] = useState(false);
+
+  // Connected sellers get a last-look preview before the listing goes live;
+  // dry-runs (no eBay) publish straight through since nothing reaches eBay.
+  const onPublishLive = () => (canPublishLive ? setPreview(true) : w.publish("live"));
 
   // Show which shipping/payment/return policies will apply.
   useEffect(() => {
@@ -36,7 +42,7 @@ export function PublishCard({ w }) {
     <WorkflowCard
       id="publish" icon={Rocket} title="Publish"
       hint={canPublishLive
-        ? "Save as Draft keeps it here in QuickFlip; Publish Live posts it to your eBay account"
+        ? "Save as Draft keeps it here in Thryft; Publish Live posts it to your eBay account"
         : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
       state={publishedOk ? "complete" : "todo"} focus={w.cardFocus}
     >
@@ -66,10 +72,18 @@ export function PublishCard({ w }) {
           <Button variant="secondary" size="lg" onClick={() => w.publish("draft")}>
             <Save aria-hidden /> Save as Draft
           </Button>
-          <Button variant="primary" size="lg" onClick={() => w.publish("live")}>
+          <Button variant="primary" size="lg" onClick={onPublishLive}>
             <Rocket aria-hidden /> Publish Live
           </Button>
         </div>
+
+        <PublishPreview
+          w={w}
+          policiesData={policiesData}
+          open={preview}
+          onClose={() => setPreview(false)}
+          onConfirm={() => { setPreview(false); w.publish("live"); }}
+        />
 
         {/* Success states */}
         {publishedOk && (
