@@ -366,6 +366,20 @@ async def ebay_live_listings(request: Request) -> dict:
     items = await run_in_threadpool(ebay.fetch_active_inventory, creds)
     if not items:
         items = await run_in_threadpool(ebay.fetch_live_listings, creds)
+    # De-dup: listings published THROUGH the app already show as app cards on
+    # the Listings tab — without this they appeared twice (once editable in
+    # the app, once as a read-only eBay mirror). Match on the app's stable
+    # THRYFT-<session> SKU (covers everything ever published here, even before
+    # ebay_listing_id existed) and on the recorded eBay listing id.
+    uid = _uid(request)
+    if items and uid:
+        mine = await run_in_threadpool(db.list_listings, 500, uid)
+        app_skus = {f"THRYFT-{r['id']}".upper() for r in mine}
+        app_eids = {str((r.get("listing") or {}).get("ebay_listing_id") or "")
+                    for r in mine} - {""}
+        items = [i for i in items
+                 if str(i.get("sku") or "").upper() not in app_skus
+                 and str(i.get("ebay_item_id") or "") not in app_eids]
     return {"listings": items}
 
 
@@ -1200,6 +1214,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, add_shadow: bool
                         status = "published"
                         item["status"] = "published"
                         item["listing_id"] = pub.get("listing_id")
+                        if pub.get("listing_id"):
+                            listing.ebay_listing_id = str(pub["listing_id"])
                     else:
                         # Stay a draft; surface why it couldn't go live.
                         item["error"] = pub.get("message") or "Couldn't publish automatically."
@@ -1454,6 +1470,10 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     # Record the outcome: published (live), draft, or dry-run.
     if result.get("published"):
         status = "published"
+        # Remember which eBay listing this became, so the inventory sync can
+        # de-dup it instead of showing the same item twice.
+        if result.get("listing_id"):
+            req.listing.ebay_listing_id = str(result["listing_id"])
         log.info("publish OK: session=%s listing_id=%s", req.session_id, result.get("listing_id"))
         # Promoted Listings, best-effort (never fails the publish).
         if req.listing.promote_enabled and creds:

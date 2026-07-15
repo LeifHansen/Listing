@@ -737,6 +737,8 @@ def fetch_live_listings(creds: dict, limit: int = 100) -> list[dict]:
                 out.append({
                     "id": f"ebay-{off.get('offerId', lid)}",
                     "from_ebay": True,
+                    "ebay_item_id": lid,
+                    "sku": off.get("sku", ""),
                     "status": "published",
                     "title": off.get("sku", ""),
                     "listing": {
@@ -856,6 +858,7 @@ def fetch_active_inventory(creds: dict, limit: int = 200) -> list[dict]:
                 "id": f"ebay-{item_id}",
                 "from_ebay": True,
                 "ebay_item_id": item_id,
+                "sku": _lttext(item, "{*}SKU"),
                 "editable_ebay": True,
                 "status": "live",
                 "title": title,
