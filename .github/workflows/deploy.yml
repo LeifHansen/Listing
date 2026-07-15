@@ -26,6 +26,8 @@ jobs:
         # alongside a freshly-built backend — same image, mismatched halves —
         # which made deploys look like they "didn't take". A clean build costs
         # ~1-2 min more but guarantees the live site matches the current code.
-        run: flyctl deploy --remote-only --no-cache
+        # GIT_SHA is stamped into the UI footer + /api/health so anyone can
+        # see exactly which commit a running instance was built from.
+        run: flyctl deploy --remote-only --no-cache --build-arg GIT_SHA=${{ github.sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

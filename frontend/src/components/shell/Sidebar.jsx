@@ -17,7 +17,11 @@ const NAV = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export const APP_VERSION = "v2.0";
+// Short git SHA of the deployed commit (stamped by the Docker build). This is
+// the ground truth for "which build am I looking at?" — if the footer doesn't
+// match the latest commit on main, something between you and the server is
+// serving a stale copy.
+export const APP_VERSION = (import.meta.env.VITE_BUILD_ID || "dev").slice(0, 7);
 
 function Brand({ collapsed }) {
   return (

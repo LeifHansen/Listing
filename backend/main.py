@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -56,10 +57,12 @@ FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
 
 @app.middleware("http")
 async def _cache_headers(request: Request, call_next):
-    """Cache policy: index.html must always revalidate so a deploy is visible
-    on the next load, while Vite's content-hashed /assets/ bundles are immutable
-    and can cache forever; /media images are content-stable, so let browsers
-    keep them a bit (the UI cache-busts edited photos with ?v=)."""
+    """Cache policy: index.html must NEVER be stored — not by the browser and
+    not by any proxy/VPN in between (no-store; no-cache only requires
+    revalidation, which a misbehaving intermediary can skip). Vite's
+    content-hashed /assets/ bundles are immutable and can cache forever;
+    /media images are content-stable, so let browsers keep them a bit (the UI
+    cache-busts edited photos with ?v=)."""
     response = await call_next(request)
     path = request.url.path
     ctype = response.headers.get("content-type", "")
@@ -67,7 +70,11 @@ async def _cache_headers(request: Request, call_next):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     elif path.startswith("/media/"):
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
-    elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
+    elif ctype.startswith("text/html"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    elif ctype.startswith("text/css") or "javascript" in ctype:
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -90,6 +97,9 @@ def _base_url(request: Request) -> str:
 def health() -> dict:
     return {
         "ok": True,
+        # Short SHA of the deployed commit (stamped by the Docker build) —
+        # ground truth for which build this server is running.
+        "build": os.getenv("GIT_SHA", "dev")[:7],
         "anthropic_configured": config.anthropic_ready(),
         "ebay_configured": config.ebay_ready(),
         "ebay_missing": config.ebay_status()["missing"],
