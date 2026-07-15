@@ -46,7 +46,8 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "item_specifics": [{"name": "string", "value": "string"}],
   "missing_info": ["names of fields a human should verify/fill, e.g. 'exact model number', 'size'"],
   "confidence": "low|medium|high",
-  "raw_observations": "brief notes on what you actually see in the photos"
+  "raw_observations": "brief notes on what you actually see in the photos",
+  "image_orientations": [one integer PER PHOTO, in the same order shown: how many degrees CLOCKWISE to rotate that photo so the item appears upright. 0, 90, 180, or 270 only]
 }
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
@@ -54,6 +55,11 @@ Rules:
 - Title must be <= 80 characters and front-load the most searched keywords.
 - item_specifics should include relevant fields (Brand, Model, Color, Size,
   Material, Type, etc.) where determinable.
+- image_orientations must have exactly one entry per photo provided, in order.
+  Be conservative — only flag a rotation when the correct upright is obvious
+  (readable text/logo, a person or mannequin, a clearly top-heavy object). When
+  there is no obvious upright (e.g. a garment laid flat and shot from above) or
+  you are unsure, use 0. The seller can rotate manually if you get it wrong.
 """ % ", ".join(EBAY_CONDITIONS)
 
 
@@ -184,10 +190,24 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
     conf = str(data.get("confidence", "medium")).lower().strip()
     if conf not in ("low", "medium", "high"):
         conf = "medium"
+    # Per-image auto-orientation, aligned to the images we actually sent (capped
+    # at 8). Clamp to the four valid quarter-turns; anything odd becomes 0 (leave
+    # as-is) so a malformed value can never rotate a photo wrongly.
+    sent = min(len(image_paths), 8)
+    raw_orient = data.get("image_orientations")
+    orientations = []
+    if isinstance(raw_orient, list):
+        for v in raw_orient[:sent]:
+            try:
+                deg = int(v) % 360
+            except (TypeError, ValueError):
+                deg = 0
+            orientations.append(deg if deg in (90, 180, 270) else 0)
     return IdentifyResult(
         listing=listing,
         confidence=conf,
         raw_observations=str(data.get("raw_observations", "")),
+        orientations=orientations,
     )
 
 

@@ -220,12 +220,41 @@ def _pad_to_square(img: Image.Image) -> Image.Image:
     return canvas
 
 
+def _auto_levels(img: Image.Image) -> Image.Image:
+    """Auto brightness + contrast: stretch the tonal range so under/over-exposed
+    phone photos get an even, well-lit exposure before the rest of the pipeline.
+    A small histogram cutoff ignores specular highlights and deep shadows so one
+    hot pixel can't flatten the result; preserve_tone applies a single luminance
+    LUT across channels to avoid colour casts (falls back on old Pillow)."""
+    rgb = _flatten(img)
+    try:
+        return ImageOps.autocontrast(rgb, cutoff=1, preserve_tone=True)
+    except TypeError:  # Pillow < 8.2 has no preserve_tone kwarg
+        return ImageOps.autocontrast(rgb, cutoff=1)
+
+
 def _enhance(img: Image.Image) -> Image.Image:
     img = ImageEnhance.Brightness(img).enhance(1.04)
     img = ImageEnhance.Contrast(img).enhance(1.08)
     img = ImageEnhance.Color(img).enhance(1.05)
     img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=3))
     return img
+
+
+def rotate_saved(path: Path, degrees_cw: int) -> bool:
+    """Rotate an already-optimized JPEG in place by 90/180/270° clockwise
+    (used to auto-correct sideways/upside-down photos). Returns True on change."""
+    import os
+    d = int(degrees_cw) % 360
+    if d not in (90, 180, 270):
+        return False
+    with Image.open(path) as im:
+        flat = _flatten(ImageOps.exif_transpose(im))
+    out = flat.rotate(-d, expand=True)  # PIL rotate() is CCW; negate for CW
+    tmp = path.with_name(path.name + ".tmp")
+    out.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
+    os.replace(tmp, path)
+    return True
 
 
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
@@ -238,6 +267,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         # Downscale oversized inputs before the memory-heavy passes below.
         if max(img.size) > MAX_WORK_SIDE:
             img.thumbnail((MAX_WORK_SIDE, MAX_WORK_SIDE), Image.LANCZOS)
+
+        # Even out exposure first, so background removal keys off a clean,
+        # well-lit image and the final photo looks studio-lit.
+        img = _auto_levels(img)
 
         bg_removed = False
         if remove_bg:

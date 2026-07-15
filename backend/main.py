@@ -904,6 +904,21 @@ def identify(session_id: str, request: Request) -> dict:
     except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
         raise HTTPException(502, f"AI identification failed: {exc}") from exc
 
+    # Auto-correct photos the vision model flagged as sideways/upside-down. Purely
+    # best-effort — the seller can rotate any photo manually in the editor — so a
+    # rotation failure or a stray R2 re-push must never break identify.
+    for name, deg in zip(names, result.orientations or []):
+        if not deg:
+            continue
+        try:
+            if images.rotate_saved(opt_dir / name, deg):
+                log.info("identify: auto-rotated %s by %d° (session=%s)", name, deg, session_id)
+                if objstore.enabled():
+                    objstore.upload(opt_dir / name, objstore.key_for(session_id, name))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("identify: auto-rotate failed (session=%s name=%s): %s",
+                        session_id, name, exc)
+
     # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
     if config.taxonomy_ready() and not result.listing.category_id:
         try:
