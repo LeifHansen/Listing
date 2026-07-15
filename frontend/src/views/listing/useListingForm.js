@@ -384,15 +384,15 @@ export function useListingForm() {
   }, []);
 
   return {
-    sessionId, form, set, setForm, collect,
+    sessionId, form, set,
     cardFocus, focusCard,
-    aiBusy, setAiBusy,
-    publish, publishResult, setPublishResult, runPreflight,
+    aiBusy,
+    publish, publishResult, runPreflight,
     publishing, celebration, finishCelebration,
     fixTarget, setFixTarget,
     refine,
     suggestCategories, catSuggestions, chooseCategory,
-    checkMarketPrice, priceData, setPriceData,
+    checkMarketPrice, priceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, upsertSpecific,
     deleteImage, imageVersion, setImageVersion,

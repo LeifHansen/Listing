@@ -193,7 +193,6 @@ def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
     rgb = _flatten(img)
     # Compare against the top-left corner color as the assumed background.
     bg = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
-    from PIL import ImageChops
 
     diff = ImageChops.difference(rgb, bg)
     bbox = diff.getbbox()
@@ -321,7 +320,6 @@ def analyze_cleanup(img: Image.Image) -> dict:
     Returns the subject bbox, a binary residue mask (mode L), and how much of
     the frame that residue covers.
     """
-    from PIL import ImageChops
 
     rgb = _flatten(img)
     subject = _refined_alpha(rgb).point(lambda a: 255 if a >= 128 else 0)

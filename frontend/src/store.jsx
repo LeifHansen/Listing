@@ -1,18 +1,13 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api, postJson } from "@/lib/api";
+import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/Toaster";
 
-/* Central app state, ported from the original app.js:
-   auth session, eBay connection, server health, theme, navigation, the
-   listing being worked on, and the saved-listings cache. */
+/* Central app state: auth session, eBay connection, server health, theme,
+   navigation, the listing being worked on, and the saved-listings cache. */
 
 const AppContext = createContext(null);
-
-export const VIEWS = [
-  "dashboard", "new", "shop", "inventory", "drafts", "listings", "settings",
-];
 
 export function AppProvider({ children }) {
   const { toast } = useToast();
@@ -104,7 +99,6 @@ export function AppProvider({ children }) {
         loading: false,
         authed: !!res.authed,
         dbConfigured: !!(res.db && res.db.configured),
-        dbConnected: !!(res.db && res.db.connected),
         items: res.listings || [],
       });
     } catch (e) {
@@ -205,5 +199,3 @@ export function useApp() {
   if (!ctx) throw new Error("useApp must be used inside <AppProvider>");
   return ctx;
 }
-
-export { postJson };

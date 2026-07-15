@@ -310,21 +310,6 @@ def _is_ground_policy(p: dict) -> bool:
                for s in _policy_services(p))
 
 
-def list_fulfillment_policies(access_token: str) -> list[dict]:
-    """Fulfillment policies with their shipping services, for the per-listing
-    shipping-service picker: [{id, name, services: [code, ...]}]."""
-    path, list_field, id_field = _POLICY_SPECS["fulfillment"]
-    data = _account_get(path, access_token)
-    out = []
-    for p in data.get(list_field, []):
-        out.append({
-            "id": p.get(id_field, ""),
-            "name": p.get("name", "") or p.get(id_field, ""),
-            "services": [s["code"] for s in _policy_services(p)],
-        })
-    return out
-
-
 def find_ground_policy(access_token: str) -> Optional[dict]:
     """The seller's first fulfillment policy that ships USPS Ground Advantage."""
     path, list_field, id_field = _POLICY_SPECS["fulfillment"]

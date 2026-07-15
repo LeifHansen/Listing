@@ -651,18 +651,6 @@ def _find_or_create_campaign(client, base: str, token: str) -> Optional[str]:
     return None
 
 
-def _suggested_bid(client, base: str, token: str, campaign_id: str,
-                   listing_id: str) -> Optional[str]:
-    """eBay's recommended ad rate (%) for a listing, if available."""
-    try:
-        r = client.post(
-            f"{base}/sell/marketing/v1/ad_campaign/{campaign_id}/get_ads_by_inventory_reference",
-            headers=_headers(token), json={})
-    except Exception:  # noqa: BLE001
-        return None
-    return None  # suggestion endpoint varies by program; fall back to a default
-
-
 def promote(session_id: str, listing: Listing, listing_id: str,
             creds: Optional[dict]) -> dict:
     """Best-effort: advertise a just-published listing via Promoted Listings.

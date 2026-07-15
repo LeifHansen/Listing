@@ -139,20 +139,3 @@ export function SearchIllustration(props) {
     </svg>
   );
 }
-
-// A magic wand mid-zap — refine & AI actions.
-export function WandIllustration(props) {
-  return (
-    <svg viewBox="0 0 160 130" width="160" height="130" role="img" aria-hidden {...props}>
-      <ellipse cx="80" cy="120" rx="46" ry="7" fill={soft} />
-      <rect x="38" y="86" width="72" height="14" rx="7" transform="rotate(-35 74 93)"
-        fill="var(--brand-blue)" stroke={stroke} strokeWidth="4" />
-      <rect x="96" y="44" width="26" height="14" rx="7" transform="rotate(-35 109 51)"
-        fill="var(--brand-yellow)" stroke={stroke} strokeWidth="4" />
-      <Sparkle x={128} y={26} s={1.2} />
-      <Sparkle x={104} y={16} s={0.7} color="var(--brand-blue)" />
-      <Sparkle x={140} y={54} s={0.8} color="var(--brand-green)" />
-      <Sparkle x={36} y={50} s={0.6} color="var(--brand-red)" />
-    </svg>
-  );
-}
