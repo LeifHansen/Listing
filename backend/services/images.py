@@ -164,49 +164,90 @@ def _cast_shadow(canvas: Image.Image, rgb: Image.Image,
 
 MIN_COMPONENT_FRACTION = 0.08   # keep subject blobs >= 8% of the largest
 MIN_HOLE_PX = 24                # ignore speckle "holes" smaller than this
-BG_TOL_MIN, BG_TOL_MAX = 16, 46 # per-channel background color tolerance
+MAX_HOLE_FRACTION = 0.15        # a see-through hole is SMALL vs the item
+HOLE_UNIFORMITY_STD = 14.0      # background through a hole is uniform
+MIN_REFINED_KEEP = 0.55         # refinement may not gut the model's subject
+BG_TOL_MIN, BG_TOL_MAX = 16, 34 # per-channel background color tolerance
 
 
 def _refined_alpha(rgb: Image.Image) -> Image.Image:
-    """A cleaned-up, feathered subject alpha (mode L) for compositing."""
+    """A cleaned-up, feathered subject alpha (mode L) for compositing.
+
+    Refinement is deliberately CONSERVATIVE: on items with bright/glossy
+    patches (a white-highlighted painted statue), aggressive color-based hole
+    punching used to carve visible chunks out of the subject. Every cut now
+    has to look like a genuine see-through hole — small relative to the item
+    and showing a uniform patch of the background color — and if refinement
+    would remove a large share of what the model called subject, we fall back
+    to the model's own mask untouched."""
     import numpy as np
     from scipy import ndimage
 
     raw = _subject_mask(rgb)
-    m = np.asarray(raw) >= 96
-    if not m.any():
+    raw_m = np.asarray(raw) >= 96
+    if not raw_m.any():
         # No subject found: keep the whole image rather than blanking it.
         return Image.new("L", rgb.size, 255)
+    m = raw_m.copy()
     arr = np.asarray(rgb, dtype=np.int16)
 
     # 1. Drop stray blobs: keep components comparable to the largest one
-    # (multi-item photos keep every real item; distant specks vanish).
+    # (multi-item photos keep every real item; distant specks vanish). Smaller
+    # parts that overlap the main item's bounding box (a statue's paw, a
+    # strap) are kept too — they're almost always part of the item.
     labels, n = ndimage.label(m)
     if n > 1:
         sizes = ndimage.sum(m, labels, range(1, n + 1))
         keep = sizes >= max(sizes.max() * MIN_COMPONENT_FRACTION, 64)
+        largest = int(sizes.argmax()) + 1
+        ys, xs = np.nonzero(labels == largest)
+        pady = int(0.05 * (ys.max() - ys.min() + 1))
+        padx = int(0.05 * (xs.max() - xs.min() + 1))
+        y0, y1 = ys.min() - pady, ys.max() + pady
+        x0, x1 = xs.min() - padx, xs.max() + padx
+        objs = ndimage.find_objects(labels)
+        for i, sl in enumerate(objs):
+            if keep[i] or sl is None or sizes[i] < 256:
+                continue
+            if (sl[0].start <= y1 and sl[0].stop >= y0
+                    and sl[1].start <= x1 and sl[1].stop >= x0):
+                keep[i] = True
         m = np.isin(labels, np.nonzero(keep)[0] + 1)
 
-    # 2. Punch background-colored regions inside the mask (handle holes, and
-    # background the mask bled onto around the edges).
+    # 2. Punch background regions showing THROUGH the item (handle holes).
     outside = ~m
     if outside.sum() > 500:
         bg = np.median(arr[outside], axis=0)
         spread = np.abs(arr[outside] - bg).mean(axis=0).max()
         tol = float(np.clip(2.5 * spread, BG_TOL_MIN, BG_TOL_MAX))
-        subject_px = arr[m]
-        subj_med = np.median(subject_px, axis=0)
+        subj_med = np.median(arr[m], axis=0)
         # Guard: if the item itself is background-colored (white-on-white),
         # color can't separate them — don't punch anything.
         if np.abs(subj_med - bg).max() > tol * 1.5:
             near_bg = (np.abs(arr - bg) <= tol).all(axis=2)
             holes = m & near_bg
             hlabels, hn = ndimage.label(holes)
-            if hn:
+            if 0 < hn <= 400:  # speckle storm -> refinement untrustworthy
                 hsizes = ndimage.sum(holes, hlabels, range(1, hn + 1))
-                drop = hsizes >= MIN_HOLE_PX
-                if drop.any():
-                    m &= ~np.isin(hlabels, np.nonzero(drop)[0] + 1)
+                max_hole = MAX_HOLE_FRACTION * m.sum()
+                for i in range(1, hn + 1):
+                    sz = hsizes[i - 1]
+                    # Too big to be a see-through hole = likely the item's own
+                    # bright patch (glossy highlight); leave it alone.
+                    if sz < MIN_HOLE_PX or sz > max_hole:
+                        continue
+                    region = hlabels == i
+                    # Background through a real hole is uniform; the item's
+                    # highlights carry texture and gradients.
+                    if arr[region].std(axis=0).max() > HOLE_UNIFORMITY_STD:
+                        continue
+                    m &= ~region
+
+    # Catastrophe guard: if refinement removed a big share of the model's
+    # subject, it went wrong (multicoloured item, busy background) — trust
+    # the model over our heuristics.
+    if m.sum() < MIN_REFINED_KEEP * raw_m.sum():
+        m = raw_m
 
     # Slight grow to protect the item's edge, then feather the cut.
     mask_img = Image.fromarray((m * 255).astype("uint8"), "L")
