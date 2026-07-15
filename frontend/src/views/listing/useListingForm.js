@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
-import { once } from "@/lib/utils";
+import { once, mediaUrl } from "@/lib/utils";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -283,6 +283,36 @@ export function useListingForm() {
     }
   }, [form.images, sessionId, toast]);
 
+  // One-click 90° clockwise rotate. Done in the browser (same-origin canvas,
+  // so toBlob works) and saved through /api/edit-image, then cache-busted.
+  const rotateImage = useCallback(async (name) => {
+    try {
+      const img = await new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = () => rej(new Error("couldn't load the photo"));
+        im.src = `${mediaUrl(sessionId, name)}?v=${imageVersion}-${Date.now()}`;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalHeight;
+      canvas.height = img.naturalWidth;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2); // 90° clockwise
+      ctx.drawImage(img, 0, 0);
+      const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.92));
+      if (!blob) throw new Error("couldn't render the rotation");
+      const fd = new FormData();
+      fd.append("session_id", sessionId);
+      fd.append("name", name);
+      fd.append("file", new File([blob], name, { type: "image/jpeg" }));
+      await api("/api/edit-image", { method: "POST", body: fd });
+      setImageVersion((v) => v + 1);
+    } catch (e) {
+      toast(`Couldn't rotate the photo: ${e.message}`, { kind: "error" });
+    }
+  }, [sessionId, imageVersion, toast]);
+
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
     setAiBusy(["Checking everything eBay requires…"]);
@@ -395,7 +425,7 @@ export function useListingForm() {
     checkMarketPrice, priceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, upsertSpecific,
-    deleteImage, imageVersion, setImageVersion,
+    deleteImage, rotateImage, imageVersion, setImageVersion,
     completion,
   };
 }

@@ -62,6 +62,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
                 onDragEnd={() => { dragIndex.current = null; setDraggingIdx(null); }}
                 onEdit={() => onEdit(name)}
                 onSmartCrop={() => onSmartCrop(name)}
+                onRotate={() => w.rotateImage(name)}
                 onDelete={() => onDelete(name)}
               />
             ))}
