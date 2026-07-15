@@ -21,6 +21,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Deploy to Fly
-        run: flyctl deploy --remote-only
+        # --no-cache forces a clean build every time. The Fly remote builder's
+        # layer cache was serving a STALE frontend (old "QuickFlip" bundle)
+        # alongside a freshly-built backend — same image, mismatched halves —
+        # which made deploys look like they "didn't take". A clean build costs
+        # ~1-2 min more but guarantees the live site matches the current code.
+        run: flyctl deploy --remote-only --no-cache
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
