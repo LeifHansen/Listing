@@ -110,6 +110,17 @@ def _uid(request: Request):
     return user["id"] if user else None
 
 
+def _guard_session(session_id: str, request: Request) -> None:
+    """Block writes to a session that belongs to someone else. session_id is
+    embedded in public image URLs (eBay fetches them), so it must not act as a
+    bearer token for edits: once a listing row is owned by an account, only
+    that account may modify the session. Unowned/anonymous sessions stay open
+    (drafts can be started before logging in)."""
+    rec = db.get_listing(session_id)
+    if rec and rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+
 # --- auth ------------------------------------------------------------------
 
 @app.post("/api/auth/signup")
@@ -372,8 +383,12 @@ async def ebay_revise_listing(item_id: str, request: Request, payload: dict) -> 
         raise HTTPException(400, "Nothing to update.")
     if price is not None and price <= 0:
         raise HTTPException(400, "Price must be greater than 0.")
-    if quantity is not None and quantity < 0:
-        raise HTTPException(400, "Quantity can't be negative.")
+    if quantity is not None and quantity < 1:
+        # Quantity 0 doesn't "update" — eBay takes the listing off sale/ends
+        # it. Make ending explicit via the End button instead of silent.
+        raise HTTPException(
+            400, "Quantity must be at least 1 — to take the listing down, use "
+                 "End listing instead.")
     result = await run_in_threadpool(
         ebay.revise_live_listing, creds, item_id, price, quantity)
     if not result.get("ok"):
@@ -719,6 +734,7 @@ async def upload(
 
 @app.post("/api/edit-image")
 async def edit_image(
+    request: Request,
     session_id: str = Form(...),
     name: str = Form(...),
     file: UploadFile = File(...),
@@ -735,6 +751,7 @@ async def edit_image(
     if not session_id or not name:
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
+    _guard_session(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
@@ -929,6 +946,7 @@ def _apply_package_prefs(listing: Listing, uid: Optional[str],
 @app.post("/api/identify/{session_id}")
 def identify(session_id: str, request: Request) -> dict:
     """Run Claude vision over the optimized images and draft a listing."""
+    _guard_session(session_id, request)
     if not config.anthropic_ready():
         raise HTTPException(
             400, "ANTHROPIC_API_KEY not configured; cannot identify images."
@@ -1022,18 +1040,24 @@ def price_suggestions(payload: dict) -> dict:
 
 @app.post("/api/refine")
 def refine(req: RefineRequest, request: Request) -> dict:
+    _guard_session(req.session_id, request)
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     updated = claude_ai.refine(req.listing, req.prompt)
     storage.save_listing(req.session_id, updated)
-    db.upsert_listing(req.session_id, updated.model_dump(), status="draft", user_id=_uid(request))
+    db.upsert_listing(req.session_id, updated.model_dump(),
+                      status=_status_keeping_published(req.session_id, "draft"),
+                      user_id=_uid(request))
     return updated.model_dump()
 
 
 @app.post("/api/save/{session_id}")
 def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
+    _guard_session(session_id, request)
     storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(), status="draft", user_id=_uid(request))
+    db.upsert_listing(session_id, listing.model_dump(),
+                      status=_status_keeping_published(session_id, "draft"),
+                      user_id=_uid(request))
     return {"saved": True}
 
 
@@ -1076,6 +1100,7 @@ def delete_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name", "")).strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
+    _guard_session(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents:  # path-traversal guard
@@ -1220,6 +1245,12 @@ async def bulk_upload(
     creds = _ebay_creds_for(request) if mode == "live" else None
     job_id = storage.new_session_id()
     with _BULK_LOCK:
+        # Evict finished jobs beyond a small window so the in-memory store
+        # (each entry holds full per-item listing dumps) can't grow unbounded
+        # on a long-lived machine.
+        done_ids = [k for k, j in _BULK_JOBS.items() if j.get("done")]
+        for stale in done_ids[:-10]:
+            _BULK_JOBS.pop(stale, None)
         _BULK_JOBS[job_id] = {
             "id": job_id, "mode": mode, "phase": "uploading", "done": False,
             "error": None, "items": [], "total_items": 0, "current": 0,
@@ -1332,12 +1363,41 @@ def delete_listing_route(listing_id: str, request: Request) -> dict:
     return {"ok": True}
 
 
+def _status_keeping_published(session_id: str, fallback: str) -> str:
+    """Never downgrade a listing that's live on eBay. A blocked/failed
+    re-publish (or a Save-as-Draft on a live listing) used to overwrite
+    status to 'draft' — after which delete skipped the eBay withdraw and
+    left an orphaned live listing."""
+    rec = db.get_listing(session_id)
+    if rec and rec.get("status") in ("published", "live"):
+        return rec["status"]
+    return fallback
+
+
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
+    _guard_session(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
+    # A connected seller whose token refresh transiently failed must NOT fall
+    # through: with env creds configured that path would publish their item
+    # under the DEPLOYMENT OWNER'S eBay account; without them it silently
+    # dry-runs. Fail fast and let them retry instead.
+    uid_now = _uid(request)
+    if req.mode == "live" and creds is None and uid_now:
+        acct = db.get_ebay_account(uid_now)
+        if acct and acct.get("refresh_token"):
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status=_status_keeping_published(req.session_id, "draft"),
+                              user_id=uid_now)
+            return JSONResponse({
+                "dry_run": False, "error": True, "mode": req.mode,
+                "message": "Couldn't reach your eBay account just now (token "
+                           "refresh failed). Your draft is saved — try "
+                           "publishing again in a moment.",
+            })
     # Pre-publish checklist: catch everything eBay would reject BEFORE the
     # round-trip, with field-targeted fixes. Only gates a real (connected)
     # live publish — dry-runs and drafts stay permissive.
@@ -1349,7 +1409,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                  _time.monotonic() - _t0, req.session_id)
         if problems:
             db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status="draft", user_id=_uid(request))
+                              status=_status_keeping_published(req.session_id, "draft"),
+                              user_id=_uid(request))
             log.info("publish blocked by preflight: session=%s issues=%d",
                      req.session_id, len(problems))
             return JSONResponse({
@@ -1391,12 +1452,15 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
             except Exception as exc:  # noqa: BLE001
                 log.warning("promote failed: %s", exc)
     elif result.get("error"):
-        status = req.mode
+        # A FAILED live attempt must never be recorded as "live" — the UI would
+        # show it as live and delete would try to withdraw a nonexistent offer.
+        status = _status_keeping_published(req.session_id, "draft")
         log.warning("publish error: session=%s step=%s", req.session_id, result.get("step"))
     elif result.get("dry_run"):
-        status = "dry_run"
+        status = _status_keeping_published(req.session_id, "dry_run")
     else:
-        status = req.mode
+        status = _status_keeping_published(
+            req.session_id, "draft" if req.mode == "draft" else req.mode)
     db.upsert_listing(req.session_id, req.listing.model_dump(), status=status, user_id=_uid(request))
     return JSONResponse(result)
 

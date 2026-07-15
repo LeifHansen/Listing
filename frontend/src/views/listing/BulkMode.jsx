@@ -124,10 +124,12 @@ export function BulkQueue({ jobId, mode, onExit }) {
   useEffect(() => {
     stopped.current = false;
     let timer;
+    let fails = 0;
     const poll = async () => {
       try {
         const j = await api(`/api/bulk/status/${jobId}`);
         if (stopped.current) return;
+        fails = 0;
         setJob(j);
         if (j.items?.length) {
           setItems(j.items);
@@ -144,8 +146,15 @@ export function BulkQueue({ jobId, mode, onExit }) {
         if (!j.done) timer = setTimeout(poll, 1500);
         else loadListings({ quiet: true });
       } catch (e) {
-        if (!stopped.current) {
+        // A transient poll failure must NOT kill the loop — the server-side
+        // job keeps running. Retry with backoff; only give up after several
+        // consecutive failures.
+        if (stopped.current) return;
+        fails += 1;
+        if (fails >= 5) {
           toast(`Lost the bulk job: ${e.message}`, { kind: "error" });
+        } else {
+          timer = setTimeout(poll, Math.min(1500 * 2 ** fails, 15000));
         }
       }
     };
@@ -166,11 +175,13 @@ export function BulkQueue({ jobId, mode, onExit }) {
   const publishOne = useCallback(async (it) => {
     setPublishing((p) => ({ ...p, [it.session_id]: true }));
     try {
-      // Persist inline edits first, then publish.
+      // Persist inline edits first, then publish. Publishing is slow (photo
+      // upload + several eBay calls) — use the same generous timeout as the
+      // single-listing flow so we don't abort a publish that's still going.
       await postJson(`/api/save/${it.session_id}`, it.listing);
       const res = await postJson("/api/publish", {
         session_id: it.session_id, listing: it.listing, mode: "live",
-      });
+      }, { timeoutMs: 150_000 });
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
         ? {
             ...x,
@@ -182,8 +193,13 @@ export function BulkQueue({ jobId, mode, onExit }) {
         : x));
       return !!res.published;
     } catch (e) {
+      // A timeout doesn't mean it failed — the publish may have gone through
+      // server-side. Warn instead of inviting a blind retry (double listing).
+      const msg = e.timedOut
+        ? "Still publishing on eBay — check your eBay account before retrying so you don't list it twice."
+        : e.message;
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
-        ? { ...x, error: e.message } : x));
+        ? { ...x, error: msg } : x));
       return false;
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));

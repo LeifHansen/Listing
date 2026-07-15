@@ -189,7 +189,14 @@ export function ListingsView({ kind, search = "" }) {
         </p>
       </div>
       {body}
-      <LiveListingEditor item={editingLive} onClose={() => setEditingLive(null)} />
+      {/* key remounts the editor per listing so its price/qty fields
+          initialize from the opened item (useState inits run once per mount) —
+          otherwise stale values from a previous edit get pushed to eBay. */}
+      <LiveListingEditor
+        key={editingLive?.id || "none"}
+        item={editingLive}
+        onClose={() => setEditingLive(null)}
+      />
     </div>
   );
 }

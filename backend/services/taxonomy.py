@@ -12,6 +12,7 @@ Endpoints used:
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -19,30 +20,35 @@ import httpx
 
 from .. import config
 
-# Simple in-process caches (token + per-marketplace tree id).
+# Simple in-process caches (token + per-marketplace tree id). Guarded by a
+# lock: taxonomy runs from both the bulk daemon thread and the request
+# threadpool, and an unguarded check-then-fetch near expiry produces a
+# token-request stampede.
 _token_cache: dict = {"token": None, "expires_at": 0.0}
 _tree_cache: dict = {}
+_cache_lock = threading.Lock()
 
 
 def _app_token() -> str:
-    now = time.time()
-    if _token_cache["token"] and now < _token_cache["expires_at"] - 60:
-        return _token_cache["token"]
+    with _cache_lock:
+        now = time.time()
+        if _token_cache["token"] and now < _token_cache["expires_at"] - 60:
+            return _token_cache["token"]
 
-    resp = httpx.post(
-        f"{config.EBAY_API_BASE}/identity/v1/oauth2/token",
-        data={
-            "grant_type": "client_credentials",
-            "scope": "https://api.ebay.com/oauth/api_scope",
-        },
-        auth=(config.EBAY_CLIENT_ID, config.EBAY_CLIENT_SECRET),
-        timeout=30,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    _token_cache["token"] = body["access_token"]
-    _token_cache["expires_at"] = now + float(body.get("expires_in", 7200))
-    return _token_cache["token"]
+        resp = httpx.post(
+            f"{config.EBAY_API_BASE}/identity/v1/oauth2/token",
+            data={
+                "grant_type": "client_credentials",
+                "scope": "https://api.ebay.com/oauth/api_scope",
+            },
+            auth=(config.EBAY_CLIENT_ID, config.EBAY_CLIENT_SECRET),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        _token_cache["token"] = body["access_token"]
+        _token_cache["expires_at"] = now + float(body.get("expires_in", 7200))
+        return _token_cache["token"]
 
 
 def _headers() -> dict:
@@ -225,7 +231,8 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None,
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
     result = {"aspects": aspects}
-    if len(_ASPECTS_CACHE) > 500:  # bounded: drop everything, repopulate lazily
-        _ASPECTS_CACHE.clear()
-    _ASPECTS_CACHE[category_id] = (time.time(), result)
+    with _cache_lock:
+        if len(_ASPECTS_CACHE) > 500:  # bounded: drop everything, repopulate lazily
+            _ASPECTS_CACHE.clear()
+        _ASPECTS_CACHE[category_id] = (time.time(), result)
     return result

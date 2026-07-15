@@ -36,7 +36,7 @@ def _prune(value):
             out[key] = pruned
         return out
     if isinstance(value, list):
-        return [_prune(v) for v in value]
+        return [p for p in (_prune(v) for v in value) if p is not None]
     return value
 
 

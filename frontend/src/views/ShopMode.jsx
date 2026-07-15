@@ -81,21 +81,33 @@ export function ShopMode() {
     }
   });
 
-  const buy = once("buy", async () => {
-    if (!result) return;
-    if (!user) {
-      // Resume the buy after the login that interrupted it.
-      openAuth(() => buy());
-      return;
-    }
+  // addToInventory takes the current find explicitly so the post-login resume
+  // doesn't run through a stale `user`/`result` closure (which used to bounce
+  // the login dialog forever and never add the item).
+  const addToInventory = async (find) => {
+    if (!find) return;
     try {
       await postJson("/api/inventory/add", {
-        session_id: result.session, listing: result.listing,
+        session_id: find.session, listing: find.listing,
       });
       setResult(null);
       loadListings({ quiet: true });
       toast("Added to your inventory! Open Inventory to finish and publish it.", { kind: "success" });
       setView("inventory");
+    } catch (e) {
+      toast(`Couldn't add to inventory: ${e.message}`, { kind: "error" });
+    }
+  };
+
+  const buy = once("buy", async () => {
+    if (!result) return;
+    if (!user) {
+      const find = result; // capture the find now; resume uses it after login
+      openAuth(() => addToInventory(find));
+      return;
+    }
+    try {
+      await addToInventory(result);
     } catch (e) {
       toast(`Couldn't add to inventory: ${e.message}`, { kind: "error" });
     }

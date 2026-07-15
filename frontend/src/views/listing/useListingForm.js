@@ -200,7 +200,12 @@ export function useListingForm() {
   useEffect(() => {
     if (!sessionId || !health.taxonomy_configured) return;
     if (suggestedFor.current === sessionId) return;
-    if (!(form.title.trim() || form.brand.trim())) return;
+    // Only auto-suggest+select once there's a SUBSTANTIAL query — otherwise
+    // typing the first letter of a title fired a lookup for "N", auto-picked a
+    // nonsense category, and pinned it. A real identified title clears this
+    // instantly; sparse cases wait for the user (Category card has Refresh).
+    const query = `${form.title.trim()} ${form.brand.trim()}`.trim();
+    if (query.length < 6) return;
     suggestedFor.current = sessionId;
     const hadCategory = !!form.category_id.trim();
     (async () => {
@@ -259,7 +264,7 @@ export function useListingForm() {
         session_id: sessionId, listing: current, prompt,
       });
       setSession((s) => ({ ...s, listing: updated }));
-      setForm(fromListing(updated));
+      setForm(fromListing(updated, user?.prefs)); // keep package defaults/auto-promote
       seededFor.current = sessionId; // keep the reseed guard in sync
       toast("Listing refined ✨", { kind: "success" });
       return true;
