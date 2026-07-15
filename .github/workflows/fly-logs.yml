@@ -1,6 +1,6 @@
 name: Fetch Fly logs
 # Ops helper: push to this branch (or run manually) to dump recent production
-# logs into the Actions run output for debugging.
+# logs + live-site ground truth into the Actions run output for debugging.
 on:
   push:
     branches:
@@ -9,11 +9,28 @@ on:
 
 jobs:
   logs:
-    name: Dump recent app logs
+    name: Dump app status, live-site check, logs
     runs-on: ubuntu-latest
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Machines + releases
+        run: |
+          flyctl status -a listing-lfwjrg || true
+          echo "--- releases ---"
+          flyctl releases -a listing-lfwjrg | head -8 || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Live site check (hits the public URL from the runner)
+        run: |
+          for i in 1 2 3 4; do
+            echo "=== attempt $i ==="
+            curl -sS -D - -o /tmp/index.html https://listing-lfwjrg.fly.dev/ | grep -i -E "fly-machine|http/|cache" || true
+            grep -o "<title>[^<]*</title>" /tmp/index.html || true
+            grep -o "assets/index-[A-Za-z0-9_-]*\.js" /tmp/index.html | head -1 || true
+          done
+          echo "=== health ==="
+          curl -sS https://listing-lfwjrg.fly.dev/api/health || true
       - name: Recent logs
-        run: flyctl logs -a listing-lfwjrg --no-tail | tail -400
+        run: flyctl logs -a listing-lfwjrg --no-tail | tail -120
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
