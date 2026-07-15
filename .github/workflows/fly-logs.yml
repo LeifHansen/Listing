@@ -20,6 +20,21 @@ jobs:
           flyctl releases -a listing-lfwjrg | head -8 || true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # The Fly remote builder's Docker layer cache got poisoned with a stale
+      # frontend stage — any plain `fly deploy` (no --no-cache) from any
+      # machine re-published the old UI. Destroying the builder app wipes that
+      # cache for good; Fly recreates a fresh builder on the next deploy.
+      # Idempotent and safe to run every time.
+      - name: Destroy remote builder (wipe poisoned build cache)
+        run: |
+          builders=$(flyctl apps list | awk '{print $1}' | grep '^fly-builder' || true)
+          if [ -z "$builders" ]; then echo "no builder apps found"; fi
+          for b in $builders; do
+            echo "destroying $b"
+            flyctl apps destroy "$b" --yes || true
+          done
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Live site check (hits the public URL from the runner)
         run: |
           for i in 1 2 3 4; do
