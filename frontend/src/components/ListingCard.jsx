@@ -55,8 +55,10 @@ export function ListingCard({ item, onOpen, onDelete, className }) {
           )}
         </div>
 
-        {/* Hover actions */}
-        <div className="absolute top-2.5 right-2.5 flex gap-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
+        {/* Quick actions. Always visible on touch devices (no hover to reveal
+           them); fade in on hover for pointer devices. Without the
+           (hover:hover) gate these were unreachable on phones. */}
+        <div className="absolute top-2.5 right-2.5 flex gap-1.5 opacity-100 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
           {!fromEbay && (
             <button
               type="button"

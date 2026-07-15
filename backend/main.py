@@ -74,6 +74,7 @@ def health() -> dict:
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
         "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
+        "ebay_extended": config.EBAY_EXTENDED_SCOPES,
         "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
     }
