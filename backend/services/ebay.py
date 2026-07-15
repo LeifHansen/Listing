@@ -98,6 +98,14 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
         if key in _IDENTIFIER_KEYS:
             identifiers.setdefault(_IDENTIFIER_KEYS[key], spec.value.strip())
             continue
+        # eBay allows exactly ONE Brand value (error 25002 "Brand should
+        # contain only one value"). The AI often emits Brand as an item
+        # specific too — sometimes with different casing/spelling — which used
+        # to produce Brand: [x, y] and block the publish. listing.brand wins.
+        if key == "brand":
+            if not aspects.get("Brand"):
+                aspects["Brand"] = [spec.value.strip()]
+            continue
         aspects.setdefault(spec.name, [])
         if spec.value not in aspects[spec.name]:
             aspects[spec.name].append(spec.value)
