@@ -38,7 +38,10 @@ class _QuietDeletionPings(logging.Filter):
         args = record.args
         if isinstance(args, tuple) and len(args) >= 5:
             path, status = args[2], args[4]
-            if (path == "/api/ebay/account-deletion"
+            # eBay's validation ping is GET with a ?challenge_code=... query, so
+            # strip the query string before matching (both GET and POST pings).
+            base = path.split("?", 1)[0] if isinstance(path, str) else path
+            if (base == "/api/ebay/account-deletion"
                     and isinstance(status, int) and status < 400):
                 return False
         return True
@@ -915,12 +918,14 @@ async def image_smart_crop(
     return await run_in_threadpool(_run)
 
 
-def _apply_package_prefs(listing: Listing, uid: Optional[str],
-                         prefs: Optional[dict] = None) -> None:
-    """Auto-apply the account's saved package defaults (Settings → Package
-    defaults) to a freshly identified listing, overriding the AI's estimate —
-    the seller asked for these to be THE default; they can still edit any
-    single listing. Zeros/blanks in prefs mean "not set" and change nothing."""
+def _apply_account_defaults(listing: Listing, uid: Optional[str],
+                            prefs: Optional[dict] = None) -> None:
+    """Apply the account's saved defaults to a FRESHLY IDENTIFIED listing:
+    package weight/size (Settings → Package defaults) and, when auto-promote is
+    on, eBay's recommended promotion. Applied once here — NOT on every form
+    seed — so a later per-listing opt-out (e.g. turning Promote off) survives a
+    refine or reopen. The seller can still edit any single listing.
+    Zeros/blanks in prefs mean "not set" and change nothing."""
     if prefs is None:
         user = db.get_user_by_id(uid) if uid else None
         prefs = (user or {}).get("prefs") or {}
@@ -941,6 +946,10 @@ def _apply_package_prefs(listing: Listing, uid: Optional[str],
         listing.package_length_in = length
         listing.package_width_in = width
         listing.package_height_in = height
+
+    if prefs.get("auto_promote"):
+        listing.promote_enabled = True
+        listing.promote_recommended = True
 
 
 @app.post("/api/identify/{session_id}")
@@ -976,7 +985,7 @@ def identify(session_id: str, request: Request) -> dict:
             log.warning("identify: auto-rotate failed (session=%s name=%s): %s",
                         session_id, name, exc)
 
-    _apply_package_prefs(result.listing, _uid(request))
+    _apply_account_defaults(result.listing, _uid(request))
 
     # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
     if config.taxonomy_ready() and not result.listing.category_id:
@@ -990,7 +999,9 @@ def identify(session_id: str, request: Request) -> dict:
             pass
 
     storage.save_listing(session_id, result.listing)
-    db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
+    db.upsert_listing(session_id, result.listing.model_dump(),
+                      status=_status_keeping_published(session_id, "draft"),
+                      user_id=_uid(request))
     return result.model_dump()
 
 
@@ -1171,7 +1182,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, add_shadow: bool
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names], item_names)
                 listing = result.listing
-                _apply_package_prefs(listing, uid, prefs=pkg_prefs)
+                _apply_account_defaults(listing, uid, prefs=pkg_prefs)
                 if config.taxonomy_ready() and not listing.category_id:
                     try:
                         best = taxonomy.best_category_id(_category_query(listing))
@@ -1394,9 +1405,9 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                               user_id=uid_now)
             return JSONResponse({
                 "dry_run": False, "error": True, "mode": req.mode,
-                "message": "Couldn't reach your eBay account just now (token "
-                           "refresh failed). Your draft is saved — try "
-                           "publishing again in a moment.",
+                "message": "Couldn't reach your eBay account (token refresh "
+                           "failed). Your draft is saved. Try again in a moment "
+                           "— if it keeps happening, reconnect eBay in Settings.",
             })
     # Pre-publish checklist: catch everything eBay would reject BEFORE the
     # round-trip, with field-targeted fixes. Only gates a real (connected)
