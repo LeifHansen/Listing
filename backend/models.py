@@ -48,6 +48,9 @@ class Listing(BaseModel):
     promote_recommended: bool = True
     promote_percent: Optional[float] = None
     item_specifics: list[ItemSpecific] = Field(default_factory=list)
+    # Set when this listing goes live on eBay: the eBay listing id, used to
+    # de-dup against the account-wide inventory sync (and for deep links).
+    ebay_listing_id: str = ""
     # filenames (relative to the session image dir) of optimized images
     images: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
