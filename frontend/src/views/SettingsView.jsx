@@ -422,8 +422,8 @@ function ProfileCard() {
             <Toggle
               checked={!!user?.prefs?.sync_ebay_listings}
               onChange={toggleSync}
-              label="Sync my eBay listings & sales"
-              help="Pulls your active eBay listings into the Listings tab (marked with an eBay badge) and shows an items-sold tile on the dashboard."
+              label="Sync all my eBay listings & sales"
+              help="Off (default): the Listings tab shows only listings you created in QuickFlip. On: pulls your entire active eBay inventory into the Listings tab (marked with an eBay badge) so you can edit price, quantity, or end them here — plus an items-sold tile on the dashboard."
             />
           </div>
         )}

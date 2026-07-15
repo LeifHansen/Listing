@@ -11,6 +11,7 @@ can inspect them and push later once you have a developer account.
 """
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from typing import Optional
 
 import httpx
@@ -749,3 +750,171 @@ def fetch_live_listings(creds: dict, limit: int = 100) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         log.info("fetch_live_listings failed: %s", exc)
     return out
+
+
+# --- Trading API: full active-inventory sync + live-listing edits -----------
+# The Inventory API's getOffers only sees listings created *through* this app.
+# To manage a seller's ENTIRE active inventory (including items listed
+# elsewhere) we use the classic Trading API with an OAuth token passed as an
+# IAF token. These calls need only the sell.inventory scope, which every
+# connection already grants — so this adds no risk to the Connect flow.
+
+_TRADING_NS = "urn:ebay:apis:eBLBaseComponents"
+_TRADING_COMPAT = "1193"
+
+
+def _xml_escape(value) -> str:
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _trading_call(call_name: str, inner_xml: str, token: str,
+                  timeout: float = 30) -> ET.Element:
+    """POST a Trading API request and return the parsed XML root. Raises on
+    transport errors; callers inspect Ack/Errors for API-level failures."""
+    body = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<{call_name}Request xmlns="{_TRADING_NS}">'
+        '<ErrorLanguage>en_US</ErrorLanguage>'
+        '<WarningLevel>Low</WarningLevel>'
+        f'{inner_xml}'
+        f'</{call_name}Request>'
+    )
+    headers = {
+        "X-EBAY-API-SITEID": "0",  # US
+        "X-EBAY-API-COMPATIBILITY-LEVEL": _TRADING_COMPAT,
+        "X-EBAY-API-CALL-NAME": call_name,
+        "X-EBAY-API-IAF-TOKEN": token,
+        "Content-Type": "text/xml",
+    }
+    r = httpx.post(f"{config.EBAY_API_BASE}/ws/api.dll",
+                   headers=headers, content=body.encode("utf-8"), timeout=timeout)
+    return ET.fromstring(r.content)
+
+
+def _lt(elem: Optional[ET.Element], path: str) -> Optional[ET.Element]:
+    """find() ignoring XML namespaces (Trading API responses are namespaced)."""
+    return elem.find(path) if elem is not None else None
+
+
+def _lttext(elem: Optional[ET.Element], path: str, default: str = "") -> str:
+    node = _lt(elem, path)
+    return node.text if (node is not None and node.text is not None) else default
+
+
+def _trading_errors(root: ET.Element) -> list[str]:
+    """Human-readable long messages for any Error (severity Error) in a reply."""
+    msgs = []
+    for err in root.findall(".//{*}Errors"):
+        if _lttext(err, "{*}SeverityCode") == "Error":
+            msgs.append(_lttext(err, "{*}LongMessage")
+                        or _lttext(err, "{*}ShortMessage") or "eBay error")
+    return msgs
+
+
+def fetch_active_inventory(creds: dict, limit: int = 200) -> list[dict]:
+    """Every active listing on the seller's account (Trading API
+    GetMyeBaySelling → ActiveList), as from_ebay listing cards. Best-effort."""
+    token = (creds or {}).get("access_token") or _access_token()
+    per_page = min(max(limit, 1), 200)  # Trading API caps EntriesPerPage at 200
+    inner = (
+        "<ActiveList><Include>true</Include>"
+        f"<Pagination><EntriesPerPage>{per_page}</EntriesPerPage>"
+        "<PageNumber>1</PageNumber></Pagination></ActiveList>"
+    )
+    out: list[dict] = []
+    try:
+        root = _trading_call("GetMyeBaySelling", inner, token)
+        if _lttext(root, "{*}Ack") in ("Failure",):
+            log.info("GetMyeBaySelling failure: %s", "; ".join(_trading_errors(root)))
+            return []
+        for item in root.findall(".//{*}ActiveList/{*}ItemArray/{*}Item"):
+            item_id = _lttext(item, "{*}ItemID")
+            if not item_id:
+                continue
+            title = _lttext(item, "{*}Title")
+            price_node = _lt(item, "{*}SellingStatus/{*}CurrentPrice")
+            price = None
+            currency = "USD"
+            if price_node is not None:
+                currency = price_node.get("currencyID", "USD")
+                try:
+                    price = float(price_node.text) if price_node.text else None
+                except (TypeError, ValueError):
+                    price = None
+            qty_avail = (_lttext(item, "{*}QuantityAvailable")
+                         or _lttext(item, "{*}Quantity") or "")
+            try:
+                quantity = int(qty_avail) if qty_avail else None
+            except ValueError:
+                quantity = None
+            gallery = (_lttext(item, "{*}PictureDetails/{*}GalleryURL")
+                       or _lttext(item, "{*}PictureURL"))
+            view_url = (_lttext(item, "{*}ListingDetails/{*}ViewItemURL")
+                        or (f"https://www.ebay.com/itm/{item_id}"))
+            out.append({
+                "id": f"ebay-{item_id}",
+                "from_ebay": True,
+                "ebay_item_id": item_id,
+                "editable_ebay": True,
+                "status": "live",
+                "title": title,
+                "listing": {
+                    "title": title,
+                    "price": price,
+                    "currency": currency,
+                    "quantity": quantity,
+                    "image_url": gallery,
+                    "images": [],
+                },
+                "view_url": view_url,
+            })
+    except Exception as exc:  # noqa: BLE001
+        log.info("fetch_active_inventory failed: %s", exc)
+    return out
+
+
+def revise_live_listing(creds: dict, item_id: str,
+                        price: Optional[float] = None,
+                        quantity: Optional[int] = None) -> dict:
+    """Change price and/or quantity of a live listing (Trading API
+    ReviseInventoryStatus). Returns {ok, message}."""
+    token = (creds or {}).get("access_token") or _access_token()
+    if not item_id or (price is None and quantity is None):
+        return {"ok": False, "message": "Nothing to update."}
+    parts = [f"<ItemID>{_xml_escape(item_id)}</ItemID>"]
+    if price is not None:
+        parts.append(f"<StartPrice>{float(price):.2f}</StartPrice>")
+    if quantity is not None:
+        parts.append(f"<Quantity>{int(quantity)}</Quantity>")
+    inner = f"<InventoryStatus>{''.join(parts)}</InventoryStatus>"
+    try:
+        root = _trading_call("ReviseInventoryStatus", inner, token)
+        errors = _trading_errors(root)
+        if _lttext(root, "{*}Ack") in ("Success", "Warning") and not errors:
+            return {"ok": True, "message": "Listing updated on eBay."}
+        return {"ok": False, "message": "; ".join(errors) or "eBay rejected the update."}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("revise_live_listing(%s) failed: %s", item_id, exc)
+        return {"ok": False, "message": "Couldn't reach eBay to update the listing."}
+
+
+def end_item(creds: dict, item_id: str, reason: str = "NotAvailable") -> dict:
+    """End a live listing (Trading API EndItem). Returns {ok, message}."""
+    token = (creds or {}).get("access_token") or _access_token()
+    if not item_id:
+        return {"ok": False, "message": "Missing item id."}
+    inner = (f"<ItemID>{_xml_escape(item_id)}</ItemID>"
+             f"<EndingReason>{_xml_escape(reason)}</EndingReason>")
+    try:
+        root = _trading_call("EndItem", inner, token)
+        errors = _trading_errors(root)
+        if _lttext(root, "{*}Ack") in ("Success", "Warning") and not errors:
+            return {"ok": True, "message": "Listing ended on eBay."}
+        # Already-ended items report an error we can treat as success.
+        if any("already" in e.lower() or "ended" in e.lower() for e in errors):
+            return {"ok": True, "message": "Listing was already ended."}
+        return {"ok": False, "message": "; ".join(errors) or "eBay rejected the request."}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("end_item(%s) failed: %s", item_id, exc)
+        return {"ok": False, "message": "Couldn't reach eBay to end the listing."}

@@ -1,13 +1,22 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
-import { Trash2, Brush, Crop, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  Trash2, Brush, Crop, ChevronLeft, ChevronRight, RotateCw, Loader2,
+} from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 
 // PhotoTile — an uploaded photo as a rounded card with hover actions.
 // Draggable to reorder (arrow buttons cover touch); index 0 is the cover.
 export function PhotoTile({
   sessionId, name, version, index, count, isCover, dragging,
-  onDelete, onEdit, onSmartCrop, onMove, onDragStart, onDragEnter, onDragEnd,
+  onDelete, onEdit, onSmartCrop, onRotate, onMove, onDragStart, onDragEnter, onDragEnd,
 }) {
+  const [rotating, setRotating] = useState(false);
+  const rotate = async () => {
+    if (rotating) return;
+    setRotating(true);
+    try { await onRotate(); } finally { setRotating(false); }
+  };
   return (
     <motion.div
       layout
@@ -30,15 +39,28 @@ export function PhotoTile({
         src={`${mediaUrl(sessionId, name)}?v=${version}`}
         alt=""
         draggable={false}
-        className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.04]"
+        className="size-full object-contain transition-transform duration-200 group-hover:scale-[1.03]"
       />
       {isCover && (
         <span className="absolute top-1.5 left-1.5 rounded-full bg-blue text-on-accent text-[10px] font-bold px-2 py-0.5 shadow-card">
           Cover
         </span>
       )}
-      {/* Reorder arrows — also the touch path, since HTML5 drag is mouse-only. */}
-      <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
+      {/* Rotate + reorder. Rotate is always available; arrows cover touch
+          reordering since HTML5 drag is mouse-only. */}
+      <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-100 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
+        <button
+          type="button"
+          aria-label="Rotate photo 90 degrees"
+          title="Rotate"
+          onClick={rotate}
+          disabled={rotating}
+          className="grid place-items-center size-7 rounded-full bg-card/90 text-ink shadow-card cursor-pointer disabled:cursor-wait"
+        >
+          {rotating
+            ? <Loader2 size={14} className="animate-spin" aria-hidden />
+            : <RotateCw size={14} aria-hidden />}
+        </button>
         {index > 0 && (
           <button
             type="button"

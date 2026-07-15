@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
 import { PlusCircle, Store, LogIn } from "lucide-react";
 import { useApp } from "@/store";
@@ -6,6 +7,7 @@ import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
+import { LiveListingEditor } from "@/components/LiveListingEditor";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
@@ -48,8 +50,24 @@ const CONFIGS = {
 export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
   const { listingsState, loadListings, openListing, setView, startNew, user, openAuth,
-    ebayListings } = useApp();
+    ebayListings, syncEbay, endEbayListing } = useApp();
   const { toast, confirm } = useToast();
+  const [editingLive, setEditingLive] = useState(null);
+
+  const onEndLive = async (item) => {
+    if (!(await confirm({
+      title: "End this eBay listing?",
+      message: "This ends the live listing on eBay. This can't be undone.",
+      confirmLabel: "End listing",
+      danger: true,
+    }))) return;
+    try {
+      const r = await endEbayListing(item.ebay_item_id);
+      toast(r?.message || "Listing ended on eBay.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't end listing: ${e.message}`, { kind: "error" });
+    }
+  };
 
   const onDelete = async (item) => {
     const live = item.status === "published" || item.status === "live";
@@ -139,7 +157,8 @@ export function ListingsView({ kind, search = "" }) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
-            <ListingCard item={item} onOpen={openListing} onDelete={onDelete} />
+            <ListingCard item={item} onOpen={openListing} onDelete={onDelete}
+              onEditLive={setEditingLive} onEndLive={onEndLive} />
           </motion.div>
         ))}
       </div>
@@ -150,9 +169,29 @@ export function ListingsView({ kind, search = "" }) {
     <div className="flex flex-col gap-5">
       <div>
         <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">{cfg.title}</h1>
-        <p className="text-sm text-ink-secondary mt-1">{cfg.sub}</p>
+        <p className="text-sm text-ink-secondary mt-1">
+          {kind === "listings" && user
+            ? (syncEbay
+                ? "Managing all your active eBay listings — edit price, quantity, or end a listing."
+                : cfg.sub)
+            : cfg.sub}
+          {kind === "listings" && user && !syncEbay && (
+            <>
+              {" "}
+              <button
+                type="button"
+                onClick={() => setView("settings")}
+                className="font-semibold text-blue hover:underline"
+              >
+                Sync all eBay listings
+              </button>
+              {" in Settings to manage your full inventory here."}
+            </>
+          )}
+        </p>
       </div>
       {body}
+      <LiveListingEditor item={editingLive} onClose={() => setEditingLive(null)} />
     </div>
   );
 }
