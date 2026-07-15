@@ -1,20 +1,25 @@
-# QuickFlip - container image (used by Fly.io and any Docker host)
+# Thryft - container image (used by Fly.io and any Docker host)
 
 # Stage 1: build the React frontend (Vite outputs static files to dist/).
 FROM node:22-slim AS frontend
+# Git SHA of the commit being deployed (passed by deploy.yml). Baked into the
+# bundle so the UI can display exactly which build is on screen.
+ARG GIT_SHA=dev
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend ./
-RUN npm run build
+RUN VITE_BUILD_ID=$GIT_SHA npm run build
 
 # Stage 2: the Python backend serves the API + the built frontend.
 FROM python:3.11-slim
+ARG GIT_SHA=dev
 
 # Pillow 11 ships manylinux wheels, so no system build deps are needed.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8080
+    PORT=8080 \
+    GIT_SHA=$GIT_SHA
 
 WORKDIR /app
 
