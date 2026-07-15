@@ -174,7 +174,9 @@ EBAY_OAUTH_SCOPES = [
 # keyset to be approved for those APIs — otherwise requesting them breaks the
 # whole "Connect eBay" flow. Off by default; enable per deployment with
 # EBAY_EXTENDED_SCOPES=1 once the keyset has Marketing + Fulfillment enabled.
-if os.getenv("EBAY_EXTENDED_SCOPES", "").strip().lower() in ("1", "true", "yes", "on"):
+EBAY_EXTENDED_SCOPES = os.getenv("EBAY_EXTENDED_SCOPES", "").strip().lower() in (
+    "1", "true", "yes", "on")
+if EBAY_EXTENDED_SCOPES:
     EBAY_OAUTH_SCOPES += [
         "https://api.ebay.com/oauth/api_scope/sell.marketing",
         "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
