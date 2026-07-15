@@ -31,7 +31,10 @@ function pkgDefaults(prefs) {
 }
 
 function fromListing(l, prefs) {
-  if (!l) return { ...EMPTY };
+  // When the seller enabled "auto-promote" in Settings, new listings default to
+  // eBay's recommended ad rate (they can still turn it off per listing).
+  const autoPromote = !!(prefs && prefs.auto_promote);
+  if (!l) return { ...EMPTY, promote_enabled: autoPromote, promote_recommended: true };
   const d = pkgDefaults(prefs);
   // The AI's measurements win; the user's defaults fill what it left blank.
   const noWeight = !(l.package_weight_lb || l.package_weight_oz);
@@ -39,6 +42,8 @@ function fromListing(l, prefs) {
   return {
     ...EMPTY,
     ...l,
+    promote_enabled: !!l.promote_enabled || autoPromote,
+    promote_recommended: l.promote_recommended != null ? l.promote_recommended : true,
     price: l.price != null ? l.price : "",
     best_offer_min: l.best_offer_min != null ? l.best_offer_min : "",
     best_offer_accept: l.best_offer_accept != null ? l.best_offer_accept : "",

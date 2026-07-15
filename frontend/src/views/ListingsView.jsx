@@ -2,7 +2,6 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { PlusCircle, Store, LogIn } from "lucide-react";
 import { useApp } from "@/store";
-import { api } from "@/lib/api";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -38,7 +37,7 @@ const CONFIGS = {
   },
   listings: {
     title: "Listings",
-    sub: "Everything you've created with QuickFlip",
+    sub: "Everything you've created with Thryft",
     filter: () => true,
     illustration: TagIllustration,
     emptyTitle: "No listings yet",
@@ -50,7 +49,7 @@ const CONFIGS = {
 export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
   const { listingsState, loadListings, openListing, setView, startNew, user, openAuth,
-    ebayListings, syncEbay, endEbayListing } = useApp();
+    ebayListings, syncEbay, endEbayListing, removeListing } = useApp();
   const { toast, confirm } = useToast();
   const [editingLive, setEditingLive] = useState(null);
 
@@ -75,14 +74,13 @@ export function ListingsView({ kind, search = "" }) {
       title: "Delete this listing?",
       message: live
         ? "This will also end the live listing on eBay. This can't be undone."
-        : "This removes it from QuickFlip. This can't be undone.",
+        : "This removes it from Thryft. This can't be undone.",
       confirmLabel: "Delete",
       danger: true,
     }))) return;
     try {
-      await api(`/api/listings/${item.id}`, { method: "DELETE" });
+      await removeListing(item.id);
       toast("Listing deleted.", { kind: "success" });
-      loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't delete: ${e.message}`, { kind: "error" });
     }

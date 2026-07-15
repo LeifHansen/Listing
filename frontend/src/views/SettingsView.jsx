@@ -283,11 +283,16 @@ export function SettingsView() {
 
             {POLICY_KINDS.map(({ key, field, label }) => {
               const opts = data.policies[key] || [];
+              const err = (data.policies.errors || {})[key];
+              const help = opts.length
+                ? undefined
+                : err === "not_opted_in"
+                  ? "Your eBay account isn't opted into Business Policies yet — tap “Create starter policies” below to opt in and add one."
+                  : err
+                    ? `Couldn't load from eBay (${err}). Try “Create starter policies” below.`
+                    : `No ${label.toLowerCase()} on eBay yet.`;
               return (
-                <Field
-                  key={key} label={label}
-                  help={opts.length ? undefined : `No ${label.toLowerCase()} on eBay yet.`}
-                >
+                <Field key={key} label={label} help={help}>
                   <Select
                     value={selected[field] || ""}
                     onChange={(e) => setSelected((s) => ({ ...s, [field]: e.target.value }))}
@@ -365,6 +370,19 @@ function ProfileCard() {
     }
   };
 
+  const toggleAutoPromote = async (on) => {
+    setUser((u) => ({ ...u, prefs: { ...(u.prefs || {}), auto_promote: on } }));
+    try {
+      await postJson("/api/profile", { auto_promote: on });
+      toast(on
+        ? "New listings will default to eBay's recommended promotion rate."
+        : "Auto-promote off.", { kind: "success" });
+    } catch (e) {
+      setUser((u) => ({ ...u, prefs: { ...(u.prefs || {}), auto_promote: !on } }));
+      toast(`Couldn't update: ${e.message}`, { kind: "error" });
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -397,7 +415,7 @@ function ProfileCard() {
       <SectionHeader
         icon={UserRound}
         title="Profile"
-        hint="How QuickFlip greets you — sync pulls your eBay username and settings"
+        hint="How Thryft greets you — sync pulls your eBay username and settings"
       />
       <div className="flex flex-col gap-4 max-w-lg">
         <Field label="Display name" help={`Email: ${user?.email || ""}`}>
@@ -423,8 +441,16 @@ function ProfileCard() {
               checked={!!user?.prefs?.sync_ebay_listings}
               onChange={toggleSync}
               label="Sync all my eBay listings & sales"
-              help="Off (default): the Listings tab shows only listings you created in QuickFlip. On: pulls your entire active eBay inventory into the Listings tab (marked with an eBay badge) so you can edit price, quantity, or end them here — plus an items-sold tile on the dashboard."
+              help="Off (default): the Listings tab shows only listings you created in Thryft. On: pulls your entire active eBay inventory into the Listings tab (marked with an eBay badge) so you can edit price, quantity, or end them here — plus an items-sold tile on the dashboard."
             />
+            <div className="border-t border-line pt-4">
+              <Toggle
+                checked={!!user?.prefs?.auto_promote}
+                onChange={toggleAutoPromote}
+                label="Auto-promote new listings"
+                help="Turns on Promoted Listings at eBay's recommended ad rate for every new listing by default (you can still change it per listing). Requires Promoted Listings to be enabled on your eBay account."
+              />
+            </div>
           </div>
         )}
       </div>

@@ -199,8 +199,14 @@ _POLICY_SPECS = {
 
 def list_business_policies(access_token: str) -> dict:
     """All of the seller's eBay business policies, grouped by type, as
-    [{id, name, summary}] so the user can pick a default for each."""
-    out = {"fulfillment": [], "payment": [], "return": []}
+    [{id, name, summary}] so the user can pick a default for each.
+
+    On error per type we log the real eBay response (previously swallowed
+    silently, which made an empty dropdown impossible to diagnose) and record a
+    human-readable reason under "errors" so the UI can explain *why* it's empty
+    — most often the seller isn't opted into eBay's Business Policies program,
+    which the "Create starter policies" button resolves."""
+    out = {"fulfillment": [], "payment": [], "return": [], "errors": {}}
     for key, (path, list_field, id_field) in _POLICY_SPECS.items():
         try:
             data = _account_get(path, access_token)
@@ -215,8 +221,20 @@ def list_business_policies(access_token: str) -> dict:
                 if key == "fulfillment":
                     entry["services"] = [s["code"] for s in _policy_services(p)]
                 out[key].append(entry)
-        except Exception:  # noqa: BLE001 - best effort per type
-            pass
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500]
+            msg = _ebay_error_message(body) or f"HTTP {exc.response.status_code}"
+            log.warning("list_business_policies[%s] -> %s %s", key,
+                        exc.response.status_code, body)
+            # errorId 20403 = "not opted in to Business Policies".
+            if "20403" in body or "not opted in" in body.lower() \
+                    or "business policies" in body.lower():
+                out["errors"][key] = "not_opted_in"
+            else:
+                out["errors"][key] = msg
+        except Exception as exc:  # noqa: BLE001 - best effort per type
+            log.warning("list_business_policies[%s] failed: %s", key, exc)
+            out["errors"][key] = "fetch_failed"
     return out
 
 

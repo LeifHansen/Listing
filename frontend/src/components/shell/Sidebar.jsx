@@ -22,12 +22,18 @@ export const APP_VERSION = "v2.0";
 function Brand({ collapsed }) {
   return (
     <div className="flex items-center gap-2.5 px-2 h-12">
-      <span className="grid place-items-center size-9 rounded-[13px] bg-blue text-on-accent shrink-0 shadow-card">
+      <span
+        className="grid place-items-center size-9 rounded-[13px] text-white shrink-0 shadow-card"
+        style={{
+          backgroundImage:
+            "linear-gradient(135deg, var(--brand-red), var(--brand-yellow) 40%, var(--brand-green) 70%, var(--brand-blue))",
+        }}
+      >
         <Zap size={19} strokeWidth={2.4} aria-hidden />
       </span>
       {!collapsed && (
-        <span className="font-extrabold text-[19px] tracking-tight text-ink">
-          Quick<span className="text-blue">Flip</span>
+        <span className="brand-gradient-text font-extrabold text-[20px] tracking-tight">
+          Thryft
         </span>
       )}
     </div>

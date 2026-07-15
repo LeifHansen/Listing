@@ -7,8 +7,8 @@ import { ProgressChip } from "@/components/ui/badges";
 // WorkflowCard — one collapsible step of the listing workflow. Collapsed by
 // default (the attention banner calls out anything incomplete); shows a
 // ✔ Complete / Needs attention chip and expands itself when eBay flags it.
-export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, focus, children }) {
-  const [open, setOpen] = useState(false);
+export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, focus, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
   const ref = useRef(null);
 
   // When a publish error points here, expand and scroll into view.
