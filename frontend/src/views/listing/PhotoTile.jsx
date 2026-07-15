@@ -91,7 +91,8 @@ export function PhotoTile({
         </div>
         <div
           className="absolute inset-x-0 bottom-0 pointer-events-none
-            flex items-end justify-center gap-2 p-3 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-200"
+            flex items-end justify-center gap-2 p-3 transition-opacity duration-200
+            opacity-100 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-within:opacity-100"
         >
           <button
             type="button"

@@ -10,22 +10,26 @@ import { Input } from "@/components/ui/fields";
    no scrolling around the form hunting for where each blank lives. */
 
 export function MissingInfo({ w }) {
-  const items = w.form.missing_info || [];
+  // De-dupe so two identical questions can't share a React key or an answer.
+  const items = [...new Set(w.form.missing_info || [])];
+  // Answers are keyed by the QUESTION TEXT, not the array index — dismissing a
+  // question used to shift every later index down while answers stayed put, so
+  // typed answers got attached to the wrong question (silent data corruption).
   const [answers, setAnswers] = useState({});
 
   if (!items.length) return null;
 
-  const dismiss = (idx) => {
-    w.set("missing_info", items.filter((_, i) => i !== idx));
+  const dismiss = (q) => {
+    w.set("missing_info", items.filter((x) => x !== q));
     setAnswers((a) => {
       const next = { ...a };
-      delete next[idx];
+      delete next[q];
       return next;
     });
   };
 
   const answered = items
-    .map((q, i) => ({ q, a: (answers[i] || "").trim() }))
+    .map((q) => ({ q, a: (answers[q] || "").trim() }))
     .filter((x) => x.a);
 
   const apply = async () => {
@@ -51,22 +55,22 @@ export function MissingInfo({ w }) {
         The AI wasn't sure about a few things — answer here and it fills in the right fields
       </p>
       <ul className="mt-4 flex flex-col gap-2.5">
-        {items.map((q, i) => (
+        {items.map((q) => (
           <li key={q} className="flex flex-col sm:flex-row sm:items-center gap-2">
             <span className="text-sm text-ink sm:w-2/5 min-w-0">{q}</span>
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <Input
-                value={answers[i] || ""}
+                value={answers[q] || ""}
                 placeholder="Type the answer…"
                 className="h-10 bg-card/70"
-                onChange={(e) => setAnswers((a) => ({ ...a, [i]: e.target.value }))}
+                onChange={(e) => setAnswers((a) => ({ ...a, [q]: e.target.value }))}
                 onKeyDown={(e) => { if (e.key === "Enter") apply(); }}
               />
               <Button
                 variant="ghost" size="iconSm" className="shrink-0"
                 aria-label={`Dismiss "${q}" — already correct`}
                 title="Already correct / not applicable"
-                onClick={() => dismiss(i)}
+                onClick={() => dismiss(q)}
               >
                 <X size={15} />
               </Button>

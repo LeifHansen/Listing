@@ -8,6 +8,7 @@ upscale to target, and apply mild brightness/contrast/sharpness enhancement.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +55,10 @@ def _flatten(img: Image.Image) -> Image.Image:
 # Override with REMBG_MODEL if the box ever gets a bigger VM.
 _REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 _rembg_session = None
+# Bulk jobs run in a daemon thread while uploads hit the request threadpool —
+# without a lock, two first-users would double-load the ONNX model (memory
+# spike on a shared-cpu-1x box) and race the session init.
+_rembg_lock = threading.Lock()
 
 
 def warm() -> None:
@@ -389,9 +394,13 @@ def _subject_mask(img: Image.Image) -> Image.Image:
     global _rembg_session
     from rembg import new_session, remove
 
-    if _rembg_session is None:
-        _rembg_session = new_session(_REMBG_MODEL)
-    return remove(img.convert("RGB"), session=_rembg_session, only_mask=True).convert("L")
+    with _rembg_lock:
+        if _rembg_session is None:
+            _rembg_session = new_session(_REMBG_MODEL)
+        # Serialize inference too: one shared ONNX session, and concurrent
+        # inference on a 1-CPU box just thrashes memory without speedup.
+        return remove(img.convert("RGB"), session=_rembg_session,
+                      only_mask=True).convert("L")
 
 
 def analyze_cleanup(img: Image.Image) -> dict:

@@ -373,4 +373,13 @@ def refine(listing: Listing, prompt: str) -> Listing:
     updated = _to_listing(data, listing.images)
     # Preserve images explicitly.
     updated.images = listing.images
+    # _to_listing only parses the fields the identify schema defines — fields
+    # managed by the UI (category picker, shipping policy, Best Offer, Promote)
+    # aren't among them and would silently reset to defaults on EVERY refine
+    # ("lower the price" used to wipe the category and turn Promote off).
+    # Carry them over from the seller's current listing.
+    for field in ("category_id", "fulfillment_policy_id",
+                  "best_offer_enabled", "best_offer_min", "best_offer_accept",
+                  "promote_enabled", "promote_recommended", "promote_percent"):
+        setattr(updated, field, getattr(listing, field))
     return updated

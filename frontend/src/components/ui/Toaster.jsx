@@ -38,6 +38,11 @@ export function ToastProvider({ children }) {
   // await confirm({ title, message, confirmLabel, danger }) → boolean
   const confirm = useCallback((opts) => {
     return new Promise((resolve) => {
+      // If a confirm is already pending (e.g. Enter re-fired the handler, or
+      // two flows raced), resolve the previous one as "cancel" instead of
+      // orphaning its promise — a leaked resolver leaves that await hung
+      // forever, silently abandoning the earlier flow mid-action.
+      if (resolver.current) resolver.current(false);
       resolver.current = resolve;
       setConfirmState(opts);
     });
