@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   Thryft design tokens
+   QuickFlip design tokens
    eBay brand colors are used as *accents* on an airy neutral canvas.
    Every component reads from these variables — change them here, restyle
    the whole app (including dark mode below).

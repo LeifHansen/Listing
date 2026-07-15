@@ -192,9 +192,8 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None,
     """
     if not category_id:
         return {"aspects": []}
-    import time as _time
     cached = _ASPECTS_CACHE.get(category_id)
-    if cached and _time.time() - cached[0] < _ASPECTS_TTL_S:
+    if cached and time.time() - cached[0] < _ASPECTS_TTL_S:
         return cached[1]
     tree_id = default_tree_id(marketplace_id)
     resp = httpx.get(
@@ -226,8 +225,7 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None,
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
     result = {"aspects": aspects}
-    import time as _time
     if len(_ASPECTS_CACHE) > 500:  # bounded: drop everything, repopulate lazily
         _ASPECTS_CACHE.clear()
-    _ASPECTS_CACHE[category_id] = (_time.time(), result)
+    _ASPECTS_CACHE[category_id] = (time.time(), result)
     return result

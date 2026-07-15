@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import threading
 from pathlib import Path
@@ -25,6 +26,25 @@ from .models import Listing, PublishRequest, RefineRequest
 from .services import claude_ai, ebay, images, preflight, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
+
+
+class _QuietDeletionPings(logging.Filter):
+    """eBay pings /api/ebay/account-deletion ~40×/hour to keep our compliance
+    endpoint validated. Logged at INFO by uvicorn's access logger, those pings
+    bury every other request in the Fly logs. Drop only the *successful* ones —
+    any non-2xx (a real problem with the endpoint) still gets logged."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 5:
+            path, status = args[2], args[4]
+            if (path == "/api/ebay/account-deletion"
+                    and isinstance(status, int) and status < 400):
+                return False
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietDeletionPings())
 
 # The frontend is a Vite/React app; serve its build output. (The Dockerfile
 # builds it in a node stage; run.sh builds it for local dev.)
