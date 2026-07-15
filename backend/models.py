@@ -58,6 +58,9 @@ class IdentifyResult(BaseModel):
     listing: Listing
     confidence: str = "medium"
     raw_observations: str = ""
+    # Per-image clockwise rotation (deg) the vision model suggests to make each
+    # photo upright; applied server-side after identify. 0 = leave as-is.
+    orientations: list[int] = Field(default_factory=list)
 
 
 class RefineRequest(BaseModel):
