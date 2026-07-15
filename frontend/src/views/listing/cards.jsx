@@ -542,7 +542,9 @@ const isGroundPolicy = (p) => (p.services || []).some(
 // silently on the account if it doesn't exist yet.
 function ShippingServicePicker({ w }) {
   const { ebay, policiesData, setPoliciesData } = useApp();
+  const { toast } = useToast();
   const ensured = useRef(false);
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     if (!ebay.connected || policiesData) return;
@@ -551,6 +553,21 @@ function ShippingServicePicker({ w }) {
 
   const policies = policiesData?.policies?.fulfillment || [];
   const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
+  const polErr = policiesData?.policies?.errors?.fulfillment;
+
+  const createStarter = async () => {
+    setCreating(true);
+    try {
+      const res = await postJson("/api/ebay/ensure-defaults", {});
+      if (res.fulfillment?.id) w.set("fulfillment_policy_id", res.fulfillment.id);
+      setPoliciesData(null); // reload so the new policies show in the list
+      toast("Shipping policy created on eBay.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't create a shipping policy: ${e.message}`, { kind: "error" });
+    } finally {
+      setCreating(false);
+    }
+  };
 
   // Default this listing's service: the account preference saved in Settings
   // wins; otherwise USPS Ground Advantage (quietly created when the account
@@ -564,13 +581,14 @@ function ShippingServicePicker({ w }) {
     const ground = policies.find(isGroundPolicy);
     if (ground) {
       w.set("fulfillment_policy_id", ground.id);
-    } else if (!ensured.current) {
+    } else if (!ensured.current && policies.length === 0) {
       ensured.current = true;
+      // One quiet attempt; if it fails the empty state below shows a visible
+      // button + the real reason instead of a blank dropdown.
       postJson("/api/ebay/ensure-defaults", {})
         .then((res) => {
-          const pol = res.fulfillment;
-          if (pol?.id) w.set("fulfillment_policy_id", pol.id);
-          setPoliciesData(null); // reload so any new policies show in the list
+          if (res.fulfillment?.id) w.set("fulfillment_policy_id", res.fulfillment.id);
+          setPoliciesData(null);
         })
         .catch(() => {});
     }
@@ -584,6 +602,10 @@ function ShippingServicePicker({ w }) {
   const weightOz = (parseFloat(w.form.package_weight_lb) || 0) * 16
     + (parseFloat(w.form.package_weight_oz) || 0);
   const capIssue = capIssueFor(services, weightOz);
+  // The select must NEVER render optionless (that's an inexplicable blank
+  // box): show a labelled placeholder when the account has no policies, or
+  // when the chosen id isn't in the list (stale draft, deleted policy).
+  const chosenInList = policies.some((p) => p.id === chosen);
 
   return (
     <div className="flex flex-col gap-3 max-w-md">
@@ -596,9 +618,15 @@ function ShippingServicePicker({ w }) {
         help="How this item ships (an eBay shipping policy). USPS Ground Advantage is the cheapest option for most packages — up to 70 lb."
       >
         <Select
-          value={chosen}
+          value={chosenInList ? chosen : ""}
           onChange={(e) => w.set("fulfillment_policy_id", e.target.value)}
         >
+          {!policies.length && (
+            <option value="">— no shipping policies on eBay yet —</option>
+          )}
+          {!!policies.length && !chosenInList && (
+            <option value="">Choose a shipping service…</option>
+          )}
           {policies.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}{p.summary ? ` · ${p.summary}` : ""}
@@ -607,6 +635,19 @@ function ShippingServicePicker({ w }) {
           ))}
         </Select>
       </Field>
+      {!policies.length && policiesData && (
+        <div className="rounded-tile bg-warning-soft border border-warning/30 p-3 text-[13px]">
+          <p className="text-ink">
+            {polErr === "not_opted_in"
+              ? "Your eBay account isn't opted into Business Policies yet — one tap sets that up and creates a USPS Ground Advantage policy."
+              : "Your eBay account has no shipping policies yet. One tap creates a USPS Ground Advantage starter policy."}
+          </p>
+          <Button variant="primary" size="sm" className="mt-2"
+            onClick={createStarter} loading={creating}>
+            <Truck aria-hidden /> Set up USPS Ground Advantage
+          </Button>
+        </div>
+      )}
       {capIssue && (
         <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
           <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden /> {capIssue}
