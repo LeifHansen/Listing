@@ -1,26 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { motion } from "framer-motion";
-import { Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks } from "lucide-react";
+import { Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApp } from "@/store";
-import { WorkflowCard } from "./WorkflowCard";
-import { PublishPreview } from "./PublishPreview";
 import { Button } from "@/components/ui/Button";
 
 function nameFor(data, key, field) {
   return ((data.policies[key] || []).find((p) => p.id === data.selected[field]) || {}).name || "not set";
 }
 
-// Publish — the last card: what will apply, the two big buttons, and a
-// friendly "what to fix" panel when eBay pushes back.
-export function PublishCard({ w }) {
+// Publish — a STATIC, always-visible section (not a collapsible card) with a
+// tinted background so the final step stands out. Two actions: Save as Draft,
+// and Preview → full-page eBay-style preview where the real Publish lives.
+export function PublishCard({ w, onPreview }) {
   const { canPublishLive, ebay, setView, policiesData, setPoliciesData } = useApp();
   const r = w.publishResult;
-  const [preview, setPreview] = useState(false);
-
-  // Connected sellers get a last-look preview before the listing goes live;
-  // dry-runs (no eBay) publish straight through since nothing reaches eBay.
-  const onPublishLive = () => (canPublishLive ? setPreview(true) : w.publish("live"));
 
   // Show which shipping/payment/return policies will apply.
   useEffect(() => {
@@ -39,14 +33,25 @@ export function PublishCard({ w }) {
     && (r.published || r.draft || r.ebay_draft || r.dry_run || r.preflight);
 
   return (
-    <WorkflowCard
-      id="publish" icon={Rocket} title="Publish"
-      hint={canPublishLive
-        ? "Save as Draft keeps it here in Thryft; Publish Live posts it to your eBay account"
-        : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
-      state={publishedOk ? "complete" : "todo"} focus={w.cardFocus}
+    <section
+      id="card-publish"
+      className="rounded-card border border-blue/25 bg-blue-soft/60 shadow-card p-5 sm:p-6"
     >
-      <div className="flex flex-col gap-5">
+      <div className="flex items-center gap-3">
+        <span className="grid place-items-center size-10 rounded-[13px] bg-blue text-on-accent shrink-0">
+          <Rocket size={19} strokeWidth={2} aria-hidden />
+        </span>
+        <div className="min-w-0">
+          <h2 className="font-bold text-[16px] text-ink">Publish</h2>
+          <p className="text-[13px] text-ink-secondary">
+            {canPublishLive
+              ? "Preview shows the listing as buyers will see it — publish from there"
+              : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-col gap-4">
         {ebay.connected && policiesData && (
           <p className="text-[13px] text-ink-secondary">
             Applies to this listing — <strong className="text-ink">Shipping:</strong>{" "}
@@ -66,24 +71,13 @@ export function PublishCard({ w }) {
         )}
 
         <div className="flex flex-wrap gap-2.5">
-          <Button variant="ghost" size="lg" onClick={w.runPreflight}>
-            <ListChecks aria-hidden /> Check before publishing
-          </Button>
           <Button variant="secondary" size="lg" onClick={() => w.publish("draft")}>
             <Save aria-hidden /> Save as Draft
           </Button>
-          <Button variant="primary" size="lg" onClick={onPublishLive}>
-            <Rocket aria-hidden /> Publish Live
+          <Button variant="primary" size="lg" onClick={onPreview}>
+            <Eye aria-hidden /> Preview
           </Button>
         </div>
-
-        <PublishPreview
-          w={w}
-          policiesData={policiesData}
-          open={preview}
-          onClose={() => setPreview(false)}
-          onConfirm={() => { setPreview(false); w.publish("live"); }}
-        />
 
         {/* Success states */}
         {publishedOk && (
@@ -167,6 +161,6 @@ export function PublishCard({ w }) {
           </motion.div>
         )}
       </div>
-    </WorkflowCard>
+    </section>
   );
 }

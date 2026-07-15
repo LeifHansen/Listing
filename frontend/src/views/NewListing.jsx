@@ -13,6 +13,7 @@ import { MissingInfo } from "./listing/MissingInfo";
 import { ImageEditor } from "./listing/ImageEditor";
 import { PublishOverlay } from "./listing/PublishOverlay";
 import { PublishCard } from "./listing/PublishCard";
+import { PreviewPage } from "./listing/PreviewPage";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard,
@@ -105,6 +106,8 @@ function Workflow() {
   // { name, action? } — the photo open in the studio; action "crop" runs
   // smart crop as soon as the photo loads.
   const [editing, setEditing] = useState(null);
+  // Full-page eBay-style preview — the gate before Publish.
+  const [previewing, setPreviewing] = useState(false);
 
   const restart = async () => {
     if (await confirm({
@@ -113,6 +116,20 @@ function Workflow() {
       confirmLabel: "Start new",
     })) startNew();
   };
+
+  if (previewing) {
+    return (
+      <>
+        <PreviewPage
+          w={w}
+          onBack={() => setPreviewing(false)}
+          onSaveDraft={() => { setPreviewing(false); w.publish("draft"); }}
+          onPublish={() => { setPreviewing(false); w.publish("live"); }}
+        />
+        <PublishOverlay w={w} />
+      </>
+    );
+  }
 
   return (
     <motion.div variants={stagger} initial="hidden" animate="show" className="flex flex-col gap-4">
@@ -161,7 +178,7 @@ function Workflow() {
         <PricingCard w={w} />
         <ShippingCard w={w} />
         <DescriptionCard w={w} />
-        <PublishCard w={w} />
+        <PublishCard w={w} onPreview={() => setPreviewing(true)} />
       </motion.div>
 
       <ImageEditor
