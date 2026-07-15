@@ -4,6 +4,8 @@ import {
   Tags, Timer, Coins, ShoppingBag,
 } from "lucide-react";
 import { useApp } from "@/store";
+import { api } from "@/lib/api";
+import { useToast } from "@/components/ui/Toaster";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -40,9 +42,29 @@ const rise = {
 };
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, startNew, openListing, setView, session, ebayStats } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, session, ebayStats } = useApp();
+  const { toast, confirm } = useToast();
   const soldCount = ebayStats?.sold?.count;
   const items = listingsState.items;
+
+  const onDelete = async (item) => {
+    const live = item.status === "published" || item.status === "live";
+    if (!(await confirm({
+      title: "Delete this listing?",
+      message: live
+        ? "This will also end the live listing on eBay. This can't be undone."
+        : "This removes it from QuickFlip. This can't be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+    }))) return;
+    try {
+      await api(`/api/listings/${item.id}`, { method: "DELETE" });
+      toast("Listing deleted.", { kind: "success" });
+      loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+    }
+  };
 
   const todays = items.filter((i) => isToday(i.created_at));
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
@@ -171,7 +193,7 @@ export function Dashboard() {
         ) : recent.length > 0 ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {recent.map((item) => (
-              <ListingCard key={item.id} item={item} onOpen={openListing} />
+              <ListingCard key={item.id} item={item} onOpen={openListing} onDelete={onDelete} />
             ))}
           </div>
         ) : (

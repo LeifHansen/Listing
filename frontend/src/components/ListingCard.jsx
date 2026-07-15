@@ -55,28 +55,28 @@ export function ListingCard({ item, onOpen, onDelete, className }) {
           )}
         </div>
 
-        {/* Quick actions. Always visible on touch devices (no hover to reveal
-           them); fade in on hover for pointer devices. Without the
-           (hover:hover) gate these were unreachable on phones. */}
-        <div className="absolute top-2.5 right-2.5 flex gap-1.5 opacity-100 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-150">
+        {/* Quick actions — ALWAYS visible so a delete is never hidden behind a
+           hover (which doesn't exist on touch devices). */}
+        <div className="absolute top-2.5 right-2.5 flex gap-1.5">
           {!fromEbay && (
             <button
               type="button"
               aria-label="Edit listing"
               onClick={(e) => { e.stopPropagation(); onOpen(item.id); }}
-              className="grid place-items-center size-8 rounded-full bg-card/95 text-ink shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
+              className="grid place-items-center size-9 rounded-full bg-card text-ink shadow-float cursor-pointer hover:-translate-y-0.5 hover:bg-bg-sunken transition-all duration-150"
             >
-              <Pencil size={14} aria-hidden />
+              <Pencil size={16} aria-hidden />
             </button>
           )}
           {onDelete && !fromEbay && (
             <button
               type="button"
               aria-label="Delete listing"
+              title="Delete"
               onClick={(e) => { e.stopPropagation(); onDelete(item); }}
-              className="grid place-items-center size-8 rounded-full bg-card/95 text-error shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
+              className="grid place-items-center size-9 rounded-full bg-card text-error shadow-float cursor-pointer hover:-translate-y-0.5 hover:bg-red-soft transition-all duration-150"
             >
-              <Trash2 size={14} aria-hidden />
+              <Trash2 size={16} aria-hidden />
             </button>
           )}
         </div>
