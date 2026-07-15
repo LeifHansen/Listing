@@ -34,7 +34,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="Drag to reorder — the first photo is your cover. Hover for clean-up, smart crop, or delete"
+      hint="Click a photo to open the editor · drag to reorder — the first photo is your cover"
       state={w.completion.photos} focus={w.cardFocus} flagged={w.fixTarget === "photos"}
     >
       {(w.form.images || []).length ? (
