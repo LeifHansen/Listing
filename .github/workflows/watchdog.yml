@@ -1,0 +1,48 @@
+name: Watchdog — keep production on main
+
+# Production got overwritten twice by deploys that did NOT come from GitHub
+# (Fly releases v89 @ 17:55 UTC and v92 @ 21:40 UTC on 2026-07-15 have no
+# matching Actions run), each time re-publishing a stale build. This watchdog
+# makes GitHub main the enforced source of truth: every 15 minutes it compares
+# the live site's build SHA (/api/health "build", stamped by the Docker build)
+# to main's HEAD, and redeploys main if they differ. That also self-heals a
+# crashed or unreachable app, and old images that predate the build stamp
+# (no "build" field) always mismatch, so rogue stale deploys are reverted on
+# the next tick.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+# Share the deploy lock so the watchdog never races a normal deploy.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify live build matches main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare live build to main HEAD
+        id: check
+        run: |
+          want=$(echo "$GITHUB_SHA" | cut -c1-7)
+          live=$(curl -sf --max-time 20 https://listing-lfwjrg.fly.dev/api/health \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("build","none"))' \
+                 || echo "unreachable")
+          echo "live=$live want=$want"
+          if [ "$live" != "$want" ]; then
+            echo "MISMATCH — redeploying main"
+            echo "redeploy=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "live site matches main — nothing to do"
+          fi
+      - if: steps.check.outputs.redeploy == 'yes'
+        uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Redeploy main
+        if: steps.check.outputs.redeploy == 'yes'
+        run: flyctl deploy --remote-only --no-cache --build-arg GIT_SHA=$GITHUB_SHA
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
