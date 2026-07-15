@@ -157,6 +157,8 @@ EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.
 
 # Scopes needed to create listings, read/fetch business policies, and read the
 # connected seller's identity (so we can show WHICH eBay account is linked).
+# eBay rejects the ENTIRE authorize request if it contains any scope the keyset
+# isn't approved for, so this base set is only scopes every keyset grants.
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
@@ -165,11 +167,18 @@ EBAY_OAUTH_SCOPES = [
     # Real Seller Hub drafts (Listing API createItemDraft). Connections made
     # before this scope was added keep their old grant — reconnect to enable.
     "https://api.ebay.com/oauth/api_scope/sell.item.draft",
-    # Promoted Listings (Marketing API) and reading orders/live listings for
-    # the dashboard "items sold" tile + pulled-from-eBay listings.
-    "https://api.ebay.com/oauth/api_scope/sell.marketing",
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
 ]
+
+# Promoted Listings (Marketing) + reading orders/live listings power the
+# promote feature and the eBay-sync dashboard tiles, but they require the
+# keyset to be approved for those APIs — otherwise requesting them breaks the
+# whole "Connect eBay" flow. Off by default; enable per deployment with
+# EBAY_EXTENDED_SCOPES=1 once the keyset has Marketing + Fulfillment enabled.
+if os.getenv("EBAY_EXTENDED_SCOPES", "").strip().lower() in ("1", "true", "yes", "on"):
+    EBAY_OAUTH_SCOPES += [
+        "https://api.ebay.com/oauth/api_scope/sell.marketing",
+        "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+    ]
 
 
 def ebay_oauth_ready() -> bool:
