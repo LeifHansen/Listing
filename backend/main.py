@@ -830,13 +830,24 @@ async def image_analyze(
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
+        from PIL import Image as _Image
+
         img = _studio_load(session_id, name, data)
         res = images.analyze_cleanup(img)
+        # The editor tints via canvas source-in, which keys on the ALPHA
+        # channel — an opaque grayscale mask would tint the ENTIRE photo red.
+        # Encode the mask as the alpha of an otherwise-solid PNG.
+        mask_url = None
+        if res["residue_pct"] > 0:
+            m = res["residue_mask"]
+            rgba = _Image.new("RGBA", m.size, (255, 255, 255, 0))
+            rgba.putalpha(m)
+            mask_url = _data_url(rgba, "PNG")
         return {
             "ok": True,
             "residue_pct": res["residue_pct"],
             "bbox": res["bbox"],
-            "mask": _data_url(res["residue_mask"], "PNG") if res["residue_pct"] > 0 else None,
+            "mask": mask_url,
             "width": res["residue_mask"].width,
             "height": res["residue_mask"].height,
         }
@@ -887,6 +898,34 @@ async def image_smart_crop(
     return await run_in_threadpool(_run)
 
 
+def _apply_package_prefs(listing: Listing, uid: Optional[str],
+                         prefs: Optional[dict] = None) -> None:
+    """Auto-apply the account's saved package defaults (Settings → Package
+    defaults) to a freshly identified listing, overriding the AI's estimate —
+    the seller asked for these to be THE default; they can still edit any
+    single listing. Zeros/blanks in prefs mean "not set" and change nothing."""
+    if prefs is None:
+        user = db.get_user_by_id(uid) if uid else None
+        prefs = (user or {}).get("prefs") or {}
+
+    def _pf(key: str) -> float:
+        try:
+            return max(0.0, float(prefs.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    lb, oz = _pf("default_weight_lb"), _pf("default_weight_oz")
+    if lb or oz:
+        listing.package_weight_lb = lb
+        listing.package_weight_oz = oz
+    length, width, height = (_pf("default_length_in"), _pf("default_width_in"),
+                             _pf("default_height_in"))
+    if length and width and height:  # eBay needs all three or none
+        listing.package_length_in = length
+        listing.package_width_in = width
+        listing.package_height_in = height
+
+
 @app.post("/api/identify/{session_id}")
 def identify(session_id: str, request: Request) -> dict:
     """Run Claude vision over the optimized images and draft a listing."""
@@ -918,6 +957,8 @@ def identify(session_id: str, request: Request) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("identify: auto-rotate failed (session=%s name=%s): %s",
                         session_id, name, exc)
+
+    _apply_package_prefs(result.listing, _uid(request))
 
     # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
     if config.taxonomy_ready() and not result.listing.category_id:
@@ -1083,6 +1124,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, add_shadow: bool
         thumbs = [images.thumb_jpeg(opt_dir / n) for n in names]
         groups = claude_ai.group_photos(thumbs)["groups"]
         _bulk_set(job_id, total_items=len(groups))
+        # Account package defaults, fetched once and applied to every item.
+        pkg_prefs = ((db.get_user_by_id(uid) or {}).get("prefs") or {}) if uid else {}
 
         items: list[dict] = []
         for gi, group in enumerate(groups):
@@ -1103,6 +1146,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, add_shadow: bool
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names], item_names)
                 listing = result.listing
+                _apply_package_prefs(listing, uid, prefs=pkg_prefs)
                 if config.taxonomy_ready() and not listing.category_id:
                     try:
                         best = taxonomy.best_category_id(_category_query(listing))

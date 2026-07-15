@@ -233,8 +233,9 @@ export function SettingsView() {
           <div>
             <p className="text-[13px] font-semibold text-ink mb-1.5">Default package</p>
             <p className="text-xs text-ink-secondary mb-3">
-              Pre-fills the Shipping card whenever the AI couldn't tell the size from
-              the photos.
+              Auto-applied to every new listing's Shipping card (you can still
+              adjust any single listing before publishing). Leave a field at 0
+              to fall back to the built-in default.
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
               {PKG_FIELDS.map(([key, label]) => (

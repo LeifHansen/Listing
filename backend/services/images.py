@@ -117,14 +117,35 @@ def _light_offset(rgb: Image.Image, alpha: Image.Image) -> tuple[int, int]:
     return (int(round(dx)), int(round(dy)))
 
 
+def _subject_touches_edge(alpha: Image.Image, frac: float = 0.06) -> bool:
+    """True when the subject runs off the frame (a close-up crop). A drop
+    shadow makes no physical sense there — and offsetting the silhouette of a
+    clipped subject paints obvious artifacts."""
+    import numpy as np
+
+    a = np.asarray(alpha) >= 128
+    h, w = a.shape
+    if not a.any():
+        return False
+    border = (a[0, :].sum() + a[-1, :].sum() + a[:, 0].sum() + a[:, -1].sum())
+    return border >= frac * 2 * (h + w)
+
+
 def _cast_shadow(canvas: Image.Image, rgb: Image.Image,
                  alpha: Image.Image) -> Image.Image:
     """Paint a soft grey shadow onto the white canvas beneath the subject."""
+    if _subject_touches_edge(alpha):
+        return canvas
     dx, dy = _light_offset(rgb, alpha)
     blur = max(6, int(0.02 * max(rgb.size)))
     shadow_mask = alpha.point(lambda v: int(v * 0.42))  # max ~42% opacity
-    shadow_mask = ImageChops.offset(shadow_mask, dx, dy)
-    shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(blur))
+    # Shift WITHOUT wrapping: ImageChops.offset wraps around the frame, so a
+    # subject near the bottom edge used to cast a floating shadow bar at the
+    # TOP of the photo. Paste into a blank mask instead — pixels shifted past
+    # the edge just disappear.
+    shifted = Image.new("L", shadow_mask.size, 0)
+    shifted.paste(shadow_mask, (dx, dy))
+    shadow_mask = shifted.filter(ImageFilter.GaussianBlur(blur))
     grey = Image.new("RGB", canvas.size, (150, 150, 150))
     return Image.composite(grey, canvas, shadow_mask)
 
@@ -212,6 +233,30 @@ def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
     return img.crop((left, top, right, bottom))
 
 
+def _crop_to_content(img: Image.Image, margin: float = 0.05,
+                     tol: int = 8) -> Image.Image:
+    """Tighten the frame around non-white content ("crop to fit"). Used after
+    background removal, where everything but the subject (and its shadow) is
+    pure white — without this, a small item floats in a sea of white padding."""
+    rgb = _flatten(img)
+    bg = Image.new("RGB", rgb.size, WHITE)
+    diff = ImageChops.difference(rgb, bg).convert("L").point(
+        lambda v: 255 if v > tol else 0)
+    bbox = diff.getbbox()
+    if not bbox:
+        return img
+    left, top, right, bottom = bbox
+    pad = int(margin * max(img.size))
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(img.size[0], right + pad)
+    bottom = min(img.size[1], bottom + pad)
+    # Skip trivial crops — not worth re-framing for a sliver.
+    if (right - left) > 0.92 * img.size[0] and (bottom - top) > 0.92 * img.size[1]:
+        return img
+    return img.crop((left, top, right, bottom))
+
+
 def _pad_to_square(img: Image.Image) -> Image.Image:
     w, h = img.size
     side = max(w, h)
@@ -275,6 +320,9 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         bg_removed = False
         if remove_bg:
             img = _remove_background(img, add_shadow=add_shadow)
+            # Crop to fit: tighten around the subject (+ its shadow) so the
+            # item fills the frame instead of floating in white padding.
+            img = _crop_to_content(img)
             bg_removed = True
         else:
             img = _autocrop_borders(img)

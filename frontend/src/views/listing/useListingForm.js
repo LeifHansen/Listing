@@ -27,7 +27,11 @@ const SYSTEM_PKG_DEFAULTS = {
 };
 
 function pkgDefaults(prefs) {
-  return { ...SYSTEM_PKG_DEFAULTS, ...(prefs || {}) };
+  // Zeros/blanks in saved prefs mean "not set" — they must not clobber the
+  // system fallback (that's how the Shipping card ended up with empty fields).
+  const set = Object.fromEntries(
+    Object.entries(prefs || {}).filter(([, v]) => Number(v) > 0));
+  return { ...SYSTEM_PKG_DEFAULTS, ...set };
 }
 
 function fromListing(l, prefs) {
