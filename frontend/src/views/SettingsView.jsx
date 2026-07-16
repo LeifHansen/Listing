@@ -12,6 +12,7 @@ import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { RobotIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
+import { SHIPPING_SERVICES, DEFAULT_SHIPPING_SERVICE } from "@/lib/shipping";
 
 const POLICY_KINDS = [
   { key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy" },
@@ -43,6 +44,8 @@ export function SettingsView() {
   const [selected, setSelected] = useState({});
   const [pkg, setPkg] = useState(() => Object.fromEntries(
     PKG_FIELDS.map(([key, , dflt]) => [key, user?.prefs?.[key] ?? dflt])));
+  const [shipService, setShipService] = useState(
+    user?.prefs?.default_shipping_service || DEFAULT_SHIPPING_SERVICE);
 
   // Reseed when the user (or their prefs) arrive AFTER mount — e.g. Settings
   // opened before login. Without this the fields showed system defaults and
@@ -51,6 +54,7 @@ export function SettingsView() {
     if (!user) return;
     setPkg(Object.fromEntries(
       PKG_FIELDS.map(([key, , dflt]) => [key, user.prefs?.[key] ?? dflt])));
+    setShipService(user.prefs?.default_shipping_service || DEFAULT_SHIPPING_SERVICE);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, user?.prefs]);
 
@@ -79,6 +83,7 @@ export function SettingsView() {
       // Package defaults live on the user profile; policies live on eBay.
       const prefs = Object.fromEntries(
         Object.entries(pkg).map(([k, v]) => [k, parseFloat(v) || 0]));
+      prefs.default_shipping_service = shipService;
       const res = await postJson("/api/profile", prefs);
       setUser((u) => ({ ...u, prefs: res.user.prefs }));
       if (ebay.connected) {
@@ -258,6 +263,25 @@ export function SettingsView() {
                 </Field>
               ))}
             </div>
+          </div>
+
+          <div>
+            <p className="text-[13px] font-semibold text-ink mb-1.5">Default shipping service</p>
+            <p className="text-xs text-ink-secondary mb-3">
+              Pre-selected on every new listing. When your eBay account is
+              connected, this picks the matching shipping business policy
+              automatically (and creates a USPS Ground Advantage one if you have
+              none yet).
+            </p>
+            <Select
+              className="max-w-xs"
+              value={shipService}
+              onChange={(e) => setShipService(e.target.value)}
+            >
+              {SHIPPING_SERVICES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </Select>
           </div>
         </div>
 

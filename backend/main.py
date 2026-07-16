@@ -270,31 +270,44 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
     if not cookie_nonce or cookie_nonce != nonce:
         log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
         return RedirectResponse("/?ebay=error")
+    # Token exchange is the ONLY step that must succeed to connect — get the
+    # refresh token and persist it immediately. Everything after (policies,
+    # location, identity) is best-effort enrichment: it used to run BEFORE the
+    # save, so a flaky policies/location fetch (or a brand-new seller not yet
+    # opted into Business Policies) threw and the connection was never saved —
+    # the user connected, got "?ebay=error", and it never stuck.
     try:
         tokens = ebay_auth.exchange_code(code)
+        refresh_token = tokens["refresh_token"]
         access = tokens["access_token"]
-        policies = ebay_auth.fetch_policies_and_location(access)
-        # Record WHICH eBay account this is, so the user can confirm they
-        # connected the right one (best-effort — never block connect on it).
-        ident = {"username": "", "email": ""}
-        try:
-            ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
-        except Exception as exc:  # noqa: BLE001
-            log.warning(f"ebay: identity fetch failed on connect: {exc}")
-        db.save_ebay_account(
-            uid, refresh_token=tokens["refresh_token"],
-            ebay_username=ident["username"], ebay_email=ident["email"],
-            **policies)
-        with _token_cache_lock:  # a (re)connect may swap eBay accounts
-            _TOKEN_CACHE.pop(uid, None)
-        resp = RedirectResponse("/?ebay=connected")
-        resp.delete_cookie(EBAY_NONCE_COOKIE)
-        return resp
     except Exception as exc:  # noqa: BLE001
-        # Losing the reason here made connect failures undiagnosable — every
-        # user just saw "?ebay=error" with nothing in the server logs.
-        log.warning(f"ebay: connect callback failed (uid={uid}): {exc}")
+        log.warning(f"ebay: token exchange failed (uid={uid}): {exc}")
         return RedirectResponse("/?ebay=error")
+
+    # Save the connection now — the refresh token is the essential bit.
+    db.save_ebay_account(uid, refresh_token=refresh_token)
+
+    # Enrich with account identity + existing policies/location. Each step is
+    # non-fatal: the account stays connected even if eBay is flaky here, and
+    # the user can load/create policies later in Settings.
+    try:
+        ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
+        db.save_ebay_account(uid, ebay_username=ident["username"],
+                             ebay_email=ident["email"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"ebay: identity fetch failed on connect (uid={uid}): {exc}")
+    try:
+        policies = ebay_auth.fetch_policies_and_location(access)
+        if policies:
+            db.save_ebay_account(uid, **policies)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"ebay: policies/location fetch failed on connect (uid={uid}): {exc}")
+
+    with _token_cache_lock:  # a (re)connect may swap eBay accounts
+        _TOKEN_CACHE.pop(uid, None)
+    resp = RedirectResponse("/?ebay=connected")
+    resp.delete_cookie(EBAY_NONCE_COOKIE)
+    return resp
 
 
 @app.get("/api/ebay/status")

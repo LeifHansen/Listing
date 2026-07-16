@@ -86,9 +86,14 @@ export function PreviewPage({ w, onPublish, onSaveDraft, onBack }) {
               {check.errors.length} thing{check.errors.length === 1 ? "" : "s"} to fix
               before eBay will accept this listing:
             </p>
-            <ul className="mt-1.5 ml-6 list-disc flex flex-col gap-0.5">
-              {check.errors.slice(0, 4).map((i, n) => <li key={n}>{i.message}</li>)}
-              {check.errors.length > 4 && <li>…and {check.errors.length - 4} more</li>}
+            <ul className="mt-1.5 ml-6 list-disc flex flex-col gap-1">
+              {check.errors.slice(0, 5).map((i, n) => (
+                <li key={n}>
+                  <span className="font-medium">{i.title}</span>
+                  {i.fix && <span className="text-ink-secondary"> — {i.fix}</span>}
+                </li>
+              ))}
+              {check.errors.length > 5 && <li>…and {check.errors.length - 5} more</li>}
             </ul>
             <p className="mt-1.5 ml-6 text-ink-secondary">
               Use “Back to Editing” — the fields that need attention get highlighted.
