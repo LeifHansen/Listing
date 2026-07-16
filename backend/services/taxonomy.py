@@ -217,16 +217,16 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None,
         values = [v.get("localizedValue", "")
                   for v in (a.get("aspectValues") or []) if v.get("localizedValue")]
         mode = constraint.get("aspectMode", "FREE_TEXT")
-        # SELECTION_ONLY aspects (e.g. Country/Region of Manufacture, ~250
-        # countries) MUST keep every value — the user can only pick from the
-        # list, so truncating drops valid choices. Only cap free-text enums,
-        # where the list is a suggestion and typing past it is allowed.
-        cap = 1000 if mode == "SELECTION_ONLY" else 60
+        # Never truncate value lists. The UI renders these as pick-lists even
+        # for FREE_TEXT aspects, so a cap silently drops valid choices — the
+        # old 60-value cap cut "Country/Region of Manufacture" off at exactly
+        # its 60th entry (Falkland Islands). eBay's own lists are bounded
+        # (a few hundred values at most), so there's nothing to protect.
         aspects.append({
             "name": a.get("localizedAspectName", ""),
             "required": bool(constraint.get("aspectRequired")),
             "mode": mode,
-            "values": values[:cap],
+            "values": values,
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
