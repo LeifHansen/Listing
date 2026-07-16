@@ -543,7 +543,9 @@ const isGroundPolicy = (p) => (p.services || []).some(
 // back to USPS Ground Advantage — created silently if the account has none.
 function ShippingServicePicker({ w }) {
   const { ebay, policiesData, setPoliciesData, loadPolicies, user } = useApp();
-  const prefService = user?.prefs?.default_shipping_service;
+  // This listing's shipping service (from a template) wins; else the account
+  // default set in Settings.
+  const prefService = w.form.shipping_service || user?.prefs?.default_shipping_service;
   const { toast } = useToast();
   const ensured = useRef(false);
   const [creating, setCreating] = useState(false);

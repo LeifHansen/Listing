@@ -67,6 +67,21 @@ class ListingRecord(Base):
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ListingTemplate(Base):
+    """A reusable set of LOGISTICAL defaults (category, shipping service,
+    package dims, condition, boilerplate item specifics) a seller applies when
+    starting a new listing — e.g. a 'T-Shirt' template. The content (title,
+    description, price) still comes from the AI per item."""
+    __tablename__ = "listing_templates"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(80), default="")
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 def enabled() -> bool:
     return bool(config.DATABASE_URL)
 
@@ -365,4 +380,67 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
             return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: delete_listing failed: {exc}")
+        return False
+
+
+# --- listing templates -----------------------------------------------------
+
+def _template_to_dict(t: ListingTemplate) -> dict:
+    return {"id": t.id, "name": t.name, "data": t.data or {},
+            "updated_at": t.updated_at.isoformat() if t.updated_at else None}
+
+
+def list_templates(user_id: str) -> list[dict]:
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            q = (select(ListingTemplate)
+                 .where(ListingTemplate.user_id == user_id)
+                 .order_by(ListingTemplate.name.asc()))
+            return [_template_to_dict(t) for t in s.execute(q).scalars().all()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: list_templates failed: {exc}")
+        return []
+
+
+def upsert_template(template_id: str, user_id: str, name: str, data: dict) -> Optional[dict]:
+    """Create or update a template the user owns. Returns the saved dict."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            now = _now()
+            t = s.get(ListingTemplate, template_id)
+            if t is None:
+                t = ListingTemplate(id=template_id, user_id=user_id, created_at=now)
+                s.add(t)
+            elif t.user_id != user_id:
+                return None  # not yours
+            t.name = (name or "Untitled")[:80]
+            t.data = data or {}
+            t.updated_at = now
+            s.commit()
+            return _template_to_dict(t)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: upsert_template failed: {exc}")
+        return None
+
+
+def delete_template(template_id: str, user_id: str) -> bool:
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            t = s.get(ListingTemplate, template_id)
+            if t is None or t.user_id != user_id:
+                return False
+            s.delete(t)
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_template failed: {exc}")
         return False

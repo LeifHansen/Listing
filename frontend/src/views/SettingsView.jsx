@@ -13,6 +13,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { RobotIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 import { SHIPPING_SERVICES, DEFAULT_SHIPPING_SERVICE } from "@/lib/shipping";
+import { TemplateManager } from "@/views/listing/Templates";
+import { LayoutTemplate } from "lucide-react";
 
 const POLICY_KINDS = [
   { key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy" },
@@ -235,6 +237,16 @@ export function SettingsView() {
             </div>
           </div>
         )}
+      </Card>
+
+      {/* Listing templates */}
+      <Card>
+        <SectionHeader
+          icon={LayoutTemplate}
+          title="Listing templates"
+          hint="Reusable logistics (category, condition, package, shipping) — pick one when starting a new listing"
+        />
+        <TemplateManager />
       </Card>
 
       {/* Listing defaults */}

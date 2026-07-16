@@ -14,6 +14,7 @@ import { ImageEditor } from "./listing/ImageEditor";
 import { PublishOverlay } from "./listing/PublishOverlay";
 import { PublishCard } from "./listing/PublishCard";
 import { PreviewPage } from "./listing/PreviewPage";
+import { TemplatePicker, SaveTemplateButton } from "./listing/Templates";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard,
@@ -142,6 +143,7 @@ function Workflow() {
             {session.confidence && <ConfidenceBadge level={session.confidence} />}
           </div>
         </div>
+        <SaveTemplateButton w={w} />
         <Button variant="ghost" onClick={restart}>
           <RotateCcw aria-hidden /> Start over
         </Button>
@@ -225,6 +227,7 @@ export function NewListing() {
             Start with photos — the AI handles the boring parts.
           </p>
         </div>
+        <TemplatePicker />
         <UploadPhase onBulkStarted={(jobId, mode) => setBulkJob({ jobId, mode })} />
       </div>
     );

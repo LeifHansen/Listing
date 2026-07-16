@@ -120,6 +120,33 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // ---------- listing templates (logistical presets) ----------
+  const [templates, setTemplates] = useState([]);
+  // The template chosen for the NEXT new listing; consumed once at identify.
+  const [activeTemplate, setActiveTemplate] = useState(null);
+
+  const loadTemplates = useCallback(async () => {
+    try {
+      const res = await api("/api/templates");
+      setTemplates(res.templates || []);
+    } catch (e) { /* optional */ }
+  }, []);
+
+  const saveTemplate = useCallback(async ({ id, name, data }) => {
+    const res = await api("/api/templates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, name, data }),
+    });
+    await loadTemplates();
+    return res.template;
+  }, [loadTemplates]);
+
+  const deleteTemplate = useCallback(async (id) => {
+    await api(`/api/templates/${id}`, { method: "DELETE" });
+    setTemplates((t) => t.filter((x) => x.id !== id));
+  }, []);
+
   // ---------- the listing being worked on ----------
   // session: { sessionId, listing, confidence } — null until AI identify runs
   // or a saved listing is opened.
@@ -213,6 +240,11 @@ export function AppProvider({ children }) {
     loadListings({ quiet: true });
   }, [user, loadListings]);
 
+  // Templates belong to the account; (re)load them when auth changes.
+  useEffect(() => {
+    if (user) loadTemplates(); else setTemplates([]);
+  }, [user, loadTemplates]);
+
   // Re-fetch when navigating to a data view, so statuses are never stale
   // (e.g. a just-published draft must not linger in Drafts).
   useEffect(() => {
@@ -231,6 +263,8 @@ export function AppProvider({ children }) {
     listingsState, loadListings,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
     reviseEbayListing, endEbayListing, removeListing,
+    templates, activeTemplate, setActiveTemplate,
+    loadTemplates, saveTemplate, deleteTemplate,
     session, setSession, startNew, openListing,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
@@ -238,6 +272,8 @@ export function AppProvider({ children }) {
     loadPolicies, listingsState, loadListings, session, startNew, openListing,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
     reviseEbayListing, endEbayListing, removeListing,
+    templates, activeTemplate, setActiveTemplate,
+    loadTemplates, saveTemplate, deleteTemplate,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
