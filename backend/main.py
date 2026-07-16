@@ -1428,6 +1428,47 @@ def listings(request: Request, limit: int = 50) -> dict:
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
 
 
+# --- listing templates -----------------------------------------------------
+# A template holds LOGISTICAL defaults (category, shipping service, package
+# dims, condition, boilerplate specifics) for a kind of item — e.g. "T-Shirt".
+# Starting a new listing from one pre-fills those; the AI still writes the
+# title/description/price per item.
+
+@app.get("/api/templates")
+def templates_list(request: Request) -> dict:
+    uid = _uid(request)
+    return {"templates": db.list_templates(uid) if uid else []}
+
+
+@app.post("/api/templates")
+def templates_save(payload: dict, request: Request) -> dict:
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to save templates.")
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "A template name is required.")
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Template data must be an object.")
+    tid = str(payload.get("id") or "").strip() or hashlib.sha1(
+        f"{uid}:{name}:{time.time()}:{os.urandom(4).hex()}".encode()).hexdigest()[:16]
+    saved = db.upsert_template(tid, uid, name, data)
+    if not saved:
+        raise HTTPException(400, "Couldn't save that template.")
+    return {"ok": True, "template": saved}
+
+
+@app.delete("/api/templates/{template_id}")
+def templates_delete(template_id: str, request: Request) -> dict:
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    if not db.delete_template(template_id, uid):
+        raise HTTPException(404, "Template not found.")
+    return {"ok": True}
+
+
 @app.get("/api/listings/{listing_id}")
 def get_listing(listing_id: str, request: Request) -> dict:
     rec = db.get_listing(listing_id)

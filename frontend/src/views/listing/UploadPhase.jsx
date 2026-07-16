@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, FolderOpen, X, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import { api, downscaleForUpload, IMAGE_EXT_RE } from "@/lib/api";
+import { applyTemplate } from "@/lib/templates";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Toggle } from "@/components/ui/fields";
@@ -16,7 +17,7 @@ import { useToast } from "@/components/ui/Toaster";
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
 export function UploadPhase({ onBulkStarted }) {
-  const { setSession } = useApp();
+  const { setSession, activeTemplate, setActiveTemplate } = useApp();
   const { toast, confirm } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -90,9 +91,15 @@ export function UploadPhase({ onBulkStarted }) {
 
       const result = await api(`/api/identify/${up.session_id}`, { method: "POST" });
       files.forEach((f) => URL.revokeObjectURL(f.url));
+      // A chosen template pre-fills the logistics (category, condition,
+      // package, shipping) on top of what the AI identified. Consumed once.
+      const listing = activeTemplate
+        ? applyTemplate(result.listing, activeTemplate)
+        : result.listing;
+      if (activeTemplate) setActiveTemplate(null);
       setSession({
         sessionId: up.session_id,
-        listing: result.listing,
+        listing,
         confidence: result.confidence,
       });
     } catch (e) {

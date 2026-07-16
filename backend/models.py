@@ -36,6 +36,9 @@ class Listing(BaseModel):
     # Per-listing shipping service, as an eBay fulfillment-policy id. Empty
     # means "use the account default from Settings".
     fulfillment_policy_id: str = ""
+    # Preferred carrier service (e.g. "usps_ground_advantage"), from a template
+    # or the account default. The UI maps it to the matching fulfillment policy.
+    shipping_service: str = ""
     # Best Offer: let buyers make offers; optional auto-decline floor and
     # auto-accept threshold (both in the listing currency).
     best_offer_enabled: bool = False
