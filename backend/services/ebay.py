@@ -660,6 +660,34 @@ def _find_or_create_campaign(client, base: str, token: str) -> Optional[str]:
     return None
 
 
+def _suggested_ad_rate(client: httpx.Client, base: str, token: str,
+                       listing_id: str) -> Optional[float]:
+    """eBay's recommended Promoted Listings ad rate for one listing
+    (Recommendation API). Best-effort — None means 'no suggestion'."""
+    try:
+        r = client.post(
+            f"{base}/sell/recommendation/v1/find",
+            headers={**_headers(token), "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"},
+            params={"filter": "recommendationTypes:{AD}"},
+            json={"listingIds": [listing_id]})
+        if r.status_code != 200:
+            log.info("suggest_ad_rate(%s) -> %s %s", listing_id,
+                     r.status_code, r.text[:200])
+            return None
+        for rec in r.json().get("listingRecommendations", []):
+            for bid in ((rec.get("marketing") or {}).get("ad") or {}).get(
+                    "bidPercentages", []):
+                try:
+                    val = float(bid.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                if 0 < val <= 100:
+                    return val
+    except Exception as exc:  # noqa: BLE001
+        log.info("suggest_ad_rate(%s) failed: %s", listing_id, exc)
+    return None
+
+
 def promote(session_id: str, listing: Listing, listing_id: str,
             creds: Optional[dict]) -> dict:
     """Best-effort: advertise a just-published listing via Promoted Listings.
@@ -677,7 +705,12 @@ def promote(session_id: str, listing: Listing, listing_id: str,
             if not campaign_id:
                 return {"promoted": False,
                         "message": "Couldn't set up a Promoted Listings campaign."}
-            rate = percent if percent else 2.0  # sensible default ad rate
+            rate = percent
+            if not rate:
+                # "Recommended" now actually asks eBay for its suggested rate
+                # (it used to silently hardcode 2%); 2% stays the fallback
+                # when eBay has no suggestion for the listing.
+                rate = _suggested_ad_rate(client, base, token, listing_id) or 2.0
             body = {
                 "listingId": listing_id,
                 "bidPercentage": f"{float(rate):.1f}",
@@ -799,6 +832,11 @@ def _trading_call(call_name: str, inner_xml: str, token: str,
     }
     r = httpx.post(f"{config.EBAY_API_BASE}/ws/api.dll",
                    headers=headers, content=body.encode("utf-8"), timeout=timeout)
+    if r.status_code >= 400:
+        # Feeding an HTML error page to fromstring() raised a ParseError that
+        # callers reported as "couldn't reach eBay", hiding the real status.
+        log.warning("trading %s -> HTTP %s: %.300s", call_name, r.status_code, r.text)
+        r.raise_for_status()
     return ET.fromstring(r.content)
 
 
@@ -827,17 +865,37 @@ def fetch_active_inventory(creds: dict, limit: int = 200) -> list[dict]:
     GetMyeBaySelling → ActiveList), as from_ebay listing cards. Best-effort."""
     token = (creds or {}).get("access_token") or _access_token()
     per_page = min(max(limit, 1), 200)  # Trading API caps EntriesPerPage at 200
-    inner = (
-        "<ActiveList><Include>true</Include>"
-        f"<Pagination><EntriesPerPage>{per_page}</EntriesPerPage>"
-        "<PageNumber>1</PageNumber></Pagination></ActiveList>"
-    )
     out: list[dict] = []
-    try:
-        root = _trading_call("GetMyeBaySelling", inner, token)
+    # Page through the whole account (was: page 1 only, so sellers with >200
+    # active listings silently lost the rest). Bounded at 5 pages = 1000 items.
+    for page in range(1, 6):
+        inner = (
+            "<ActiveList><Include>true</Include>"
+            f"<Pagination><EntriesPerPage>{per_page}</EntriesPerPage>"
+            f"<PageNumber>{page}</PageNumber></Pagination></ActiveList>"
+        )
+        try:
+            root = _trading_call("GetMyeBaySelling", inner, token)
+        except Exception as exc:  # noqa: BLE001
+            log.info("fetch_active_inventory page %d failed: %s", page, exc)
+            break
         if _lttext(root, "{*}Ack") in ("Failure",):
             log.info("GetMyeBaySelling failure: %s", "; ".join(_trading_errors(root)))
-            return []
+            break
+        out.extend(_parse_active_items(root))
+        total_pages = _lttext(
+            root, ".//{*}ActiveList/{*}PaginationResult/{*}TotalNumberOfPages", "1")
+        try:
+            if page >= int(total_pages or "1"):
+                break
+        except ValueError:
+            break
+    return out
+
+
+def _parse_active_items(root: ET.Element) -> list[dict]:
+    out: list[dict] = []
+    try:
         for item in root.findall(".//{*}ActiveList/{*}ItemArray/{*}Item"):
             item_id = _lttext(item, "{*}ItemID")
             if not item_id:
@@ -881,7 +939,7 @@ def fetch_active_inventory(creds: dict, limit: int = 200) -> list[dict]:
                 "view_url": view_url,
             })
     except Exception as exc:  # noqa: BLE001
-        log.info("fetch_active_inventory failed: %s", exc)
+        log.info("fetch_active_inventory parse failed: %s", exc)
     return out
 
 

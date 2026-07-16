@@ -541,15 +541,15 @@ const isGroundPolicy = (p) => (p.services || []).some(
 // (cheapest broadly-applicable service) is selected by default — created
 // silently on the account if it doesn't exist yet.
 function ShippingServicePicker({ w }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
+  const { ebay, policiesData, setPoliciesData, loadPolicies } = useApp();
   const { toast } = useToast();
   const ensured = useRef(false);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
+    loadPolicies(); // deduped in store — PublishCard mounts alongside this
+  }, [ebay.connected, policiesData, loadPolicies]);
 
   const policies = policiesData?.policies?.fulfillment || [];
   const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";

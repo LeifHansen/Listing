@@ -13,14 +13,22 @@ function nameFor(data, key, field) {
 // tinted background so the final step stands out. Two actions: Save as Draft,
 // and Preview → full-page eBay-style preview where the real Publish lives.
 export function PublishCard({ w, onPreview }) {
-  const { canPublishLive, ebay, setView, policiesData, setPoliciesData } = useApp();
+  const { canPublishLive, ebay, setView, policiesData, loadPolicies } = useApp();
   const r = w.publishResult;
 
-  // Show which shipping/payment/return policies will apply.
+  // Show which shipping/payment/return policies will apply (deduped in store).
   useEffect(() => {
     if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
+    loadPolicies();
+  }, [ebay.connected, policiesData, loadPolicies]);
+
+  // "Go to Publish →" in the all-sections-complete banner targets this static
+  // section; without this it was a silent no-op (only WorkflowCards scrolled).
+  useEffect(() => {
+    if (w.cardFocus?.id !== "publish") return;
+    document.getElementById("card-publish")
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [w.cardFocus]);
 
   const onFix = (target) => {
     if (target === "location" || target === "policies") { setView("settings"); return; }

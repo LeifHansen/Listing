@@ -184,7 +184,7 @@ export function Dashboard() {
             </Button>
           )}
         />
-        {listingsState.loading && !listingsState.loaded ? (
+        {!listingsState.loaded ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {[0, 1, 2, 3].map((i) => <ListingCardSkeleton key={i} />)}
           </div>

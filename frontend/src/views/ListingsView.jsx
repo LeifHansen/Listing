@@ -101,7 +101,9 @@ export function ListingsView({ kind, search = "" }) {
   const go = () => (cfg.emptyAction.view === "new" ? startNew() : setView(cfg.emptyAction.view));
 
   let body;
-  if (listingsState.loading && !listingsState.loaded) {
+  // Gate on loaded alone: every load is quiet, so `loading` never went true
+  // and users saw a flash of "No listings yet" instead of the skeletons.
+  if (!listingsState.loaded) {
     body = (
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {[0, 1, 2, 3, 4, 5].map((i) => <ListingCardSkeleton key={i} />)}

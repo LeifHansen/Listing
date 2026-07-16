@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -129,7 +130,11 @@ def _guard_session(session_id: str, request: Request) -> None:
     bearer token for edits: once a listing row is owned by an account, only
     that account may modify the session. Unowned/anonymous sessions stay open
     (drafts can be started before logging in)."""
-    rec = db.get_listing(session_id)
+    rec = db.get_listing(session_id, on_error=db.DB_ERROR)
+    if rec is db.DB_ERROR:
+        # A DB outage must fail CLOSED here — returning None would let anyone
+        # write to any session id (the exact attack this guard exists for).
+        raise HTTPException(503, "Temporarily unavailable — please retry.")
     if rec and rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
 
@@ -187,6 +192,14 @@ def auth_me(request: Request) -> dict:
 
 # --- eBay connect (Sign in with eBay) --------------------------------------
 
+# Access tokens live ~2h; refreshing on every request added ~0.5-1s to each
+# eBay-touching endpoint (and a publish refreshed twice: once for itself, once
+# inside preflight). Small in-process cache, keyed by user, refreshed when
+# within 60s of expiry. Sized-bounded; entries are just (expiry, token).
+_TOKEN_CACHE: dict[str, tuple[float, str]] = {}
+_token_cache_lock = threading.Lock()
+
+
 def _ebay_creds_for(request: Request):
     """Build live eBay creds for the logged-in user, or None if not connected."""
     uid = _uid(request)
@@ -195,15 +208,25 @@ def _ebay_creds_for(request: Request):
     acct = db.get_ebay_account(uid)
     if not acct or not acct.get("refresh_token"):
         return None
-    try:
-        fresh = ebay_auth.refresh_access_token(acct["refresh_token"])
-    except Exception as exc:  # noqa: BLE001 - fall back to dry-run, but log it
-        # A token-refresh outage otherwise looks identical to "not connected"
-        # and silently dry-runs a live publish; log so it's debuggable.
-        log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
-        return None
+    with _token_cache_lock:
+        cached = _TOKEN_CACHE.get(uid)
+    if cached and cached[0] - time.time() > 60:
+        access_token = cached[1]
+    else:
+        try:
+            fresh = ebay_auth.refresh_access_token(acct["refresh_token"])
+        except Exception as exc:  # noqa: BLE001 - fall back to dry-run, but log it
+            # A token-refresh outage otherwise looks identical to "not connected"
+            # and silently dry-runs a live publish; log so it's debuggable.
+            log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
+            return None
+        access_token = fresh["access_token"]
+        with _token_cache_lock:
+            if len(_TOKEN_CACHE) > 500:
+                _TOKEN_CACHE.clear()
+            _TOKEN_CACHE[uid] = (float(fresh.get("expires_at", 0)), access_token)
     return {
-        "access_token": fresh["access_token"],
+        "access_token": access_token,
         "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
         "payment_policy_id": acct.get("payment_policy_id", ""),
         "return_policy_id": acct.get("return_policy_id", ""),
@@ -262,10 +285,15 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             uid, refresh_token=tokens["refresh_token"],
             ebay_username=ident["username"], ebay_email=ident["email"],
             **policies)
+        with _token_cache_lock:  # a (re)connect may swap eBay accounts
+            _TOKEN_CACHE.pop(uid, None)
         resp = RedirectResponse("/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Losing the reason here made connect failures undiagnosable — every
+        # user just saw "?ebay=error" with nothing in the server logs.
+        log.warning(f"ebay: connect callback failed (uid={uid}): {exc}")
         return RedirectResponse("/?ebay=error")
 
 
@@ -439,9 +467,13 @@ async def ebay_end_listing(item_id: str, request: Request) -> dict:
     return result
 
 
-def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
-    """Run the full pre-publish checklist for this user's account state."""
-    creds = _ebay_creds_for(request)
+def _preflight_issues(request: Request, listing: Listing, mode: str,
+                      creds: Optional[dict] = None) -> list[dict]:
+    """Run the full pre-publish checklist for this user's account state.
+    Pass creds when the caller already built them (publish) to avoid a
+    redundant account lookup."""
+    if creds is None:
+        creds = _ebay_creds_for(request)
     connected = bool(creds) or config.ebay_ready()
     if creds:
         fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
@@ -617,6 +649,8 @@ def ebay_disconnect(request: Request) -> dict:
     if not uid:
         raise HTTPException(401, "Log in first.")
     db.delete_ebay_account(uid)
+    with _token_cache_lock:
+        _TOKEN_CACHE.pop(uid, None)
     return {"ok": True}
 
 
@@ -711,6 +745,23 @@ MAX_UPLOAD_FILES = 12   # eBay allows up to 24 photos; keep memory bounded
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # per file
 
 
+async def _read_upload_capped(f, label: str) -> bytes:
+    """Read an upload in chunks, aborting as soon as it exceeds the size cap.
+    `await f.read()` loaded the whole file into RAM before the size check ran,
+    so one oversized 'photo' could OOM the machine before the 400 went out."""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await f.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, f"'{label}' is too large (max 20MB per image)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/api/upload")
 async def upload(
     files: list[UploadFile] = File(...),
@@ -733,10 +784,7 @@ async def upload(
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
     for i, f in enumerate(files):
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
+        data = await _read_upload_capped(f, f.filename or "image")
         suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
         (orig / f"src_{i:02d}{suffix}").write_bytes(data)
 
@@ -1274,10 +1322,7 @@ async def bulk_upload(
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
     for i, f in enumerate(files):
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
+        data = await _read_upload_capped(f, f.filename or "image")
         suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
         (orig / f"src_{i:02d}{suffix}").write_bytes(data)
 
@@ -1330,9 +1375,7 @@ async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
         raise HTTPException(400, "No frames provided.")
     frames: list[bytes] = []
     for f in files[:8]:
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(400, "A frame was too large.")
+        data = await _read_upload_capped(f, f.filename or "frame")
         if data:
             frames.append(data)
     if not frames:
@@ -1354,6 +1397,9 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")
+    # Session ids appear in public image URLs — without this guard, any
+    # logged-in user could overwrite someone else's listing row.
+    _guard_session(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     db.upsert_listing(req.session_id, req.listing.model_dump(),
                       status="unlisted", user_id=uid)
@@ -1445,7 +1491,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     import time as _time
     _t0 = _time.monotonic()
     if req.mode == "live" and (creds or config.ebay_ready()):
-        problems = preflight.errors_only(_preflight_issues(request, req.listing, "live"))
+        problems = preflight.errors_only(
+            _preflight_issues(request, req.listing, "live", creds=creds))
         log.info("publish preflight took %.1fs (session=%s)",
                  _time.monotonic() - _t0, req.session_id)
         if problems:

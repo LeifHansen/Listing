@@ -327,27 +327,38 @@ export function useListingForm() {
   }, [sessionId, imageVersion, toast]);
 
   // ---------- pre-publish checklist ----------
-  const runPreflight = useCallback(async () => {
-    setAiBusy(["Checking everything eBay requires…"]);
+  // quiet: no busy overlay / publish-result card — just return the summary
+  // (used by the Preview page's readiness banner).
+  const runPreflight = useCallback(async ({ quiet = false } = {}) => {
+    if (!quiet) setAiBusy(["Checking everything eBay requires…"]);
     try {
       const res = await postJson("/api/publish-preflight", {
         session_id: sessionId, listing: collect(), mode: "live",
       });
       const errors = (res.issues || []).filter((i) => i.level !== "warn");
-      setPublishResult({
-        preflight: true,
-        error: errors.length > 0,
-        issues: res.issues || [],
-        message: errors.length
-          ? `Not quite ready — ${errors.length} thing${errors.length === 1 ? "" : "s"} to fix before eBay will accept it:`
-          : "All checks passed — this listing is ready to publish. 🎉",
-      });
-      const first = errors.find((x) => x.target && x.target !== "generic");
-      if (first) setFixTarget(first.target);
+      if (!quiet) {
+        setPublishResult({
+          preflight: true,
+          error: errors.length > 0,
+          issues: res.issues || [],
+          message: errors.length
+            ? `Not quite ready — ${errors.length} thing${errors.length === 1 ? "" : "s"} to fix before eBay will accept it:`
+            : "All checks passed — this listing is ready to publish. 🎉",
+        });
+        const first = errors.find((x) => x.target && x.target !== "generic");
+        if (first) setFixTarget(first.target);
+      } else if (errors.length) {
+        // Quiet mode still flags the first offending field so "Back to
+        // Editing" from the preview banner lands on the thing to fix.
+        const first = errors.find((x) => x.target && x.target !== "generic");
+        if (first) setFixTarget(first.target);
+      }
+      return { ok: errors.length === 0, errors, issues: res.issues || [] };
     } catch (e) {
-      toast(`Couldn't run the check: ${e.message}`, { kind: "error" });
+      if (!quiet) toast(`Couldn't run the check: ${e.message}`, { kind: "error" });
+      return null;
     } finally {
-      setAiBusy(null);
+      if (!quiet) setAiBusy(null);
     }
   }, [collect, sessionId, toast]);
 

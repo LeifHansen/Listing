@@ -44,6 +44,16 @@ export function SettingsView() {
   const [pkg, setPkg] = useState(() => Object.fromEntries(
     PKG_FIELDS.map(([key, , dflt]) => [key, user?.prefs?.[key] ?? dflt])));
 
+  // Reseed when the user (or their prefs) arrive AFTER mount — e.g. Settings
+  // opened before login. Without this the fields showed system defaults and
+  // "Save defaults" silently overwrote the user's saved values.
+  useEffect(() => {
+    if (!user) return;
+    setPkg(Object.fromEntries(
+      PKG_FIELDS.map(([key, , dflt]) => [key, user.prefs?.[key] ?? dflt])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.prefs]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {

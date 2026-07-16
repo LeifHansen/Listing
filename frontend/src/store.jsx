@@ -68,6 +68,19 @@ export function AppProvider({ children }) {
   });
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
 
+  // Single deduped fetch for /api/ebay/policies — PublishCard and the
+  // shipping picker mount together and each used to fire an identical GET.
+  const policiesInFlight = useRef(false);
+  const loadPolicies = useCallback(async () => {
+    if (policiesInFlight.current) return;
+    policiesInFlight.current = true;
+    try {
+      const data = await api("/api/ebay/policies");
+      setPoliciesData(data);
+    } catch (e) { /* callers show their own empty states */ }
+    finally { policiesInFlight.current = false; }
+  }, []);
+
   const loadEbayStatus = useCallback(async () => {
     try {
       const s = await api("/api/ebay/status");
@@ -148,7 +161,9 @@ export function AppProvider({ children }) {
   const syncEbay = !!user?.prefs?.sync_ebay_listings;
 
   const loadEbaySync = useCallback(async () => {
-    if (!syncEbay) { setEbayListings([]); return; }
+    // Clear stats too — the "Items sold" tile used to keep its last count
+    // after the user turned sync off, until a full page reload.
+    if (!syncEbay) { setEbayListings([]); setEbayStats({ sold: { count: null } }); return; }
     try {
       const [stats, live] = await Promise.all([
         api("/api/ebay/stats").catch(() => null),
@@ -189,8 +204,12 @@ export function AppProvider({ children }) {
     await loadListings({ quiet: true });
   }, [loadListings]);
 
-  // Refresh the listings cache when auth changes (login/logout).
+  // Refresh the listings cache when auth changes (login/logout). Skipped on
+  // the initial mount — the view effect below covers first load, so this used
+  // to fire a duplicate identical GET on every app start.
+  const authLoadedOnce = useRef(false);
   useEffect(() => {
+    if (!authLoadedOnce.current) { authLoadedOnce.current = true; return; }
     loadListings({ quiet: true });
   }, [user, loadListings]);
 
@@ -208,7 +227,7 @@ export function AppProvider({ children }) {
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
-    policiesData, setPoliciesData,
+    policiesData, setPoliciesData, loadPolicies,
     listingsState, loadListings,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
     reviseEbayListing, endEbayListing, removeListing,
@@ -216,7 +235,7 @@ export function AppProvider({ children }) {
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
-    listingsState, loadListings, session, startNew, openListing,
+    loadPolicies, listingsState, loadListings, session, startNew, openListing,
     ebayStats, ebayListings, syncEbay, loadEbaySync,
     reviseEbayListing, endEbayListing, removeListing,
   ]);

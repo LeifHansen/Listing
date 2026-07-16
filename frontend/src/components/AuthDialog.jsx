@@ -52,10 +52,16 @@ export function AuthDialog() {
       onClose={close}
       title={
         <span className="inline-flex items-center gap-2">
-          <span className="grid place-items-center size-8 rounded-[11px] bg-blue text-on-accent">
+          <span
+            className="grid place-items-center size-8 rounded-[11px] text-white"
+            style={{
+              backgroundImage:
+                "linear-gradient(135deg, var(--brand-red), var(--brand-yellow) 40%, var(--brand-green) 70%, var(--brand-blue))",
+            }}
+          >
             <Zap size={16} strokeWidth={2.4} aria-hidden />
           </span>
-          Quick<span className="text-blue -ml-2">Flip</span>
+          <span className="brand-gradient-text">Thryft</span>
         </span>
       }
     >
