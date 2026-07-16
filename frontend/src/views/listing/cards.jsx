@@ -5,6 +5,7 @@ import {
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
+import { policyMatchesService } from "@/lib/shipping";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -36,6 +37,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
       id="photos" icon={ImageIcon} title="Photos"
       hint="Click a photo to open the editor · drag to reorder — the first photo is your cover"
       state={w.completion.photos} focus={w.cardFocus} flagged={w.fixTarget === "photos"}
+      defaultOpen
     >
       {(w.form.images || []).length ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
@@ -231,7 +233,6 @@ export function SpecificsCard({ w }) {
       id="specifics" icon={ListChecks} title="Item specifics"
       hint="Details buyers filter by — required ones gate publishing"
       state={w.completion.specifics} focus={w.cardFocus} flagged={w.fixTarget === "specifics"}
-      defaultOpen
     >
       <div className="flex flex-col gap-5">
         {(required.length > 0 || recommended.length > 0) && (
@@ -537,11 +538,12 @@ const isGroundPolicy = (p) => (p.services || []).some(
   (s) => s.toLowerCase().replaceAll("_", "").includes("groundadvantage"));
 
 // Per-listing shipping service = an eBay fulfillment policy on the offer.
-// The dropdown lists every policy on the account; USPS Ground Advantage
-// (cheapest broadly-applicable service) is selected by default — created
-// silently on the account if it doesn't exist yet.
+// The dropdown lists every policy on the account; the seller's Default
+// shipping service (Settings) picks the matching policy by default, falling
+// back to USPS Ground Advantage — created silently if the account has none.
 function ShippingServicePicker({ w }) {
-  const { ebay, policiesData, setPoliciesData, loadPolicies } = useApp();
+  const { ebay, policiesData, setPoliciesData, loadPolicies, user } = useApp();
+  const prefService = user?.prefs?.default_shipping_service;
   const { toast } = useToast();
   const ensured = useRef(false);
   const [creating, setCreating] = useState(false);
@@ -578,9 +580,12 @@ function ShippingServicePicker({ w }) {
       w.set("fulfillment_policy_id", accountDefault);
       return;
     }
-    const ground = policies.find(isGroundPolicy);
-    if (ground) {
-      w.set("fulfillment_policy_id", ground.id);
+    // Prefer a policy matching the seller's Default shipping service, then
+    // Ground Advantage, then anything on the account.
+    const preferred = (prefService && policies.find((p) => policyMatchesService(p, prefService)))
+      || policies.find(isGroundPolicy) || policies[0];
+    if (preferred) {
+      w.set("fulfillment_policy_id", preferred.id);
     } else if (!ensured.current && policies.length === 0) {
       ensured.current = true;
       // One quiet attempt; if it fails the empty state below shows a visible
@@ -711,7 +716,6 @@ export function DescriptionCard({ w }) {
       id="description" icon={AlignLeft} title="Description"
       hint="The story buyers read before they commit"
       state={w.completion.description} focus={w.cardFocus} flagged={w.fixTarget === "description"}
-      defaultOpen
     >
       <Textarea
         rows={7}
