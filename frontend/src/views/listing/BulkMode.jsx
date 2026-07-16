@@ -132,7 +132,13 @@ export function BulkQueue({ jobId, mode, onExit }) {
         fails = 0;
         setJob(j);
         if (j.items?.length) {
-          setItems(j.items);
+          // MERGE server state with local edits: replacing wholesale wiped
+          // whatever the user was typing into an already-identified card on
+          // every 1.5s poll while the rest of the batch processed.
+          setItems((cur) => j.items.map((it) => {
+            const local = cur.find((x) => x.session_id === it.session_id);
+            return local?.edited ? { ...it, listing: local.listing, edited: true } : it;
+          }));
           setChecked((c) => {
             const next = { ...c };
             j.items.forEach((it) => {
@@ -153,6 +159,12 @@ export function BulkQueue({ jobId, mode, onExit }) {
         fails += 1;
         if (fails >= 5) {
           toast(`Lost the bulk job: ${e.message}`, { kind: "error" });
+          // Mark the job finished(-with-error) so the UI stops showing an
+          // infinite "Identifying items…" shimmer with no way out.
+          setJob((cur) => ({
+            ...(cur || {}), done: true,
+            error: "Lost contact with the job — your items may still finish; reload to check.",
+          }));
         } else {
           timer = setTimeout(poll, Math.min(1500 * 2 ** fails, 15000));
         }
@@ -163,8 +175,9 @@ export function BulkQueue({ jobId, mode, onExit }) {
   }, [jobId, loadListings, toast]);
 
   const updateItem = (sid, listing) => {
+    // `edited` pins this item's listing against poll refreshes (see merge above).
     setItems((cur) => cur.map((it) =>
-      it.session_id === sid ? { ...it, listing } : it));
+      it.session_id === sid ? { ...it, listing, edited: true } : it));
   };
 
   const openItem = (it) => {

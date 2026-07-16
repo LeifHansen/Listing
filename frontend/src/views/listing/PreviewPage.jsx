@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowLeft, Rocket, Save, Truck, RotateCcw, CreditCard, Tag } from "lucide-react";
+import {
+  AlertTriangle, ArrowLeft, CheckCircle2, CreditCard, Rocket, RotateCcw,
+  Save, Tag, Truck,
+} from "lucide-react";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { mediaUrl, formatMoney } from "@/lib/utils";
@@ -24,6 +27,17 @@ export function PreviewPage({ w, onPublish, onSaveDraft, onBack }) {
   const f = w.form;
   const images = f.images || [];
   const [active, setActive] = useState(0);
+
+  // Quiet readiness check while the seller reviews — catches everything eBay
+  // would reject (missing policies, weight caps, required specifics) BEFORE
+  // the Publish click instead of after.
+  const [check, setCheck] = useState(undefined); // undefined=running, null=unavailable
+  useEffect(() => {
+    let alive = true;
+    w.runPreflight({ quiet: true }).then((res) => { if (alive) setCheck(res); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const specifics = (f.item_specifics || []).filter((s) => s.name && s.value);
   const ship = policyName(policiesData, "fulfillment", "fulfillment_policy_id");
   const pay = policyName(policiesData, "payment", "payment_policy_id");
@@ -57,6 +71,31 @@ export function PreviewPage({ w, onPublish, onSaveDraft, onBack }) {
           </Button>
         </div>
       </div>
+
+      {/* Readiness banner (quiet preflight) */}
+      {check !== null && (
+        check === undefined ? null : check.ok ? (
+          <div className="rounded-card bg-success-soft border border-success/30 px-4 py-3 text-sm text-ink flex items-center gap-2">
+            <CheckCircle2 size={17} className="text-success shrink-0" aria-hidden />
+            Ready to publish — everything eBay requires checks out.
+          </div>
+        ) : (
+          <div className="rounded-card bg-warning-soft border border-warning/30 px-4 py-3 text-sm text-ink">
+            <p className="flex items-center gap-2 font-semibold">
+              <AlertTriangle size={17} className="text-warning shrink-0" aria-hidden />
+              {check.errors.length} thing{check.errors.length === 1 ? "" : "s"} to fix
+              before eBay will accept this listing:
+            </p>
+            <ul className="mt-1.5 ml-6 list-disc flex flex-col gap-0.5">
+              {check.errors.slice(0, 4).map((i, n) => <li key={n}>{i.message}</li>)}
+              {check.errors.length > 4 && <li>…and {check.errors.length - 4} more</li>}
+            </ul>
+            <p className="mt-1.5 ml-6 text-ink-secondary">
+              Use “Back to Editing” — the fields that need attention get highlighted.
+            </p>
+          </div>
+        )
+      )}
 
       {/* eBay-style listing layout */}
       <div className="bg-card border border-line rounded-card shadow-card p-5 sm:p-7">

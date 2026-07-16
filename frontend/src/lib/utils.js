@@ -31,9 +31,8 @@ export function conditionLabel(c) {
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-export function mediaUrl(sessionId, name, bust) {
-  const v = bust ? `?v=${Date.now()}` : "";
-  return `/media/${sessionId}/optimized/${name}${v}`;
+export function mediaUrl(sessionId, name) {
+  return `/media/${sessionId}/optimized/${name}`;
 }
 
 export function formatMoney(n, currency = "USD") {

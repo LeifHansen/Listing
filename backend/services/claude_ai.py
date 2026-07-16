@@ -125,8 +125,11 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
     # echoes the split fields (package_weight_lb + package_weight_oz). Detect
     # which shape we got so a refine round-trip doesn't drop the pounds.
     if "package_weight_lb" in data:
-        weight_lb = int(_f("package_weight_lb"))
-        weight_oz = round(_f("package_weight_oz"), 1)
+        # lb may echo back fractional (1.5) — fold the fraction into oz
+        # instead of int-truncating it away (1.5 lb used to become 1 lb).
+        total_oz = _f("package_weight_lb") * 16 + _f("package_weight_oz")
+        weight_lb = int(total_oz // 16)
+        weight_oz = round(total_oz - weight_lb * 16, 1)
     else:
         total_oz = _f("package_weight_oz")
         weight_lb = int(total_oz // 16)

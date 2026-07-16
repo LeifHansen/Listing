@@ -311,7 +311,12 @@ def delete_ebay_account(user_id: str) -> None:
         log.warning(f"db: delete_ebay_account failed: {exc}")
 
 
-def get_listing(listing_id: str) -> Optional[dict]:
+# Sentinel so callers can tell "row doesn't exist" from "DB errored" — the
+# ownership guard must fail closed on DB errors, not treat them as unowned.
+DB_ERROR = object()
+
+
+def get_listing(listing_id: str, on_error: Optional[object] = None) -> Optional[dict]:
     try:
         eng = _get_engine()
         if eng is None:
@@ -321,7 +326,7 @@ def get_listing(listing_id: str) -> Optional[dict]:
             return _record_to_dict(rec) if rec else None
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_listing failed: {exc}")
-        return None
+        return on_error
 
 
 def db_status() -> dict:
