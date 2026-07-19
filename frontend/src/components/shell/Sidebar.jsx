@@ -19,15 +19,18 @@ const NAV = [
 
 export const APP_VERSION = "v2.0";
 
-// The Thryft Shop cart mascot (frontend/public/brand/logo-mark.png). Falls
-// back to the Zap glyph until the asset file is uploaded, so a missing image
-// never leaves a broken tile.
+// The Thryft Shop logo (uploaded to frontend/public/). One asset, used
+// app-wide: sidebar, login dialog, favicon.
+export const BRAND_LOGO = "/thryft-shop-logo-final.png";
+
+// Square-tile rendition of the logo for small spots. Falls back to the Zap
+// glyph if the asset ever goes missing, so nothing renders broken.
 export function BrandMark({ className = "size-9 rounded-[13px]" }) {
   const [imgOk, setImgOk] = useState(true);
   if (imgOk) {
     return (
       <img
-        src="/brand/logo-mark.png"
+        src={BRAND_LOGO}
         alt=""
         onError={() => setImgOk(false)}
         className={cn("object-cover shrink-0 shadow-card bg-card", className)}
@@ -42,10 +45,24 @@ export function BrandMark({ className = "size-9 rounded-[13px]" }) {
 }
 
 function Brand({ collapsed }) {
+  const [imgOk, setImgOk] = useState(true);
+  if (collapsed) {
+    return (
+      <div className="flex items-center justify-center h-12">
+        <BrandMark />
+      </div>
+    );
+  }
   return (
-    <div className="flex items-center gap-2.5 px-2 h-12">
-      <BrandMark />
-      {!collapsed && (
+    <div className="flex items-center px-2 h-14">
+      {imgOk ? (
+        <img
+          src={BRAND_LOGO}
+          alt="Thryft Shop"
+          onError={() => setImgOk(false)}
+          className="h-14 w-auto object-contain"
+        />
+      ) : (
         <span className="font-extrabold text-[19px] tracking-tight text-ink whitespace-nowrap">
           Thryft <span className="text-blue">Shop</span>
         </span>
