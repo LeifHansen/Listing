@@ -1099,6 +1099,18 @@ _BULK_LOCK = threading.Lock()
 # Claude vision accepts at most 100 images per request; bigger piles are
 # grouped in chunks of this size (no cap on the upload itself).
 BULK_GROUP_CHUNK = 100
+# Bound the in-memory job store. identify runs as a job on EVERY upload, so
+# without eviction this dict would grow monotonically until restart. Dicts keep
+# insertion order, so we drop the oldest past this cap — a client polls a job
+# only briefly, and the resulting listings persist to the DB regardless.
+_BULK_JOBS_MAX = 200
+
+
+def _register_bulk_job(job_id: str, data: dict) -> None:
+    with _BULK_LOCK:
+        _BULK_JOBS[job_id] = data
+        while len(_BULK_JOBS) > _BULK_JOBS_MAX:
+            _BULK_JOBS.pop(next(iter(_BULK_JOBS)))
 
 
 def _bulk_set(job_id: str, **fields) -> None:
@@ -1225,12 +1237,11 @@ async def bulk_upload(
     uid = _uid(request)
     creds = _ebay_creds_for(request) if mode == "live" else None
     job_id = storage.new_session_id()
-    with _BULK_LOCK:
-        _BULK_JOBS[job_id] = {
-            "id": job_id, "mode": mode, "phase": "uploading", "done": False,
-            "error": None, "items": [], "total_items": 0, "current": 0,
-            "total_photos": len(files),
-        }
+    _register_bulk_job(job_id, {
+        "id": job_id, "mode": mode, "phase": "uploading", "done": False,
+        "error": None, "items": [], "total_items": 0, "current": 0,
+        "total_photos": len(files),
+    })
     threading.Thread(
         target=_run_bulk_job,
         args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
@@ -1292,11 +1303,10 @@ def identify_async(session_id: str, request: Request) -> dict:
         raise HTTPException(404, "No optimized images found for this session.")
     uid = _uid(request)
     job_id = storage.new_session_id()
-    with _BULK_LOCK:
-        _BULK_JOBS[job_id] = {
-            "id": job_id, "kind": "identify", "phase": "identifying",
-            "done": False, "error": None, "result": None,
-        }
+    _register_bulk_job(job_id, {
+        "id": job_id, "kind": "identify", "phase": "identifying",
+        "done": False, "error": None, "result": None,
+    })
     threading.Thread(
         target=_run_identify_job, args=(job_id, session_id, uid), daemon=True,
     ).start()
