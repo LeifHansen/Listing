@@ -56,10 +56,13 @@ def _flatten(img: Image.Image) -> Image.Image:
 _REMBG_MODEL = os.getenv("REMBG_MODEL", "isnet-general-use").strip() or "isnet-general-use"
 _rembg_session = None
 
-# Alpha (0-255) below this is treated as background, so the faint semi-
-# transparent "ghost" halos the matte leaves around a subject composite as
-# clean white instead of gray fuzz.
-_ALPHA_FLOOR = 48
+# Harden the soft matte into a near-binary mask so the background is fully
+# gone, not faintly visible. Alpha below _ALPHA_LOW is forced to background,
+# above _ALPHA_HIGH to solid subject; the thin band between keeps a 1-2px
+# anti-aliased edge. A soft matte (mid-alpha everywhere) is what leaves a
+# "ghost" of the old background compositing through as gray fuzz.
+_ALPHA_LOW = 90
+_ALPHA_HIGH = 170
 # If the cutout keeps less than this fraction of the frame as opaque subject,
 # the model ate the item (dark denim, close-up textures, low contrast) — keep
 # the original photo rather than saving a destroyed one.
@@ -86,7 +89,10 @@ def _alpha_mask(img_rgb: Image.Image) -> Image.Image:
              if scale < 1 else img_rgb)
     alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
     if alpha.size != img_rgb.size:
-        alpha = alpha.resize(img_rgb.size, Image.LANCZOS)
+        # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
+        # high-contrast edges, ringing a faint halo of the old background back
+        # in — exactly the "ghost background" the cutout is meant to remove.
+        alpha = alpha.resize(img_rgb.size, Image.BILINEAR)
     return alpha
 
 
@@ -115,9 +121,15 @@ def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
     """
     rgb = img.convert("RGB")
     alpha = _alpha_mask(rgb)
-    # Drop faint, semi-transparent pixels so ghost halos/smudges composite as
-    # clean white rather than gray fuzz. Real subject edges stay high-alpha.
-    alpha = alpha.point(lambda a: 0 if a < _ALPHA_FLOOR else a)
+    # Despeckle isolated stray pixels, then harden the matte: background pixels
+    # go fully transparent (no ghost), subject pixels fully opaque, with a thin
+    # anti-aliased edge in between. A plain floor left mid-alpha background
+    # visible as gray fuzz — the reported "ghost background".
+    alpha = alpha.filter(ImageFilter.MedianFilter(3))
+    span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
+    alpha = alpha.point(lambda a: 0 if a < _ALPHA_LOW
+                        else 255 if a > _ALPHA_HIGH
+                        else round((a - _ALPHA_LOW) * 255 / span))
     opaque = sum(alpha.histogram()[128:])
     if opaque / max(1, alpha.width * alpha.height) < _MIN_FG_COVERAGE:
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",

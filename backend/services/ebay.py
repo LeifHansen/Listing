@@ -87,8 +87,12 @@ _IDENTIFIER_KEYS = {"upc": "upc", "ean": "ean", "isbn": "isbn"}
 def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> dict:
     aspects: dict[str, list[str]] = {}
     identifiers: dict[str, str] = {}
+    # Brand is a SINGLE-value aspect on eBay — sending two values (e.g. a brand
+    # field plus a duplicate "Brand" item specific, or a comma-joined value)
+    # triggers "Brand should contain only one value". Seed it from the brand
+    # field, cleaned to exactly one token.
     if listing.brand:
-        aspects["Brand"] = [listing.brand]
+        aspects["Brand"] = [listing.brand.split(",")[0].strip()[:65]]
     for spec in listing.item_specifics:
         if not (spec.name and spec.value):
             continue
@@ -104,6 +108,11 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
         if key in _IDENTIFIER_KEYS:
             identifiers.setdefault(_IDENTIFIER_KEYS[key], raw_value[:65])
             continue
+        # Brand must stay single-valued: never comma-split it, and don't add a
+        # second value when the brand field already seeded it.
+        if key == "brand":
+            aspects.setdefault("Brand", [raw_value.split(",")[0].strip()[:65]])
+            continue
         aspects.setdefault(name, [])
         # Split comma-separated values into eBay's multi-value array form, so
         # "Season: Spring,Summer" maps to both instead of one token eBay's
@@ -114,11 +123,15 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
         if not aspects[name]:
             del aspects[name]  # never send an empty aspect array (eBay rejects it)
 
+    # Final guard: whatever path set it, Brand ships as exactly one value.
+    if aspects.get("Brand"):
+        aspects["Brand"] = aspects["Brand"][:1]
+
     # eBay validates brand and MPN as a pair ('Input data for tag <BrandMPN>
     # is invalid or missing'): once a brand is present, an MPN must be too.
     # Use the seller's MPN item specific when given, else eBay's official
     # "no part number" sentinel.
-    brand = listing.brand or (aspects.get("Brand") or [""])[0]
+    brand = (aspects.get("Brand") or [""])[0] or listing.brand
     mpn = next((s.value for s in listing.item_specifics
                 if s.name and s.value and s.name.strip().lower()
                 in ("mpn", "manufacturer part number")), "")

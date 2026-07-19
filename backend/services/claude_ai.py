@@ -43,6 +43,9 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "price": number or null (suggested USD price based on item & condition),
   "quantity": integer (default 1),
   "package_weight_oz": number (estimated TOTAL shipping weight in ounces, packed; best-effort estimate the seller can correct),
+  "package_length_in": number (estimated SHIPPING BOX length in inches, packed),
+  "package_width_in": number (estimated SHIPPING BOX width in inches, packed),
+  "package_height_in": number (estimated SHIPPING BOX height in inches, packed),
   "item_specifics": [{"name": "string", "value": "string"}],
   "missing_info": ["names of fields a human should verify/fill, e.g. 'exact model number', 'size'"],
   "confidence": "low|medium|high",
@@ -52,6 +55,12 @@ Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
   authenticity guarantees, or specs you cannot verify; put those in missing_info.
 - Title must be <= 80 characters and front-load the most searched keywords.
+- ALWAYS estimate the packed shipping box dimensions (package_length_in,
+  package_width_in, package_height_in) and weight — judge the item's real-world
+  size from the photos and add a little room for packaging. Never leave the
+  dimensions at 0; a reasonable estimate the seller can correct is required so
+  shipping calculates. (e.g. a t-shirt ≈ 10×8×2 in; a coffee mug ≈ 6×5×5 in;
+  a paperback ≈ 8×6×1 in; a pair of shoes in-box ≈ 13×8×5 in.)
 - item_specifics: be thorough. Fill EVERY standard eBay item specific you can
   see or confidently infer, using eBay's exact aspect names as "name" (these
   populate the listing's item specifics, so more accurate entries = far better
