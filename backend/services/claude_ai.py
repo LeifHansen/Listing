@@ -81,6 +81,31 @@ def _client() -> Anthropic:
     return Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
 
+def ai_error_message(exc: Exception) -> tuple[int, str]:
+    """Map an Anthropic/API error to (http_status, user-facing message).
+
+    Turns raw SDK errors into a clear reason the UI can show — especially the
+    two limits a seller actually hits: rate limits and an exhausted credit
+    balance. Uses status_code + message text so it survives SDK version drift.
+    """
+    status = getattr(exc, "status_code", None)
+    body = str(getattr(exc, "message", "") or exc).lower()
+    if status == 429 or "rate limit" in body or "overloaded" in body:
+        return 429, ("The AI is rate-limited or busy right now — wait a few "
+                     "seconds and try again.")
+    if (status == 402 or "credit balance" in body or "insufficient" in body
+            or "billing" in body or "quota" in body):
+        return 402, ("The Anthropic account is out of credits. Top it up at "
+                     "console.anthropic.com to keep generating listings.")
+    if status in (401, 403) or "authentication" in body or "x-api-key" in body:
+        return 400, ("The AI credentials on the server are missing or invalid "
+                     "(check ANTHROPIC_API_KEY).")
+    if "connection" in body or "timed out" in body or "timeout" in body:
+        return 503, ("Couldn't reach the AI service — check the connection and "
+                     "try again in a moment.")
+    return 502, f"AI request failed: {str(exc)[:200]}"
+
+
 def _image_block(path: Path) -> dict:
     media_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
     data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
