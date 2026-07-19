@@ -106,11 +106,93 @@ def _alpha_mask(img_rgb: Image.Image) -> Image.Image:
     return _photoroom(img_rgb, channels="alpha")
 
 
+# Photoroom's v2 "edit" endpoint (Image Editing API plans) does the cutout,
+# pure-white background, an AI-drawn drop shadow, and subject centering in a
+# single call — the studio-quality look eBay buyers expect.
+_PHOTOROOM_EDIT_URL = "https://image-api.photoroom.com/v2/edit"
+# Remembers a plan-level rejection so we don't pay a doomed round-trip on
+# every photo — we fall straight back to the plain v1 cutout (no shadow).
+_v2_unavailable = False
+
+
+def _photoroom_shadow_cutout(img_rgb: Image.Image) -> Optional[Image.Image]:
+    """White background + AI drop shadow + centered subject via the v2 edit
+    API, sized straight to the final listing square. Returns None whenever the
+    v2 API can't be used (disabled, not on the plan, transient error) so the
+    caller falls back to the plain v1 cutout."""
+    global _v2_unavailable
+    import httpx
+    from io import BytesIO
+
+    shadow = config.PHOTOROOM_SHADOW
+    if (_v2_unavailable or not config.PHOTOROOM_API_KEY
+            or shadow in ("", "off", "none", "0", "false")):
+        return None
+    buf = BytesIO()
+    img_rgb.save(buf, "JPEG", quality=92)
+    try:
+        resp = httpx.post(
+            _PHOTOROOM_EDIT_URL,
+            headers={"x-api-key": config.PHOTOROOM_API_KEY},
+            files={"imageFile": ("photo.jpg", buf.getvalue(), "image/jpeg")},
+            data={
+                "background.color": "FFFFFF",
+                "shadow.mode": shadow,
+                # Small even margin around the subject — the pro marketplace
+                # look, and it survives the square pipeline untouched since
+                # the output is already TARGET_SIZE x TARGET_SIZE.
+                "padding": "0.08",
+                "outputSize": f"{TARGET_SIZE}x{TARGET_SIZE}",
+            },
+            timeout=90,
+        )
+    except httpx.HTTPError as exc:
+        raise ValueError("Couldn't reach the background-removal service — "
+                         "try again in a moment.") from exc
+    if resp.status_code == 402:
+        raise ValueError("The Photoroom plan is out of image credits — top it "
+                         "up at photoroom.com/api to keep removing backgrounds.")
+    if resp.status_code in (401, 403, 404):
+        _v2_unavailable = True
+        log.warning("photoroom: v2 edit unavailable (HTTP %s) — using the plain "
+                    "cutout without a shadow. AI shadows need a plan that "
+                    "includes the Image Editing API.", resp.status_code)
+        return None
+    if resp.status_code >= 400:
+        log.warning("photoroom: v2 edit failed (HTTP %s) — using the plain cutout",
+                    resp.status_code)
+        return None
+    out = Image.open(BytesIO(resp.content))
+    out.load()
+    if "A" in out.getbands():
+        canvas = Image.new("RGBA", out.size, WHITE + (255,))
+        canvas.alpha_composite(out.convert("RGBA"))
+        out = canvas
+    return out.convert("RGB")
+
+
+def _looks_blank(img_rgb: Image.Image) -> bool:
+    """True when almost nothing differs from a pure-white canvas — i.e. the
+    segmentation erased the subject."""
+    from PIL import ImageChops
+
+    diff = ImageChops.difference(
+        img_rgb, Image.new("RGB", img_rgb.size, WHITE)).convert("L")
+    kept = sum(diff.point(lambda d: 255 if d > 16 else 0).histogram()[128:])
+    return kept / max(1, img_rgb.width * img_rgb.height) < _MIN_FG_COVERAGE
+
+
 def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
-    """Photoroom cutout composited on pure white — or None when the result is
-    clearly a failure (subject erased), so callers keep the original photo
-    instead of saving a destroyed one."""
+    """Photoroom cutout on pure white (with an AI drop shadow when available)
+    — or None when the result is clearly a failure (subject erased), so
+    callers keep the original photo instead of saving a destroyed one."""
     rgb = img.convert("RGB")
+    out = _photoroom_shadow_cutout(rgb)
+    if out is not None:
+        if _looks_blank(out):
+            log.warning("bg-removal: v2 edit erased the subject — keeping original")
+            return None
+        return out
     rgba = _photoroom(rgb, channels="rgba")
     alpha = rgba.getchannel("A")
     opaque = sum(alpha.histogram()[128:])

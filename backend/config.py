@@ -119,6 +119,12 @@ CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
 # --- Photoroom (background removal / subject segmentation) -----------------
 PHOTOROOM_API_KEY = os.getenv("PHOTOROOM_API_KEY", "").strip()
+# Drop-shadow style drawn under the subject when removing a background, via
+# Photoroom's v2 edit API: "ai.soft" (natural, recommended), "ai.hard", or
+# "ai.floating"; set to "off" to disable. Needs a plan that includes the
+# Image Editing API — when it doesn't, the app falls back to the plain
+# cutout (no shadow) automatically.
+PHOTOROOM_SHADOW = os.getenv("PHOTOROOM_SHADOW", "ai.soft").strip().lower()
 
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
