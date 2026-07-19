@@ -949,8 +949,10 @@ def identify(session_id: str, request: Request) -> dict:
     paths = [opt_dir / n for n in names]
     try:
         result = claude_ai.identify(paths, names)
-    except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
-        raise HTTPException(502, f"AI identification failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
+        code, message = claude_ai.ai_error_message(exc)
+        log.warning("identify failed (session=%s): %s", session_id, exc)
+        raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
 
     # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
@@ -1017,7 +1019,12 @@ def price_suggestions(payload: dict) -> dict:
 def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
-    updated = claude_ai.refine(req.listing, req.prompt)
+    try:
+        updated = claude_ai.refine(req.listing, req.prompt)
+    except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
+        code, message = claude_ai.ai_error_message(exc)
+        log.warning("refine failed (session=%s): %s", req.session_id, exc)
+        raise HTTPException(code, message) from exc
     storage.save_listing(req.session_id, updated)
     db.upsert_listing(req.session_id, updated.model_dump(), status="draft", user_id=_uid(request))
     return updated.model_dump()
@@ -1269,9 +1276,9 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
-    except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
+    except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         log.warning("identify job %s failed: %s", job_id, exc)
-        _bulk_set(job_id, done=True, error=f"AI identification failed: {exc}")
+        _bulk_set(job_id, done=True, error=claude_ai.ai_error_message(exc)[1])
 
 
 @app.post("/api/identify-async/{session_id}")
