@@ -180,12 +180,18 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
         return buf.getvalue()
 
 
-def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[dict]:
+def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
+                 progress=None) -> list[dict]:
+    """Optimize every image in src_dir. `progress(done, total)` (optional) is
+    called after each photo so long bulk jobs can show a live count."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     results = []
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
-    for i, src in enumerate(sorted(src_dir.iterdir())):
+    entries = sorted(src_dir.iterdir())
+    total = sum(1 for p in entries if p.suffix.lower() in exts)
+    done = 0
+    for i, src in enumerate(entries):
         if src.suffix.lower() not in exts:
             continue
         dst = dst_dir / f"img_{i:02d}.jpg"
@@ -193,6 +199,12 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False) -> list[
             results.append(optimize(src, dst, remove_bg))
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             results.append({"file": src.name, "error": str(exc)})
+        done += 1
+        if progress:
+            try:
+                progress(done, total)
+            except Exception:  # noqa: BLE001 - progress is display-only
+                pass
     return results
 
 
