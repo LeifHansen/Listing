@@ -8,7 +8,10 @@ import { PriceBadge, StatusBadge } from "@/components/ui/badges";
 // sibling of the card button (not nested) so it stays valid, focusable HTML.
 export function ListingCard({ item, onOpen, onDelete, className }) {
   const l = item.listing || {};
-  const thumb = l.images && l.images[0] ? mediaUrl(item.id, l.images[0]) : null;
+  // Version thumbnails by updated_at so a rotate/clean-up busts the hour-long
+  // /media cache the moment the listing is touched — without killing caching.
+  const ver = Date.parse(item.updated_at || "") || undefined;
+  const thumb = l.images && l.images[0] ? mediaUrl(item.id, l.images[0], ver) : null;
   const inventory = item.status === "unlisted";
 
   return (

@@ -18,11 +18,11 @@ import { PhotoTile } from "./PhotoTile";
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
 
-export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
+export function PhotosCard({ w, onEdit, onRemoveBg, onCrop, onDelete }) {
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="One-tap rotate & delete on every photo; hover for background clean-up and smart crop"
+      hint="One-tap rotate & delete on every photo; hover for clean-up, background removal & crop"
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {(w.form.images || []).length ? (
@@ -35,7 +35,8 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
                 name={name}
                 version={w.imageVersion}
                 onEdit={() => onEdit(name)}
-                onSmartCrop={() => onSmartCrop(name)}
+                onRemoveBg={() => onRemoveBg(name)}
+                onCrop={() => onCrop(name)}
                 onDelete={() => onDelete(name)}
                 onRotate={() => w.rotateImage(name)}
               />

@@ -46,6 +46,47 @@ export function AIStatusCard({ messages, className }) {
   );
 }
 
+// Full-screen branded wait state — used for publish/save so the feedback is
+// unmissable no matter where the page is scrolled (the trigger buttons live
+// at the bottom of a long form).
+export function LoadingOverlay({ messages }) {
+  const list = Array.isArray(messages) ? messages : [messages || "Working…"];
+  const [i, setI] = useState(0);
+
+  useEffect(() => {
+    if (list.length <= 1) return;
+    const t = setInterval(() => setI((n) => (n + 1) % list.length), 2200);
+    return () => clearInterval(t);
+  }, [list.length]);
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="fixed inset-0 z-50 grid place-items-center bg-bg/80 backdrop-blur-sm"
+    >
+      <div className="flex flex-col items-center gap-5 p-8 text-center">
+        <span className="ai-sparkle" aria-hidden>
+          <BrandMark className="size-20 rounded-[24px]" />
+        </span>
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={list[i % list.length]}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.25 }}
+            className="ai-shimmer-text font-bold text-lg"
+          >
+            {list[i % list.length]}
+          </motion.p>
+        </AnimatePresence>
+        <div className="h-1.5 rounded-full ai-shimmer w-56" aria-hidden />
+      </div>
+    </div>
+  );
+}
+
 // Small inline variant for tight spots (buttons rows, card headers).
 export function AIStatusInline({ message, className }) {
   return (

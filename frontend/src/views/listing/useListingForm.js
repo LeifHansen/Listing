@@ -281,6 +281,11 @@ export function useListingForm() {
         session_id: sessionId, listing, mode,
       });
       setPublishResult(result);
+      // Live success swaps in the PublishedScreen; draft saves get a toast so
+      // there's clear feedback even if the result banner is below the fold.
+      if (!result.error && !result.published && mode === "draft") {
+        toast("Draft saved — find it anytime under Drafts.", { kind: "success" });
+      }
       if (result.error && result.issues && result.issues.length) {
         const first = result.issues.find((x) => x.target && x.target !== "generic");
         if (first) setFixTarget(first.target);
