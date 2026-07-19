@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import { AppProvider, useApp } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
 import { Sidebar, BottomNav } from "@/components/shell/Sidebar";
@@ -13,7 +13,7 @@ import { ListingsView } from "@/views/ListingsView";
 import { SettingsView } from "@/views/SettingsView";
 
 function Main() {
-  const { view, setView, health } = useApp();
+  const { view, setView, health, activeBulk } = useApp();
   const [search, setSearch] = useState("");
 
   return (
@@ -21,6 +21,21 @@ function Main() {
       <Sidebar />
       <div className="flex-1 min-w-0 px-4 sm:px-6 pb-28 md:pb-10">
         <TopBar onSearch={setSearch} onManageEbay={() => setView("settings")} />
+
+        {activeBulk && view !== "new" && (
+          <button
+            type="button"
+            onClick={() => setView("new")}
+            className="mb-4 w-full flex items-center gap-3 rounded-card bg-blue-soft border border-blue/30 p-4 text-left text-sm text-ink hover:border-blue/50 transition-colors cursor-pointer"
+          >
+            <Loader2 size={17} className="text-blue shrink-0 animate-spin" aria-hidden />
+            <span className="flex-1 min-w-0">
+              <strong className="font-semibold">A bulk batch is processing.</strong>{" "}
+              Finished items save to Drafts automatically — tap to watch or review it.
+            </span>
+            <span className="font-semibold text-blue shrink-0">Review →</span>
+          </button>
+        )}
 
         {health._loaded && !health.anthropic_configured && (
           <div className="mb-4 rounded-card bg-warning-soft border border-warning/30 p-4 text-sm text-ink flex gap-2.5">

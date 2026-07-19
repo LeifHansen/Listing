@@ -202,11 +202,11 @@ function Workflow() {
 }
 
 export function NewListing() {
-  const { session } = useApp();
-  // { jobId, mode } while a bulk batch is processing / under review.
-  const [bulkJob, setBulkJob] = useState(null);
+  // activeBulk lives in the store + localStorage, so a running batch survives
+  // navigating away and page reloads (see store startBulk/clearBulk).
+  const { session, activeBulk, startBulk, clearBulk, bulkSettled } = useApp();
 
-  if (!session && bulkJob) {
+  if (!session && activeBulk) {
     return (
       <div className="flex flex-col gap-4">
         <div>
@@ -216,9 +216,10 @@ export function NewListing() {
           </p>
         </div>
         <BulkQueue
-          jobId={bulkJob.jobId}
-          mode={bulkJob.mode}
-          onExit={() => setBulkJob(null)}
+          jobId={activeBulk.jobId}
+          mode={activeBulk.mode}
+          onExit={clearBulk}
+          onSettled={bulkSettled}
         />
       </div>
     );
@@ -233,7 +234,7 @@ export function NewListing() {
             Start with photos — the AI handles the boring parts.
           </p>
         </div>
-        <UploadPhase onBulkStarted={(jobId, mode) => setBulkJob({ jobId, mode })} />
+        <UploadPhase onBulkStarted={startBulk} />
       </div>
     );
   }
