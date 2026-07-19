@@ -14,8 +14,8 @@ primary_region = 'sjc'
   EBAY_ENV = 'production'
   PORT = '8080'
   DATA_DIR = '/data'
-  # The background-removal model is baked into the image (see Dockerfile), so
-  # no runtime download and no volume dependency for it.
+  # Background removal is a Photoroom API call — PHOTOROOM_API_KEY lives in
+  # `fly secrets`; no local model in the image.
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...
@@ -29,16 +29,15 @@ primary_region = 'sjc'
   internal_port = 8080
   force_https = true
   # Keep one machine always warm: auto-stop would let it go cold, and a load
-  # during the wake window renders a "naked" (uncached CSS fails) page and
-  # makes background removal pay a ~60s JIT cost. Small always-on cost buys a
-  # site that's instant and always fully styled.
+  # during the wake window renders a "naked" (uncached CSS fails) page. Small
+  # always-on cost buys a site that's instant and always fully styled.
   auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
 [[vm]]
-  # Background removal loads onnxruntime + rembg (scipy/numba/opencv). 1GB
-  # thrashes and the request hangs; 2GB + 2 vCPUs runs it in a few seconds.
-  # auto_stop keeps it billed only while actually in use.
+  # Bulk photo optimization runs several full-res Pillow passes concurrently;
+  # 2GB + 2 vCPUs gives comfortable headroom now that background removal is
+  # API-side (Photoroom) instead of an in-process model.
   size = 'shared-cpu-2x'
   memory = '2gb'

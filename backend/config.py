@@ -117,6 +117,9 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
+# --- Photoroom (background removal / subject segmentation) -----------------
+PHOTOROOM_API_KEY = os.getenv("PHOTOROOM_API_KEY", "").strip()
+
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
 EBAY_OAUTH_TOKEN = _env("EBAY_OAUTH_TOKEN")
@@ -172,6 +175,10 @@ def ebay_oauth_ready() -> bool:
 
 def anthropic_ready() -> bool:
     return bool(ANTHROPIC_API_KEY)
+
+
+def photoroom_ready() -> bool:
+    return bool(PHOTOROOM_API_KEY)
 
 
 def ebay_status() -> dict:
