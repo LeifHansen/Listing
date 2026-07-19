@@ -3,9 +3,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card } from "./Card";
+import { BrandMark } from "@/components/BrandMark";
 
-// AIStatusCard — shown while the AI works. Never a plain spinner: an animated
-// sparkle, a shimmer, and rotating friendly messages make waiting feel magical.
+// AIStatusCard — the branded wait state (publishing, saving drafts, AI work).
+// Never a plain spinner: the Thryft Shop mark gently pulsing, a shimmer, and
+// rotating friendly messages make waiting feel magical.
 export function AIStatusCard({ messages, className }) {
   const list = Array.isArray(messages) ? messages : [messages || "Working some magic…"];
   const [i, setI] = useState(0);
@@ -22,8 +24,8 @@ export function AIStatusCard({ messages, className }) {
       aria-live="polite"
       className={cn("flex items-center gap-4 border-blue/20", className)}
     >
-      <span className="grid place-items-center size-11 rounded-[14px] bg-blue-soft text-blue shrink-0">
-        <Sparkles size={22} className="ai-sparkle" aria-hidden />
+      <span className="ai-sparkle shrink-0" aria-hidden>
+        <BrandMark className="size-11 rounded-[14px]" />
       </span>
       <div className="min-w-0 flex-1">
         <AnimatePresence mode="wait">

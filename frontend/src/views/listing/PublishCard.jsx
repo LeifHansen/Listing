@@ -13,8 +13,17 @@ function nameFor(data, key, field) {
 // Publish — the last card: what will apply, the two big buttons, and a
 // friendly "what to fix" panel when eBay pushes back.
 export function PublishCard({ w }) {
-  const { canPublishLive, ebay, setView, policiesData, setPoliciesData } = useApp();
+  const {
+    canPublishLive, ebay, setView, policiesData, setPoliciesData,
+    listingsState, openListing,
+  } = useApp();
   const r = w.publishResult;
+
+  // The assembly line: after a listing goes live, offer the next queued draft.
+  const draftsLeft = (listingsState.items || [])
+    .filter((it) => (it.status === "draft" || it.status === "dry_run") && it.id !== w.sessionId)
+    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  const nextDraft = draftsLeft[0];
 
   // Show which shipping/payment/return policies will apply.
   useEffect(() => {
@@ -90,6 +99,33 @@ export function PublishCard({ w }) {
                 </>
               ) : (
                 <p className="font-semibold">{r.message || "Done!"}</p>
+              )}
+              {r.published && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {nextDraft ? (
+                    <>
+                      <Button variant="primary" size="sm" onClick={() => openListing(nextDraft.id)}>
+                        Next draft:{" "}
+                        <span className="truncate max-w-44">
+                          "{nextDraft.listing?.title || nextDraft.title || "untitled"}"
+                        </span>
+                        <ArrowRight aria-hidden />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setView("dashboard")}>
+                        Back to Dashboard
+                      </Button>
+                      {draftsLeft.length > 1 && (
+                        <span className="w-full text-xs text-ink-faint">
+                          {draftsLeft.length} drafts waiting in your queue.
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <Button variant="ghost" size="sm" onClick={() => setView("dashboard")}>
+                      All drafts done — back to Dashboard
+                    </Button>
+                  )}
+                </div>
               )}
               {r.dry_run && (
                 <details className="mt-2">

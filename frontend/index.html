@@ -21,7 +21,17 @@
   </script>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <!-- Branded boot splash — replaced the moment React mounts. -->
+    <div id="boot-splash" style="min-height:100dvh;display:grid;place-items:center">
+      <img src="/thryft-shop-logo-final.png" alt="Thryft Shop"
+        style="width:200px;max-width:60vw;border-radius:28px;animation:ts-boot 1.6s ease-in-out infinite" />
+    </div>
+    <style>
+      @keyframes ts-boot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.7;transform:scale(.97)}}
+      @media (prefers-reduced-motion: reduce){#boot-splash img{animation:none}}
+    </style>
+  </div>
   <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>

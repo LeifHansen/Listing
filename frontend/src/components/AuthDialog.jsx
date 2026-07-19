@@ -5,7 +5,7 @@ import { useApp } from "@/store";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/fields";
-import { BrandMark } from "@/components/shell/Sidebar";
+import { BrandMark } from "@/components/BrandMark";
 
 // Log in / sign up. On success, resumes whatever action prompted the login
 // (e.g. Shop-mode "Buy").
