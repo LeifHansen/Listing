@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/fields";
+import { BrandMark } from "@/components/shell/Sidebar";
 
 // Log in / sign up. On success, resumes whatever action prompted the login
 // (e.g. Shop-mode "Buy").
@@ -52,10 +52,8 @@ export function AuthDialog() {
       onClose={close}
       title={
         <span className="inline-flex items-center gap-2">
-          <span className="grid place-items-center size-8 rounded-[11px] bg-blue text-on-accent">
-            <Zap size={16} strokeWidth={2.4} aria-hidden />
-          </span>
-          Quick<span className="text-blue -ml-2">Flip</span>
+          <BrandMark className="size-8 rounded-[11px]" />
+          Thryft <span className="text-blue -ml-1">Shop</span>
         </span>
       }
     >

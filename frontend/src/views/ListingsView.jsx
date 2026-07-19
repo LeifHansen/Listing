@@ -35,7 +35,7 @@ const CONFIGS = {
   },
   listings: {
     title: "Listings",
-    sub: "Everything you've created with QuickFlip",
+    sub: "Everything you've created with Thryft Shop",
     filter: () => true,
     illustration: TagIllustration,
     emptyTitle: "No listings yet",

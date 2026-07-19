@@ -512,7 +512,7 @@ function ProfileCard() {
       <SectionHeader
         icon={UserRound}
         title="Profile"
-        hint="How QuickFlip greets you — sync pulls your eBay username and settings"
+        hint="How Thryft Shop greets you — sync pulls your eBay username and settings"
       />
       <div className="flex flex-col gap-4 max-w-lg">
         <Field label="Display name" help={`Email: ${user?.email || ""}`}>

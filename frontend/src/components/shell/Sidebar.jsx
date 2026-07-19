@@ -19,15 +19,35 @@ const NAV = [
 
 export const APP_VERSION = "v2.0";
 
+// The Thryft Shop cart mascot (frontend/public/brand/logo-mark.png). Falls
+// back to the Zap glyph until the asset file is uploaded, so a missing image
+// never leaves a broken tile.
+export function BrandMark({ className = "size-9 rounded-[13px]" }) {
+  const [imgOk, setImgOk] = useState(true);
+  if (imgOk) {
+    return (
+      <img
+        src="/brand/logo-mark.png"
+        alt=""
+        onError={() => setImgOk(false)}
+        className={cn("object-cover shrink-0 shadow-card bg-card", className)}
+      />
+    );
+  }
+  return (
+    <span className={cn("grid place-items-center bg-blue text-on-accent shrink-0 shadow-card", className)}>
+      <Zap size={19} strokeWidth={2.4} aria-hidden />
+    </span>
+  );
+}
+
 function Brand({ collapsed }) {
   return (
     <div className="flex items-center gap-2.5 px-2 h-12">
-      <span className="grid place-items-center size-9 rounded-[13px] bg-blue text-on-accent shrink-0 shadow-card">
-        <Zap size={19} strokeWidth={2.4} aria-hidden />
-      </span>
+      <BrandMark />
       {!collapsed && (
-        <span className="font-extrabold text-[19px] tracking-tight text-ink">
-          Quick<span className="text-blue">Flip</span>
+        <span className="font-extrabold text-[19px] tracking-tight text-ink whitespace-nowrap">
+          Thryft <span className="text-blue">Shop</span>
         </span>
       )}
     </div>
