@@ -92,14 +92,27 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
     for spec in listing.item_specifics:
         if not (spec.name and spec.value):
             continue
-        key = spec.name.strip().lower()
+        # eBay aspect limits: name <= 40 chars, value <= 65, <= 30 values each.
+        # An over-long value otherwise fails the whole createOrReplace call, so
+        # NO specifics land — exactly the "not populating" symptom.
+        name = spec.name.strip()[:40]
+        raw_value = spec.value.strip()
+        if not name or not raw_value:
+            continue
+        key = name.lower()
         # Route UPC/EAN/ISBN to the canonical product fields rather than aspects.
         if key in _IDENTIFIER_KEYS:
-            identifiers.setdefault(_IDENTIFIER_KEYS[key], spec.value.strip())
+            identifiers.setdefault(_IDENTIFIER_KEYS[key], raw_value[:65])
             continue
-        aspects.setdefault(spec.name, [])
-        if spec.value not in aspects[spec.name]:
-            aspects[spec.name].append(spec.value)
+        aspects.setdefault(name, [])
+        # Split comma-separated values into eBay's multi-value array form, so
+        # "Season: Spring,Summer" maps to both instead of one token eBay's
+        # category doesn't recognize.
+        for piece in (p.strip()[:65] for p in raw_value.split(",")):
+            if piece and piece not in aspects[name] and len(aspects[name]) < 30:
+                aspects[name].append(piece)
+        if not aspects[name]:
+            del aspects[name]  # never send an empty aspect array (eBay rejects it)
 
     # eBay validates brand and MPN as a pair ('Input data for tag <BrandMPN>
     # is invalid or missing'): once a brand is present, an MPN must be too.

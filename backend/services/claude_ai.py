@@ -52,8 +52,24 @@ Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
   authenticity guarantees, or specs you cannot verify; put those in missing_info.
 - Title must be <= 80 characters and front-load the most searched keywords.
-- item_specifics should include relevant fields (Brand, Model, Color, Size,
-  Material, Type, etc.) where determinable.
+- item_specifics: be thorough. Fill EVERY standard eBay item specific you can
+  see or confidently infer, using eBay's exact aspect names as "name" (these
+  populate the listing's item specifics, so more accurate entries = far better
+  search visibility). Give ONE value per name; never guess. Common names by
+  category:
+  * Clothing: Department, Type, Style, Size, Size Type, Color, Material,
+    Pattern, Sleeve Length, Fit, Neckline, Closure, Occasion, Season, Theme,
+    Features, Country/Region of Manufacture, Vintage.
+  * Shoes: Department, Type, Style, US Shoe Size, Color, Upper Material.
+  * Trading cards: Game, Set, Card Name, Card Number, Language, Rarity, Finish,
+    Features, Grade.
+  * Collectibles/other: Type, Character, Material, Color, Theme, Year
+    Manufactured, Country/Region of Manufacture.
+  Use the canonical value eBay expects (e.g. Color "Red", Department "Men",
+  Size "L"). For a field with two values, return it twice as separate entries
+  (e.g. {"name":"Season","value":"Spring"} and {"name":"Season","value":"Summer"})
+  rather than one comma-joined value. Put anything you cannot verify in
+  missing_info instead of guessing.
 """ % ", ".join(EBAY_CONDITIONS)
 
 
