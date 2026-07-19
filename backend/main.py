@@ -647,8 +647,11 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
     return Response(status_code=200)
 
 
-MAX_UPLOAD_FILES = 12   # eBay allows up to 24 photos; keep memory bounded
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # per file
+# Caps raised on request. A high bound stays so a pathological huge upload
+# can't OOM the box; per-image dimension downscale (MAX_WORK_SIDE) bounds pixel
+# memory regardless, and bulk upload has no count cap at all.
+MAX_UPLOAD_FILES = 40   # per single listing (eBay itself accepts up to 24 live)
+MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
 
 
 @app.post("/api/upload")
@@ -674,7 +677,7 @@ async def upload(
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
+                400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
         (orig / f"src_{i:02d}{suffix}").write_bytes(data)
 
@@ -1207,7 +1210,7 @@ async def bulk_upload(
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max 20MB per image)")
+                400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
         (orig / f"src_{i:02d}{suffix}").write_bytes(data)
 
