@@ -16,7 +16,7 @@ import { cn, mediaUrl } from "@/lib/utils";
    - smart crop: crops to the item with a clean margin
    Every action only previews onto the canvas; nothing is stored until Save. */
 
-const HIGHLIGHT_COLOR = "#e53238"; // brand red, tinted over leftovers
+const HIGHLIGHT_COLOR = "#e85c46"; // brand coral, tinted over leftovers
 
 function canvasBlob(canvas, type = "image/jpeg", q = 0.92) {
   return new Promise((r) => canvas.toBlob(r, type, q));
