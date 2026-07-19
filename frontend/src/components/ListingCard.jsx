@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
 import { ImageOff, ArrowRight, Trash2 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
@@ -13,6 +14,9 @@ export function ListingCard({ item, onOpen, onDelete, className }) {
   const ver = Date.parse(item.updated_at || "") || undefined;
   const thumb = l.images && l.images[0] ? mediaUrl(item.id, l.images[0], ver) : null;
   const inventory = item.status === "unlisted";
+  // An image that 404s (e.g. an older photo lost from ephemeral storage) shows
+  // the placeholder instead of a blank tile.
+  const [imgFailed, setImgFailed] = useState(false);
 
   return (
     <div className={cn("relative group", className)}>
@@ -28,13 +32,13 @@ export function ListingCard({ item, onOpen, onDelete, className }) {
         )}
       >
         <div className="aspect-[4/3] bg-bg-sunken relative overflow-hidden">
-          {thumb ? (
+          {thumb && !imgFailed ? (
             <img
               src={thumb}
               alt=""
               loading="lazy"
               className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
-              onError={(e) => { e.currentTarget.style.display = "none"; }}
+              onError={() => setImgFailed(true)}
             />
           ) : (
             <div className="grid place-items-center size-full text-ink-faint">

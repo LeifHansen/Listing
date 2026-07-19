@@ -22,12 +22,20 @@ function canvasBlob(canvas, type = "image/jpeg", q = 0.92) {
   return new Promise((r) => canvas.toBlob(r, type, q));
 }
 
-async function studioCall(path, sessionId, name, blob) {
+async function studioCall(path, sessionId, name, blob, timeoutMs) {
   const fd = new FormData();
   fd.append("session_id", sessionId);
   fd.append("name", name);
   if (blob) fd.append("file", new File([blob], name, { type: blob.type }));
-  return api(path, { method: "POST", body: fd });
+  const opts = { method: "POST", body: fd };
+  if (timeoutMs) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    opts.signal = ctrl.signal;
+    try { return await api(path, opts); }
+    finally { clearTimeout(timer); }
+  }
+  return api(path, opts);
 }
 
 function loadImage(src) {
@@ -47,7 +55,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const [brush, setBrush] = useState(40);
   const brushRef = useRef(40);
   const [saving, setSaving] = useState(false);
-  const [aiBusy, setAiBusy] = useState(null); // friendly message while AI works
+  const [aiBusy, setAiBusy] = useState(null); // destructive op running (locks Save)
+  const [checking, setChecking] = useState(null); // passive border re-check (never locks Save)
   const [highlight, setHighlight] = useState(true);
   const [residuePct, setResiduePct] = useState(null);
   // Manual crop tool: drag a rect, then Apply.
@@ -115,7 +124,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   // Ask the AI to re-check the item borders; highlight whatever needs cleaning.
   const analyze = useCallback(async (blob, { show } = {}) => {
     try {
-      const res = await studioCall("/api/image/analyze", sessionId, name, blob);
+      const res = await studioCall("/api/image/analyze", sessionId, name, blob, 30000);
       paintedSinceAnalyze.current = false;
       setResiduePct(res.residue_pct);
       const shouldShow = show ?? (res.residue_pct >= 0.2);
@@ -137,13 +146,15 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       canvas.getContext("2d").drawImage(img, 0, 0);
       clearOverlay();
       setResiduePct(null);
-      setAiBusy("Re-checking the item's borders…");
-      await analyze(null);
     } catch (e) {
       toast(e.message, { kind: "error" });
-    } finally {
-      setAiBusy(null);
+      return;
     }
+    // Border re-check is a passive assist: it never blocks Save (the image is
+    // already on the canvas) and times out so a slow model can't lock the editor.
+    setChecking("Re-checking the item's borders…");
+    try { await analyze(null); }
+    finally { setChecking(null); }
   }, [sessionId, name, analyze, clearOverlay, toast]);
 
   // Preview an AI-processed image (data URL) onto the canvas, then re-check.
@@ -253,22 +264,22 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   }, [aiBusy, sessionId, name, applyPreview, toast]);
 
   const toggleHighlight = useCallback(async () => {
-    if (aiBusy) return;
+    if (aiBusy || checking) return;
     if (highlight) {
       setHighlight(false);
       clearOverlay();
       return;
     }
     // Re-analyze against the current canvas so fresh brush strokes count.
-    setAiBusy("Re-checking the item's borders…");
+    setChecking("Re-checking the item's borders…");
     try {
       const blob = paintedSinceAnalyze.current
         ? await canvasBlob(canvasRef.current) : null;
       await analyze(blob, { show: true });
     } finally {
-      setAiBusy(null);
+      setChecking(null);
     }
-  }, [aiBusy, highlight, analyze, clearOverlay]);
+  }, [aiBusy, checking, highlight, analyze, clearOverlay]);
 
   useEffect(() => {
     if (!name) return;
@@ -469,8 +480,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       </div>
 
       <div className="mt-3 min-h-5 text-[13px]" aria-live="polite">
-        {aiBusy ? (
-          <AIStatusInline message={aiBusy} />
+        {(aiBusy || checking) ? (
+          <AIStatusInline message={aiBusy || checking} />
         ) : borderState && (
           <span className={cn(
             "inline-flex items-center gap-1.5",
