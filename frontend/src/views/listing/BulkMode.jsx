@@ -135,7 +135,17 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         fails.current = 0;
         setJob(j);
         if (j.items?.length) {
-          setItems(j.items);
+          // Merge WITHOUT clobbering the user's inline edits: the server never
+          // re-edits an item once it's identified, so for items we already have
+          // we keep the local listing (which may hold edits like a changed
+          // condition/price) and only pick up new items from the poll.
+          setItems((cur) => {
+            const mine = new Map(cur.map((it) => [it.session_id, it]));
+            return j.items.map((srv) => {
+              const local = mine.get(srv.session_id);
+              return local ? { ...srv, listing: local.listing ?? srv.listing } : srv;
+            });
+          });
           setChecked((c) => {
             const next = { ...c };
             j.items.forEach((it) => {
