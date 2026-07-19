@@ -87,20 +87,24 @@ function PublishedScreen({ w }) {
 
         <div className="mt-2 flex flex-wrap justify-center items-center gap-2.5">
           {next ? (
-            <Button variant="primary" size="lg" onClick={() => openListing(next.id)} className="max-w-full">
-              <span className="truncate">
-                Next draft: "{next.listing?.title || next.title || "untitled"}"
-              </span>
-              <ArrowRight aria-hidden className="shrink-0" />
-            </Button>
+            <>
+              <Button variant="primary" size="lg" onClick={() => openListing(next.id)}>
+                Next Draft <ArrowRight aria-hidden />
+              </Button>
+              <Button variant="ghost" size="lg" onClick={() => setView("dashboard")}>
+                <LayoutDashboard aria-hidden /> Dashboard
+              </Button>
+            </>
           ) : (
-            <Button variant="primary" size="lg" onClick={startNew}>
-              <PlusCircle aria-hidden /> Start a new listing
-            </Button>
+            <>
+              <Button variant="primary" size="lg" onClick={() => setView("dashboard")}>
+                <LayoutDashboard aria-hidden /> Back to Home
+              </Button>
+              <Button variant="ghost" size="lg" onClick={startNew}>
+                <PlusCircle aria-hidden /> Start a new listing
+              </Button>
+            </>
           )}
-          <Button variant="ghost" size="lg" onClick={() => setView("dashboard")}>
-            <LayoutDashboard aria-hidden /> Dashboard
-          </Button>
         </div>
         {draftsLeft.length > 0 && (
           <p className="text-xs text-ink-faint">
@@ -116,8 +120,7 @@ function Workflow() {
   const { session, startNew } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
-  // { name, action? } — the photo open in the studio; "removebg" runs
-  // background removal on load, "manualcrop" opens with the crop tool active.
+  // { name } — the photo open in the studio (clean up, remove background, crop).
   const [editing, setEditing] = useState(null);
 
   const restart = async () => {
@@ -177,8 +180,6 @@ function Workflow() {
         <PhotosCard
           w={w}
           onEdit={(name) => setEditing({ name })}
-          onRemoveBg={(name) => setEditing({ name, action: "removebg" })}
-          onCrop={(name) => setEditing({ name, action: "manualcrop" })}
           onDelete={(name) => w.deleteImage(name)}
         />
         <TitleCard w={w} />

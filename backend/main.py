@@ -277,24 +277,6 @@ def get_ebay_policies(request: Request) -> dict:
     }
 
 
-@app.post("/api/ebay/ensure-ground-policy")
-def ensure_ground_policy(request: Request) -> dict:
-    """Find — or create — a USPS Ground Advantage fulfillment policy (the
-    cheapest broadly-applicable USPS service) and make it the account default
-    if none is set yet."""
-    creds = _ebay_creds_for(request)
-    if not creds:
-        raise HTTPException(400, "Connect eBay first.")
-    try:
-        pol = ebay_auth.ensure_ground_policy(creds["access_token"])
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
-    if pol.get("id") and not creds.get("fulfillment_policy_id"):
-        db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
-    return pol
-
-
 @app.get("/api/ebay/shipping-services")
 def shipping_services() -> dict:
     """The catalog of eBay shipping services a seller can one-tap into a

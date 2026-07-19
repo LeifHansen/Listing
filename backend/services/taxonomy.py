@@ -198,15 +198,19 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     aspects = []
     for a in data.get("aspects", []):
         constraint = a.get("aspectConstraint", {}) or {}
+        mode = constraint.get("aspectMode", "FREE_TEXT")
         values = [v.get("localizedValue", "")
                   for v in (a.get("aspectValues") or []) if v.get("localizedValue")]
+        # For SELECTION_ONLY aspects the value MUST come from this list, so keep
+        # it whole — capping it drops valid choices (e.g. Country/Region of
+        # Manufacture has ~250 entries and was truncating at "Dominica"). For
+        # FREE_TEXT the values are only suggestions, so cap them to stay lean.
+        capped = values if mode == "SELECTION_ONLY" else values[:60]
         aspects.append({
             "name": a.get("localizedAspectName", ""),
             "required": bool(constraint.get("aspectRequired")),
-            "mode": constraint.get("aspectMode", "FREE_TEXT"),
-            # Cap the value list so a huge enum (e.g. Brand) doesn't bloat the
-            # payload; free-text is still allowed client-side past the cap.
-            "values": values[:60],
+            "mode": mode,
+            "values": capped,
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))

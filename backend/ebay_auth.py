@@ -398,12 +398,6 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
             "name": created.get("name", name), "created": True}
 
 
-def ensure_ground_policy(access_token: str) -> dict:
-    """Find — or create — a USPS Ground Advantage fulfillment policy (the
-    cheapest broadly-applicable USPS service). Returns {id, name, created}."""
-    return ensure_service_policy(access_token, service_by_code("USPSGroundAdvantage"))
-
-
 def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:
     """[{code, name}] for one fulfillment policy (empty on any failure —
     preflight treats unknown services as unconstrained)."""
