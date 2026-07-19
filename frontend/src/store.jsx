@@ -133,6 +133,18 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  const deleteListing = useCallback(async (id) => {
+    try {
+      await api(`/api/listings/${id}`, { method: "DELETE" });
+      // Drop it from the cache immediately (snappy), and close it if open.
+      setListingsState((s) => ({ ...s, items: s.items.filter((i) => i.id !== id) }));
+      setSession((cur) => (cur && cur.sessionId === id ? null : cur));
+      toast("Listing deleted.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+    }
+  }, [toast]);
+
   // ---------- eBay OAuth redirect landing ----------
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -161,11 +173,11 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     policiesData, setPoliciesData,
     listingsState, loadListings,
-    session, setSession, startNew, openListing,
+    session, setSession, startNew, openListing, deleteListing,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
-    listingsState, loadListings, session, startNew, openListing,
+    listingsState, loadListings, session, startNew, openListing, deleteListing,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

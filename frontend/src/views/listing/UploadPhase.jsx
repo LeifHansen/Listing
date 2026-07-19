@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, FolderOpen, X, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
-import { api, downscaleForUpload, IMAGE_EXT_RE } from "@/lib/api";
+import { api, pollJob, downscaleForUpload, IMAGE_EXT_RE } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Toggle } from "@/components/ui/fields";
@@ -85,7 +85,10 @@ export function UploadPhase({ onBulkStarted }) {
       fd.append("remove_bg", removeBg ? "true" : "false");
       const up = await api("/api/upload", { method: "POST", body: fd });
 
-      const result = await api(`/api/identify/${up.session_id}`, { method: "POST" });
+      // Identify runs as a background job we poll, so a slow multi-photo vision
+      // call can't outlive the browser/proxy timeout.
+      const { job_id } = await api(`/api/identify-async/${up.session_id}`, { method: "POST" });
+      const result = await pollJob(job_id);
       files.forEach((f) => URL.revokeObjectURL(f.url));
       setSession({
         sessionId: up.session_id,

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { PlusCircle, Store, LogIn } from "lucide-react";
 import { useApp } from "@/store";
+import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
@@ -45,7 +46,18 @@ const CONFIGS = {
 
 export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
-  const { listingsState, openListing, setView, startNew, user, openAuth } = useApp();
+  const { listingsState, openListing, setView, startNew, user, openAuth, deleteListing } = useApp();
+  const { confirm } = useToast();
+
+  const askDelete = async (item) => {
+    const name = item.listing?.title || item.title || "this listing";
+    if (await confirm({
+      title: "Delete this listing?",
+      message: `"${name}" will be permanently removed. This can't be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    })) deleteListing(item.id);
+  };
 
   const q = search.trim().toLowerCase();
   const items = listingsState.items
@@ -111,7 +123,7 @@ export function ListingsView({ kind, search = "" }) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
-            <ListingCard item={item} onOpen={openListing} />
+            <ListingCard item={item} onOpen={openListing} onDelete={askDelete} />
           </motion.div>
         ))}
       </div>

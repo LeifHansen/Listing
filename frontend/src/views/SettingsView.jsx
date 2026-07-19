@@ -162,20 +162,31 @@ export function SettingsView() {
               Not connected yet — publishing runs in dry-run mode (you get the exact eBay
               API payload without posting).
             </p>
-            <div>
-              <Button
-                variant="primary"
-                onClick={() => {
-                  if (!ebay.oauth_ready) {
-                    toast("eBay isn't configured on the server yet (needs EBAY_CLIENT_ID / SECRET / RUNAME).", { kind: "warning" });
-                    return;
-                  }
-                  window.location.href = "/api/ebay/connect";
-                }}
-              >
-                <Link2 aria-hidden /> Connect eBay
-              </Button>
-            </div>
+            {ebay.oauth_ready ? (
+              <div>
+                <Button
+                  variant="primary"
+                  onClick={() => { window.location.href = "/api/ebay/connect"; }}
+                >
+                  <Link2 aria-hidden /> Connect eBay
+                </Button>
+              </div>
+            ) : (
+              <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 flex gap-3">
+                <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
+                <div className="text-sm min-w-0">
+                  <p className="font-bold text-ink">“Sign in with eBay” isn’t set up on the server</p>
+                  <p className="text-ink-secondary mt-0.5">
+                    The Connect button can’t do anything until these are set on the
+                    deployment: <code className="text-ink font-semibold">EBAY_CLIENT_ID</code>,{" "}
+                    <code className="text-ink font-semibold">EBAY_CLIENT_SECRET</code>, and{" "}
+                    <code className="text-ink font-semibold">EBAY_RUNAME</code>{" "}
+                    (e.g. <code className="text-ink font-semibold">fly secrets set …</code>).
+                    Until then, publishing stays in dry-run mode.
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </Card>

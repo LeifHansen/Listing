@@ -4,6 +4,7 @@ import {
   Tags, Timer, Coins,
 } from "lucide-react";
 import { useApp } from "@/store";
+import { useToast } from "@/components/ui/Toaster";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -40,8 +41,19 @@ const rise = {
 };
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, startNew, openListing, setView, session } = useApp();
+  const { user, openAuth, listingsState, startNew, openListing, setView, session, deleteListing } = useApp();
+  const { confirm } = useToast();
   const items = listingsState.items;
+
+  const askDelete = async (item) => {
+    const name = item.listing?.title || item.title || "this listing";
+    if (await confirm({
+      title: "Delete this listing?",
+      message: `"${name}" will be permanently removed. This can't be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    })) deleteListing(item.id);
+  };
 
   const todays = items.filter((i) => isToday(i.created_at));
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
@@ -165,7 +177,7 @@ export function Dashboard() {
         ) : recent.length > 0 ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {recent.map((item) => (
-              <ListingCard key={item.id} item={item} onOpen={openListing} />
+              <ListingCard key={item.id} item={item} onOpen={openListing} onDelete={askDelete} />
             ))}
           </div>
         ) : (

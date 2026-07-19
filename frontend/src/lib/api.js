@@ -25,6 +25,29 @@ export function postJson(path, body) {
   });
 }
 
+// Poll a background job (see /api/bulk/status) until it finishes, then resolve
+// with its `result` (or throw its `error`). Used so slow AI steps run as a job
+// the client polls instead of a single long request that a gateway or the
+// browser would time out ("server taking too long to respond"). If we give up
+// waiting, the server keeps working and saves the draft anyway.
+export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const j = await api(`/api/bulk/status/${jobId}`);
+    if (j.done) {
+      if (j.error) throw new Error(j.error);
+      return j.result;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        "The AI is taking longer than usual. Your photos are still here — "
+        + "tap Identify to try again, or check Drafts in a moment; it may have finished.",
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 // Phone photos are often 5-12MB; the server only needs ~1600px. Re-encoding
 // in the browser before upload cuts transfer time ~10x. Formats the browser
 // can't decode (e.g. HEIC) fall through and upload as-is — the server

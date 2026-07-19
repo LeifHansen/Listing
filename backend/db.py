@@ -317,6 +317,28 @@ def get_listing(listing_id: str) -> Optional[dict]:
         return None
 
 
+def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
+    """Delete a listing row; returns True if a row was removed. Ownership-
+    checked: a listing owned by an account can only be deleted by that owner.
+    Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            rec = s.get(ListingRecord, listing_id)
+            if rec is None:
+                return False
+            if rec.user_id and user_id and rec.user_id != user_id:
+                return False
+            s.delete(rec)
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_listing failed: {exc}")
+        return False
+
+
 def db_status() -> dict:
     """Health probe: is a DB configured, and can we actually reach it?"""
     if not enabled():

@@ -1049,6 +1049,59 @@ def bulk_status(job_id: str) -> dict:
         return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
 
 
+def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
+    """Background worker for a single-item identify. Claude vision over several
+    photos can take long enough that a synchronous request outlives the
+    proxy/browser timeout ('server taking too long'); running it as a job the
+    client polls avoids that entirely and still saves the draft when done."""
+    try:
+        opt_dir = storage.optimized_dir(session_id)
+        names = storage.list_optimized(session_id)
+        if not names:
+            _bulk_set(job_id, done=True, error="No optimized images found for this session.")
+            return
+        result = claude_ai.identify([opt_dir / n for n in names], names)
+        # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
+        if config.taxonomy_ready() and not result.listing.category_id:
+            try:
+                best = taxonomy.best_category_id(_category_query(result.listing))
+                if best.get("category_id"):
+                    result.listing.category_id = best["category_id"]
+                    if best.get("path"):
+                        result.listing.category_suggestion = best["path"]
+            except Exception:  # noqa: BLE001 - never block identify on taxonomy
+                pass
+        storage.save_listing(session_id, result.listing)
+        db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
+        _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
+    except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
+        log.warning("identify job %s failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=f"AI identification failed: {exc}")
+
+
+@app.post("/api/identify-async/{session_id}")
+def identify_async(session_id: str, request: Request) -> dict:
+    """Start a background identify; poll /api/bulk/status/{job_id} for the
+    result. Same outcome as POST /api/identify, but it never holds a long
+    synchronous request open, so slow vision calls can't time out the browser."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    if not storage.list_optimized(session_id):
+        raise HTTPException(404, "No optimized images found for this session.")
+    uid = _uid(request)
+    job_id = storage.new_session_id()
+    with _BULK_LOCK:
+        _BULK_JOBS[job_id] = {
+            "id": job_id, "kind": "identify", "phase": "identifying",
+            "done": False, "error": None, "result": None,
+        }
+    threading.Thread(
+        target=_run_identify_job, args=(job_id, session_id, uid), daemon=True,
+    ).start()
+    log.info("identify job %s: started (session=%s)", job_id, session_id)
+    return {"job_id": job_id}
+
+
 @app.post("/api/shelf-scan")
 async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
     """Shop Mode 'Scan a shelf': the client samples frames from a recorded
@@ -1108,6 +1161,27 @@ def get_listing(listing_id: str, request: Request) -> dict:
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
     return rec
+
+
+@app.delete("/api/listings/{listing_id}")
+def delete_listing(listing_id: str, request: Request) -> dict:
+    """Remove a saved listing/draft (ownership-checked) and clean up its
+    on-disk session files. A missing listing is a 404."""
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    db.delete_listing(listing_id, _uid(request))
+    # Best-effort: drop the session's uploaded/optimized images from disk.
+    try:
+        d = storage.session_dir(listing_id)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 - never fail the delete on cleanup
+        log.warning(f"delete listing: fs cleanup failed for {listing_id}: {exc}")
+    log.info("listing deleted: id=%s user=%s", listing_id, _uid(request))
+    return {"ok": True}
 
 
 @app.post("/api/publish")
