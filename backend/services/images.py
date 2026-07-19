@@ -187,12 +187,54 @@ def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
     return img.crop((left, top, right, bottom))
 
 
-def _pad_to_square(img: Image.Image) -> Image.Image:
-    w, h = img.size
-    side = max(w, h)
-    canvas = Image.new("RGB", (side, side), CANVAS_COLOR)
-    canvas.paste(_flatten(img), ((side - w) // 2, (side - h) // 2))
-    return canvas
+def _subject_box(img_rgb: Image.Image) -> Optional[tuple[int, int, int, int]]:
+    """Best-effort subject bounding box via a cheap corner-color difference.
+
+    Works well on plain backgrounds and on cutouts-on-white (the corner is the
+    background color). Returns None when the box is basically the whole frame
+    (busy/textured background) or a tiny speck, so callers fall back to a plain
+    center crop instead of a bad guess. No model — fast enough for every photo.
+    """
+    from PIL import ImageChops
+
+    bg = Image.new("RGB", img_rgb.size, img_rgb.getpixel((0, 0)))
+    diff = ImageChops.difference(img_rgb, bg).convert("L")
+    mask = diff.point(lambda v: 255 if v > 32 else 0)
+    box = mask.getbbox()
+    if not box:
+        return None
+    w, h = img_rgb.size
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    if (bw > w * 0.92 and bh > h * 0.92) or bw < w * 0.05 or bh < h * 0.05:
+        return None  # whole frame (textured bg) or a speck — not a clean subject
+    return box
+
+
+def _fill_square(img: Image.Image) -> Image.Image:
+    """Crop to a square that FILLS the frame — never pad with white bars.
+
+    When a subject is detectable, crop a square that tightly frames it (plus
+    margin) so the item fills the photo. Otherwise take the largest centered
+    square. The result is always square (eBay's recommended shape) with no
+    letterbox/pillarbox padding.
+    """
+    rgb = _flatten(img)
+    w, h = rgb.size
+    box = _subject_box(rgb)
+    if box:
+        left, top, right, bottom = box
+        cx, cy = (left + right) // 2, (top + bottom) // 2
+        # A square big enough for the subject + ~30% breathing room, but never
+        # larger than the frame nor a tiny over-zoom.
+        want = int(max(right - left, bottom - top) * 1.3)
+        side = max(min(w, h) // 2, min(want, w, h))
+    else:
+        cx, cy = w // 2, h // 2
+        side = min(w, h)
+    # Clamp the window so it stays fully inside the image (still no padding).
+    left = min(max(0, cx - side // 2), w - side)
+    top = min(max(0, cy - side // 2), h - side)
+    return rgb.crop((left, top, left + side, top + side))
 
 
 def _enhance(img: Image.Image) -> Image.Image:
@@ -219,7 +261,9 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
             bg_removed = True
         else:
             img = _autocrop_borders(img)
-        img = _pad_to_square(img)
+        # Fill the square frame by cropping to the subject instead of padding
+        # with white bars (which looked terrible on portrait photos).
+        img = _fill_square(img)
 
         if img.size[0] != TARGET_SIZE:
             img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
