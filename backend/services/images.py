@@ -64,6 +64,30 @@ _ALPHA_FLOOR = 48
 # the model ate the item (dark denim, close-up textures, low contrast) — keep
 # the original photo rather than saving a destroyed one.
 _MIN_FG_COVERAGE = 0.045
+# Cap the resolution the background model actually runs at. isnet on a full
+# 1600px image thrashes memory on a 2GB machine and can hang a bulk job for
+# minutes; running on a smaller copy is fast and light, and the resulting mask
+# upscales cleanly (product cutouts don't need pixel-perfect edges). Override
+# with REMBG_MAX_SIDE.
+_REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
+
+
+def _alpha_mask(img_rgb: Image.Image) -> Image.Image:
+    """rembg subject alpha (mode L, same size as img_rgb), computed on a
+    downscaled copy for speed/memory, then upscaled back."""
+    global _rembg_session
+    from rembg import new_session, remove
+
+    if _rembg_session is None:
+        _rembg_session = new_session(_REMBG_MODEL)
+    scale = min(1.0, _REMBG_MAX_SIDE / max(img_rgb.size))
+    small = (img_rgb.resize((max(1, round(img_rgb.width * scale)),
+                             max(1, round(img_rgb.height * scale))), Image.LANCZOS)
+             if scale < 1 else img_rgb)
+    alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+    if alpha.size != img_rgb.size:
+        alpha = alpha.resize(img_rgb.size, Image.LANCZOS)
+    return alpha
 
 
 def warm() -> None:
@@ -86,24 +110,21 @@ def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
     clearly a failure (subject erased), so callers keep the original photo
     instead of saving a destroyed one.
 
-    Imported lazily so the dependency/model only loads when used.
+    The model runs at reduced resolution (see _alpha_mask) so it stays fast and
+    light; the full-res photo keeps its detail.
     """
-    global _rembg_session
-    from rembg import new_session, remove
-
-    if _rembg_session is None:
-        _rembg_session = new_session(_REMBG_MODEL)
-    rgba = remove(img.convert("RGBA"), session=_rembg_session)  # transparent bg
-    alpha = rgba.getchannel("A")
+    rgb = img.convert("RGB")
+    alpha = _alpha_mask(rgb)
     # Drop faint, semi-transparent pixels so ghost halos/smudges composite as
     # clean white rather than gray fuzz. Real subject edges stay high-alpha.
     alpha = alpha.point(lambda a: 0 if a < _ALPHA_FLOOR else a)
-    rgba.putalpha(alpha)
     opaque = sum(alpha.histogram()[128:])
     if opaque / max(1, alpha.width * alpha.height) < _MIN_FG_COVERAGE:
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
                     100 * opaque / max(1, alpha.width * alpha.height))
         return None
+    rgba = rgb.convert("RGBA")
+    rgba.putalpha(alpha)
     canvas = Image.new("RGBA", rgba.size, WHITE + (255,))
     canvas.alpha_composite(rgba)
     return canvas.convert("RGB")
@@ -257,12 +278,7 @@ SUBJECT_GROW_PX = 9
 
 def _subject_mask(img: Image.Image) -> Image.Image:
     """Soft alpha mask (mode L, same size as img) of the detected subject."""
-    global _rembg_session
-    from rembg import new_session, remove
-
-    if _rembg_session is None:
-        _rembg_session = new_session(_REMBG_MODEL)
-    return remove(img.convert("RGB"), session=_rembg_session, only_mask=True).convert("L")
+    return _alpha_mask(img.convert("RGB"))
 
 
 def analyze_cleanup(img: Image.Image) -> dict:
