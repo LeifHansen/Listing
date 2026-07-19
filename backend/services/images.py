@@ -49,11 +49,21 @@ def _flatten(img: Image.Image) -> Image.Image:
 
 # rembg loads an ONNX model on first use; keep the session process-global so we
 # pay that cost once, and only when background removal is actually used.
-# Default to the lightweight "u2netp" model (~4.7MB): the full "u2net" (176MB)
-# is too slow to download and too memory-hungry for a shared-cpu-1x machine.
-# Override with REMBG_MODEL if the box ever gets a bigger VM.
-_REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
+# "isnet-general-use" (~176MB) is rembg's best general-purpose model — far
+# better than the tiny "u2netp" on clothing, dark items, and detail shots. It
+# fits the shared-cpu-2x / 2GB machine (fly.toml). Set REMBG_MODEL to override
+# (e.g. "u2netp" for a smaller/faster but lower-quality cut).
+_REMBG_MODEL = os.getenv("REMBG_MODEL", "isnet-general-use").strip() or "isnet-general-use"
 _rembg_session = None
+
+# Alpha (0-255) below this is treated as background, so the faint semi-
+# transparent "ghost" halos the matte leaves around a subject composite as
+# clean white instead of gray fuzz.
+_ALPHA_FLOOR = 48
+# If the cutout keeps less than this fraction of the frame as opaque subject,
+# the model ate the item (dark denim, close-up textures, low contrast) — keep
+# the original photo rather than saving a destroyed one.
+_MIN_FG_COVERAGE = 0.045
 
 
 def warm() -> None:
@@ -71,27 +81,52 @@ def warm() -> None:
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
 
-def _remove_background(img: Image.Image) -> Image.Image:
-    """Cut out the subject and composite it onto a pure-white canvas.
+def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
+    """rembg cutout composited on pure white — or None when the result is
+    clearly a failure (subject erased), so callers keep the original photo
+    instead of saving a destroyed one.
 
-    Uses rembg (U^2-Net). Imported lazily so the dependency/model is only
-    loaded when a user actually checks the box.
+    Imported lazily so the dependency/model only loads when used.
     """
     global _rembg_session
     from rembg import new_session, remove
 
     if _rembg_session is None:
         _rembg_session = new_session(_REMBG_MODEL)
-    cutout = remove(img.convert("RGBA"), session=_rembg_session)  # transparent bg
-    canvas = Image.new("RGBA", cutout.size, WHITE + (255,))
-    canvas.alpha_composite(cutout)
+    rgba = remove(img.convert("RGBA"), session=_rembg_session)  # transparent bg
+    alpha = rgba.getchannel("A")
+    # Drop faint, semi-transparent pixels so ghost halos/smudges composite as
+    # clean white rather than gray fuzz. Real subject edges stay high-alpha.
+    alpha = alpha.point(lambda a: 0 if a < _ALPHA_FLOOR else a)
+    rgba.putalpha(alpha)
+    opaque = sum(alpha.histogram()[128:])
+    if opaque / max(1, alpha.width * alpha.height) < _MIN_FG_COVERAGE:
+        log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
+                    100 * opaque / max(1, alpha.width * alpha.height))
+        return None
+    canvas = Image.new("RGBA", rgba.size, WHITE + (255,))
+    canvas.alpha_composite(rgba)
     return canvas.convert("RGB")
 
 
+def _remove_background(img: Image.Image) -> Image.Image:
+    """Cut out the subject onto white for the upload path. Falls back to the
+    original (flattened) if the model clearly failed, so an auto/bulk upload
+    never silently saves a destroyed photo."""
+    out = _cutout_on_white(img)
+    return out if out is not None else _flatten(img)
+
+
 def remove_background_white(img: Image.Image) -> Image.Image:
-    """Public wrapper for the photo studio's one-tap 'Remove background':
-    rembg cutout composited onto pure white."""
-    return _remove_background(img)
+    """Photo-studio 'Remove background'. Raises when the cutout fails so the
+    editor can tell the user instead of silently doing nothing."""
+    out = _cutout_on_white(img)
+    if out is None:
+        raise ValueError(
+            "Couldn't cleanly separate this photo from its background — it's "
+            "likely a close-up, dark, or low-contrast shot. Try Auto clean, or "
+            "paint the background out with the brush.")
+    return out
 
 
 def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
