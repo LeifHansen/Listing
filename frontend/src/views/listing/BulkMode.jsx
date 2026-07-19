@@ -111,7 +111,7 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
   );
 }
 
-export function BulkQueue({ jobId, mode, onExit }) {
+export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const { setSession, loadListings } = useApp();
   const { toast, confirm } = useToast();
   const [job, setJob] = useState(null);
@@ -141,17 +141,23 @@ export function BulkQueue({ jobId, mode, onExit }) {
             return next;
           });
         }
-        if (!j.done) timer = setTimeout(poll, 1500);
-        else loadListings({ quiet: true });
+        if (!j.done) {
+          timer = setTimeout(poll, 1500);
+        } else {
+          loadListings({ quiet: true });
+          onSettled?.();  // stop persisting; a reload shouldn't restore a done batch
+        }
       } catch (e) {
         if (!stopped.current) {
-          toast(`Lost the bulk job: ${e.message}`, { kind: "error" });
+          onSettled?.();
+          toast("Lost track of this batch — any finished items are saved in Drafts.",
+            { kind: "warning" });
         }
       }
     };
     poll();
     return () => { stopped.current = true; clearTimeout(timer); };
-  }, [jobId, loadListings, toast]);
+  }, [jobId, loadListings, toast, onSettled]);
 
   const updateItem = (sid, listing) => {
     setItems((cur) => cur.map((it) =>

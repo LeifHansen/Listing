@@ -147,6 +147,31 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // ---------- active bulk job (survives navigation + reload) ----------
+  // { jobId, mode } — persisted so leaving the progress screen (or a reload)
+  // never strands a running batch. Completed items also auto-save to Drafts.
+  const [activeBulk, setActiveBulk] = useState(() => {
+    try {
+      const raw = localStorage.getItem("quickflip-bulk");
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  });
+  const startBulk = useCallback((jobId, mode) => {
+    const b = { jobId, mode };
+    setActiveBulk(b);
+    try { localStorage.setItem("quickflip-bulk", JSON.stringify(b)); } catch (e) {}
+    setView("new");
+  }, []);
+  // Job finished: stop persisting (a reload shouldn't restore a done batch) but
+  // keep it in memory so the results stay on screen until the user moves on.
+  const bulkSettled = useCallback(() => {
+    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+  }, []);
+  const clearBulk = useCallback(() => {
+    setActiveBulk(null);
+    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+  }, []);
+
   // ---------- eBay OAuth redirect landing ----------
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -176,10 +201,12 @@ export function AppProvider({ children }) {
     policiesData, setPoliciesData,
     listingsState, loadListings,
     session, setSession, startNew, openListing, deleteListing,
+    activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, session, startNew, openListing, deleteListing,
+    activeBulk, startBulk, bulkSettled, clearBulk,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
