@@ -59,17 +59,13 @@ export function PublishCard({ w }) {
           </p>
         )}
 
-        <div className="flex flex-wrap gap-2.5">
-          <Button variant="ghost" size="lg" onClick={w.runPreflight}>
-            <ListChecks aria-hidden /> Check before publishing
-          </Button>
-          <Button variant="secondary" size="lg" onClick={() => w.publish("draft")}>
-            <Save aria-hidden /> Save as Draft
-          </Button>
-          <Button variant="primary" size="lg" onClick={() => w.publish("live")}>
-            <Rocket aria-hidden /> Publish Live
-          </Button>
-        </div>
+        {!publishedOk && !r?.error && (
+          <p className="text-[13px] text-ink-secondary">
+            Use the pinned <strong className="text-ink">Publish bar</strong> below to{" "}
+            <strong className="text-ink">Save as Draft</strong> or{" "}
+            <strong className="text-ink">Publish Live</strong> — it stays in reach as you scroll.
+          </p>
+        )}
 
         {/* Success states */}
         {publishedOk && (
@@ -146,5 +142,41 @@ export function PublishCard({ w }) {
         )}
       </div>
     </WorkflowCard>
+  );
+}
+
+// PublishBar — the primary action, pinned to the bottom of the workflow so
+// Save/Publish is always one tap away instead of stranded at the end of a long
+// form. Readiness count comes from the same per-card completion the cards show.
+export function PublishBar({ w }) {
+  const { canPublishLive } = useApp();
+  const attention = Object.values(w.completion).filter((s) => s === "attention").length;
+  const ready = attention === 0;
+  return (
+    <div className="sticky bottom-20 md:bottom-4 z-30 pt-1">
+      <div className="bg-card/95 backdrop-blur border border-line-strong rounded-card shadow-float p-2.5 sm:p-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="flex items-center gap-2 min-w-0 flex-1 pl-1">
+          {ready
+            ? <CheckCircle2 size={18} className="text-success shrink-0" aria-hidden />
+            : <AlertTriangle size={18} className="text-warning shrink-0" aria-hidden />}
+          <span className="text-sm font-semibold text-ink truncate">
+            {ready
+              ? "Looks ready — publish when you are"
+              : `${attention} field${attention === 1 ? "" : "s"} to finish`}
+          </span>
+        </span>
+        <span className="flex items-center gap-2 shrink-0">
+          <Button variant="ghost" size="sm" onClick={w.runPreflight} className="hidden sm:inline-flex">
+            <ListChecks aria-hidden /> Check
+          </Button>
+          <Button variant="secondary" size="md" onClick={() => w.publish("draft")}>
+            <Save aria-hidden /> Save Draft
+          </Button>
+          <Button variant="primary" size="md" onClick={() => w.publish("live")}>
+            <Rocket aria-hidden /> {canPublishLive ? "Publish Live" : "Publish"}
+          </Button>
+        </span>
+      </div>
+    </div>
   );
 }

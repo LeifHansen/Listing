@@ -14,7 +14,7 @@ import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
 import { BulkQueue } from "./listing/BulkMode";
 import { ImageEditor } from "./listing/ImageEditor";
-import { PublishCard } from "./listing/PublishCard";
+import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard,
@@ -189,6 +189,10 @@ function Workflow() {
         <DescriptionCard w={w} />
         <PublishCard w={w} />
       </motion.div>
+
+      {/* Pinned primary action — stays in reach as you scroll the long form
+          (kept outside the animated card stack so sticky positioning holds). */}
+      <PublishBar w={w} />
 
       <ImageEditor
         sessionId={w.sessionId}
