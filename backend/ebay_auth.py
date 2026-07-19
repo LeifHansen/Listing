@@ -259,6 +259,40 @@ def fetch_policies_and_location(access_token: str) -> dict:
 
 GROUND_POLICY_NAME = "USPS Ground Advantage (QuickFlip)"
 
+# The eBay (EBAY_US) shipping services a seller can one-tap into a fulfillment
+# policy. Codes are eBay ShippingServiceCodeType values; keep to well-known,
+# calculated-cost-friendly services so policy creation can't send an invalid
+# combo. The picker shows label + note; `cap_oz` mirrors preflight's weight
+# caps where a service silently kills a publish.
+SHIPPING_SERVICES = [
+    {"code": "USPSGroundAdvantage", "carrier": "USPS",
+     "label": "USPS Ground Advantage", "note": "Cheapest for most packages — up to 70 lb"},
+    {"code": "USPSPriority", "carrier": "USPS",
+     "label": "USPS Priority Mail", "note": "1–3 business days"},
+    {"code": "USPSPriorityExpress", "carrier": "USPS",
+     "label": "USPS Priority Mail Express", "note": "Overnight to 2-day"},
+    {"code": "USPSMedia", "carrier": "USPS",
+     "label": "USPS Media Mail", "note": "Books & media only — slow but cheap"},
+    {"code": "US_eBayStandardEnvelope", "carrier": "USPS",
+     "label": "eBay Standard Envelope", "note": "Cards & flat items, 3 oz max", "cap_oz": 3},
+    {"code": "UPSGround", "carrier": "UPS",
+     "label": "UPS Ground", "note": "1–5 business days, good for heavy items"},
+    {"code": "UPS3DaySelect", "carrier": "UPS",
+     "label": "UPS 3 Day Select", "note": "3 business days"},
+    {"code": "UPS2ndDay", "carrier": "UPS",
+     "label": "UPS 2nd Day Air", "note": "2 business days"},
+    {"code": "FedExHomeDelivery", "carrier": "FEDEX",
+     "label": "FedEx Home Delivery", "note": "1–5 business days, residential"},
+]
+
+
+def service_by_code(code: str) -> Optional[dict]:
+    norm = (code or "").lower().replace("_", "")
+    for svc in SHIPPING_SERVICES:
+        if svc["code"].lower().replace("_", "") == norm:
+            return svc
+    return None
+
 
 def _policy_services(p: dict) -> list[dict]:
     """[{code, name}] for every shipping service in a fulfillment policy."""
@@ -307,15 +341,32 @@ def find_ground_policy(access_token: str) -> Optional[dict]:
     return None
 
 
-def ensure_ground_policy(access_token: str) -> dict:
-    """Find — or create — a fulfillment policy that ships USPS Ground Advantage
-    (calculated cost, up to 70 lb; the cheapest broadly-applicable USPS
-    service). Returns {id, name, created}."""
-    existing = find_ground_policy(access_token)
+def find_policy_for_service(access_token: str, service_code: str) -> Optional[dict]:
+    """The seller's first fulfillment policy already shipping `service_code`."""
+    norm = (service_code or "").lower().replace("_", "")
+    path, list_field, id_field = _POLICY_SPECS["fulfillment"]
+    try:
+        data = _account_get(path, access_token)
+    except Exception:  # noqa: BLE001
+        return None
+    for p in data.get(list_field, []):
+        if any(s["code"].lower().replace("_", "") == norm
+               for s in _policy_services(p)):
+            return {"id": p.get(id_field, ""), "name": p.get("name", "")}
+    return None
+
+
+def ensure_service_policy(access_token: str, svc: dict) -> dict:
+    """Find — or create — a fulfillment policy that ships `svc` (an entry from
+    SHIPPING_SERVICES): calculated cost, domestic, 2-day handling. Returns
+    {id, name, created}."""
+    existing = find_policy_for_service(access_token, svc["code"])
     if existing and existing["id"]:
         return {**existing, "created": False}
+    name = (f"{svc['label']} (QuickFlip)"
+            if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
     body = {
-        "name": GROUND_POLICY_NAME,
+        "name": name,
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
         "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
         "handlingTime": {"value": 2, "unit": "DAY"},
@@ -324,8 +375,8 @@ def ensure_ground_policy(access_token: str) -> dict:
             "optionType": "DOMESTIC",
             "shippingServices": [{
                 "sortOrder": 1,
-                "shippingCarrierCode": "USPS",
-                "shippingServiceCode": "USPSGroundAdvantage",
+                "shippingCarrierCode": svc["carrier"],
+                "shippingServiceCode": svc["code"],
             }],
         }],
     }
@@ -341,10 +392,16 @@ def ensure_ground_policy(access_token: str) -> dict:
     )
     resp.raise_for_status()
     created = resp.json()
-    log.info("ebay: created Ground Advantage fulfillment policy %s",
+    log.info("ebay: created %s fulfillment policy %s", svc["code"],
              created.get("fulfillmentPolicyId", ""))
     return {"id": created.get("fulfillmentPolicyId", ""),
-            "name": created.get("name", GROUND_POLICY_NAME), "created": True}
+            "name": created.get("name", name), "created": True}
+
+
+def ensure_ground_policy(access_token: str) -> dict:
+    """Find — or create — a USPS Ground Advantage fulfillment policy (the
+    cheapest broadly-applicable USPS service). Returns {id, name, created}."""
+    return ensure_service_policy(access_token, service_by_code("USPSGroundAdvantage"))
 
 
 def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:

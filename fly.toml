@@ -9,7 +9,9 @@ primary_region = 'sjc'
 [build]
 
 [env]
-  EBAY_ENV = 'sandbox'
+  # Production eBay keyset lives in `fly secrets` — keep the app pointed at the
+  # production API. (A secret named EBAY_ENV would override this either way.)
+  EBAY_ENV = 'production'
   PORT = '8080'
   DATA_DIR = '/data'
   # The background-removal model is baked into the image (see Dockerfile), so

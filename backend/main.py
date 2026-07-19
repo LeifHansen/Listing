@@ -229,8 +229,16 @@ def ebay_status(request: Request) -> dict:
     uid = _uid(request)
     acct = db.get_ebay_account(uid) if uid else None
     connected = bool(acct and acct.get("refresh_token"))
+    # Which server-side OAuth vars are absent (names only, never values) — so
+    # "the button does nothing" is diagnosable from the UI instead of guessed.
+    oauth_missing = [name for name, val in (
+        ("EBAY_CLIENT_ID", config.EBAY_CLIENT_ID),
+        ("EBAY_CLIENT_SECRET", config.EBAY_CLIENT_SECRET),
+        ("EBAY_RUNAME", config.EBAY_RUNAME),
+    ) if not val]
     return {
         "oauth_ready": config.ebay_oauth_ready(),
+        "oauth_missing": oauth_missing,
         "connected": connected,
         "env": config.EBAY_ENV,
         # Which eBay account is linked (empty for connections made before the
@@ -279,6 +287,33 @@ def ensure_ground_policy(request: Request) -> dict:
         raise HTTPException(400, "Connect eBay first.")
     try:
         pol = ebay_auth.ensure_ground_policy(creds["access_token"])
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
+    if pol.get("id") and not creds.get("fulfillment_policy_id"):
+        db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
+    return pol
+
+
+@app.get("/api/ebay/shipping-services")
+def shipping_services() -> dict:
+    """The catalog of eBay shipping services a seller can one-tap into a
+    fulfillment policy (static; no auth needed)."""
+    return {"services": ebay_auth.SHIPPING_SERVICES}
+
+
+@app.post("/api/ebay/ensure-policy")
+def ensure_policy(request: Request, payload: dict) -> dict:
+    """Find — or create — a fulfillment policy for any catalog shipping
+    service, and make it the account default if none is set yet."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    svc = ebay_auth.service_by_code(str(payload.get("service_code", "")))
+    if not svc:
+        raise HTTPException(400, "Unknown shipping service.")
+    try:
+        pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
@@ -397,6 +432,88 @@ def save_profile(request: Request, payload: dict) -> dict:
         raise HTTPException(503, "Couldn't save your profile — try again shortly.")
     return {"ok": True, "user": {"email": updated["email"],
                                  "display_name": updated["display_name"]}}
+
+
+# Prefs the client may set, with sane bounds. Everything is optional; empty
+# string / 0 means "no default".
+_PREF_FIELDS = {
+    "package_weight_lb": (float, 0, 150),
+    "package_weight_oz": (float, 0, 15.9),
+    "package_length_in": (float, 0, 120),
+    "package_width_in": (float, 0, 120),
+    "package_height_in": (float, 0, 120),
+    "quantity": (int, 1, 999),
+    "condition": (str, None, None),  # "" = let the AI decide
+}
+
+
+@app.get("/api/prefs")
+def get_prefs(request: Request) -> dict:
+    """The user's new-listing defaults (weight/dims/quantity/condition)."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    return {"prefs": db.get_prefs(uid)}
+
+
+@app.post("/api/prefs")
+def save_prefs(request: Request, payload: dict) -> dict:
+    """Save new-listing defaults. Only known fields are stored, clamped to
+    sane ranges; they pre-fill every future AI draft."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    clean: dict = {}
+    for key, (typ, lo, hi) in _PREF_FIELDS.items():
+        if key not in payload:
+            continue
+        raw = payload.get(key)
+        if typ is str:
+            clean[key] = str(raw or "").strip()[:40]
+            continue
+        try:
+            val = typ(float(raw or 0))
+        except (TypeError, ValueError):
+            val = typ(0) if typ is float else lo
+        clean[key] = min(max(val, lo), hi) if val else val
+    if not clean:
+        raise HTTPException(400, "No settings provided.")
+    merged = db.save_prefs(uid, clean)
+    if not merged and not db.enabled():
+        raise HTTPException(503, "No database configured — defaults need DATABASE_URL set.")
+    return {"ok": True, "prefs": merged}
+
+
+def _apply_listing_defaults(listing: Listing, uid: Optional[str]) -> Listing:
+    """Fill gaps in a fresh AI draft from the user's saved defaults — the
+    fields the photos can't tell us (package weight/dims, quantity) plus an
+    explicit condition override. Never touches a field the AI populated."""
+    if not uid:
+        return listing
+    prefs = db.get_prefs(uid)
+    if not prefs:
+        return listing
+    def _f(key):  # noqa: E306
+        try:
+            return float(prefs.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    if (listing.package_weight_lb or 0) + (listing.package_weight_oz or 0) <= 0 \
+            and _f("package_weight_lb") + _f("package_weight_oz") > 0:
+        listing.package_weight_lb = _f("package_weight_lb")
+        listing.package_weight_oz = _f("package_weight_oz")
+    dims = ("package_length_in", "package_width_in", "package_height_in")
+    if all((getattr(listing, d) or 0) <= 0 for d in dims) \
+            and all(_f(d) > 0 for d in dims):
+        for d in dims:
+            setattr(listing, d, _f(d))
+    if int(prefs.get("quantity") or 0) > 1 and (listing.quantity or 1) <= 1:
+        listing.quantity = int(prefs["quantity"])
+    # Condition is an explicit "always use this" override (the Settings UI
+    # defaults it to 'Let the AI decide' = empty).
+    if (prefs.get("condition") or "").strip():
+        listing.condition = str(prefs["condition"]).strip()
+    return listing
 
 
 @app.post("/api/profile/sync-ebay")
@@ -769,6 +886,7 @@ def identify(session_id: str, request: Request) -> dict:
         result = claude_ai.identify(paths, names)
     except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
         raise HTTPException(502, f"AI identification failed: {exc}") from exc
+    _apply_listing_defaults(result.listing, _uid(request))
 
     # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
     if config.taxonomy_ready() and not result.listing.category_id:
@@ -952,7 +1070,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                     "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names], item_names)
-                listing = result.listing
+                listing = _apply_listing_defaults(result.listing, uid)
                 if config.taxonomy_ready() and not listing.category_id:
                     try:
                         best = taxonomy.best_category_id(_category_query(listing))
@@ -1049,6 +1167,60 @@ def bulk_status(job_id: str) -> dict:
         return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
 
 
+def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
+    """Background worker for a single-item identify. Claude vision over several
+    photos can take long enough that a synchronous request outlives the
+    proxy/browser timeout ('server taking too long'); running it as a job the
+    client polls avoids that entirely and still saves the draft when done."""
+    try:
+        opt_dir = storage.optimized_dir(session_id)
+        names = storage.list_optimized(session_id)
+        if not names:
+            _bulk_set(job_id, done=True, error="No optimized images found for this session.")
+            return
+        result = claude_ai.identify([opt_dir / n for n in names], names)
+        _apply_listing_defaults(result.listing, uid)
+        # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
+        if config.taxonomy_ready() and not result.listing.category_id:
+            try:
+                best = taxonomy.best_category_id(_category_query(result.listing))
+                if best.get("category_id"):
+                    result.listing.category_id = best["category_id"]
+                    if best.get("path"):
+                        result.listing.category_suggestion = best["path"]
+            except Exception:  # noqa: BLE001 - never block identify on taxonomy
+                pass
+        storage.save_listing(session_id, result.listing)
+        db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
+        _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
+    except Exception as exc:  # noqa: BLE001 - surface the real reason to the UI
+        log.warning("identify job %s failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=f"AI identification failed: {exc}")
+
+
+@app.post("/api/identify-async/{session_id}")
+def identify_async(session_id: str, request: Request) -> dict:
+    """Start a background identify; poll /api/bulk/status/{job_id} for the
+    result. Same outcome as POST /api/identify, but it never holds a long
+    synchronous request open, so slow vision calls can't time out the browser."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    if not storage.list_optimized(session_id):
+        raise HTTPException(404, "No optimized images found for this session.")
+    uid = _uid(request)
+    job_id = storage.new_session_id()
+    with _BULK_LOCK:
+        _BULK_JOBS[job_id] = {
+            "id": job_id, "kind": "identify", "phase": "identifying",
+            "done": False, "error": None, "result": None,
+        }
+    threading.Thread(
+        target=_run_identify_job, args=(job_id, session_id, uid), daemon=True,
+    ).start()
+    log.info("identify job %s: started (session=%s)", job_id, session_id)
+    return {"job_id": job_id}
+
+
 @app.post("/api/shelf-scan")
 async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
     """Shop Mode 'Scan a shelf': the client samples frames from a recorded
@@ -1108,6 +1280,27 @@ def get_listing(listing_id: str, request: Request) -> dict:
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
     return rec
+
+
+@app.delete("/api/listings/{listing_id}")
+def delete_listing(listing_id: str, request: Request) -> dict:
+    """Remove a saved listing/draft (ownership-checked) and clean up its
+    on-disk session files. A missing listing is a 404."""
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    db.delete_listing(listing_id, _uid(request))
+    # Best-effort: drop the session's uploaded/optimized images from disk.
+    try:
+        d = storage.session_dir(listing_id)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 - never fail the delete on cleanup
+        log.warning(f"delete listing: fs cleanup failed for {listing_id}: {exc}")
+    log.info("listing deleted: id=%s user=%s", listing_id, _uid(request))
+    return {"ok": True}
 
 
 @app.post("/api/publish")

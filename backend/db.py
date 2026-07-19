@@ -35,6 +35,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80), default="")
+    # New-listing defaults (package weight/dims, quantity, condition, …) that
+    # pre-fill every AI draft so repeat sellers stop re-typing them.
+    prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -99,6 +102,7 @@ def _get_engine():
             "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
             "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
             "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN prefs JSON",
         ):
             try:
                 with _engine.begin() as conn:
@@ -195,6 +199,41 @@ def update_user(user_id: str, display_name: Optional[str] = None) -> Optional[di
 # Sentinel so callers can tell "email taken" (user error, 409) apart from
 # "database broken" (server error, 503).
 EMAIL_TAKEN = object()
+
+
+def get_prefs(user_id: str) -> dict:
+    """The user's new-listing defaults ({} when unset). Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return {}
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            return dict(u.prefs) if u and isinstance(u.prefs, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_prefs failed: {exc}")
+        return {}
+
+
+def save_prefs(user_id: str, prefs: dict) -> dict:
+    """Merge new values into the user's defaults; returns the merged dict.
+    Returns {} if there's no DB / no such user (the caller surfaces that)."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return {}
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                return {}
+            merged = dict(u.prefs) if isinstance(u.prefs, dict) else {}
+            merged.update(prefs)
+            u.prefs = merged
+            s.commit()
+            return merged
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: save_prefs failed: {exc}")
+        return {}
 
 
 def create_user(user_id: str, email: str, password_hash: str):
@@ -315,6 +354,28 @@ def get_listing(listing_id: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_listing failed: {exc}")
         return None
+
+
+def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
+    """Delete a listing row; returns True if a row was removed. Ownership-
+    checked: a listing owned by an account can only be deleted by that owner.
+    Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            rec = s.get(ListingRecord, listing_id)
+            if rec is None:
+                return False
+            if rec.user_id and user_id and rec.user_id != user_id:
+                return False
+            s.delete(rec)
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_listing failed: {exc}")
+        return False
 
 
 def db_status() -> dict:

@@ -212,12 +212,13 @@ export function useListingForm() {
   // ---------- images ----------
   const [imageVersion, setImageVersion] = useState(0); // cache-bust after edits
 
+  // One-click by default; pass a confirmFn to gate it behind a dialog.
   const deleteImage = useCallback(async (name, confirmFn) => {
     if ((form.images || []).length <= 1) {
       toast("A listing needs at least one photo — add another before deleting this one.", { kind: "warning" });
       return;
     }
-    if (!(await confirmFn({
+    if (confirmFn && !(await confirmFn({
       title: "Delete this photo?",
       message: "This can't be undone.",
       confirmLabel: "Delete",
