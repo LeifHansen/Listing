@@ -22,7 +22,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="Hover a photo to clean up its background, smart-crop it, or remove it"
+      hint="Tap the trash to remove a photo instantly; hover for background clean-up and smart crop"
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {(w.form.images || []).length ? (

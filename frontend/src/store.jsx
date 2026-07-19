@@ -70,6 +70,7 @@ export function AppProvider({ children }) {
   // ---------- eBay connection ----------
   const [ebay, setEbay] = useState({
     connected: false, env: "", username: "", email: "", oauth_ready: false,
+    oauth_missing: [],
   });
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
 
@@ -82,6 +83,7 @@ export function AppProvider({ children }) {
         username: s.username || "",
         email: s.email || "",
         oauth_ready: !!s.oauth_ready,
+        oauth_missing: s.oauth_missing || [],
       });
     } catch (e) { /* keep previous */ }
   }, []);

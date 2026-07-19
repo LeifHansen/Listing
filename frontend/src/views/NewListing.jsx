@@ -109,7 +109,7 @@ function Workflow() {
           w={w}
           onEdit={(name) => setEditing({ name })}
           onSmartCrop={(name) => setEditing({ name, action: "crop" })}
-          onDelete={(name) => w.deleteImage(name, confirm)}
+          onDelete={(name) => w.deleteImage(name)}
         />
         <TitleCard w={w} />
         <CategoryCard w={w} />

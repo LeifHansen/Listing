@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
+  PackageOpen, Truck, Plus,
 } from "lucide-react";
 import { api, postJson } from "@/lib/api";
+import { CONDITIONS, conditionLabel } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -126,6 +128,8 @@ export function SettingsView() {
     <SettingsShell>
       <ProfileCard />
 
+      <NewListingDefaultsCard />
+
       {/* eBay account */}
       <Card>
         <SectionHeader
@@ -176,14 +180,31 @@ export function SettingsView() {
                 <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
                 <div className="text-sm min-w-0">
                   <p className="font-bold text-ink">“Sign in with eBay” isn’t set up on the server</p>
-                  <p className="text-ink-secondary mt-0.5">
-                    The Connect button can’t do anything until these are set on the
-                    deployment: <code className="text-ink font-semibold">EBAY_CLIENT_ID</code>,{" "}
-                    <code className="text-ink font-semibold">EBAY_CLIENT_SECRET</code>, and{" "}
-                    <code className="text-ink font-semibold">EBAY_RUNAME</code>{" "}
-                    (e.g. <code className="text-ink font-semibold">fly secrets set …</code>).
-                    Until then, publishing stays in dry-run mode.
-                  </p>
+                  {(ebay.oauth_missing || []).length > 0 ? (
+                    <p className="text-ink-secondary mt-0.5">
+                      The server reports {ebay.oauth_missing.length === 1 ? "this variable is" : "these variables are"} missing
+                      or placeholder text:{" "}
+                      {ebay.oauth_missing.map((name, i) => (
+                        <span key={name}>
+                          {i > 0 && ", "}
+                          <code className="text-ink font-semibold">{name}</code>
+                        </span>
+                      ))}
+                      . Set {ebay.oauth_missing.length === 1 ? "it" : "them"} on the deployment
+                      (e.g. <code className="text-ink font-semibold">fly secrets set …</code>) —
+                      values containing <code className="text-ink font-semibold">&lt;</code> are
+                      treated as unset. Until then, publishing stays in dry-run mode.
+                    </p>
+                  ) : (
+                    <p className="text-ink-secondary mt-0.5">
+                      The Connect button can’t do anything until these are set on the
+                      deployment: <code className="text-ink font-semibold">EBAY_CLIENT_ID</code>,{" "}
+                      <code className="text-ink font-semibold">EBAY_CLIENT_SECRET</code>, and{" "}
+                      <code className="text-ink font-semibold">EBAY_RUNAME</code>{" "}
+                      (e.g. <code className="text-ink font-semibold">fly secrets set …</code>).
+                      Until then, publishing stays in dry-run mode.
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -191,11 +212,11 @@ export function SettingsView() {
         )}
       </Card>
 
-      {/* Listing defaults */}
+      {/* eBay publish defaults (business policies + ship-from) */}
       <Card>
         <SectionHeader
           icon={SettingsIcon}
-          title="Listing defaults"
+          title="eBay publish defaults"
           hint="Applied to every listing you publish — shipping, payment & returns come from your eBay business policies"
         />
         {!ebay.connected ? (
@@ -251,6 +272,14 @@ export function SettingsView() {
               );
             })}
 
+            <AddShippingServiceRow
+              onCreated={(pol) => {
+                setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
+                setPoliciesData(null);
+                load();
+              }}
+            />
+
             {POLICY_KINDS.some(({ key }) => !(data.policies[key] || []).length) && (
               <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm">
                 <p className="text-ink flex gap-2">
@@ -278,6 +307,166 @@ export function SettingsView() {
         )}
       </Card>
     </SettingsShell>
+  );
+}
+
+// New-listing defaults — pre-filled into every AI draft so repeat sellers
+// stop re-typing package weight, dimensions, quantity, and condition.
+function NewListingDefaultsCard() {
+  const { toast } = useToast();
+  const [prefs, setPrefs] = useState(null); // null = loading
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api("/api/prefs")
+      .then((r) => setPrefs(r.prefs || {}))
+      .catch(() => setPrefs({}));
+  }, []);
+
+  const set = (k, v) => setPrefs((p) => ({ ...p, [k]: v }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await postJson("/api/prefs", prefs);
+      setPrefs(res.prefs || {});
+      toast("Defaults saved — they'll pre-fill every new listing.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't save defaults: ${e.message}`, { kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <SectionHeader
+        icon={PackageOpen}
+        title="New-listing defaults"
+        hint="Pre-filled on every listing the AI drafts — tweak any of it per listing. Perfect when most of what you sell packs the same way."
+      />
+      {prefs === null ? (
+        <div className="ai-shimmer h-28 rounded-tile" aria-hidden />
+      ) : (
+        <div className="flex flex-col gap-5 max-w-lg">
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Package weight — lb">
+              <Input
+                type="number" min="0" step="1" inputMode="numeric"
+                value={prefs.package_weight_lb ?? ""}
+                onChange={(e) => set("package_weight_lb", e.target.value)}
+              />
+            </Field>
+            <Field label="Package weight — oz">
+              <Input
+                type="number" min="0" max="15" step="0.1" inputMode="decimal"
+                value={prefs.package_weight_oz ?? ""}
+                onChange={(e) => set("package_weight_oz", e.target.value)}
+              />
+            </Field>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            {[
+              ["package_length_in", "Length (in)"],
+              ["package_width_in", "Width (in)"],
+              ["package_height_in", "Height (in)"],
+            ].map(([key, label]) => (
+              <Field key={key} label={label}>
+                <Input
+                  type="number" min="0" step="0.1" inputMode="decimal"
+                  value={prefs[key] ?? ""}
+                  onChange={(e) => set(key, e.target.value)}
+                />
+              </Field>
+            ))}
+          </div>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <Field label="Condition" help="Set one to always use it; otherwise the AI judges from the photos.">
+              <Select
+                value={prefs.condition || ""}
+                onChange={(e) => set("condition", e.target.value)}
+              >
+                <option value="">Let the AI decide (from photos)</option>
+                {CONDITIONS.map((c) => (
+                  <option key={c} value={c}>{conditionLabel(c)}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Quantity" help="Only applied when listing more than one of an item.">
+              <Input
+                type="number" min="1" step="1" inputMode="numeric"
+                value={prefs.quantity ?? ""}
+                onChange={(e) => set("quantity", e.target.value)}
+              />
+            </Field>
+          </div>
+          <div>
+            <Button variant="primary" onClick={save} loading={saving}>
+              Save defaults
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// One-tap "create an eBay shipping policy for any service" — the dropdown of
+// all eBay options; picking one creates (or reuses) a policy on the account.
+function AddShippingServiceRow({ onCreated }) {
+  const { toast } = useToast();
+  const [services, setServices] = useState([]);
+  const [code, setCode] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    api("/api/ebay/shipping-services")
+      .then((r) => setServices(r.services || []))
+      .catch(() => {});
+  }, []);
+
+  const create = async () => {
+    if (!code) return;
+    setCreating(true);
+    try {
+      const pol = await postJson("/api/ebay/ensure-policy", { service_code: code });
+      toast(pol.created
+        ? `Created "${pol.name}" on your eBay account and selected it above.`
+        : `Your "${pol.name}" policy already ships this — selected it above.`,
+        { kind: "success" });
+      onCreated(pol);
+      setCode("");
+    } catch (e) {
+      toast(`Couldn't add that service: ${e.message}`, { kind: "error" });
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <Field
+      label={
+        <span className="inline-flex items-center gap-1.5">
+          <Truck size={14} aria-hidden /> Add a shipping service
+        </span>
+      }
+      help="All the eBay options in one dropdown — picking one creates (or reuses) a shipping policy on your eBay account, ready to select as your default above."
+    >
+      <div className="flex gap-2">
+        <div className="flex-1 min-w-0">
+          <Select value={code} onChange={(e) => setCode(e.target.value)}>
+            <option value="">Choose an eBay shipping service…</option>
+            {services.map((s) => (
+              <option key={s.code} value={s.code}>
+                {s.label}{s.note ? ` — ${s.note}` : ""}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <Button variant="secondary" onClick={create} loading={creating} disabled={!code}>
+          <Plus aria-hidden /> Add
+        </Button>
+      </div>
+    </Field>
   );
 }
 

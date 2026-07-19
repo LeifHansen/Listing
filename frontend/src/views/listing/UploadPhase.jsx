@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Sparkles, FolderOpen, X, Camera } from "lucide-react";
+import { Sparkles, FolderOpen, Trash2, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import { api, pollJob, downscaleForUpload, IMAGE_EXT_RE } from "@/lib/api";
 import { useApp } from "@/store";
@@ -190,12 +190,13 @@ export function UploadPhase({ onBulkStarted }) {
                       <button
                         type="button"
                         aria-label="Remove photo"
+                        title="Remove photo"
                         onClick={() => removeFile(i)}
-                        className="absolute top-1.5 right-1.5 grid place-items-center size-7 rounded-full
-                          bg-card/90 text-ink shadow-card cursor-pointer opacity-0 group-hover:opacity-100
-                          focus-visible:opacity-100 transition-opacity duration-150"
+                        className="absolute top-1.5 right-1.5 z-10 grid place-items-center size-7 rounded-full
+                          bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card cursor-pointer
+                          hover:text-error hover:border-error/40 transition-colors duration-150"
                       >
-                        <X size={13} aria-hidden />
+                        <Trash2 size={13} aria-hidden />
                       </button>
                     </motion.div>
                   ))}
