@@ -49,16 +49,6 @@ async def _cache_headers(request: Request, call_next):
     return response
 
 
-@app.on_event("startup")
-def _warm_models() -> None:
-    """Warm the background-removal model in a daemon thread so uvicorn binds
-    the port immediately (machine stays reachable) while the ~60s first-use
-    JIT/import cost happens in the background."""
-    import threading
-
-    threading.Thread(target=images.warm, daemon=True).start()
-
-
 def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
@@ -68,6 +58,7 @@ def health() -> dict:
     return {
         "ok": True,
         "anthropic_configured": config.anthropic_ready(),
+        "photoroom_configured": config.photoroom_ready(),
         "ebay_configured": config.ebay_ready(),
         "ebay_missing": config.ebay_status()["missing"],
         "taxonomy_configured": config.taxonomy_ready(),
@@ -876,7 +867,7 @@ async def image_remove_bg(
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
-    """Full background removal: rembg cutout composited onto pure white.
+    """Full background removal: Photoroom cutout composited onto pure white.
     Returns the processed image for the editor to preview (not saved yet)."""
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:

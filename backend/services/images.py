@@ -7,12 +7,12 @@ upscale to target, and apply mild brightness/contrast/sharpness enhancement.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
+from .. import config
 from ..config import log
 
 # iPhone/Mac photos are HEIC by default; register the decoder if available so
@@ -47,96 +47,77 @@ def _flatten(img: Image.Image) -> Image.Image:
         return canvas.convert("RGB")
     return img.convert("RGB")
 
-# rembg loads an ONNX model on first use; keep the session process-global so we
-# pay that cost once, and only when background removal is actually used.
-# "isnet-general-use" (~176MB) is rembg's best general-purpose model — far
-# better than the tiny "u2netp" on clothing, dark items, and detail shots. It
-# fits the shared-cpu-2x / 2GB machine (fly.toml). Set REMBG_MODEL to override
-# (e.g. "u2netp" for a smaller/faster but lower-quality cut).
-_REMBG_MODEL = os.getenv("REMBG_MODEL", "isnet-general-use").strip() or "isnet-general-use"
-_rembg_session = None
+# Background removal / subject segmentation is delegated to the Photoroom API
+# (photoroom.com/api) — purpose-built for product photos, with far cleaner
+# mattes than the local ONNX model it replaced, and no model RAM/CPU load on
+# the app machine (the old in-process model was the main source of slow bulk
+# jobs and 502s under memory pressure).
+_PHOTOROOM_URL = "https://sdk.photoroom.com/v1/segment"
 
-# Harden the soft matte into a near-binary mask so the background is fully
-# gone, not faintly visible. Alpha below _ALPHA_LOW is forced to background,
-# above _ALPHA_HIGH to solid subject; the thin band between keeps a 1-2px
-# anti-aliased edge. A soft matte (mid-alpha everywhere) is what leaves a
-# "ghost" of the old background compositing through as gray fuzz.
-_ALPHA_LOW = 90
-_ALPHA_HIGH = 170
 # If the cutout keeps less than this fraction of the frame as opaque subject,
-# the model ate the item (dark denim, close-up textures, low contrast) — keep
-# the original photo rather than saving a destroyed one.
+# the segmentation ate the item — keep the original photo rather than saving a
+# destroyed one.
 _MIN_FG_COVERAGE = 0.045
-# Cap the resolution the background model actually runs at. isnet on a full
-# 1600px image thrashes memory on a 2GB machine and can hang a bulk job for
-# minutes; running on a smaller copy is fast and light, and the resulting mask
-# upscales cleanly (product cutouts don't need pixel-perfect edges). Override
-# with REMBG_MAX_SIDE.
-_REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
+
+
+def _photoroom(img_rgb: Image.Image, channels: str = "rgba") -> Image.Image:
+    """One Photoroom segment call. channels="rgba" returns the cutout with a
+    transparent background (RGBA); "alpha" returns just the subject mask
+    (mode L). Raises ValueError with a user-facing message on any failure."""
+    import httpx
+    from io import BytesIO
+
+    if not config.PHOTOROOM_API_KEY:
+        raise ValueError(
+            "Background removal isn't configured on this server — set the "
+            "PHOTOROOM_API_KEY secret to enable it.")
+    buf = BytesIO()
+    img_rgb.save(buf, "JPEG", quality=92)
+    try:
+        resp = httpx.post(
+            _PHOTOROOM_URL,
+            headers={"x-api-key": config.PHOTOROOM_API_KEY},
+            files={"image_file": ("photo.jpg", buf.getvalue(), "image/jpeg")},
+            data={"channels": channels, "size": "full", "format": "png"},
+            timeout=90,
+        )
+    except httpx.HTTPError as exc:
+        raise ValueError("Couldn't reach the background-removal service — "
+                         "try again in a moment.") from exc
+    if resp.status_code == 402:
+        raise ValueError("The Photoroom plan is out of image credits — top it "
+                         "up at photoroom.com/api to keep removing backgrounds.")
+    if resp.status_code in (401, 403):
+        raise ValueError("The Photoroom API key was rejected — check the "
+                         "PHOTOROOM_API_KEY secret on the server.")
+    if resp.status_code >= 400:
+        raise ValueError(f"Background removal failed ({resp.status_code}) — "
+                         "try again in a moment.")
+    out = Image.open(BytesIO(resp.content))
+    out.load()
+    if out.size != img_rgb.size:
+        out = out.resize(img_rgb.size,
+                         Image.BILINEAR if channels == "alpha" else Image.LANCZOS)
+    return out.convert("L") if channels == "alpha" else out.convert("RGBA")
 
 
 def _alpha_mask(img_rgb: Image.Image) -> Image.Image:
-    """rembg subject alpha (mode L, same size as img_rgb), computed on a
-    downscaled copy for speed/memory, then upscaled back."""
-    global _rembg_session
-    from rembg import new_session, remove
-
-    if _rembg_session is None:
-        _rembg_session = new_session(_REMBG_MODEL)
-    scale = min(1.0, _REMBG_MAX_SIDE / max(img_rgb.size))
-    small = (img_rgb.resize((max(1, round(img_rgb.width * scale)),
-                             max(1, round(img_rgb.height * scale))), Image.LANCZOS)
-             if scale < 1 else img_rgb)
-    alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
-    if alpha.size != img_rgb.size:
-        # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
-        # high-contrast edges, ringing a faint halo of the old background back
-        # in — exactly the "ghost background" the cutout is meant to remove.
-        alpha = alpha.resize(img_rgb.size, Image.BILINEAR)
-    return alpha
-
-
-def warm() -> None:
-    """Pre-import rembg and trigger numba's JIT on a tiny image.
-
-    The very first background removal otherwise pays a ~60-70s one-time cost
-    (importing scipy/numba/opencv + JIT compilation). Called in a background
-    thread at startup so the machine is reachable immediately while this warms
-    up, and real uploads hit a warm (~1s) path.
-    """
-    try:
-        _remove_background(Image.new("RGB", (32, 32), (200, 100, 50)))
-        log.info("images: background-removal model warmed")
-    except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-        log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
+    """Subject alpha mask (mode L, same size as img_rgb)."""
+    return _photoroom(img_rgb, channels="alpha")
 
 
 def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
-    """rembg cutout composited on pure white — or None when the result is
+    """Photoroom cutout composited on pure white — or None when the result is
     clearly a failure (subject erased), so callers keep the original photo
-    instead of saving a destroyed one.
-
-    The model runs at reduced resolution (see _alpha_mask) so it stays fast and
-    light; the full-res photo keeps its detail.
-    """
+    instead of saving a destroyed one."""
     rgb = img.convert("RGB")
-    alpha = _alpha_mask(rgb)
-    # Despeckle isolated stray pixels, then harden the matte: background pixels
-    # go fully transparent (no ghost), subject pixels fully opaque, with a thin
-    # anti-aliased edge in between. A plain floor left mid-alpha background
-    # visible as gray fuzz — the reported "ghost background".
-    alpha = alpha.filter(ImageFilter.MedianFilter(3))
-    span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
-    alpha = alpha.point(lambda a: 0 if a < _ALPHA_LOW
-                        else 255 if a > _ALPHA_HIGH
-                        else round((a - _ALPHA_LOW) * 255 / span))
+    rgba = _photoroom(rgb, channels="rgba")
+    alpha = rgba.getchannel("A")
     opaque = sum(alpha.histogram()[128:])
     if opaque / max(1, alpha.width * alpha.height) < _MIN_FG_COVERAGE:
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
                     100 * opaque / max(1, alpha.width * alpha.height))
         return None
-    rgba = rgb.convert("RGBA")
-    rgba.putalpha(alpha)
     canvas = Image.new("RGBA", rgba.size, WHITE + (255,))
     canvas.alpha_composite(rgba)
     return canvas.convert("RGB")
@@ -144,9 +125,13 @@ def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
 
 def _remove_background(img: Image.Image) -> Image.Image:
     """Cut out the subject onto white for the upload path. Falls back to the
-    original (flattened) if the model clearly failed, so an auto/bulk upload
-    never silently saves a destroyed photo."""
-    out = _cutout_on_white(img)
+    original (flattened) on any failure — an auto/bulk upload must never die
+    or silently save a destroyed photo because one cutout call failed."""
+    try:
+        out = _cutout_on_white(img)
+    except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
+        log.warning("bg-removal: cutout failed (%s) — keeping original", exc)
+        out = None
     return out if out is not None else _flatten(img)
 
 
