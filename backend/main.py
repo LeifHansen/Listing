@@ -800,6 +800,43 @@ def _data_url(img, fmt: str = "JPEG") -> str:
     return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
+@app.post("/api/rotate-image")
+async def rotate_image(payload: dict) -> dict:
+    """Quick-rotate an optimized photo 90° clockwise, in place. Atomic replace
+    + R2 re-push, mirroring /api/edit-image, so eBay always fetches the
+    rotated copy."""
+    session_id = str(payload.get("session_id") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "session_id and name are required")
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents or not path.is_file():
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+
+    def _rotate() -> None:
+        import os
+        from PIL import Image
+        with Image.open(path) as img:
+            rotated = img.convert("RGB").transpose(Image.Transpose.ROTATE_270)
+        tmp = path.with_name(path.name + ".tmp")
+        rotated.save(tmp, "JPEG", quality=88, optimize=True)
+        os.replace(tmp, path)
+
+    try:
+        await run_in_threadpool(_rotate)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Couldn't rotate that photo: {exc}") from exc
+    if objstore.enabled():
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            raise HTTPException(
+                502, "Rotated locally, but couldn’t update the stored copy eBay "
+                     "uses. Try again in a moment.")
+    return {"ok": True}
+
+
 @app.post("/api/image/analyze")
 async def image_analyze(
     session_id: str = Form(""),

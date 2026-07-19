@@ -212,6 +212,16 @@ export function useListingForm() {
   // ---------- images ----------
   const [imageVersion, setImageVersion] = useState(0); // cache-bust after edits
 
+  // One-tap 90° clockwise rotate; the version bump refreshes every tile.
+  const rotateImage = useCallback(async (name) => {
+    try {
+      await postJson("/api/rotate-image", { session_id: sessionId, name });
+      setImageVersion((v) => v + 1);
+    } catch (e) {
+      toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
+    }
+  }, [sessionId, toast]);
+
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   const deleteImage = useCallback(async (name, confirmFn) => {
     if ((form.images || []).length <= 1) {
@@ -311,7 +321,7 @@ export function useListingForm() {
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, upsertSpecific,
-    deleteImage, imageVersion, setImageVersion,
+    deleteImage, rotateImage, imageVersion, setImageVersion,
     completion,
   };
 }

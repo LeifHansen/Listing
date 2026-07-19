@@ -192,7 +192,7 @@ export function UploadPhase({ onBulkStarted }) {
                         aria-label="Remove photo"
                         title="Remove photo"
                         onClick={() => removeFile(i)}
-                        className="absolute top-1.5 right-1.5 z-10 grid place-items-center size-7 rounded-full
+                        className="absolute top-1.5 left-1.5 z-10 grid place-items-center size-7 rounded-full
                           bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card cursor-pointer
                           hover:text-error hover:border-error/40 transition-colors duration-150"
                       >

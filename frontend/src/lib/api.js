@@ -59,15 +59,27 @@ export async function downscaleForUpload(file) {
     try {
       bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
     } catch (e) {
-      bmp = await createImageBitmap(file);
+      // Some browsers reject the options bag. Decode via <img> instead — that
+      // path always applies EXIF orientation when drawn to a canvas. A bare
+      // createImageBitmap(file) here would NOT, and since this function
+      // re-encodes (dropping EXIF), it painted phone photos sideways.
+      bmp = await new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const el = new Image();
+        el.onload = () => { URL.revokeObjectURL(url); resolve(el); };
+        el.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode failed")); };
+        el.src = url;
+      });
     }
-    const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(bmp.width, bmp.height));
-    if (scale >= 1 && file.size < 2 * 1024 * 1024) { bmp.close(); return file; }
+    const w = bmp.naturalWidth || bmp.width;
+    const h = bmp.naturalHeight || bmp.height;
+    const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(w, h));
+    if (scale >= 1 && file.size < 2 * 1024 * 1024) { bmp.close?.(); return file; }
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(bmp.width * scale));
-    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
     canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
-    bmp.close();
+    bmp.close?.();
     const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
     if (!blob) return file;
     const name = (file.name || "photo").replace(/\.\w+$/, "") + ".jpg";

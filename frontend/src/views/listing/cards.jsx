@@ -22,7 +22,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="Tap the trash to remove a photo instantly; hover for background clean-up and smart crop"
+      hint="One-tap rotate & delete on every photo; hover for background clean-up and smart crop"
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {(w.form.images || []).length ? (
@@ -37,6 +37,7 @@ export function PhotosCard({ w, onEdit, onSmartCrop, onDelete }) {
                 onEdit={() => onEdit(name)}
                 onSmartCrop={() => onSmartCrop(name)}
                 onDelete={() => onDelete(name)}
+                onRotate={() => w.rotateImage(name)}
               />
             ))}
           </AnimatePresence>
