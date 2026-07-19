@@ -1082,7 +1082,9 @@ def delete_image(payload: dict, request: Request) -> dict:
 # lost job only means re-running the upload — listings themselves persist.
 _BULK_JOBS: dict[str, dict] = {}
 _BULK_LOCK = threading.Lock()
-BULK_MAX_FILES = 40
+# Claude vision accepts at most 100 images per request; bigger piles are
+# grouped in chunks of this size (no cap on the upload itself).
+BULK_GROUP_CHUNK = 100
 
 
 def _bulk_set(job_id: str, **fields) -> None:
@@ -1096,18 +1098,29 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                   uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
     """Background worker: optimize -> group -> per-item identify (-> publish)."""
     try:
-        _bulk_set(job_id, phase="optimizing")
-        images.optimize_all(storage.original_dir(staging_id),
-                            storage.optimized_dir(staging_id), strip_bg)
+        _bulk_set(job_id, phase="optimizing", current=0)
+        images.optimize_all(
+            storage.original_dir(staging_id), storage.optimized_dir(staging_id),
+            strip_bg,
+            progress=lambda done, total: _bulk_set(job_id, current=done,
+                                                   total_photos=total))
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
             return
         opt_dir = storage.optimized_dir(staging_id)
 
-        _bulk_set(job_id, phase="grouping", total_photos=len(names))
+        _bulk_set(job_id, phase="grouping", total_photos=len(names), current=0)
         thumbs = [images.thumb_jpeg(opt_dir / n) for n in names]
-        groups = claude_ai.group_photos(thumbs)["groups"]
+        # Group in API-sized chunks. Resellers shoot item-by-item, so photos of
+        # the same item land in the same chunk except right at a boundary —
+        # worst case a boundary item shows up as two entries to merge by hand.
+        groups: list[dict] = []
+        for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
+            part = claude_ai.group_photos(thumbs[base:base + BULK_GROUP_CHUNK])["groups"]
+            groups.extend({"name": g["name"],
+                           "indices": [base + i for i in g["indices"]]}
+                          for g in part)
         _bulk_set(job_id, total_items=len(groups))
 
         items: list[dict] = []
@@ -1183,8 +1196,6 @@ async def bulk_upload(
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     if not files:
         raise HTTPException(400, "No files uploaded")
-    if len(files) > BULK_MAX_FILES:
-        raise HTTPException(400, f"Too many files (max {BULK_MAX_FILES} in bulk mode)")
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)

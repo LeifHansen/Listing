@@ -213,8 +213,10 @@ export function BulkQueue({ jobId, mode, onExit }) {
   const drafts = items.filter((it) => it.status === "draft");
   const progressDetail = phase === "identifying" && job?.total_items
     ? ` (${job.current}/${job.total_items})`
-    : phase === "grouping" && job?.total_photos
-      ? ` (${job.total_photos} photos)` : "";
+    : phase === "optimizing" && job?.total_photos
+      ? ` (${Math.min(job.current || 0, job.total_photos)}/${job.total_photos} photos)`
+      : phase === "grouping" && job?.total_photos
+        ? ` (${job.total_photos} photos)` : "";
 
   return (
     <div className="flex flex-col gap-4">
