@@ -284,7 +284,9 @@ export function useListingForm() {
       // Live success swaps in the PublishedScreen; draft saves get a toast so
       // there's clear feedback even if the result banner is below the fold.
       if (!result.error && !result.published && mode === "draft") {
-        toast("Draft saved — find it anytime under Drafts.", { kind: "success" });
+        toast(result.ebay_draft
+          ? "Draft saved here and staged on your eBay account — publish it live when you're ready."
+          : "Draft saved — find it anytime under Drafts.", { kind: "success" });
       }
       if (result.error && result.issues && result.issues.length) {
         const first = result.issues.find((x) => x.target && x.target !== "generic");

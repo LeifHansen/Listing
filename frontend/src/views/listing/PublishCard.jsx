@@ -36,7 +36,7 @@ export function PublishCard({ w }) {
     <WorkflowCard
       id="publish" icon={Rocket} title="Publish"
       hint={canPublishLive
-        ? "Save as Draft keeps it here in Thryft Shop; Publish Live posts it to your eBay account"
+        ? "Save as Draft saves it here and stages it on your connected eBay account (as an unpublished offer); Publish Live makes it a live listing"
         : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
       state={publishedOk ? "complete" : "todo"}
     >
