@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Trash2, Brush, Crop, RotateCw } from "lucide-react";
+import { Trash2, Brush, Crop, RotateCw, Eraser } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 
 // PhotoTile — an uploaded photo as a rounded card with hover actions plus
 // two always-visible one-tap corners: rotate (right) and delete (left).
-export function PhotoTile({ sessionId, name, version, onDelete, onRotate, onEdit, onSmartCrop }) {
+export function PhotoTile({
+  sessionId, name, version, onDelete, onRotate, onEdit, onRemoveBg, onCrop,
+}) {
   const [rotating, setRotating] = useState(false);
   const rotate = async () => {
     if (rotating || !onRotate) return;
@@ -58,21 +60,28 @@ export function PhotoTile({ sessionId, name, version, onDelete, onRotate, onEdit
       )}
       <div
         className="absolute inset-0 bg-ink/0 group-hover:bg-ink/25 transition-colors duration-200
-          flex items-end justify-center gap-2 p-3 opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+          flex flex-wrap items-end justify-center content-end gap-1.5 p-2.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100"
       >
         <button
           type="button"
           onClick={onEdit}
-          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
+          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
         >
           <Brush size={13} aria-hidden /> Clean up
         </button>
         <button
           type="button"
-          onClick={onSmartCrop}
-          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
+          onClick={onRemoveBg}
+          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
         >
-          <Crop size={13} aria-hidden /> Smart crop
+          <Eraser size={13} aria-hidden /> Remove BG
+        </button>
+        <button
+          type="button"
+          onClick={onCrop}
+          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
+        >
+          <Crop size={13} aria-hidden /> Crop
         </button>
       </div>
     </motion.div>

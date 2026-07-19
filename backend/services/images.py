@@ -88,6 +88,12 @@ def _remove_background(img: Image.Image) -> Image.Image:
     return canvas.convert("RGB")
 
 
+def remove_background_white(img: Image.Image) -> Image.Image:
+    """Public wrapper for the photo studio's one-tap 'Remove background':
+    rembg cutout composited onto pure white."""
+    return _remove_background(img)
+
+
 def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
     """Trim near-uniform borders (e.g. plain background) around the subject."""
     rgb = _flatten(img)

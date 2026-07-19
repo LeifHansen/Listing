@@ -1,11 +1,15 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Sparkles, AlertTriangle, RotateCcw } from "lucide-react";
+import {
+  Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
+  LayoutDashboard,
+} from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
 import { ConfidenceBadge } from "@/components/ui/badges";
-import { AIStatusCard } from "@/components/ui/AIStatus";
+import { LoadingOverlay } from "@/components/ui/AIStatus";
+import { BrandMark } from "@/components/BrandMark";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
 import { BulkQueue } from "./listing/BulkMode";
@@ -47,12 +51,73 @@ function RefineBar({ w }) {
   );
 }
 
+// PublishedScreen — the moment of glory. Replaces the workflow after a live
+// publish so the user isn't left staring at the listing they just posted;
+// offers the next queued draft to keep the assembly line moving.
+function PublishedScreen({ w }) {
+  const { listingsState, openListing, startNew, setView } = useApp();
+  const r = w.publishResult;
+  const draftsLeft = (listingsState.items || [])
+    .filter((it) => (it.status === "draft" || it.status === "dry_run") && it.id !== w.sessionId)
+    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  const next = draftsLeft[0];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 14, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ duration: 0.3, ease: "easeOut" }}
+      className="grid place-items-center py-8 sm:py-14"
+    >
+      <div className="bg-card border border-line rounded-card shadow-float p-8 sm:p-10 max-w-xl w-full flex flex-col items-center text-center gap-4">
+        <span className="ai-sparkle" aria-hidden>
+          <BrandMark className="size-16 rounded-[20px]" />
+        </span>
+        <p className="inline-flex items-center gap-2 text-success font-bold text-sm">
+          <CheckCircle2 size={17} aria-hidden /> Live on eBay
+        </p>
+        <h1 className="text-2xl font-bold tracking-tight text-ink">
+          Listing published! 🎉
+        </h1>
+        <p className="text-sm text-ink-secondary">
+          <strong className="text-ink">"{w.form.title || "Your item"}"</strong> is live
+          {r?.listing_id && <> — Listing ID <strong className="text-ink">{r.listing_id}</strong></>}.
+          Find it under Selling → Active in your eBay account.
+        </p>
+
+        <div className="mt-2 flex flex-wrap justify-center items-center gap-2.5">
+          {next ? (
+            <Button variant="primary" size="lg" onClick={() => openListing(next.id)} className="max-w-full">
+              <span className="truncate">
+                Next draft: "{next.listing?.title || next.title || "untitled"}"
+              </span>
+              <ArrowRight aria-hidden className="shrink-0" />
+            </Button>
+          ) : (
+            <Button variant="primary" size="lg" onClick={startNew}>
+              <PlusCircle aria-hidden /> Start a new listing
+            </Button>
+          )}
+          <Button variant="ghost" size="lg" onClick={() => setView("dashboard")}>
+            <LayoutDashboard aria-hidden /> Dashboard
+          </Button>
+        </div>
+        {draftsLeft.length > 0 && (
+          <p className="text-xs text-ink-faint">
+            {draftsLeft.length} draft{draftsLeft.length === 1 ? "" : "s"} still waiting in your queue.
+          </p>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
 function Workflow() {
   const { session, startNew } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
-  // { name, action? } — the photo open in the studio; action "crop" runs
-  // smart crop as soon as the photo loads.
+  // { name, action? } — the photo open in the studio; "removebg" runs
+  // background removal on load, "manualcrop" opens with the crop tool active.
   const [editing, setEditing] = useState(null);
 
   const restart = async () => {
@@ -62,6 +127,12 @@ function Workflow() {
       confirmLabel: "Start new",
     })) startNew();
   };
+
+  // A live publish replaces the workflow with the success screen — staying on
+  // the just-posted listing was confusing.
+  if (w.publishResult?.published) {
+    return <PublishedScreen w={w} />;
+  }
 
   return (
     <motion.div variants={stagger} initial="hidden" animate="show" className="flex flex-col gap-4">
@@ -94,21 +165,20 @@ function Workflow() {
         </motion.div>
       )}
 
-      {w.aiBusy ? (
-        <motion.div variants={rise}>
-          <AIStatusCard messages={w.aiBusy} />
-        </motion.div>
-      ) : (
-        <motion.div variants={rise}>
-          <RefineBar w={w} />
-        </motion.div>
-      )}
+      {/* Long waits (publish, save, refine) use a full-screen branded overlay
+          so feedback is visible no matter where the page is scrolled. */}
+      {w.aiBusy && <LoadingOverlay messages={w.aiBusy} />}
+
+      <motion.div variants={rise}>
+        <RefineBar w={w} />
+      </motion.div>
 
       <motion.div variants={rise} className="flex flex-col gap-4">
         <PhotosCard
           w={w}
           onEdit={(name) => setEditing({ name })}
-          onSmartCrop={(name) => setEditing({ name, action: "crop" })}
+          onRemoveBg={(name) => setEditing({ name, action: "removebg" })}
+          onCrop={(name) => setEditing({ name, action: "manualcrop" })}
           onDelete={(name) => w.deleteImage(name)}
         />
         <TitleCard w={w} />

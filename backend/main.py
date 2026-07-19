@@ -755,6 +755,7 @@ async def edit_image(
             raise HTTPException(
                 502, "Saved locally, but couldn’t update the stored copy eBay "
                      "uses. Try saving again in a moment.")
+    db.touch_listing(session_id)  # bump updated_at so list thumbnails refetch
     log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 
@@ -834,6 +835,7 @@ async def rotate_image(payload: dict) -> dict:
             raise HTTPException(
                 502, "Rotated locally, but couldn’t update the stored copy eBay "
                      "uses. Try again in a moment.")
+    db.touch_listing(session_id)  # bump updated_at so list thumbnails refetch
     return {"ok": True}
 
 
@@ -879,6 +881,25 @@ async def image_auto_clean(
     def _run() -> dict:
         img = _studio_load(session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
+
+    return await run_in_threadpool(_run)
+
+
+@app.post("/api/image/remove-bg")
+async def image_remove_bg(
+    session_id: str = Form(""),
+    name: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+) -> dict:
+    """Full background removal: rembg cutout composited onto pure white.
+    Returns the processed image for the editor to preview (not saved yet)."""
+    data = await file.read() if file else None
+    if data and len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+
+    def _run() -> dict:
+        img = _studio_load(session_id, name, data)
+        return {"ok": True, "image": _data_url(images.remove_background_white(img))}
 
     return await run_in_threadpool(_run)
 
@@ -1396,7 +1417,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
 
 
 @app.get("/media/{session_id}/optimized/{name}")
-def media(session_id: str, name: str):
+def media(session_id: str, name: str, v: str = ""):
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name` (e.g. "../../etc/passwd").
@@ -1405,8 +1426,14 @@ def media(session_id: str, name: str):
     if path.is_file():
         return FileResponse(path)
     # Local file gone (e.g. after a restart) — fall back to R2 if available.
+    # Carry the client's cache-bust version onto the R2 URL, otherwise the CDN
+    # can keep serving a pre-edit copy (e.g. a photo rotated after upload).
     if objstore.enabled():
-        return RedirectResponse(objstore.public_url(objstore.key_for(session_id, name)))
+        url = objstore.public_url(objstore.key_for(session_id, name))
+        safe_v = "".join(c for c in v if c.isalnum())[:24]
+        if safe_v:
+            url += ("&" if "?" in url else "?") + "v=" + safe_v
+        return RedirectResponse(url)
     raise HTTPException(404, "Not found")
 
 

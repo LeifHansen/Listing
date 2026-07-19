@@ -32,7 +32,10 @@ export function conditionLabel(c) {
 }
 
 export function mediaUrl(sessionId, name, bust) {
-  const v = bust ? `?v=${Date.now()}` : "";
+  // bust === true → always refetch; any other truthy value → stable version
+  // key (cache holds until the value changes, e.g. a listing's updated_at).
+  const v = bust === true ? `?v=${Date.now()}`
+    : bust ? `?v=${encodeURIComponent(bust)}` : "";
   return `/media/${sessionId}/optimized/${name}${v}`;
 }
 

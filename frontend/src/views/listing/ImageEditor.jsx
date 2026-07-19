@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RotateCcw, Crop, Sparkles, Highlighter, CheckCircle2 } from "lucide-react";
+import {
+  RotateCcw, Crop, Sparkles, Highlighter, CheckCircle2, Eraser, Wand2,
+} from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { AIStatusInline } from "@/components/ui/AIStatus";
@@ -7,11 +9,12 @@ import { useToast } from "@/components/ui/Toaster";
 import { api } from "@/lib/api";
 import { cn, mediaUrl } from "@/lib/utils";
 
-/* Photo studio: brush clean-up plus three AI assists —
+/* Photo studio: brush clean-up, a manual crop tool, and three AI assists —
    - analyze: re-checks the item's borders and highlights leftover background
    - auto clean: whitens everything the AI says is outside the item
+   - remove background: full rembg cutout onto pure white
    - smart crop: crops to the item with a clean margin
-   Every AI action only previews onto the canvas; nothing is stored until Save. */
+   Every action only previews onto the canvas; nothing is stored until Save. */
 
 const HIGHLIGHT_COLOR = "#e53238"; // brand red, tinted over leftovers
 
@@ -47,11 +50,42 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const [aiBusy, setAiBusy] = useState(null); // friendly message while AI works
   const [highlight, setHighlight] = useState(true);
   const [residuePct, setResiduePct] = useState(null);
+  // Manual crop tool: drag a rect, then Apply.
+  const [tool, setTool] = useState("brush"); // "brush" | "crop"
+  const toolRef = useRef("brush");
+  const cropStart = useRef(null);
+  const liveRect = useRef(null);
+  const [cropRect, setCropRect] = useState(null); // {x,y,w,h} in canvas px
   const { toast } = useToast();
+
+  useEffect(() => { toolRef.current = tool; }, [tool]);
 
   const clearOverlay = useCallback(() => {
     const o = overlayRef.current;
     if (o) o.getContext("2d").clearRect(0, 0, o.width, o.height);
+  }, []);
+
+  // Crop framing: dim everything outside the dragged rect.
+  const drawCropOverlay = useCallback((rect) => {
+    const overlay = overlayRef.current;
+    const canvas = canvasRef.current;
+    if (!overlay || !canvas) return;
+    if (overlay.width !== canvas.width || overlay.height !== canvas.height) {
+      overlay.width = canvas.width;
+      overlay.height = canvas.height;
+    }
+    const ctx = overlay.getContext("2d");
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    if (!rect) return;
+    ctx.save();
+    ctx.fillStyle = "rgba(16, 17, 20, 0.45)";
+    ctx.fillRect(0, 0, overlay.width, overlay.height);
+    ctx.clearRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(2, overlay.width / 300);
+    ctx.setLineDash([10, 7]);
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.restore();
   }, []);
 
   // Tint the residue mask red and lay it over the photo.
@@ -140,6 +174,64 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     }
   }, [aiBusy, sessionId, name, applyPreview, toast]);
 
+  const removeBg = useCallback(async () => {
+    const canvas = canvasRef.current;
+    if (!canvas || aiBusy) return;
+    setAiBusy("Removing the background…");
+    try {
+      const blob = await canvasBlob(canvas);
+      const res = await studioCall("/api/image/remove-bg", sessionId, name, blob);
+      await applyPreview(res.image);
+      toast("Background removed — review and Save to keep it.", { kind: "success" });
+    } catch (e) {
+      toast(`Remove background failed: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }, [aiBusy, sessionId, name, applyPreview, toast]);
+
+  // Manual crop: toggle the tool, drag a rect, Apply.
+  const toggleCropTool = useCallback(() => {
+    if (aiBusy) return;
+    setCropRect(null);
+    liveRect.current = null;
+    cropStart.current = null;
+    clearOverlay();
+    if (toolRef.current === "crop") {
+      setTool("brush");
+      return;
+    }
+    setHighlight(false);
+    setTool("crop");
+  }, [aiBusy, clearOverlay]);
+
+  const cancelCrop = useCallback(() => {
+    setCropRect(null);
+    liveRect.current = null;
+    clearOverlay();
+  }, [clearOverlay]);
+
+  const applyCrop = useCallback(async () => {
+    const canvas = canvasRef.current;
+    const rect = cropRect;
+    if (!canvas || !rect) return;
+    const tmp = document.createElement("canvas");
+    tmp.width = Math.max(1, Math.round(rect.w));
+    tmp.height = Math.max(1, Math.round(rect.h));
+    tmp.getContext("2d").drawImage(
+      canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, tmp.width, tmp.height);
+    canvas.width = tmp.width;
+    canvas.height = tmp.height;
+    canvas.getContext("2d").drawImage(tmp, 0, 0);
+    setCropRect(null);
+    liveRect.current = null;
+    clearOverlay();
+    setTool("brush");
+    toast("Cropped — review and Save to keep it.", { kind: "success" });
+    const blob = await canvasBlob(canvas);
+    analyze(blob);
+  }, [cropRect, clearOverlay, analyze, toast]);
+
   const smartCrop = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || aiBusy) return;
@@ -180,9 +272,17 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
 
   useEffect(() => {
     if (!name) return;
+    setTool("brush");
+    setCropRect(null);
     (async () => {
       await load();
       if (initialAction === "crop") smartCrop();
+      else if (initialAction === "removebg") removeBg();
+      else if (initialAction === "manualcrop") {
+        setHighlight(false);
+        clearOverlay();
+        setTool("crop");
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name]);
@@ -226,9 +326,47 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         octx.restore();
       }
     };
-    const start = (e) => { painting.current = true; paintAt(e); e.preventDefault(); };
-    const move = (e) => { if (painting.current) { paintAt(e); e.preventDefault(); } };
-    const end = () => { painting.current = false; };
+    // Crop tool: drag out a rect (dimmed framing preview via the overlay).
+    const cropDragTo = (e) => {
+      const a = cropStart.current;
+      if (!a) return;
+      const b = point(e);
+      liveRect.current = {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(a.x - b.x),
+        h: Math.abs(a.y - b.y),
+      };
+      drawCropOverlay(liveRect.current);
+    };
+    const start = (e) => {
+      if (toolRef.current === "crop") {
+        cropStart.current = point(e);
+        liveRect.current = null;
+        setCropRect(null);
+        drawCropOverlay(null);
+        e.preventDefault();
+        return;
+      }
+      painting.current = true; paintAt(e); e.preventDefault();
+    };
+    const move = (e) => {
+      if (toolRef.current === "crop") {
+        if (cropStart.current) { cropDragTo(e); e.preventDefault(); }
+        return;
+      }
+      if (painting.current) { paintAt(e); e.preventDefault(); }
+    };
+    const end = () => {
+      if (toolRef.current === "crop") {
+        const r = liveRect.current;
+        cropStart.current = null;
+        if (r && r.w >= 24 && r.h >= 24) setCropRect({ ...r });
+        else { liveRect.current = null; drawCropOverlay(null); }
+        return;
+      }
+      painting.current = false;
+    };
 
     canvas.addEventListener("mousedown", start);
     canvas.addEventListener("mousemove", move);
@@ -278,12 +416,30 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   return (
     <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
       <div className="flex flex-wrap items-center gap-2 mb-4">
+        <Button variant="soft" size="sm" onClick={removeBg} disabled={!!aiBusy}>
+          <Eraser aria-hidden /> Remove background
+        </Button>
         <Button variant="soft" size="sm" onClick={autoClean} disabled={!!aiBusy}>
           <Sparkles aria-hidden /> Auto clean
         </Button>
         <Button variant="soft" size="sm" onClick={smartCrop} disabled={!!aiBusy}>
-          <Crop aria-hidden /> Smart crop
+          <Wand2 aria-hidden /> Smart crop
         </Button>
+        <Button
+          variant={tool === "crop" ? "primary" : "soft"} size="sm"
+          onClick={toggleCropTool} disabled={!!aiBusy}
+          aria-pressed={tool === "crop"}
+        >
+          <Crop aria-hidden /> Crop
+        </Button>
+        {tool === "crop" && cropRect && (
+          <>
+            <Button variant="primary" size="sm" onClick={applyCrop}>
+              <CheckCircle2 aria-hidden /> Apply crop
+            </Button>
+            <Button variant="ghost" size="sm" onClick={cancelCrop}>Cancel</Button>
+          </>
+        )}
         <Button
           variant={highlight ? "danger" : "ghost"} size="sm"
           onClick={toggleHighlight} disabled={!!aiBusy}
@@ -292,7 +448,9 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
           <Highlighter aria-hidden /> {highlight ? "Hide highlight" : "Highlight leftovers"}
         </Button>
         <span className="ml-auto text-xs text-ink-secondary hidden sm:block">
-          Paint over anything with the white brush.
+          {tool === "crop"
+            ? "Drag on the photo to frame the crop, then Apply."
+            : "Paint over anything with the white brush."}
         </span>
       </div>
 

@@ -356,6 +356,22 @@ def get_listing(listing_id: str) -> Optional[dict]:
         return None
 
 
+def touch_listing(listing_id: str) -> None:
+    """Bump updated_at (no other changes) so list thumbnails — versioned by
+    updated_at — refetch after an image-only edit like rotate. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            rec = s.get(ListingRecord, listing_id)
+            if rec is not None:
+                rec.updated_at = _now()
+                s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: touch_listing failed: {exc}")
+
+
 def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
     """Delete a listing row; returns True if a row was removed. Ownership-
     checked: a listing owned by an account can only be deleted by that owner.
