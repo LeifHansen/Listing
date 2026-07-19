@@ -1,44 +1,46 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   Thryft design tokens
-   eBay brand colors are used as *accents* on an airy neutral canvas.
-   Every component reads from these variables — change them here, restyle
-   the whole app (including dark mode below).
+   Thryft Shop design tokens
+   The logo palette — navy ink, coral, teal, gold & cornflower on a warm cream
+   canvas — drives the whole UI. Every component reads from these variables:
+   change them here, restyle the whole app (including dark mode below).
 --------------------------------------------------------------------------- */
 :root {
-  /* Brand accents (eBay color language) */
-  --brand-blue: #0064d2;
-  --brand-blue-strong: #0053ae;
-  --brand-blue-soft: #e7f1fc;
-  --brand-red: #e53238;
-  --brand-red-soft: #fdeceb;
-  --brand-yellow: #f5af02;
-  --brand-yellow-soft: #fdf3d7;
-  --brand-green: #86b817;
-  --brand-green-soft: #f0f7dd;
+  /* Brand accents — from the Thryft Shop logo. Blue stays the primary action
+     color, deepened from the logo's cornflower so white button text meets
+     WCAG contrast; the lighter cornflower lives in -soft washes. */
+  --brand-blue: #2670b8;
+  --brand-blue-strong: #1d5a95;
+  --brand-blue-soft: #e5eef8;
+  --brand-red: #e85c46;        /* logo coral */
+  --brand-red-soft: #fce8e3;
+  --brand-yellow: #f2ab21;     /* logo gold */
+  --brand-yellow-soft: #fceecd;
+  --brand-green: #1f9e8b;      /* logo teal, playing the green accent */
+  --brand-green-soft: #dbf1ec;
 
-  /* Neutral canvas */
-  --bg: #fafafb;
-  --bg-sunken: #f3f4f6;
-  --card: #ffffff;
-  --card-hover: #ffffff;
-  --border: #ececec;
-  --border-strong: #dcdce0;
+  /* Warm cream canvas — the logo's backdrop */
+  --bg: #f8f3e7;
+  --bg-sunken: #efe8d6;
+  --card: #fffdf8;
+  --card-hover: #fffdf8;
+  --border: #e8ddc8;
+  --border-strong: #d8ccb0;
 
-  /* Text */
-  --text: #1f2937;
-  --text-secondary: #6b7280;
-  --text-faint: #9ca3af;
+  /* Navy ink */
+  --text: #17284a;
+  --text-secondary: #586178;
+  --text-faint: #9a9b90;
   --text-on-accent: #ffffff;
 
-  /* Semantic */
-  --success: #16a34a;
-  --success-soft: #e8f7ee;
-  --warning: #f59e0b;
-  --warning-soft: #fdf3d7;
-  --error: #dc2626;
-  --error-soft: #fdeceb;
+  /* Semantic — coral = bad, teal = good, gold = caution (on-brand) */
+  --success: #1f9e8b;
+  --success-soft: #dbf1ec;
+  --warning: #dd9518;
+  --warning-soft: #faecc7;
+  --error: #d94e38;
+  --error-soft: #fbe7e2;
 
   /* Radii */
   --radius-card: 22px;
@@ -54,34 +56,36 @@
 }
 
 .dark {
-  --brand-blue: #4a9ceb;
-  --brand-blue-strong: #6cb0f0;
-  --brand-blue-soft: #14263c;
-  --brand-red: #f0666b;
-  --brand-red-soft: #351b1d;
-  --brand-yellow: #f5b93c;
-  --brand-yellow-soft: #33290f;
-  --brand-green: #9fcc38;
-  --brand-green-soft: #22300c;
+  /* The logo's actual cornflower/coral/teal/gold shine on deep navy. */
+  --brand-blue: #5a9bd8;
+  --brand-blue-strong: #7cb4e8;
+  --brand-blue-soft: #172a44;
+  --brand-red: #f2795f;
+  --brand-red-soft: #37201b;
+  --brand-yellow: #f3ba45;
+  --brand-yellow-soft: #34280f;
+  --brand-green: #3fbfa9;
+  --brand-green-soft: #0f302b;
 
-  --bg: #101114;
-  --bg-sunken: #17181c;
-  --card: #1b1d22;
-  --card-hover: #1f2127;
-  --border: #2a2c33;
-  --border-strong: #383b44;
+  /* Deep navy canvas (the logo's ink family) */
+  --bg: #101a2e;
+  --bg-sunken: #0b1322;
+  --card: #16223a;
+  --card-hover: #1b2a46;
+  --border: #273450;
+  --border-strong: #384868;
 
-  --text: #eceef2;
-  --text-secondary: #9aa1ad;
-  --text-faint: #6b7280;
+  --text: #eef2f8;
+  --text-secondary: #a2adc1;
+  --text-faint: #6b7688;
   --text-on-accent: #0d1117;
 
-  --success: #34c26b;
-  --success-soft: #12301d;
-  --warning: #f5b93c;
-  --warning-soft: #33290f;
-  --error: #f0666b;
-  --error-soft: #351b1d;
+  --success: #3fbfa9;
+  --success-soft: #0f302b;
+  --warning: #f3ba45;
+  --warning-soft: #34280f;
+  --error: #f2795f;
+  --error-soft: #37201b;
 
   --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35);
   --shadow-card-hover: 0 4px 10px rgb(0 0 0 / 0.45);
