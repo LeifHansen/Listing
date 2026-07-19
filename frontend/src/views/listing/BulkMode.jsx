@@ -119,15 +119,20 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const [checked, setChecked] = useState({});
   const [publishing, setPublishing] = useState({});
   const stopped = useRef(false);
+  const fails = useRef(0);
 
-  // Poll the job until done; items render as they arrive.
+  // Poll the job until done; items render as they arrive. Resilient to transient
+  // poll failures — a busy server (heavy batch) can blip a request even though
+  // the job is still running, so we retry instead of abandoning the batch.
   useEffect(() => {
     stopped.current = false;
+    fails.current = 0;
     let timer;
     const poll = async () => {
       try {
         const j = await api(`/api/bulk/status/${jobId}`);
         if (stopped.current) return;
+        fails.current = 0;
         setJob(j);
         if (j.items?.length) {
           setItems(j.items);
@@ -148,9 +153,21 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
           onSettled?.();  // stop persisting; a reload shouldn't restore a done batch
         }
       } catch (e) {
-        if (!stopped.current) {
+        if (stopped.current) return;
+        fails.current += 1;
+        // A 404 = the job is genuinely gone (server restarted/evicted). Any
+        // other error (network blip, server busy) is transient — keep retrying.
+        const gone = (e.message || "").includes("(404)");
+        if (gone) {
           onSettled?.();
-          toast("Lost track of this batch — any finished items are saved in Drafts.",
+          toast("This batch was interrupted (the server restarted). Any items it finished are saved in Drafts.",
+            { kind: "warning" });
+        } else if (fails.current < 6) {
+          timer = setTimeout(poll, 3000);  // transient — the job is likely still running
+        } else {
+          // Give up watching but KEEP it persisted — the batch may still be
+          // finishing server-side, so the banner lets the user reopen and resume.
+          toast("Lost the connection while watching this batch — it may still be finishing. Reopen New Listing to check, and see Drafts for completed items.",
             { kind: "warning" });
         }
       }
