@@ -60,7 +60,7 @@ export function Dashboard() {
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
-  // Sellers report ~12 min per hand-written listing; QuickFlip takes ~2.
+  // Sellers report ~12 min per hand-written listing; Thryft Shop takes ~2.
   const minutesSaved = items.length * 10;
   const timeSaved = minutesSaved >= 90
     ? `${(minutesSaved / 60).toFixed(1)} h`
