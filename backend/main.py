@@ -901,7 +901,11 @@ async def image_remove_bg(
         img = _studio_load(session_id, name, data)
         return {"ok": True, "image": _data_url(images.remove_background_white(img))}
 
-    return await run_in_threadpool(_run)
+    try:
+        return await run_in_threadpool(_run)
+    except ValueError as exc:
+        # The cutout was a failure (subject erased) — tell the user why.
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/image/smart-crop")
