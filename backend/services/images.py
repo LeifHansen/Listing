@@ -8,6 +8,7 @@ upscale to target, and apply mild brightness/contrast/sharpness enhancement.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -74,12 +75,16 @@ _MIN_FG_COVERAGE = 0.045
 # upscales cleanly (product cutouts don't need pixel-perfect edges). Override
 # with REMBG_MAX_SIDE.
 _REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
-# The photo-studio 'Remove background' runs the matte at the model's native
-# resolution (isnet is a 1024px model) for noticeably crisper edges — it's one
-# deliberate image, not a bulk batch, so the extra time/memory is worth it, and
-# it falls back to the smaller size if a 1024 inference runs out of memory.
-# Override with REMBG_STUDIO_MAX_SIDE.
-_STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", "1024") or "1024")
+# The photo-studio 'Remove background' can run the matte at a higher resolution
+# for crisper edges — BUT a 1024px isnet inference peaks well over what the 2GB
+# machine has, so the worker gets OOM-killed (the 502 users hit) before any
+# Python-level fallback can run. Default to the memory-safe bulk size; raise
+# REMBG_STUDIO_MAX_SIDE (e.g. to 1024) only on a machine with more RAM (4GB+).
+_STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", str(_REMBG_MAX_SIDE))
+                       or str(_REMBG_MAX_SIDE))
+# Serialize model inference: two isnet runs at once (e.g. a studio cutout during
+# a bulk background-removal batch) would double peak memory and OOM the machine.
+_INFER_LOCK = threading.Lock()
 # Draw a soft contact shadow under the cut-out subject so the white-background
 # result still reads like a studio product shot. Pure Pillow, no external API.
 # Disable with BG_SHADOW=off.
@@ -94,14 +99,16 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.I
     global _rembg_session
     from rembg import new_session, remove
 
-    if _rembg_session is None:
-        _rembg_session = new_session(_REMBG_MODEL)
     cap = max_side or _REMBG_MAX_SIDE
     scale = min(1.0, cap / max(img_rgb.size))
     small = (img_rgb.resize((max(1, round(img_rgb.width * scale)),
                              max(1, round(img_rgb.height * scale))), Image.LANCZOS)
              if scale < 1 else img_rgb)
-    alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+    # One inference at a time — concurrent runs would stack peak memory and OOM.
+    with _INFER_LOCK:
+        if _rembg_session is None:
+            _rembg_session = new_session(_REMBG_MODEL)
+        alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
     if alpha.size != img_rgb.size:
         # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
         # high-contrast edges, ringing a faint halo of the old background back
