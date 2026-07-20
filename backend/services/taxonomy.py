@@ -175,6 +175,13 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
     return {"conditions": conditions}
 
 
+# Aspects rarely change, but they're fetched on every preflight AND every
+# publish for the same category — cache them for a few hours so a bulk batch
+# of N same-category items costs one Taxonomy call, not 2N.
+_ASPECTS_TTL = 6 * 3600
+_ASPECTS_CACHE: dict[str, tuple[float, dict]] = {}
+
+
 def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict:
     """The item specifics (aspects) eBay defines for a leaf category, so the UI
     can show exactly which fields are required vs recommended and whether each
@@ -185,6 +192,10 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     """
     if not category_id:
         return {"aspects": []}
+    cache_key = f"{category_id}|{marketplace_id or ''}"
+    hit = _ASPECTS_CACHE.get(cache_key)
+    if hit and time.time() - hit[0] < _ASPECTS_TTL:
+        return hit[1]
     tree_id = default_tree_id(marketplace_id)
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/commerce/taxonomy/v1/category_tree/{tree_id}"
@@ -214,4 +225,8 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
-    return {"aspects": aspects}
+    result = {"aspects": aspects}
+    if len(_ASPECTS_CACHE) > 300:  # tiny bound; entries are per-category
+        _ASPECTS_CACHE.clear()
+    _ASPECTS_CACHE[cache_key] = (time.time(), result)
+    return result

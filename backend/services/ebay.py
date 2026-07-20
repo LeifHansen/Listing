@@ -456,7 +456,23 @@ def withdraw(session_id: str, listing: Listing, creds: Optional[dict] = None) ->
     sku = _sku(session_id, listing)
     base = config.EBAY_API_BASE
     with httpx.Client(timeout=30) as client:
-        rec = _existing_offer(client, base, token, sku)
+        # Definitive lookup only: _existing_offer treats an API blip as "no
+        # offer", which here would mark a still-live listing as ended. Only a
+        # clean 200/404 may proceed; anything else must error out.
+        try:
+            r0 = client.get(f"{base}/sell/inventory/v1/offer",
+                            headers=_headers(token), params={"sku": sku})
+        except httpx.HTTPError as exc:
+            raise ValueError("Couldn't check this listing on eBay just now — "
+                             "try again in a moment.") from exc
+        if r0.status_code == 404:
+            offers = []
+        elif r0.status_code == 200:
+            offers = r0.json().get("offers", []) or []
+        else:
+            raise ValueError("Couldn't check this listing on eBay just now — "
+                             "try again in a moment.")
+        rec = offers[0] if offers else None
         if not rec or str(rec.get("status", "")).upper() != "PUBLISHED":
             return {"ended": False, "not_live": True,
                     "message": "This listing isn't live on eBay anymore — "

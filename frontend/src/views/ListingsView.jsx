@@ -28,8 +28,8 @@ const CONFIGS = {
   },
   drafts: {
     title: "Drafts",
-    sub: "Works in progress — open one to finish and publish",
-    filter: (i) => i.status === "draft" || i.status === "dry_run",
+    sub: "Works in progress and ended listings — open one to finish, publish, or relist",
+    filter: (i) => i.status === "draft" || i.status === "dry_run" || i.status === "ended",
     illustration: ClipboardIllustration,
     emptyTitle: "No drafts",
     emptyMessage: "Drafts save automatically while you build a listing, so you can pick up right where you left off.",

@@ -80,6 +80,16 @@ def _uid(request: Request):
     return user["id"] if user else None
 
 
+def _assert_session_owner(session_id: str, request: Request) -> None:
+    """404 when this session's saved listing belongs to a DIFFERENT user.
+    Session ids appear in media URLs and can leak, so possession of an id
+    must not grant write access. Unsaved or unowned (anonymous) sessions
+    pass — the app supports logged-out flows."""
+    rec = db.get_listing(session_id)
+    if rec and rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+
 # --- auth ------------------------------------------------------------------
 
 @app.post("/api/auth/signup")
@@ -678,6 +688,7 @@ async def upload(
 
 @app.post("/api/edit-image")
 async def edit_image(
+    request: Request,
     session_id: str = Form(...),
     name: str = Form(...),
     file: UploadFile = File(...),
@@ -694,6 +705,7 @@ async def edit_image(
     if not session_id or not name:
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
@@ -778,7 +790,7 @@ def _data_url(img, fmt: str = "JPEG") -> str:
 
 
 @app.post("/api/rotate-image")
-async def rotate_image(payload: dict) -> dict:
+async def rotate_image(payload: dict, request: Request) -> dict:
     """Quick-rotate an optimized photo 90° clockwise, in place. Atomic replace
     + R2 re-push, mirroring /api/edit-image, so eBay always fetches the
     rotated copy."""
@@ -786,6 +798,7 @@ async def rotate_image(payload: dict) -> dict:
     name = str(payload.get("name") or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not path.is_file():
@@ -1005,8 +1018,14 @@ def refine(req: RefineRequest, request: Request) -> dict:
 
 @app.post("/api/save/{session_id}")
 def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
+    _assert_session_owner(session_id, request)
     storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(), status="draft", user_id=_uid(request))
+    # A save must never demote a listing's lifecycle status: bulk publish and
+    # image edits auto-save, and flattening 'published'/'ended' to 'draft'
+    # here made live listings vanish from the Live bucket.
+    prev = db.get_listing(session_id) or {}
+    status = prev.get("status") if prev.get("status") in ("published", "ended") else "draft"
+    db.upsert_listing(session_id, listing.model_dump(), status=status, user_id=_uid(request))
     return {"saved": True}
 
 
@@ -1049,6 +1068,7 @@ def delete_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name", "")).strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents:  # path-traversal guard
@@ -1373,6 +1393,7 @@ def delete_listing(listing_id: str, request: Request) -> dict:
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
+    _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
     # A listing that's already live must NEVER lose its 'published' status in
