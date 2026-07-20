@@ -51,11 +51,16 @@ def _flatten(img: Image.Image) -> Image.Image:
 # In-house background removal — rembg (ONNX U^2-Net family) running in-process,
 # no external service. rembg loads its model on first use; keep the session
 # process-global so we pay that cost once, and only when background removal is
-# actually used. "isnet-general-use" (~176MB) is rembg's best general-purpose
-# model — far better than the tiny "u2netp" on clothing, dark items, and detail
-# shots. It fits the shared-cpu-2x / 2GB machine (fly.toml). Set REMBG_MODEL to
-# override (e.g. "u2netp" for a smaller/faster but lower-quality cut).
-_REMBG_MODEL = os.getenv("REMBG_MODEL", "isnet-general-use").strip() or "isnet-general-use"
+# actually used.
+#
+# Model choice is a memory tradeoff. "isnet-general-use" gives the best edges
+# but runs a fixed 1024x1024 forward pass whose peak memory (+ its ~60s cold
+# load) OOM-kills / times out the 2GB shared-cpu machine — the recurring 502 on
+# Remove background. "u2netp" (~4MB, 320x320) is light and fast, so it's
+# reliable here; edges are a bit softer but our matte refinement + shadow close
+# most of the gap. Default to the reliable model; set REMBG_MODEL=isnet-general-use
+# only on a machine with more RAM (4GB+).
+_REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 _rembg_session = None
 
 # Harden the soft matte into a near-binary mask so the background is fully
