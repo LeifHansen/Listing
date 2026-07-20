@@ -1463,7 +1463,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     log.info("publish request: session=%s mode=%s connected=%s", req.session_id,
              req.mode, bool(creds))
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
-                          creds=creds)
+                          creds=creds, is_revise=was_live)
     # Record the outcome: published (live), draft, or dry-run. An errored
     # attempt never demotes a live listing, and never records "live" for a
     # listing that isn't (the old status=req.mode did exactly that).

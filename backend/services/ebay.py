@@ -84,7 +84,8 @@ def _package_weight_and_size(listing: Listing) -> dict:
 _IDENTIFIER_KEYS = {"upc": "upc", "ean": "ean", "isbn": "isbn"}
 
 
-def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> dict:
+def build_inventory_item(session_id: str, listing: Listing, base_url: str,
+                         image_urls: Optional[list[str]] = None) -> dict:
     aspects: dict[str, list[str]] = {}
     identifiers: dict[str, str] = {}
     # Brand is a SINGLE-value aspect on eBay — sending two values (e.g. a brand
@@ -142,7 +143,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str) -> di
         "title": listing.title[:80],
         "description": listing.description or listing.title,
         "aspects": aspects,
-        "imageUrls": _image_urls(session_id, listing.images, base_url),
+        "imageUrls": image_urls or _image_urls(session_id, listing.images, base_url),
         "brand": brand or None,
         "mpn": (mpn if brand else None) or None,
     }
@@ -289,11 +290,36 @@ def _offer_id_from_error(body: dict) -> Optional[str]:
     return None
 
 
+def _live_inventory_images(session_id: str, listing: Listing,
+                           creds: Optional[dict]) -> Optional[list[str]]:
+    """The imageUrls eBay currently stores for this SKU's inventory item, or
+    None if there's no inventory item yet (a fresh publish). Reusing eBay's own
+    set on a REVISE avoids two problems: the local optimized photos may have
+    aged off disk ("photos aren't on the server"), and re-sending our own URLs
+    when eBay already hosts the pictures triggers eBay's "can't have a
+    combination of self-hosted and eBay-hosted pictures" rejection."""
+    token = (creds or {}).get("access_token") or _access_token()
+    if not token:
+        return None
+    try:
+        r = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/inventory_item/{_sku(session_id, listing)}",
+            headers=_headers(token), timeout=30)
+        if r.status_code == 200:
+            urls = ((r.json().get("product") or {}).get("imageUrls")) or []
+            return [u for u in urls if u] or None
+    except Exception as exc:  # noqa: BLE001 - treat as "no reusable images"
+        log.info("getInventoryItem images failed (sku=%s): %s",
+                 _sku(session_id, listing), exc)
+    return None
+
+
 def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
-               creds: Optional[dict] = None, do_publish: bool = True) -> dict:
+               creds: Optional[dict] = None, do_publish: bool = True,
+               image_urls: Optional[list[str]] = None) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
     sku = _sku(session_id, listing)
-    item = build_inventory_item(session_id, listing, base_url)
+    item = build_inventory_item(session_id, listing, base_url, image_urls=image_urls)
     offer = build_offer(session_id, listing, creds)
     base = config.EBAY_API_BASE
     steps: list[dict] = []
@@ -516,15 +542,25 @@ def live_status(session_id: str, listing: Listing,
 
 
 def publish(session_id: str, listing: Listing, mode: str, base_url: str,
-            creds: Optional[dict] = None) -> dict:
+            creds: Optional[dict] = None, is_revise: bool = False) -> dict:
     """Push to eBay, or dry-run if not configured.
 
     creds: a connected user's eBay credentials (access_token + policy ids +
     location). When present we publish with those; otherwise we fall back to
     env config, and dry-run if neither is available.
     mode: "draft" saves in QuickFlip only (no eBay call); "live" publishes to eBay.
+    is_revise: this listing is already live on eBay — reuse eBay's hosted images
+      rather than re-sending ours (avoids the "photos aren't on the server"
+      block and eBay's self-hosted/eBay-hosted image-mix rejection).
     """
-    item = build_inventory_item(session_id, listing, base_url)
+    # Revising a live listing: reuse the images eBay already hosts, so editing
+    # a listing's text/price/specifics works even after the local photos aged
+    # off disk, and we never hand eBay a mix of self-hosted + eBay-hosted URLs.
+    image_urls_override = (_live_inventory_images(session_id, listing, creds)
+                           if (creds and is_revise) else None)
+
+    item = build_inventory_item(session_id, listing, base_url,
+                                image_urls=image_urls_override)
     offer = build_offer(session_id, listing, creds)
     payload = {"inventory_item": item, "offer": offer, "mode": mode}
     export_path = storage.write_export(session_id, "ebay_payload", payload)
@@ -557,11 +593,18 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     # eBay fetches every image URL when the inventory item is created; if the
     # local files are gone (session predates a restart/deploy) it fails with
     # an opaque 25001 'system error'. Applies to drafts too (both create the
-    # inventory item). Fail clearly instead.
-    if not objstore.enabled():
+    # inventory item). Fail clearly instead — unless eBay already hosts the
+    # images (a revise), in which case we reuse those and don't need the files.
+    if not objstore.enabled() and not image_urls_override:
         names = listing.images or storage.list_optimized(session_id)
         opt_dir = storage.optimized_dir(session_id)
         if not names or any(not (opt_dir / n).is_file() for n in names):
+            # Last resort before erroring: if eBay already hosts images for this
+            # SKU, reuse them so the edit still goes through.
+            image_urls_override = (_live_inventory_images(session_id, listing, creds)
+                                   if creds else None)
+        if not image_urls_override and (
+                not names or any(not (opt_dir / n).is_file() for n in names)):
             log.warning("publish blocked: photos missing for session %s", session_id)
             return {
                 "dry_run": False,
@@ -607,7 +650,8 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
 
     try:
         result = _push_live(session_id, listing, mode, base_url, creds,
-                            do_publish=(mode == "live"))
+                            do_publish=(mode == "live"),
+                            image_urls=image_urls_override)
         result["export_path"] = str(export_path)
         return result
     except httpx.HTTPStatusError as exc:
