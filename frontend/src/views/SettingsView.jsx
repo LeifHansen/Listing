@@ -33,6 +33,7 @@ export function SettingsView() {
   const [checking, setChecking] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
+  const [prefs, setPrefs] = useState(null); // new-listing defaults (null = loading)
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -53,15 +54,34 @@ export function SettingsView() {
     if (user && ebay.connected) load();
   }, [user, ebay.connected, load]);
 
+  // New-listing defaults load independently of the eBay connection — they
+  // pre-fill every AI draft and apply even in dry-run mode.
+  useEffect(() => {
+    if (!user) return;
+    api("/api/prefs").then((r) => setPrefs(r.prefs || {})).catch(() => setPrefs({}));
+  }, [user]);
+  const setPref = (k, v) => setPrefs((p) => ({ ...p, [k]: v }));
+
+  // One Save for both default groups: the new-listing packing defaults always,
+  // and the eBay publish defaults (policies + ship-from) when connected. Policy
+  // selections are only sent once loaded, so a click mid-load can't overwrite
+  // them with empty values.
   const save = async () => {
-    const payload = { ...selected };
-    if (postal.trim()) payload.ship_from_postal = postal.trim();
     setSaving(true);
     try {
-      await postJson("/api/ebay/policies", payload);
-      setPoliciesData(null); // refresh the publish-step summary next time
-      toast("Saved. These now apply to every listing you publish.", { kind: "success" });
-      load();
+      if (prefs) {
+        const r = await postJson("/api/prefs", prefs);
+        setPrefs(r.prefs || {});
+      }
+      if (ebay.connected && data) {
+        const payload = { ...selected };
+        if (postal.trim()) payload.ship_from_postal = postal.trim();
+        await postJson("/api/ebay/policies", payload);
+        setPoliciesData(null); // refresh the publish-step summary next time
+        load();
+      }
+      toast("Defaults saved — they apply to every new listing you draft and publish.",
+        { kind: "success" });
     } catch (e) {
       toast(`Couldn't save: ${e.message}`, { kind: "error" });
     } finally {
@@ -128,10 +148,10 @@ export function SettingsView() {
     <SettingsShell>
       <ProfileCard />
 
-      <NewListingDefaultsCard />
-
-      {/* eBay account */}
+      {/* eBay account + all defaults, consolidated into one card with a single
+          Save for both default groups. */}
       <Card>
+        {/* ── eBay account ── */}
         <SectionHeader
           icon={Link2}
           title="eBay account"
@@ -210,203 +230,179 @@ export function SettingsView() {
             )}
           </div>
         )}
-      </Card>
 
-      {/* eBay publish defaults (business policies + ship-from) */}
-      <Card>
-        <SectionHeader
-          icon={SettingsIcon}
-          title="eBay publish defaults"
-          hint="Applied to every listing you publish — shipping, payment & returns come from your eBay business policies"
-        />
-        {!ebay.connected ? (
-          <p className="text-sm text-ink-secondary">
-            Connect your eBay account first — your shipping, payment, and return templates
-            come from there.
-          </p>
-        ) : loading || !data ? (
-          <div className="ai-shimmer h-32 rounded-tile" aria-hidden />
-        ) : (
-          <div className="flex flex-col gap-5 max-w-lg">
-            <Field
-              label={
-                <span className="inline-flex items-center gap-1.5">
-                  <MapPin size={14} aria-hidden /> Ship-from ZIP code
-                </span>
-              }
-              help={data.location_set
-                ? undefined
-                : "Required to publish — eBay needs a location to ship from. Enter your ZIP and Save; we'll create it on eBay for you."}
-            >
-              <Input
-                inputMode="numeric" placeholder="e.g. 90210" className="max-w-44"
-                value={postal}
-                onChange={(e) => setPostal(e.target.value)}
-              />
-              {data.location_set && (
-                <TagPill tone="green" className="self-start mt-1">
-                  <CheckCircle2 size={12} aria-hidden /> eBay ship-from location is set
-                </TagPill>
-              )}
-            </Field>
+        {/* ── New-listing defaults ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={PackageOpen}
+            title="New-listing defaults"
+            hint="Pre-filled on every listing the AI drafts — tweak any of it per listing. Perfect when most of what you sell packs the same way."
+          />
+          {prefs === null ? (
+            <div className="ai-shimmer h-28 rounded-tile" aria-hidden />
+          ) : (
+            <NewListingDefaultsFields prefs={prefs} set={setPref} />
+          )}
+        </div>
 
-            {POLICY_KINDS.map(({ key, field, label }) => {
-              const opts = data.policies[key] || [];
-              return (
-                <Field
-                  key={key} label={label}
-                  help={opts.length ? undefined : `No ${label.toLowerCase()} on eBay yet.`}
-                >
-                  <Select
-                    value={selected[field] || ""}
-                    onChange={(e) => setSelected((s) => ({ ...s, [field]: e.target.value }))}
-                  >
-                    <option value="">— none —</option>
-                    {opts.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}{p.summary ? ` · ${p.summary}` : ""}
-                      </option>
-                    ))}
-                  </Select>
-                </Field>
-              );
-            })}
-
-            <AddShippingServiceRow
-              onCreated={(pol) => {
-                setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
-                setPoliciesData(null);
-                load();
-              }}
-            />
-
-            {POLICY_KINDS.some(({ key }) => !(data.policies[key] || []).length) && (
-              <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm">
-                <p className="text-ink flex gap-2">
-                  <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
-                  <span>
-                    Missing a policy? eBay requires shipping, payment &amp; return policies to
-                    publish. Create them on eBay, then reopen this page.
+        {/* ── eBay publish defaults (business policies + ship-from) ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={SettingsIcon}
+            title="eBay publish defaults"
+            hint="Applied to every listing you publish — shipping, payment & returns come from your eBay business policies"
+          />
+          {!ebay.connected ? (
+            <p className="text-sm text-ink-secondary">
+              Connect your eBay account first — your shipping, payment, and return templates
+              come from there.
+            </p>
+          ) : loading || !data ? (
+            <div className="ai-shimmer h-32 rounded-tile" aria-hidden />
+          ) : (
+            <div className="flex flex-col gap-5 max-w-lg">
+              <Field
+                label={
+                  <span className="inline-flex items-center gap-1.5">
+                    <MapPin size={14} aria-hidden /> Ship-from ZIP code
                   </span>
-                </p>
-                <a
-                  href={data.manage_url} target="_blank" rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 mt-2 font-semibold text-blue"
-                >
-                  Manage eBay business policies <ExternalLink size={13} aria-hidden />
-                </a>
-              </div>
-            )}
+                }
+                help={data.location_set
+                  ? undefined
+                  : "Required to publish — eBay needs a location to ship from. Enter your ZIP and Save; we'll create it on eBay for you."}
+              >
+                <Input
+                  inputMode="numeric" placeholder="e.g. 90210" className="max-w-44"
+                  value={postal}
+                  onChange={(e) => setPostal(e.target.value)}
+                />
+                {data.location_set && (
+                  <TagPill tone="green" className="self-start mt-1">
+                    <CheckCircle2 size={12} aria-hidden /> eBay ship-from location is set
+                  </TagPill>
+                )}
+              </Field>
 
-            <div>
-              <Button variant="primary" size="lg" onClick={save} loading={saving}>
-                Save defaults
-              </Button>
+              {POLICY_KINDS.map(({ key, field, label }) => {
+                const opts = data.policies[key] || [];
+                return (
+                  <Field
+                    key={key} label={label}
+                    help={opts.length ? undefined : `No ${label.toLowerCase()} on eBay yet.`}
+                  >
+                    <Select
+                      value={selected[field] || ""}
+                      onChange={(e) => setSelected((s) => ({ ...s, [field]: e.target.value }))}
+                    >
+                      <option value="">— none —</option>
+                      {opts.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}{p.summary ? ` · ${p.summary}` : ""}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                );
+              })}
+
+              <AddShippingServiceRow
+                onCreated={(pol) => {
+                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
+                  setPoliciesData(null);
+                  load();
+                }}
+              />
+
+              {POLICY_KINDS.some(({ key }) => !(data.policies[key] || []).length) && (
+                <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm">
+                  <p className="text-ink flex gap-2">
+                    <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+                    <span>
+                      Missing a policy? eBay requires shipping, payment &amp; return policies to
+                      publish. Create them on eBay, then reopen this page.
+                    </span>
+                  </p>
+                  <a
+                    href={data.manage_url} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 mt-2 font-semibold text-blue"
+                  >
+                    Manage eBay business policies <ExternalLink size={13} aria-hidden />
+                  </a>
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          )}
+        </div>
+
+        {/* ── one Save for both default groups ── */}
+        <div className="mt-7 pt-6 border-t border-line">
+          <Button variant="primary" size="lg" onClick={save} loading={saving}>
+            Save defaults
+          </Button>
+        </div>
       </Card>
     </SettingsShell>
   );
 }
 
-// New-listing defaults — pre-filled into every AI draft so repeat sellers
-// stop re-typing package weight, dimensions, quantity, and condition.
-function NewListingDefaultsCard() {
-  const { toast } = useToast();
-  const [prefs, setPrefs] = useState(null); // null = loading
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    api("/api/prefs")
-      .then((r) => setPrefs(r.prefs || {}))
-      .catch(() => setPrefs({}));
-  }, []);
-
-  const set = (k, v) => setPrefs((p) => ({ ...p, [k]: v }));
-  const save = async () => {
-    setSaving(true);
-    try {
-      const res = await postJson("/api/prefs", prefs);
-      setPrefs(res.prefs || {});
-      toast("Defaults saved — they'll pre-fill every new listing.", { kind: "success" });
-    } catch (e) {
-      toast(`Couldn't save defaults: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
-  };
-
+// New-listing defaults — pre-filled into every AI draft so repeat sellers stop
+// re-typing package weight, dimensions, quantity, and condition. Fields only;
+// the parent owns the prefs state, loading, and the shared Save button.
+function NewListingDefaultsFields({ prefs, set }) {
   return (
-    <Card>
-      <SectionHeader
-        icon={PackageOpen}
-        title="New-listing defaults"
-        hint="Pre-filled on every listing the AI drafts — tweak any of it per listing. Perfect when most of what you sell packs the same way."
-      />
-      {prefs === null ? (
-        <div className="ai-shimmer h-28 rounded-tile" aria-hidden />
-      ) : (
-        <div className="flex flex-col gap-5 max-w-lg">
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Package weight — lb">
-              <Input
-                type="number" min="0" step="1" inputMode="numeric"
-                value={prefs.package_weight_lb ?? ""}
-                onChange={(e) => set("package_weight_lb", e.target.value)}
-              />
-            </Field>
-            <Field label="Package weight — oz">
-              <Input
-                type="number" min="0" max="15" step="0.1" inputMode="decimal"
-                value={prefs.package_weight_oz ?? ""}
-                onChange={(e) => set("package_weight_oz", e.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              ["package_length_in", "Length (in)"],
-              ["package_width_in", "Width (in)"],
-              ["package_height_in", "Height (in)"],
-            ].map(([key, label]) => (
-              <Field key={key} label={label}>
-                <Input
-                  type="number" min="0" step="0.1" inputMode="decimal"
-                  value={prefs[key] ?? ""}
-                  onChange={(e) => set(key, e.target.value)}
-                />
-              </Field>
+    <div className="flex flex-col gap-5 max-w-lg">
+      <div className="grid grid-cols-2 gap-4">
+        <Field label="Package weight — lb">
+          <Input
+            type="number" min="0" step="1" inputMode="numeric"
+            value={prefs.package_weight_lb ?? ""}
+            onChange={(e) => set("package_weight_lb", e.target.value)}
+          />
+        </Field>
+        <Field label="Package weight — oz">
+          <Input
+            type="number" min="0" max="15" step="0.1" inputMode="decimal"
+            value={prefs.package_weight_oz ?? ""}
+            onChange={(e) => set("package_weight_oz", e.target.value)}
+          />
+        </Field>
+      </div>
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          ["package_length_in", "Length (in)"],
+          ["package_width_in", "Width (in)"],
+          ["package_height_in", "Height (in)"],
+        ].map(([key, label]) => (
+          <Field key={key} label={label}>
+            <Input
+              type="number" min="0" step="0.1" inputMode="decimal"
+              value={prefs[key] ?? ""}
+              onChange={(e) => set(key, e.target.value)}
+            />
+          </Field>
+        ))}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Field label="Condition" help="Set one to always use it; otherwise the AI judges from the photos.">
+          <Select
+            value={prefs.condition || ""}
+            onChange={(e) => set("condition", e.target.value)}
+          >
+            <option value="">Let the AI decide (from photos)</option>
+            {CONDITIONS.map((c) => (
+              <option key={c} value={c}>{conditionLabel(c)}</option>
             ))}
-          </div>
-          <div className="grid sm:grid-cols-2 gap-4">
-            <Field label="Condition" help="Set one to always use it; otherwise the AI judges from the photos.">
-              <Select
-                value={prefs.condition || ""}
-                onChange={(e) => set("condition", e.target.value)}
-              >
-                <option value="">Let the AI decide (from photos)</option>
-                {CONDITIONS.map((c) => (
-                  <option key={c} value={c}>{conditionLabel(c)}</option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Quantity" help="Only applied when listing more than one of an item.">
-              <Input
-                type="number" min="1" step="1" inputMode="numeric"
-                value={prefs.quantity ?? ""}
-                onChange={(e) => set("quantity", e.target.value)}
-              />
-            </Field>
-          </div>
-          <div>
-            <Button variant="primary" onClick={save} loading={saving}>
-              Save defaults
-            </Button>
-          </div>
-        </div>
-      )}
-    </Card>
+          </Select>
+        </Field>
+        <Field label="Quantity" help="Only applied when listing more than one of an item.">
+          <Input
+            type="number" min="1" step="1" inputMode="numeric"
+            value={prefs.quantity ?? ""}
+            onChange={(e) => set("quantity", e.target.value)}
+          />
+        </Field>
+      </div>
+    </div>
   );
 }
 
