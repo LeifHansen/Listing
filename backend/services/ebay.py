@@ -245,11 +245,13 @@ def _body(resp: httpx.Response) -> dict:
 _OFFER_IMMUTABLE = ("sku", "marketplaceId", "format")
 
 
-def _existing_offer_id(client, base: str, token: str, sku: str) -> Optional[str]:
-    """Return the existing offerId for this SKU, or None. Republishing the same
-    session reuses the SKU, so we must update that offer rather than create a
-    duplicate (eBay error 25002 'Offer entity already exists'). Queried by SKU
-    only — extra marketplace/format filters can hide a match."""
+def _existing_offer(client, base: str, token: str, sku: str) -> Optional[dict]:
+    """Return the existing offer record for this SKU, or None. Republishing the
+    same session reuses the SKU, so we must update that offer rather than
+    create a duplicate (eBay error 25002 'Offer entity already exists').
+    Queried by SKU only — extra marketplace/format filters can hide a match.
+    The record's status/listing also tell us whether the offer is already a
+    LIVE listing, which turns a republish into a revision."""
     try:
         r = client.get(
             f"{base}/sell/inventory/v1/offer",
@@ -259,12 +261,22 @@ def _existing_offer_id(client, base: str, token: str, sku: str) -> Optional[str]
         if r.status_code == 200:
             offers = r.json().get("offers", []) or []
             if offers:
-                return offers[0].get("offerId")
+                return offers[0]
         else:
             log.info("getOffers(sku=%s) -> %s %s", sku, r.status_code, _body(r))
     except Exception as exc:  # noqa: BLE001 - treat as "no existing offer"
         log.info("getOffers(sku=%s) failed: %s", sku, exc)
     return None
+
+
+def _is_already_published(body: dict) -> bool:
+    """True when publishOffer failed only because the offer is already a live
+    listing — for us that means the update calls just revised it (success)."""
+    for err in (body or {}).get("errors", []) or []:
+        msg = str(err.get("message", "")).lower()
+        if "already" in msg and "publish" in msg:
+            return True
+    return False
 
 
 def _offer_id_from_error(body: dict) -> Optional[str]:
@@ -311,7 +323,14 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                               "offerId": oid, "body": _body(rr) if rr.content else {}})
                 rr.raise_for_status()
 
-            offer_id = _existing_offer_id(client, base, token, sku)
+            offer_rec = _existing_offer(client, base, token, sku)
+            offer_id = (offer_rec or {}).get("offerId")
+            # A PUBLISHED offer = this session is already a live eBay listing.
+            # The item/offer updates above+below then revise the live listing
+            # directly — publishOffer isn't needed (and would only error).
+            already_live = bool(
+                offer_rec and str(offer_rec.get("status", "")).upper() == "PUBLISHED")
+            live_listing_id = ((offer_rec or {}).get("listing") or {}).get("listingId")
             if offer_id:
                 _update_offer(offer_id)
             else:
@@ -349,18 +368,29 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
 
             # Draft mode stops here: the inventory item + unpublished offer now
             # live on eBay (ready to publish), but we don't call publishOffer.
-            published = False
-            listing_id = None
-            if do_publish:
+            # An already-live offer is different: the update calls above have
+            # ALREADY revised the live listing (that's how the Inventory API
+            # does revisions), so report it as a successful revision whether
+            # or not do_publish was requested.
+            published = already_live
+            revised = already_live
+            listing_id = live_listing_id if already_live else None
+            if do_publish and not already_live:
                 r3 = client.post(
                     f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
                     headers=_headers(token),
                 )
                 r3_body = _body(r3)
                 steps.append({"step": "publishOffer", "status": r3.status_code, "body": r3_body})
-                r3.raise_for_status()
-                published = True
-                listing_id = r3_body.get("listingId")
+                if not r3.is_success and _is_already_published(r3_body):
+                    # Raced/recovered offer that was live all along — the
+                    # updates above revised it; that's success, not failure.
+                    published = True
+                    revised = True
+                else:
+                    r3.raise_for_status()
+                    published = True
+                    listing_id = r3_body.get("listingId")
     except httpx.HTTPStatusError as exc:
         failed = steps[-1]["step"] if steps else "authentication"
         status = exc.response.status_code
@@ -404,8 +434,10 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
         "sku": sku,
         "offer_id": offer_id,
         "published": published,
+        "revised": revised,  # edits pushed onto an already-live listing
         "ebay_draft": not published,  # unpublished offer created on eBay
-        "message": (None if published else
+        "message": ("Live listing updated — your changes are on eBay now."
+                    if revised else None if published else
                     "Draft saved — it's staged on your eBay account as an "
                     "unpublished offer, ready for a one-click publish. Heads-up: "
                     "eBay does NOT show unpublished offers anywhere in Seller Hub "
@@ -414,6 +446,57 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
         "listing_id": listing_id,
         "steps": steps,
     }
+
+
+def withdraw(session_id: str, listing: Listing, creds: Optional[dict] = None) -> dict:
+    """End the live eBay listing for this session (withdrawOffer). Returns
+    {ended | not_live, message}; raises ValueError with a clear reason when
+    eBay refuses."""
+    token = (creds or {}).get("access_token") or _access_token()
+    sku = _sku(session_id, listing)
+    base = config.EBAY_API_BASE
+    with httpx.Client(timeout=30) as client:
+        rec = _existing_offer(client, base, token, sku)
+        if not rec or str(rec.get("status", "")).upper() != "PUBLISHED":
+            return {"ended": False, "not_live": True,
+                    "message": "This listing isn't live on eBay anymore — "
+                               "nothing to end."}
+        r = client.post(
+            f"{base}/sell/inventory/v1/offer/{rec['offerId']}/withdraw",
+            headers=_headers(token),
+        )
+        if not r.is_success:
+            issues = ebay_errors.from_response(r.text)
+            raise ValueError(ebay_errors.headline(issues, "withdrawOffer", r.status_code))
+        log.info("ebay: listing ended (sku=%s offer=%s)", sku, rec["offerId"])
+        return {"ended": True, "message": "Listing ended — it's no longer for sale on eBay."}
+
+
+def live_status(session_id: str, listing: Listing,
+                creds: Optional[dict] = None) -> tuple[Optional[str], str]:
+    """('published'|'ended'|None, listing_id) for this session's offer on eBay.
+    None means "couldn't determine" (network/API blip) — callers must NOT
+    change anything on None, only on a definitive answer."""
+    try:
+        token = (creds or {}).get("access_token") or _access_token()
+        r = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/offer",
+            headers=_headers(token),
+            params={"sku": _sku(session_id, listing)},
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - unknown, not "ended"
+        return None, ""
+    if r.status_code != 200:
+        # 404 with "no offers found" = definitively gone; anything else = unknown.
+        return ("ended", "") if r.status_code == 404 else (None, "")
+    offers = r.json().get("offers", []) or []
+    if not offers:
+        return "ended", ""
+    rec = offers[0]
+    lid = str(((rec.get("listing") or {}).get("listingId")) or "")
+    st = "published" if str(rec.get("status", "")).upper() == "PUBLISHED" else "ended"
+    return st, lid
 
 
 def publish(session_id: str, listing: Listing, mode: str, base_url: str,

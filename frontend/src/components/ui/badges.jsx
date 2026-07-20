@@ -45,6 +45,7 @@ const STATUS_META = {
   draft: { label: "Draft", tone: "blue" },
   dry_run: { label: "Dry run", tone: "yellow" },
   unlisted: { label: "Unlisted find", tone: "yellow" },
+  ended: { label: "Ended", tone: "neutral" },
 };
 
 export function StatusBadge({ status, className }) {

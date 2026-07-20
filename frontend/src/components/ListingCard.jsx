@@ -58,6 +58,16 @@ export function ListingCard({ item, onOpen, onDelete, className }) {
                 Finish &amp; list <ArrowRight size={13} aria-hidden />
               </span>
             )}
+            {(item.status === "published" || item.status === "live") && (
+              <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue">
+                Edit live <ArrowRight size={13} aria-hidden />
+              </span>
+            )}
+            {item.status === "ended" && (
+              <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue">
+                Relist <ArrowRight size={13} aria-hidden />
+              </span>
+            )}
           </div>
         </div>
       </motion.button>

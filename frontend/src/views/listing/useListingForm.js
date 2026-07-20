@@ -48,6 +48,11 @@ export function useListingForm() {
   const [categoryMeta, setCategoryMeta] = useState({ conditions: [], aspects: [] });
 
   const sessionId = session?.sessionId;
+  // Live = this session is (still) a live eBay listing being revised, so the
+  // publish actions become Update / End instead of Publish / Save Draft.
+  const isLive = session?.status === "published" || session?.status === "live";
+  const ebayListingId = session?.listing?.ebay_listing_id
+    || publishResult?.listing_id || "";
 
   // Re-seed the form whenever a different listing session is opened.
   const seededFor = useRef(sessionId);
@@ -300,6 +305,23 @@ export function useListingForm() {
     }
   }), [collect, sessionId, setSession, loadListings, toast]);
 
+  // End (withdraw) the live eBay listing; it stays here as an editable
+  // 'ended' record so it can be relisted later.
+  const endListing = useMemo(() => once("end-listing", async () => {
+    setAiBusy(["Ending the listing on eBay…"]);
+    try {
+      const res = await postJson("/api/ebay/end-listing", { session_id: sessionId });
+      toast(res.message || "Listing ended.", { kind: "success" });
+      setSession((s) => (s ? { ...s, status: "ended" } : s));
+      setPublishResult(null);
+      loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }), [sessionId, setSession, loadListings, toast]);
+
   // ---------- completion per workflow card ----------
   const completion = useMemo(() => {
     const requiredAspects = categoryMeta.aspects.filter((a) => a.required);
@@ -320,6 +342,7 @@ export function useListingForm() {
 
   return {
     sessionId, form, set, setForm, collect,
+    isLive, ebayListingId, endListing,
     aiBusy, setAiBusy,
     publish, publishResult, setPublishResult, runPreflight,
     fixTarget, setFixTarget,

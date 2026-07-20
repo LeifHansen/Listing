@@ -1,5 +1,7 @@
+import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { PlusCircle, Store, LogIn } from "lucide-react";
+import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
@@ -46,8 +48,22 @@ const CONFIGS = {
 
 export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
-  const { listingsState, openListing, setView, startNew, user, openAuth, deleteListing } = useApp();
+  const {
+    listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
+    ebay, loadListings,
+  } = useApp();
   const { confirm } = useToast();
+
+  // Reconcile Live statuses with eBay once per visit: anything sold or ended
+  // on eBay's side flips to Ended here instead of showing Live forever.
+  const synced = useRef(false);
+  useEffect(() => {
+    if (synced.current || kind !== "listings" || !user || !ebay.connected) return;
+    synced.current = true;
+    postJson("/api/ebay/sync-listings", {})
+      .then((r) => { if (r.changed) loadListings({ quiet: true }); })
+      .catch(() => {});
+  }, [kind, user, ebay.connected, loadListings]);
 
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";

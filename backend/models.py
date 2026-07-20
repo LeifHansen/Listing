@@ -41,6 +41,9 @@ class Listing(BaseModel):
     images: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
     missing_info: list[str] = Field(default_factory=list)
+    # Set once the listing goes live: eBay's item id (the /itm/ number).
+    # Powers "View on eBay" links and survives every save/publish round-trip.
+    ebay_listing_id: str = ""
 
 
 class IdentifyResult(BaseModel):
@@ -59,3 +62,7 @@ class PublishRequest(BaseModel):
     session_id: str
     listing: Listing
     mode: str = "draft"  # "draft" or "live"
+
+
+class SessionOnlyRequest(BaseModel):
+    session_id: str

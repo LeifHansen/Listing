@@ -2,12 +2,12 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard,
+  LayoutDashboard, ExternalLink,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
-import { ConfidenceBadge } from "@/components/ui/badges";
+import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
 import { useListingForm } from "./listing/useListingForm";
@@ -77,13 +77,27 @@ function PublishedScreen({ w }) {
           <CheckCircle2 size={17} aria-hidden /> Live on eBay
         </p>
         <h1 className="text-2xl font-bold tracking-tight text-ink">
-          Listing published! 🎉
+          {r?.revised ? "Listing updated! ✅" : "Listing published! 🎉"}
         </h1>
         <p className="text-sm text-ink-secondary">
-          <strong className="text-ink">"{w.form.title || "Your item"}"</strong> is live
-          {r?.listing_id && <> — Listing ID <strong className="text-ink">{r.listing_id}</strong></>}.
-          Find it under Selling → Active in your eBay account.
+          {r?.revised ? (
+            <>Your changes to <strong className="text-ink">"{w.form.title || "your item"}"</strong> are
+              live on eBay now.</>
+          ) : (
+            <><strong className="text-ink">"{w.form.title || "Your item"}"</strong> is live
+              {r?.listing_id && <> — Listing ID <strong className="text-ink">{r.listing_id}</strong></>}.
+              Find it under Selling → Active in your eBay account.</>
+          )}
         </p>
+        {(r?.listing_id || w.ebayListingId) && (
+          <a
+            href={`https://www.ebay.com/itm/${r?.listing_id || w.ebayListingId}`}
+            target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-blue hover:underline"
+          >
+            View it on eBay <ExternalLink size={14} aria-hidden />
+          </a>
+        )}
 
         <div className="mt-2 flex flex-wrap justify-center items-center gap-2.5">
           {next ? (
@@ -146,6 +160,12 @@ function Workflow() {
           </h1>
           <div className="flex items-center gap-2 mt-1">
             {session.confidence && <ConfidenceBadge level={session.confidence} />}
+            {w.isLive && (
+              <TagPill tone="green">
+                <CheckCircle2 size={12} aria-hidden /> Live on eBay — editing updates the real listing
+              </TagPill>
+            )}
+            {session.status === "ended" && <TagPill tone="neutral">Ended on eBay</TagPill>}
           </div>
         </div>
         <Button variant="ghost" onClick={restart}>
