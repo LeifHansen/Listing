@@ -74,6 +74,12 @@ _MIN_FG_COVERAGE = 0.045
 # upscales cleanly (product cutouts don't need pixel-perfect edges). Override
 # with REMBG_MAX_SIDE.
 _REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
+# The photo-studio 'Remove background' runs the matte at the model's native
+# resolution (isnet is a 1024px model) for noticeably crisper edges — it's one
+# deliberate image, not a bulk batch, so the extra time/memory is worth it, and
+# it falls back to the smaller size if a 1024 inference runs out of memory.
+# Override with REMBG_STUDIO_MAX_SIDE.
+_STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", "1024") or "1024")
 # Draw a soft contact shadow under the cut-out subject so the white-background
 # result still reads like a studio product shot. Pure Pillow, no external API.
 # Disable with BG_SHADOW=off.
@@ -81,15 +87,17 @@ _BG_SHADOW = os.getenv("BG_SHADOW", "on").strip().lower() not in (
     "off", "0", "false", "no", "none", "")
 
 
-def _alpha_mask(img_rgb: Image.Image) -> Image.Image:
-    """rembg subject alpha (mode L, same size as img_rgb), computed on a
-    downscaled copy for speed/memory, then upscaled back."""
+def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.Image:
+    """rembg subject alpha (mode L, same size as img_rgb), computed on a copy
+    capped to `max_side` (defaults to the fast bulk size) then upscaled back.
+    A larger max_side feeds the model more detail = crisper edges."""
     global _rembg_session
     from rembg import new_session, remove
 
     if _rembg_session is None:
         _rembg_session = new_session(_REMBG_MODEL)
-    scale = min(1.0, _REMBG_MAX_SIDE / max(img_rgb.size))
+    cap = max_side or _REMBG_MAX_SIDE
+    scale = min(1.0, cap / max(img_rgb.size))
     small = (img_rgb.resize((max(1, round(img_rgb.width * scale)),
                              max(1, round(img_rgb.height * scale))), Image.LANCZOS)
              if scale < 1 else img_rgb)
@@ -102,14 +110,20 @@ def _alpha_mask(img_rgb: Image.Image) -> Image.Image:
     return alpha
 
 
-def _harden_alpha(alpha: Image.Image) -> Image.Image:
-    """Despeckle + near-binary threshold: background fully transparent (no
-    ghost), subject fully opaque, thin anti-aliased edge between."""
+def _refine_alpha(alpha: Image.Image) -> Image.Image:
+    """Clean the matte into a natural cutout: despeckle, kill the faint
+    background ghost, trim the ~1px background halo around the subject, then
+    lightly feather the edge so it blends instead of looking stickered-on."""
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
     span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
-    return alpha.point(lambda a: 0 if a < _ALPHA_LOW
-                       else 255 if a > _ALPHA_HIGH
-                       else round((a - _ALPHA_LOW) * 255 / span))
+    alpha = alpha.point(lambda a: 0 if a < _ALPHA_LOW
+                        else 255 if a > _ALPHA_HIGH
+                        else round((a - _ALPHA_LOW) * 255 / span))
+    # Erode 1px to cut the residual background fringe, then a sub-pixel feather
+    # so the composited edge is smooth rather than jagged.
+    alpha = alpha.filter(ImageFilter.MinFilter(3))
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
+    return alpha
 
 
 def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
@@ -132,17 +146,14 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
     return canvas
 
 
-def _cutout_on_white(img: Image.Image) -> Optional[Image.Image]:
+def _cutout_on_white(img: Image.Image,
+                     max_side: Optional[int] = None) -> Optional[Image.Image]:
     """In-house rembg cutout composited on pure white (with a soft drop shadow
     unless BG_SHADOW=off) — or None when the result is clearly a failure
     (subject erased), so callers keep the original photo instead of saving a
-    destroyed one.
-
-    The model runs at reduced resolution (see _alpha_mask) so it stays fast and
-    light; the full-res photo keeps its detail.
-    """
+    destroyed one. `max_side` caps the matte resolution (higher = crisper)."""
     rgb = img.convert("RGB")
-    alpha = _harden_alpha(_alpha_mask(rgb))
+    alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side))
     opaque = sum(alpha.histogram()[128:])
     if opaque / max(1, alpha.width * alpha.height) < _MIN_FG_COVERAGE:
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
@@ -164,15 +175,24 @@ def _remove_background(img: Image.Image) -> Image.Image:
 
 
 def remove_background_white(img: Image.Image) -> Image.Image:
-    """Photo-studio 'Remove background'. Raises when the cutout fails so the
+    """Photo-studio 'Remove background'. Runs the matte at the higher studio
+    resolution for crisper edges, falling back to the fast size if a big
+    inference runs out of memory. Raises when the cutout genuinely fails so the
     editor can tell the user instead of silently doing nothing."""
-    out = _cutout_on_white(img)
-    if out is None:
-        raise ValueError(
-            "Couldn't cleanly separate this photo from its background — it's "
-            "likely a close-up, dark, or low-contrast shot. Try Auto clean, or "
-            "paint the background out with the brush.")
-    return out
+    for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
+        try:
+            out = _cutout_on_white(img, max_side=side)
+        except Exception as exc:  # noqa: BLE001 - retry smaller on OOM/model error
+            log.warning("bg-removal: matte at %dpx failed (%s) — retrying smaller",
+                        side, exc)
+            continue
+        if out is not None:
+            return out
+        break  # a clean run that erased the subject won't improve when smaller
+    raise ValueError(
+        "Couldn't cleanly separate this photo from its background — it's "
+        "likely a close-up, dark, or low-contrast shot. Try Auto clean, or "
+        "paint the background out with the brush.")
 
 
 def warm() -> None:

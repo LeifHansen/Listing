@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  RotateCcw, Crop, Sparkles, Highlighter, CheckCircle2, Eraser, Wand2,
+  RotateCcw, Crop, Highlighter, CheckCircle2, Eraser,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -9,11 +9,11 @@ import { useToast } from "@/components/ui/Toaster";
 import { api } from "@/lib/api";
 import { cn, mediaUrl } from "@/lib/utils";
 
-/* Photo studio: brush clean-up, a manual crop tool, and three AI assists —
-   - analyze: re-checks the item's borders and highlights leftover background
-   - auto clean: whitens everything the AI says is outside the item
-   - remove background: full rembg cutout onto pure white
-   - smart crop: crops to the item with a clean margin
+/* Photo studio: two actions plus manual clean-up —
+   - remove background: in-house cutout onto pure white
+   - crop: drag a rectangle and apply
+   - highlight leftovers: re-check the item's borders and tint any leftover
+     background red, so you can paint it out with the white brush.
    Every action only previews onto the canvas; nothing is stored until Save. */
 
 const HIGHLIGHT_COLOR = "#e85c46"; // brand coral, tinted over leftovers
@@ -169,22 +169,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     await analyze(blob);
   }, [analyze, clearOverlay]);
 
-  const autoClean = useCallback(async () => {
-    const canvas = canvasRef.current;
-    if (!canvas || aiBusy) return;
-    setAiBusy("Re-checking borders & cleaning the background…");
-    try {
-      const blob = await canvasBlob(canvas);
-      const res = await studioCall("/api/image/auto-clean", sessionId, name, blob);
-      await applyPreview(res.image);
-      toast("Background cleaned — review and Save to keep it.", { kind: "success" });
-    } catch (e) {
-      toast(`Auto clean failed: ${e.message}`, { kind: "error" });
-    } finally {
-      setAiBusy(null);
-    }
-  }, [aiBusy, sessionId, name, applyPreview, toast]);
-
   const removeBg = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || aiBusy) return;
@@ -243,26 +227,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     analyze(blob);
   }, [cropRect, clearOverlay, analyze, toast]);
 
-  const smartCrop = useCallback(async () => {
-    const canvas = canvasRef.current;
-    if (!canvas || aiBusy) return;
-    setAiBusy("Finding the item & framing the shot…");
-    try {
-      const blob = await canvasBlob(canvas);
-      const res = await studioCall("/api/image/smart-crop", sessionId, name, blob);
-      if (!res.applied) {
-        toast(res.message || "Already nicely framed — no crop needed.", { kind: "info" });
-        return;
-      }
-      await applyPreview(res.image);
-      toast("Cropped to the item — review and Save to keep it.", { kind: "success" });
-    } catch (e) {
-      toast(`Smart crop failed: ${e.message}`, { kind: "error" });
-    } finally {
-      setAiBusy(null);
-    }
-  }, [aiBusy, sessionId, name, applyPreview, toast]);
-
   const toggleHighlight = useCallback(async () => {
     if (aiBusy || checking) return;
     if (highlight) {
@@ -287,9 +251,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     setCropRect(null);
     (async () => {
       await load();
-      if (initialAction === "crop") smartCrop();
-      else if (initialAction === "removebg") removeBg();
-      else if (initialAction === "manualcrop") {
+      if (initialAction === "removebg") removeBg();
+      else if (initialAction === "manualcrop" || initialAction === "crop") {
         setHighlight(false);
         clearOverlay();
         setTool("crop");
@@ -429,12 +392,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <Button variant="soft" size="sm" onClick={removeBg} disabled={!!aiBusy}>
           <Eraser aria-hidden /> Remove background
-        </Button>
-        <Button variant="soft" size="sm" onClick={autoClean} disabled={!!aiBusy}>
-          <Sparkles aria-hidden /> Auto clean
-        </Button>
-        <Button variant="soft" size="sm" onClick={smartCrop} disabled={!!aiBusy}>
-          <Wand2 aria-hidden /> Smart crop
         </Button>
         <Button
           variant={tool === "crop" ? "primary" : "soft"} size="sm"
