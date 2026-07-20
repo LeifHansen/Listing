@@ -22,9 +22,22 @@ const PHASE_MESSAGES = {
   identifying: ["Identifying items…", "Writing titles & prices…", "Detecting brands…"],
 };
 
+// The fields eBay requires to publish — surfaced per auto-created draft so the
+// seller sees at a glance which items still need a value before going live.
+function missingRequired(l = {}) {
+  const miss = [];
+  if (!(l.title || "").trim()) miss.push("title");
+  if (!(Number(l.price) > 0)) miss.push("price");
+  const oz = (parseFloat(l.package_weight_lb) || 0) * 16 + (parseFloat(l.package_weight_oz) || 0);
+  if (!(oz > 0)) miss.push("weight");
+  if (!(l.category_id || "").toString().trim()) miss.push("category");
+  return miss;
+}
+
 function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, publishing }) {
   const l = item.listing || {};
   const editable = item.status !== "error";
+  const missing = item.status === "draft" ? missingRequired(l) : [];
   return (
     <motion.div
       layout
@@ -57,7 +70,11 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
               <CheckCircle2 size={12} aria-hidden /> Live{item.listing_id ? ` · ${item.listing_id}` : ""}
             </TagPill>
           )}
-          {item.status === "draft" && <TagPill tone="blue">Draft</TagPill>}
+          {item.status === "draft" && (
+            missing.length
+              ? <TagPill tone="yellow"><AlertTriangle size={12} aria-hidden /> Needs info</TagPill>
+              : <TagPill tone="blue">Draft</TagPill>
+          )}
           {item.status === "error" && (
             <TagPill tone="yellow"><AlertTriangle size={12} aria-hidden /> Needs attention</TagPill>
           )}
@@ -88,6 +105,11 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
       ) : (
         <p className="text-[13px] text-ink-secondary">
           {item.error || "Couldn't identify this item."}
+        </p>
+      )}
+      {item.status === "draft" && missing.length > 0 && (
+        <p className="text-xs text-warning font-medium">
+          Missing required: {missing.join(", ")}
         </p>
       )}
       {item.status === "draft" && item.error && (
@@ -244,6 +266,7 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const busy = job && !job.done;
   const phase = job?.phase || "uploading";
   const drafts = items.filter((it) => it.status === "draft");
+  const needInfo = drafts.filter((it) => missingRequired(it.listing).length > 0);
   const progressDetail = phase === "identifying" && job?.total_items
     ? ` (${job.current}/${job.total_items})`
     : phase === "optimizing" && job?.total_photos
@@ -265,6 +288,20 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
                   <CheckCircle2 size={17} className="text-success" aria-hidden />
                   {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}. Review below — they're also saved in Drafts.
                 </>}
+          </p>
+        </Card>
+      )}
+
+      {job?.done && needInfo.length > 0 && (
+        <Card className="py-3.5 border-warning/40 bg-warning-soft">
+          <p className="text-sm text-ink flex items-start gap-2">
+            <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
+            <span>
+              <strong>{needInfo.length}</strong> of {drafts.length} draft{drafts.length === 1 ? "" : "s"}{" "}
+              {needInfo.length === 1 ? "is" : "are"} missing info eBay requires (title, price, weight,
+              or category) — flagged <strong className="text-warning">Needs info</strong> below. Fill
+              those in (here or in the full editor) before publishing.
+            </span>
           </p>
         </Card>
       )}
