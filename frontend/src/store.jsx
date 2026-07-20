@@ -128,7 +128,9 @@ export function AppProvider({ children }) {
   const openListing = useCallback(async (id) => {
     try {
       const rec = await api(`/api/listings/${id}`);
-      setSession({ sessionId: rec.id, listing: rec.listing, confidence: null });
+      // status rides along so the workflow knows a live listing is being
+      // REVISED (Update Live Listing / End listing) rather than published.
+      setSession({ sessionId: rec.id, listing: rec.listing, confidence: null, status: rec.status });
       setView("new");
     } catch (e) {
       toast(`Couldn't open listing: ${e.message}`, { kind: "error" });

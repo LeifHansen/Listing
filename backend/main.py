@@ -21,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
-from .models import Listing, PublishRequest, RefineRequest
+from .models import Listing, PublishRequest, RefineRequest, SessionOnlyRequest
 from .services import claude_ai, ebay, images, preflight, pricing, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
@@ -1375,6 +1375,11 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
+    # A listing that's already live must NEVER lose its 'published' status in
+    # our records just because a revise attempt was blocked or errored — the
+    # listing is still live on eBay either way.
+    prev = db.get_listing(req.session_id) or {}
+    was_live = prev.get("status") in ("published", "live")
     # Pre-publish checklist: catch everything eBay would reject BEFORE the
     # round-trip, with field-targeted fixes. Only gates a real (connected)
     # live publish — dry-runs and drafts stay permissive.
@@ -1382,7 +1387,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         problems = preflight.errors_only(_preflight_issues(request, req.listing, "live"))
         if problems:
             db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status="draft", user_id=_uid(request))
+                              status="published" if was_live else "draft",
+                              user_id=_uid(request))
             log.info("publish blocked by preflight: session=%s issues=%d",
                      req.session_id, len(problems))
             return JSONResponse({
@@ -1409,19 +1415,79 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
              req.mode, bool(creds))
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
                           creds=creds)
-    # Record the outcome: published (live), draft, or dry-run.
+    # Record the outcome: published (live), draft, or dry-run. An errored
+    # attempt never demotes a live listing, and never records "live" for a
+    # listing that isn't (the old status=req.mode did exactly that).
     if result.get("published"):
         status = "published"
-        log.info("publish OK: session=%s listing_id=%s", req.session_id, result.get("listing_id"))
+        log.info("publish OK: session=%s listing_id=%s revised=%s",
+                 req.session_id, result.get("listing_id"), result.get("revised"))
     elif result.get("error"):
-        status = req.mode
+        status = "published" if was_live else "draft"
         log.warning("publish error: session=%s step=%s", req.session_id, result.get("step"))
     elif result.get("dry_run"):
         status = "dry_run"
     else:
-        status = req.mode
-    db.upsert_listing(req.session_id, req.listing.model_dump(), status=status, user_id=_uid(request))
+        status = "published" if was_live else req.mode
+    dump = req.listing.model_dump()
+    # Persist the eBay item id so the app can link to (and keep tracking) the
+    # live listing across sessions.
+    if result.get("listing_id"):
+        dump["ebay_listing_id"] = str(result["listing_id"])
+    db.upsert_listing(req.session_id, dump, status=status, user_id=_uid(request))
     return JSONResponse(result)
+
+
+@app.post("/api/ebay/end-listing")
+def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
+    """End (withdraw) this session's live eBay listing. The listing stays in
+    the app as status 'ended' so it can be edited and relisted later."""
+    rec = db.get_listing(req.session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    creds = _ebay_creds_for(request)
+    if not (creds or config.ebay_ready()):
+        raise HTTPException(400, "Connect eBay first.")
+    listing = Listing(**(rec.get("listing") or {}))
+    try:
+        res = ebay.withdraw(req.session_id, listing, creds=creds)
+    except ValueError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if res.get("ended") or res.get("not_live"):
+        db.upsert_listing(req.session_id, rec.get("listing") or {},
+                          status="ended", user_id=_uid(request))
+    return res
+
+
+@app.post("/api/ebay/sync-listings")
+def sync_listings(request: Request) -> dict:
+    """Reconcile our 'live' listings with eBay: anything ended or sold on
+    eBay's side flips to 'ended' here instead of showing Live forever. Also
+    backfills missing eBay item ids. Definitive answers only — an API blip
+    changes nothing."""
+    creds = _ebay_creds_for(request)
+    user = auth.current_user(request)
+    if not (creds or config.ebay_ready()) or not user:
+        return {"checked": 0, "changed": 0}
+    items = [i for i in db.list_listings(limit=200, user_id=user["id"])
+             if i.get("status") in ("published", "live")][:40]
+    changed = 0
+    for it in items:
+        listing = Listing(**(it.get("listing") or {}))
+        status, lid = ebay.live_status(it["id"], listing, creds=creds)
+        if status == "ended":
+            db.upsert_listing(it["id"], it.get("listing") or {},
+                              status="ended", user_id=user["id"])
+            changed += 1
+        elif status == "published" and lid and not listing.ebay_listing_id:
+            data = {**(it.get("listing") or {}), "ebay_listing_id": lid}
+            db.upsert_listing(it["id"], data, status="published", user_id=user["id"])
+    if changed:
+        log.info("ebay sync: %d listing(s) flipped to ended for user=%s",
+                 changed, user["id"])
+    return {"checked": len(items), "changed": changed}
 
 
 @app.get("/media/{session_id}/optimized/{name}")

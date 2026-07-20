@@ -1,8 +1,12 @@
 import { useEffect } from "react";
 import { motion } from "framer-motion";
-import { Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks } from "lucide-react";
+import {
+  Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks,
+  RefreshCw, ExternalLink, Ban,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import { useApp } from "@/store";
+import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
 import { Button } from "@/components/ui/Button";
 
@@ -35,9 +39,11 @@ export function PublishCard({ w }) {
   return (
     <WorkflowCard
       id="publish" icon={Rocket} title="Publish"
-      hint={canPublishLive
-        ? "Save as Draft saves it here and stages it on your connected eBay account (as an unpublished offer); Publish Live makes it a live listing"
-        : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
+      hint={w.isLive
+        ? "This listing is LIVE on eBay — Update Live Listing pushes your edits straight to it; End listing takes it off eBay"
+        : canPublishLive
+          ? "Save as Draft saves it here and stages it on your connected eBay account (as an unpublished offer); Publish Live makes it a live listing"
+          : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
       state={publishedOk ? "complete" : "todo"}
     >
       <div className="flex flex-col gap-5">
@@ -148,10 +154,24 @@ export function PublishCard({ w }) {
 // PublishBar — the primary action, pinned to the bottom of the workflow so
 // Save/Publish is always one tap away instead of stranded at the end of a long
 // form. Readiness count comes from the same per-card completion the cards show.
+// For a LIVE listing the actions flip to revise mode: Update Live Listing +
+// End listing (Save Draft disappears — on a published offer any eBay save
+// goes straight to the live listing, so a "draft" would mislead).
 export function PublishBar({ w }) {
   const { canPublishLive } = useApp();
+  const { confirm } = useToast();
   const attention = Object.values(w.completion).filter((s) => s === "attention").length;
   const ready = attention === 0;
+
+  const askEnd = async () => {
+    if (await confirm({
+      title: "End this listing on eBay?",
+      message: "It comes off eBay immediately. It stays here as an ended listing you can edit and relist anytime.",
+      confirmLabel: "End listing",
+      danger: true,
+    })) w.endListing();
+  };
+
   return (
     <div className="sticky bottom-20 md:bottom-4 z-30 pt-1">
       <div className="bg-card/95 backdrop-blur border border-line-strong rounded-card shadow-float p-2.5 sm:p-3 flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -160,21 +180,43 @@ export function PublishBar({ w }) {
             ? <CheckCircle2 size={18} className="text-success shrink-0" aria-hidden />
             : <AlertTriangle size={18} className="text-warning shrink-0" aria-hidden />}
           <span className="text-sm font-semibold text-ink truncate">
-            {ready
-              ? "Looks ready — publish when you are"
-              : `${attention} field${attention === 1 ? "" : "s"} to finish`}
+            {w.isLive
+              ? (ready ? "Live on eBay — edits publish straight to the listing"
+                       : `Live on eBay — ${attention} field${attention === 1 ? "" : "s"} to finish`)
+              : ready
+                ? "Looks ready — publish when you are"
+                : `${attention} field${attention === 1 ? "" : "s"} to finish`}
           </span>
         </span>
         <span className="flex items-center gap-2 shrink-0">
-          <Button variant="ghost" size="sm" onClick={w.runPreflight} className="hidden sm:inline-flex">
-            <ListChecks aria-hidden /> Check
-          </Button>
-          <Button variant="secondary" size="md" onClick={() => w.publish("draft")}>
-            <Save aria-hidden /> Save Draft
-          </Button>
-          <Button variant="primary" size="md" onClick={() => w.publish("live")}>
-            <Rocket aria-hidden /> {canPublishLive ? "Publish Live" : "Publish"}
-          </Button>
+          {w.isLive ? (
+            <>
+              {w.ebayListingId && (
+                <Button variant="ghost" size="sm" className="hidden sm:inline-flex"
+                  onClick={() => window.open(`https://www.ebay.com/itm/${w.ebayListingId}`, "_blank", "noopener")}>
+                  <ExternalLink aria-hidden /> View on eBay
+                </Button>
+              )}
+              <Button variant="ghost" size="md" onClick={askEnd}>
+                <Ban aria-hidden /> End listing
+              </Button>
+              <Button variant="primary" size="md" onClick={() => w.publish("live")}>
+                <RefreshCw aria-hidden /> Update Live Listing
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="ghost" size="sm" onClick={w.runPreflight} className="hidden sm:inline-flex">
+                <ListChecks aria-hidden /> Check
+              </Button>
+              <Button variant="secondary" size="md" onClick={() => w.publish("draft")}>
+                <Save aria-hidden /> Save Draft
+              </Button>
+              <Button variant="primary" size="md" onClick={() => w.publish("live")}>
+                <Rocket aria-hidden /> {canPublishLive ? "Publish Live" : "Publish"}
+              </Button>
+            </>
+          )}
         </span>
       </div>
     </div>
