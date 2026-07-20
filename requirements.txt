@@ -12,5 +12,7 @@ psycopg[binary]==3.2.3
 bcrypt==4.2.1
 PyJWT==2.10.1
 boto3==1.35.99
-# Background removal is a Photoroom API call (PHOTOROOM_API_KEY) — no local
-# model, so no rembg/onnxruntime and none of their memory footprint.
+# In-house background removal: rembg pulls in onnxruntime + a ~176MB
+# isnet-general-use model (baked into the image at build time, see Dockerfile).
+rembg==2.0.59
+onnxruntime==1.20.1

@@ -117,14 +117,10 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
-# --- Photoroom (background removal / subject segmentation) -----------------
-PHOTOROOM_API_KEY = os.getenv("PHOTOROOM_API_KEY", "").strip()
-# Drop-shadow style drawn under the subject when removing a background, via
-# Photoroom's v2 edit API: "ai.soft" (natural, recommended), "ai.hard", or
-# "ai.floating"; set to "off" to disable. Needs a plan that includes the
-# Image Editing API — when it doesn't, the app falls back to the plain
-# cutout (no shadow) automatically.
-PHOTOROOM_SHADOW = os.getenv("PHOTOROOM_SHADOW", "ai.soft").strip().lower()
+# --- Background removal (in-house) -----------------------------------------
+# Removal runs in-process via rembg (see services/images.py). No external
+# service or API key. Tunables (all optional): REMBG_MODEL, REMBG_MAX_SIDE,
+# BG_SHADOW — read directly from the environment in images.py.
 
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
@@ -181,10 +177,6 @@ def ebay_oauth_ready() -> bool:
 
 def anthropic_ready() -> bool:
     return bool(ANTHROPIC_API_KEY)
-
-
-def photoroom_ready() -> bool:
-    return bool(PHOTOROOM_API_KEY)
 
 
 def ebay_status() -> dict:
