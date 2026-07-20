@@ -404,3 +404,78 @@ def refine(listing: Listing, prompt: str) -> Listing:
     # Preserve images explicitly.
     updated.images = listing.images
     return updated
+
+
+_ASPECTS_FILL_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{ "specifics": [ {"name": "<exact aspect name>", "value": "<value>"} ] }
+Rules:
+- Fill each listed eBay item specific you can SEE in the photos or confidently
+  infer. Use the aspect's EXACT name as given.
+- For an aspect shown as "(choose one of: ...)", the value MUST be exactly one
+  of those allowed values, copied verbatim (this is how eBay's fixed-value /
+  checkbox specifics are matched). If none fits, omit that aspect.
+- For "(free text)" aspects, give the single best concise value eBay expects.
+- Omit any aspect you cannot determine — never guess or invent.
+- One value per aspect name.
+"""
+
+
+def fill_aspects(image_paths: list[Path], listing: Listing,
+                 aspects: list[dict]) -> list[ItemSpecific]:
+    """Fill eBay's category item specifics from the product photos. `aspects`
+    is the taxonomy list [{name, required, mode, values}]. Returns validated
+    ItemSpecifics — SELECTION_ONLY values are matched to eBay's allowed list so
+    the fixed-value ("checkbox") specifics actually populate on eBay."""
+    named = [a for a in aspects if a.get("name")]
+    if not named or not image_paths:
+        return []
+    client = _client()
+    lines = []
+    for a in named:
+        if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
+            vals = ", ".join(a["values"][:40])
+            lines.append(f'- "{a["name"]}" (choose one of: {vals})')
+        else:
+            lines.append(f'- "{a["name"]}" (free text)')
+    context = (f"Title: {listing.title}\nBrand: {listing.brand}\n"
+               f"Category: {listing.category_suggestion}\n"
+               f"Description: {(listing.description or '')[:500]}")
+    content: list[dict] = [_image_block(p) for p in image_paths[:8]]
+    content.append({"type": "text", "text": (
+        "You are cataloguing an item for eBay. Using the product photos and the "
+        "context below, fill in these eBay item specifics as accurately as "
+        "possible.\n\nCONTEXT:\n" + context + "\n\nEBAY ITEM SPECIFICS TO FILL:\n"
+        + "\n".join(lines) + "\n\n" + _ASPECTS_FILL_SCHEMA)})
+
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=1500,
+        messages=[{"role": "user", "content": content}],
+    )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the item-specifics response was cut off; try again")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    data = _extract_json(text)
+
+    by_name = {a["name"].strip().lower(): a for a in named}
+    out: list[ItemSpecific] = []
+    seen: set[str] = set()
+    for s in (data.get("specifics") or []):
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("name", "")).strip()
+        value = str(s.get("value", "")).strip()
+        key = name.lower()
+        if not name or not value or key not in by_name or key in seen:
+            continue
+        a = by_name[key]
+        if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
+            match = next((v for v in a["values"]
+                          if v.strip().lower() == value.lower()), None)
+            if not match:
+                continue  # not a valid eBay value — drop rather than get rejected
+            value = match  # canonical casing eBay expects
+        seen.add(key)
+        out.append(ItemSpecific(name=a["name"], value=value))
+    return out

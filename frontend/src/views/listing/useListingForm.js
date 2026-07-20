@@ -322,6 +322,31 @@ export function useListingForm() {
     }
   }), [sessionId, setSession, loadListings, toast]);
 
+  // Auto-fill eBay's category item specifics from the photos (fixed-value
+  // aspects picked from eBay's allowed values), merged without clobbering
+  // anything the seller already entered.
+  const autofillSpecifics = useMemo(() => once("autofill-specifics", async () => {
+    if (!form.category_id.trim()) {
+      toast("Pick an eBay category first — specifics are per category.", { kind: "warning" });
+      return;
+    }
+    setAiBusy(["Reading your photos for eBay item specifics…"]);
+    try {
+      const res = await postJson(`/api/autofill-specifics/${sessionId}`, {
+        session_id: sessionId, listing: collect(), mode: "draft",
+      });
+      setForm((f) => ({ ...f, item_specifics: (res.item_specifics || []).map((s) => ({ ...s })) }));
+      toast(res.added
+        ? `Filled ${res.added} item specific${res.added === 1 ? "" : "s"} from your photos.`
+        : "Nothing new to add — your item specifics already look complete.",
+        { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't auto-fill specifics: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }), [form.category_id, sessionId, collect, setForm, toast]);
+
   // ---------- completion per workflow card ----------
   const completion = useMemo(() => {
     const requiredAspects = categoryMeta.aspects.filter((a) => a.required);
@@ -347,6 +372,7 @@ export function useListingForm() {
     publish, publishResult, setPublishResult, runPreflight,
     fixTarget, setFixTarget,
     refine,
+    autofillSpecifics,
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,

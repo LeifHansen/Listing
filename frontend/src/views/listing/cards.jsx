@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
+  Sparkles,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -251,7 +252,10 @@ export function SpecificsCard({ w }) {
           </div>
         )}
 
-        <div>
+        <div className="flex flex-wrap gap-2.5">
+          <Button variant="soft" onClick={w.autofillSpecifics}>
+            <Sparkles aria-hidden /> Auto-fill from photos
+          </Button>
           <Button
             variant="ghost"
             onClick={() => w.set("item_specifics", [...w.form.item_specifics, { name: "", value: "" }])}
