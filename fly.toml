@@ -36,8 +36,9 @@ primary_region = 'sjc'
   min_machines_running = 1
 
 [[vm]]
-  # Background removal loads onnxruntime + rembg (scipy/numba). 1GB thrashes
-  # and the request hangs; 2GB + 2 vCPUs runs it in a few seconds. Bump to 4GB
-  # if heavy bulk background-removal batches ever OOM.
+  # Background removal loads onnxruntime + rembg (scipy/numba). At 2GB the app
+  # runs the light u2netp model (REMBG_MODEL default). To use the higher-quality
+  # isnet-general-use model, bump memory to '4gb' AND set REMBG_MODEL secret —
+  # isnet's 1024x1024 pass OOM-kills a 2GB machine.
   size = 'shared-cpu-2x'
   memory = '2gb'

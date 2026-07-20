@@ -22,10 +22,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Bake the background-removal model into the image so there's no slow/fragile
-# download at request time. isnet-general-use (~176MB) is rembg's best general
-# model — far better on clothing/dark/detail shots than the tiny u2netp. Must
-# match REMBG_MODEL's default in backend/services/images.py.
-RUN python -c "from rembg import new_session; new_session('isnet-general-use')"
+# download at request time. u2netp (~4MB) is the light, memory-safe default for
+# the 2GB machine; must match REMBG_MODEL's default in services/images.py.
+RUN python -c "from rembg import new_session; new_session('u2netp')"
 
 COPY backend ./backend
 COPY --from=frontend /app/frontend/dist ./frontend/dist
