@@ -343,6 +343,25 @@ def delete_ebay_account(user_id: str) -> None:
         log.warning(f"db: delete_ebay_account failed: {exc}")
 
 
+def disconnect_ebay_account(user_id: str) -> None:
+    """Disconnect the live link (clear the refresh token) but KEEP the saved
+    policy/location preferences and which account they belonged to, so
+    reconnecting the SAME account restores them instead of reverting to
+    auto-picked defaults (e.g. eBay Standard Envelope). Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            acct = s.get(EbayAccount, user_id)
+            if acct is not None:
+                acct.refresh_token = ""  # 'connected' checks this; prefs stay
+                acct.updated_at = _now()
+                s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: disconnect_ebay_account failed: {exc}")
+
+
 def get_listing(listing_id: str) -> Optional[dict]:
     try:
         eng = _get_engine()
