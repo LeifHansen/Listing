@@ -985,6 +985,52 @@ def identify(session_id: str, request: Request) -> dict:
     return result.model_dump()
 
 
+@app.post("/api/autofill-specifics/{session_id}")
+def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -> dict:
+    """Fill eBay's required/recommended item specifics for the listing's
+    category from the product photos — choosing fixed-value ("checkbox")
+    aspects from eBay's own allowed values — and merge them in without
+    overwriting anything the seller already set."""
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    _assert_session_owner(session_id, request)
+    listing = req.listing
+    if not listing.category_id:
+        raise HTTPException(400, "Pick an eBay category first — specifics are per category.")
+    if not config.taxonomy_ready():
+        raise HTTPException(400, "eBay taxonomy not configured (need EBAY_CLIENT_ID/SECRET).")
+    try:
+        aspects = taxonomy.item_aspects(listing.category_id).get("aspects", [])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Couldn't load eBay item specifics: {exc}") from exc
+    opt_dir = storage.optimized_dir(session_id)
+    names = listing.images or storage.list_optimized(session_id)
+    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    if not paths:
+        raise HTTPException(400, "This listing's photos aren't on the server anymore.")
+    try:
+        filled = claude_ai.fill_aspects(paths, listing, aspects)
+    except Exception as exc:  # noqa: BLE001
+        code, message = claude_ai.ai_error_message(exc)
+        log.warning("autofill-specifics failed (session=%s): %s", session_id, exc)
+        raise HTTPException(code, message) from exc
+    # Merge: keep the seller's existing non-empty values; add the rest.
+    have = {s.name.strip().lower() for s in listing.item_specifics if s.value.strip()}
+    added = 0
+    for f in filled:
+        if f.name.strip().lower() not in have:
+            listing.item_specifics.append(f)
+            have.add(f.name.strip().lower())
+            added += 1
+    storage.save_listing(session_id, listing)
+    prev_status = (db.get_listing(session_id) or {}).get("status", "draft")
+    db.upsert_listing(session_id, listing.model_dump(),
+                      status=prev_status if prev_status in ("published", "ended") else "draft",
+                      user_id=_uid(request))
+    log.info("autofill-specifics: session=%s added=%d", session_id, added)
+    return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
+
+
 @app.post("/api/category-suggestions")
 def category_suggestions(payload: dict) -> dict:
     """Return ranked eBay category suggestions for a free-text query."""
