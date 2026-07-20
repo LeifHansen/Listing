@@ -99,6 +99,24 @@ def _assert_session_owner(session_id: str, request: Request) -> None:
         raise HTTPException(404, "Listing not found")
 
 
+def _purge_session_images(session_id: str) -> None:
+    """Delete a session's photos (local disk + R2) to reclaim storage once the
+    listing is archived (sold). Keeps the DB record. Best-effort, never raises;
+    eBay still hosts the images on the sold listing itself."""
+    try:
+        if objstore.enabled():
+            for n in storage.list_optimized(session_id):
+                try:
+                    objstore.delete(objstore.key_for(session_id, n))
+                except Exception:  # noqa: BLE001 - keep purging the rest
+                    pass
+        d = storage.session_dir(session_id)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 - archiving must never fail on cleanup
+        log.warning("archive: image purge failed for %s: %s", session_id, exc)
+
+
 # --- auth ------------------------------------------------------------------
 
 @app.post("/api/auth/signup")
@@ -1558,21 +1576,28 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
 
 @app.post("/api/ebay/sync-listings")
 def sync_listings(request: Request) -> dict:
-    """Reconcile our 'live' listings with eBay: anything ended or sold on
-    eBay's side flips to 'ended' here instead of showing Live forever. Also
-    backfills missing eBay item ids. Definitive answers only — an API blip
-    changes nothing."""
+    """Reconcile our 'live' listings with eBay: a sold item is auto-archived
+    (status 'sold', its photos purged to reclaim storage), a listing that
+    otherwise disappeared flips to 'ended', and missing eBay item ids are
+    backfilled. Definitive answers only — an API blip changes nothing."""
     creds = _ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
-        return {"checked": 0, "changed": 0}
+        return {"checked": 0, "changed": 0, "archived": 0}
     items = [i for i in db.list_listings(limit=200, user_id=user["id"])
              if i.get("status") in ("published", "live")][:40]
     changed = 0
+    archived = 0
     for it in items:
         listing = Listing(**(it.get("listing") or {}))
         status, lid = ebay.live_status(it["id"], listing, creds=creds)
-        if status == "ended":
+        if status == "sold":
+            db.upsert_listing(it["id"], it.get("listing") or {},
+                              status="sold", user_id=user["id"])
+            _purge_session_images(it["id"])  # archived — reclaim the storage
+            changed += 1
+            archived += 1
+        elif status == "ended":
             db.upsert_listing(it["id"], it.get("listing") or {},
                               status="ended", user_id=user["id"])
             changed += 1
@@ -1580,9 +1605,9 @@ def sync_listings(request: Request) -> dict:
             data = {**(it.get("listing") or {}), "ebay_listing_id": lid}
             db.upsert_listing(it["id"], data, status="published", user_id=user["id"])
     if changed:
-        log.info("ebay sync: %d listing(s) flipped to ended for user=%s",
-                 changed, user["id"])
-    return {"checked": len(items), "changed": changed}
+        log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
+                 changed, archived, user["id"])
+    return {"checked": len(items), "changed": changed, "archived": archived}
 
 
 @app.get("/media/{session_id}/optimized/{name}")

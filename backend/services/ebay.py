@@ -516,9 +516,10 @@ def withdraw(session_id: str, listing: Listing, creds: Optional[dict] = None) ->
 
 def live_status(session_id: str, listing: Listing,
                 creds: Optional[dict] = None) -> tuple[Optional[str], str]:
-    """('published'|'ended'|None, listing_id) for this session's offer on eBay.
-    None means "couldn't determine" (network/API blip) — callers must NOT
-    change anything on None, only on a definitive answer."""
+    """('published'|'sold'|'ended'|None, listing_id) for this session's offer on
+    eBay. 'sold' when eBay reports units sold (auto-archive candidate). None
+    means "couldn't determine" (network/API blip) — callers must NOT change
+    anything on None, only on a definitive answer."""
     try:
         token = (creds or {}).get("access_token") or _access_token()
         r = httpx.get(
@@ -536,9 +537,20 @@ def live_status(session_id: str, listing: Listing,
     if not offers:
         return "ended", ""
     rec = offers[0]
-    lid = str(((rec.get("listing") or {}).get("listingId")) or "")
-    st = "published" if str(rec.get("status", "")).upper() == "PUBLISHED" else "ended"
-    return st, lid
+    lst = rec.get("listing") or {}
+    lid = str(lst.get("listingId") or "")
+    offer_status = str(rec.get("status", "")).upper()
+    listing_status = str(lst.get("listingStatus", "")).upper()
+    try:
+        sold_qty = int(lst.get("soldQuantity") or 0)
+    except (TypeError, ValueError):
+        sold_qty = 0
+    # A sale (soldQuantity > 0) ends a single-item listing — archive it.
+    if sold_qty > 0 or listing_status == "SOLD":
+        return "sold", lid
+    if offer_status == "PUBLISHED" and listing_status in ("", "ACTIVE"):
+        return "published", lid
+    return "ended", lid
 
 
 def publish(session_id: str, listing: Listing, mode: str, base_url: str,

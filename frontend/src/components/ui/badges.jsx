@@ -46,6 +46,7 @@ const STATUS_META = {
   dry_run: { label: "Dry run", tone: "yellow" },
   unlisted: { label: "Unlisted find", tone: "yellow" },
   ended: { label: "Ended", tone: "neutral" },
+  sold: { label: "Sold", tone: "green" },
 };
 
 export function StatusBadge({ status, className }) {
