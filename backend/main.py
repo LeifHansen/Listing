@@ -223,10 +223,27 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
             log.warning(f"ebay: identity fetch failed on connect: {exc}")
-        db.save_ebay_account(
-            uid, refresh_token=tokens["refresh_token"],
-            ebay_username=ident["username"], ebay_email=ident["email"],
-            **policies)
+        # Preserve the user's saved policy/location choices when reconnecting the
+        # SAME account (or when identity is unreadable — don't risk clobbering
+        # good settings). Only a switch to a DIFFERENT account takes the
+        # auto-discovered defaults fresh, since the old account's policy ids
+        # can't be reused. This is why a reconnect used to silently revert
+        # shipping to eBay Standard Envelope.
+        existing = db.get_ebay_account(uid) or {}
+        new_user = ident["username"]
+        keep_saved = (not new_user) or existing.get("ebay_username") == new_user
+        save_kwargs = {
+            "refresh_token": tokens["refresh_token"],
+            "ebay_username": ident["username"],
+            "ebay_email": ident["email"],
+        }
+        if keep_saved:
+            for k, v in policies.items():
+                if v and not existing.get(k):
+                    save_kwargs[k] = v  # fill only the gaps
+        else:
+            save_kwargs.update(policies)
+        db.save_ebay_account(uid, **save_kwargs)
         resp = RedirectResponse("/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
@@ -548,7 +565,9 @@ def ebay_disconnect(request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    db.delete_ebay_account(uid)
+    # Keep saved policy/location prefs so reconnecting the same account restores
+    # them; a different account overwrites them on connect (see the callback).
+    db.disconnect_ebay_account(uid)
     return {"ok": True}
 
 

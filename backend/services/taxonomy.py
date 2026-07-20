@@ -181,6 +181,16 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
 _ASPECTS_TTL = 6 * 3600
 _ASPECTS_CACHE: dict[str, tuple[float, dict]] = {}
 
+# eBay's Taxonomy API marks these physical item-dimension aspects "required"
+# for many categories, but its publish flow does NOT actually enforce them —
+# gating our UI on them blocks listings eBay would happily accept. Treat them
+# as recommended: still shown, never a hard publish blocker. If eBay ever does
+# reject on one, the post-publish error surfaces it field-targeted anyway.
+_NON_BLOCKING_ASPECTS = {
+    "item height", "item length", "item width", "item depth",
+    "item diameter", "item weight",
+}
+
 
 def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict:
     """The item specifics (aspects) eBay defines for a leaf category, so the UI
@@ -217,9 +227,13 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
         # Manufacture has ~250 entries and was truncating at "Dominica"). For
         # FREE_TEXT the values are only suggestions, so cap them to stay lean.
         capped = values if mode == "SELECTION_ONLY" else values[:60]
+        name = a.get("localizedAspectName", "")
+        required = bool(constraint.get("aspectRequired"))
+        if name.strip().lower() in _NON_BLOCKING_ASPECTS:
+            required = False  # eBay over-reports these; don't gate on them
         aspects.append({
-            "name": a.get("localizedAspectName", ""),
-            "required": bool(constraint.get("aspectRequired")),
+            "name": name,
+            "required": required,
             "mode": mode,
             "values": capped,
         })
