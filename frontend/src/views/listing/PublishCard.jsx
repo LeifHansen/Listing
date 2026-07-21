@@ -5,6 +5,7 @@ import {
   RefreshCw, ExternalLink, Ban,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
@@ -172,47 +173,68 @@ export function PublishBar({ w }) {
     })) w.endListing();
   };
 
+  const status = w.isLive
+    ? {
+        head: ready ? "Live on eBay" : `${attention} field${attention === 1 ? "" : "s"} left to finish`,
+        sub: "Your edits publish straight to the live listing.",
+      }
+    : {
+        head: ready ? "Ready to publish" : `${attention} field${attention === 1 ? "" : "s"} left to finish`,
+        sub: ready
+          ? "List it live on eBay, or keep it as a draft for now."
+          : "Finish the flagged fields — or save a draft for now.",
+      };
+
   return (
     <div className="sticky bottom-20 md:bottom-4 z-30 pt-1">
-      <div className="bg-card/95 backdrop-blur border border-line-strong rounded-card shadow-float p-2.5 sm:p-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-        <span className="flex items-center gap-2 min-w-0 flex-1 pl-1">
-          {ready
-            ? <CheckCircle2 size={18} className="text-success shrink-0" aria-hidden />
-            : <AlertTriangle size={18} className="text-warning shrink-0" aria-hidden />}
-          <span className="text-sm font-semibold text-ink truncate">
-            {w.isLive
-              ? (ready ? "Live on eBay — edits publish straight to the listing"
-                       : `Live on eBay — ${attention} field${attention === 1 ? "" : "s"} to finish`)
-              : ready
-                ? "Looks ready — publish when you are"
-                : `${attention} field${attention === 1 ? "" : "s"} to finish`}
+      <div className={cn(
+        "rounded-card border-2 backdrop-blur shadow-float p-3.5 sm:p-4 bg-card/95",
+        "flex flex-col gap-3 sm:flex-row sm:items-center",
+        ready ? "border-success/45" : "border-warning/50",
+      )}>
+        <span className="flex items-center gap-3 min-w-0 flex-1">
+          <span className={cn(
+            "grid place-items-center size-10 rounded-full shrink-0",
+            ready ? "bg-success-soft text-success" : "bg-warning-soft text-warning",
+          )}>
+            {ready
+              ? <CheckCircle2 size={20} aria-hidden />
+              : <AlertTriangle size={20} aria-hidden />}
+          </span>
+          <span className="min-w-0">
+            <span className="block text-[15px] sm:text-base font-bold text-ink leading-tight truncate">
+              {status.head}
+            </span>
+            <span className="block text-[13px] text-ink-secondary leading-snug mt-0.5">
+              {status.sub}
+            </span>
           </span>
         </span>
-        <span className="flex items-center gap-2 shrink-0">
+        <span className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto">
           {w.isLive ? (
             <>
               {w.ebayListingId && (
-                <Button variant="ghost" size="sm" className="hidden sm:inline-flex"
+                <Button variant="ghost" size="md" className="hidden sm:inline-flex"
                   onClick={() => window.open(`https://www.ebay.com/itm/${w.ebayListingId}`, "_blank", "noopener")}>
-                  <ExternalLink aria-hidden /> View on eBay
+                  <ExternalLink aria-hidden /> View
                 </Button>
               )}
-              <Button variant="ghost" size="md" onClick={askEnd}>
-                <Ban aria-hidden /> End listing
+              <Button variant="secondary" size="lg" onClick={askEnd}>
+                <Ban aria-hidden /> End
               </Button>
-              <Button variant="primary" size="md" onClick={() => w.publish("live")}>
+              <Button variant="primary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("live")}>
                 <RefreshCw aria-hidden /> Update Live Listing
               </Button>
             </>
           ) : (
             <>
-              <Button variant="ghost" size="sm" onClick={w.runPreflight} className="hidden sm:inline-flex">
+              <Button variant="ghost" size="md" onClick={w.runPreflight} className="hidden sm:inline-flex">
                 <ListChecks aria-hidden /> Check
               </Button>
-              <Button variant="secondary" size="md" onClick={() => w.publish("draft")}>
+              <Button variant="secondary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("draft")}>
                 <Save aria-hidden /> Save Draft
               </Button>
-              <Button variant="primary" size="md" onClick={() => w.publish("live")}>
+              <Button variant="primary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("live")}>
                 <Rocket aria-hidden /> {canPublishLive ? "Publish Live" : "Publish"}
               </Button>
             </>

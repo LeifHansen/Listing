@@ -79,16 +79,6 @@ function PublishedScreen({ w }) {
         <h1 className="text-2xl font-bold tracking-tight text-ink">
           {r?.revised ? "Listing updated! ✅" : "Listing published! 🎉"}
         </h1>
-        <p className="text-sm text-ink-secondary">
-          {r?.revised ? (
-            <>Your changes to <strong className="text-ink">"{w.form.title || "your item"}"</strong> are
-              live on eBay now.</>
-          ) : (
-            <><strong className="text-ink">"{w.form.title || "Your item"}"</strong> is live
-              {r?.listing_id && <> — Listing ID <strong className="text-ink">{r.listing_id}</strong></>}.
-              Find it under Selling → Active in your eBay account.</>
-          )}
-        </p>
         {(r?.listing_id || w.ebayListingId) && (
           <a
             href={`https://www.ebay.com/itm/${r?.listing_id || w.ebayListingId}`}
