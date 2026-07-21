@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
@@ -18,22 +18,81 @@ import { PhotoTile } from "./PhotoTile";
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
 
+const SEP = "|";
+
 export function PhotosCard({ w, onEdit, onDelete }) {
+  const formImages = w.form.images || [];
+  // Local order is the source of truth while dragging; the ref mirrors it
+  // synchronously so pointer handlers never read a stale array.
+  const [order, setOrder] = useState(formImages);
+  const orderRef = useRef(formImages);
+  const dragNameRef = useRef(null);
+  const dragStartRef = useRef(null);
+  const [draggingName, setDraggingName] = useState(null);
+
+  // Sync from the form when NOT mid-drag (a photo was added, deleted, rotated).
+  useEffect(() => {
+    if (dragNameRef.current) return;
+    const imgs = w.form.images || [];
+    orderRef.current = imgs;
+    setOrder(imgs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [w.form.images]);
+
+  const reorderTo = (targetIdx) => {
+    const cur = orderRef.current;
+    const from = cur.indexOf(dragNameRef.current);
+    if (from < 0 || targetIdx < 0 || targetIdx >= cur.length || targetIdx === from) return;
+    const next = [...cur];
+    const [moved] = next.splice(from, 1);
+    next.splice(targetIdx, 0, moved);
+    orderRef.current = next;
+    setOrder(next);
+  };
+
+  const startDrag = (name) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragNameRef.current = name;
+    dragStartRef.current = orderRef.current;
+    setDraggingName(name);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported */ }
+  };
+  const onMove = (e) => {
+    if (!dragNameRef.current) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const tile = el && el.closest ? el.closest("[data-photo-idx]") : null;
+    if (tile) reorderTo(Number(tile.getAttribute("data-photo-idx")));
+  };
+  const endDrag = () => {
+    if (!dragNameRef.current) return;
+    dragNameRef.current = null;
+    setDraggingName(null);
+    const next = orderRef.current;
+    if (next.join(SEP) !== (dragStartRef.current || []).join(SEP)) w.reorderImages(next);
+  };
+
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="One-tap rotate & delete on every photo; hover Edit to clean up, remove the background, or crop"
+      hint="Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
-      {(w.form.images || []).length ? (
+      {order.length ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
           <AnimatePresence>
-            {w.form.images.map((name) => (
+            {order.map((name, i) => (
               <PhotoTile
                 key={name}
                 sessionId={w.sessionId}
                 name={name}
+                index={i}
                 version={w.imageVersion}
+                reorderable={order.length > 1}
+                dragging={draggingName === name}
+                onDragStart={startDrag(name)}
+                onDragMove={onMove}
+                onDragEnd={endDrag}
                 onEdit={() => onEdit(name)}
                 onDelete={() => onDelete(name)}
                 onRotate={() => w.rotateImage(name)}
