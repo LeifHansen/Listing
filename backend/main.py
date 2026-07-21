@@ -22,7 +22,8 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest, SessionOnlyRequest
-from .services import claude_ai, ebay, images, preflight, pricing, promotions, taxonomy
+from .services import (claude_ai, ebay, images, preflight, pricing, promotions,
+                       recommender, taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -1515,6 +1516,23 @@ def listings(request: Request, limit: int = 50) -> dict:
     user = auth.current_user(request)
     items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
+
+
+@app.get("/api/insights")
+def insights(request: Request) -> dict:
+    """Ranked 'what to do next' actions across the signed-in user's listings —
+    finish drafts, relist ended items, promote/reprice stale live ones. Cheap
+    signals only (status, age, photos, promotion, missing details); returns an
+    empty list for logged-out users. Never raises."""
+    user = auth.current_user(request)
+    if not user:
+        return {"recommendations": []}
+    try:
+        items = db.list_listings(limit=200, user_id=user["id"])
+        return {"recommendations": recommender.recommendations(items)}
+    except Exception as exc:  # noqa: BLE001 - insights must never break the app
+        log.warning("insights failed for user=%s: %s", user["id"], exc)
+        return {"recommendations": []}
 
 
 @app.get("/api/listings/{listing_id}")
