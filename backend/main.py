@@ -22,8 +22,8 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest, SessionOnlyRequest
-from .services import (claude_ai, ebay, images, preflight, pricing, promotions,
-                       recommender, taxonomy)
+from .services import (claude_ai, ebay, images, metrics, preflight, pricing,
+                       promotions, recommender, taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -1518,18 +1518,55 @@ def listings(request: Request, limit: int = 50) -> dict:
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
 
 
+def _metrics_by_record_id(request: Request, items: list) -> dict:
+    """eBay views/watchers for the user's live listings, keyed by OUR listing
+    record id (not eBay's item id) so the frontend can look them up directly.
+    Best-effort — returns {} when eBay isn't connected or the analytics scope
+    hasn't been granted yet."""
+    creds = _ebay_creds_for(request)
+    if not creds:
+        return {}
+    id_by_ebay = {}
+    for it in items:
+        if it.get("status") not in ("published", "live"):
+            continue
+        eid = (it.get("listing") or {}).get("ebay_listing_id")
+        if eid:
+            id_by_ebay[str(eid)] = it["id"]
+    if not id_by_ebay:
+        return {}
+    try:
+        raw = metrics.listing_metrics(creds, list(id_by_ebay))
+    except Exception as exc:  # noqa: BLE001 - metrics never break a request
+        log.info("listing metrics unavailable: %s", exc)
+        return {}
+    return {id_by_ebay[eid]: m for eid, m in raw.items() if eid in id_by_ebay}
+
+
+@app.get("/api/ebay/listing-metrics")
+def listing_metrics_route(request: Request) -> dict:
+    """eBay views/impressions/watchers for the user's live listings, keyed by
+    our listing record id. Empty when eBay isn't connected."""
+    user = auth.current_user(request)
+    if not user:
+        return {"metrics": {}}
+    items = db.list_listings(limit=200, user_id=user["id"])
+    return {"metrics": _metrics_by_record_id(request, items)}
+
+
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, relist ended items, promote/reprice stale live ones. Cheap
-    signals only (status, age, photos, promotion, missing details); returns an
-    empty list for logged-out users. Never raises."""
+    finish drafts, relist ended items, promote/reprice stale live ones. Folds in
+    eBay views/watchers when available for sharper advice. Returns an empty list
+    for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
         return {"recommendations": []}
     try:
         items = db.list_listings(limit=200, user_id=user["id"])
-        return {"recommendations": recommender.recommendations(items)}
+        metrics_by_id = _metrics_by_record_id(request, items)
+        return {"recommendations": recommender.recommendations(items, metrics_by_id=metrics_by_id)}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": []}

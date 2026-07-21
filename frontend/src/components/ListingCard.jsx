@@ -1,14 +1,18 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { ImageOff, ArrowRight, Trash2 } from "lucide-react";
+import { ImageOff, ArrowRight, Trash2, Eye, Heart } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import { PriceBadge, StatusBadge } from "@/components/ui/badges";
 
 // ListingCard — one saved listing in a grid. Click opens it in the workflow;
 // when onDelete is provided, a trash button removes it. The delete control is a
 // sibling of the card button (not nested) so it stays valid, focusable HTML.
-export function ListingCard({ item, onOpen, onDelete, className }) {
+// `metrics` (optional) shows eBay views/watchers for a live listing.
+export function ListingCard({ item, onOpen, onDelete, metrics, className }) {
   const l = item.listing || {};
+  const isLive = item.status === "published" || item.status === "live";
+  const hasMetrics = isLive && metrics
+    && (metrics.views != null || metrics.watchers != null);
   // Version thumbnails by updated_at so a rotate/clean-up busts the hour-long
   // /media cache the moment the listing is touched — without killing caching.
   const ver = Date.parse(item.updated_at || "") || undefined;
@@ -51,6 +55,20 @@ export function ListingCard({ item, onOpen, onDelete, className }) {
           <p className="font-semibold text-sm text-ink line-clamp-2">
             {l.title || item.title || "(untitled)"}
           </p>
+          {hasMetrics && (
+            <div className="flex items-center gap-3.5 text-[12px] font-medium text-ink-secondary">
+              {metrics.views != null && (
+                <span className="inline-flex items-center gap-1" title="Views (last 30 days)">
+                  <Eye size={13} aria-hidden /> {metrics.views}
+                </span>
+              )}
+              {metrics.watchers != null && (
+                <span className="inline-flex items-center gap-1" title="Watchers">
+                  <Heart size={13} aria-hidden /> {metrics.watchers}
+                </span>
+              )}
+            </div>
+          )}
           <div className="mt-auto flex items-center justify-between gap-2">
             <PriceBadge value={l.price} currency={l.currency} approx={inventory} />
             {inventory && (
