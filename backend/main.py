@@ -97,6 +97,41 @@ def _category_query(listing) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
+    """Best-effort: fill eBay's category item specifics (required + recommended)
+    from the photos and merge them in without overwriting anything already set.
+    Returns how many were added. NEVER raises — a listing must still save and
+    publish if this enrichment fails.
+
+    This runs server-side during identify (single + bulk) so listings come
+    SEO-ready even on the bulk 'list live now' path, which publishes straight
+    after identify and would otherwise reach eBay with only the generic
+    specifics from the first vision pass (the 'specifics not populating' bug)."""
+    if not (config.taxonomy_ready() and config.anthropic_ready()):
+        return 0
+    if not listing.category_id:
+        return 0
+    try:
+        aspects = taxonomy.item_aspects(listing.category_id).get("aspects", [])
+        paths = [p for p in image_paths if p.is_file()]
+        if not aspects or not paths:
+            return 0
+        filled = claude_ai.fill_aspects(paths, listing, aspects)
+    except Exception as exc:  # noqa: BLE001 - enrichment is optional
+        log.info("specifics enrich skipped (cat=%s): %s", listing.category_id, exc)
+        return 0
+    have = {s.name.strip().lower() for s in listing.item_specifics if s.value.strip()}
+    added = 0
+    for f in filled:
+        if f.name.strip().lower() not in have:
+            listing.item_specifics.append(f)
+            have.add(f.name.strip().lower())
+            added += 1
+    if added:
+        log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    return added
+
+
 def _uid(request: Request):
     user = auth.current_user(request)
     return user["id"] if user else None
@@ -1275,6 +1310,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                                 listing.category_suggestion = best["path"]
                     except Exception:  # noqa: BLE001
                         pass
+                # Fill item specifics BEFORE publishing — bulk 'live' mode goes
+                # straight to eBay here, so without this the listing lands with
+                # only the generic first-pass specifics.
+                _fill_category_specifics(listing, [item_dir / n for n in item_names])
                 storage.save_listing(sid, listing)
                 status = "draft"
                 if mode == "live":
@@ -1396,6 +1435,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
                         result.listing.category_suggestion = best["path"]
             except Exception:  # noqa: BLE001 - never block identify on taxonomy
                 pass
+        # Fill the category's item specifics now so the draft is SEO-ready.
+        _fill_category_specifics(result.listing, [opt_dir / n for n in names])
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
