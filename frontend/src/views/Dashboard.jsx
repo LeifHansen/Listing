@@ -1,10 +1,13 @@
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Timer, Coins,
+  Tags, Timer, Coins, Lightbulb, Megaphone, TrendingDown, Tag, RotateCcw,
+  ListChecks,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
+import { api } from "@/lib/api";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -12,7 +15,19 @@ import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
-import { formatMoney } from "@/lib/utils";
+import { cn, formatMoney } from "@/lib/utils";
+
+// Icon + tone for each recommendation type from /api/insights.
+const REC_ICON = {
+  promote: Megaphone, lower_price: TrendingDown, sale: Tag,
+  finish: PlusCircle, relist: RotateCcw, photos: Camera, specifics: ListChecks,
+};
+const REC_TONE = {
+  promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
+  sale: "bg-green-soft text-green", finish: "bg-blue-soft text-blue",
+  relist: "bg-red-soft text-error", photos: "bg-blue-soft text-blue",
+  specifics: "bg-yellow-soft text-warning",
+};
 
 function greeting() {
   const h = new Date().getHours();
@@ -44,6 +59,17 @@ export function Dashboard() {
   const { user, openAuth, listingsState, startNew, openListing, setView, session, deleteListing } = useApp();
   const { confirm } = useToast();
   const items = listingsState.items;
+
+  // "What to do next" — ranked actions across the user's listings.
+  const [insights, setInsights] = useState([]);
+  useEffect(() => {
+    if (!user) { setInsights([]); return; }
+    let alive = true;
+    api("/api/insights")
+      .then((r) => { if (alive) setInsights(r.recommendations || []); })
+      .catch(() => { if (alive) setInsights([]); });
+    return () => { alive = false; };
+  }, [user, items.length]);
 
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
@@ -163,6 +189,36 @@ export function Dashboard() {
         <StatCard icon={Timer} tone="red" label="Time saved" value={items.length ? `~${timeSaved}` : "—"}
           sub="vs. writing listings by hand" />
       </motion.div>
+
+      {/* Suggested actions — the recommendation engine's picks */}
+      {insights.length > 0 && (
+        <motion.div variants={rise}>
+          <SectionHeader icon={Lightbulb} title="Suggested actions" />
+          <Card className="p-0 divide-y divide-line overflow-hidden">
+            {insights.map((rec) => {
+              const Icon = REC_ICON[rec.type] || Lightbulb;
+              return (
+                <div key={`${rec.listing_id}-${rec.type}`} className="flex items-center gap-3.5 p-4">
+                  <span className={cn(
+                    "grid place-items-center size-10 rounded-[13px] shrink-0",
+                    REC_TONE[rec.type] || "bg-blue-soft text-blue",
+                  )}>
+                    <Icon size={19} strokeWidth={2} aria-hidden />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
+                    <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
+                  </div>
+                  <Button variant="soft" size="sm" className="shrink-0"
+                    onClick={() => openListing(rec.listing_id)}>
+                    {rec.label} <ArrowRight aria-hidden />
+                  </Button>
+                </div>
+              );
+            })}
+          </Card>
+        </motion.div>
+      )}
 
       {/* Recent listings */}
       <motion.div variants={rise}>
