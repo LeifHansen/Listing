@@ -15,6 +15,7 @@ const EMPTY = {
   fulfillment_policy_id: "",
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
   condition_description: "", description: "", item_specifics: [],
+  promote: false, ad_rate_percent: 0,
   images: [], currency: "USD", missing_info: [],
 };
 

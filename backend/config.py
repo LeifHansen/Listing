@@ -160,12 +160,16 @@ _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
 
-# Scopes needed to create listings, read/fetch business policies, and read the
-# connected seller's identity (so we can show WHICH eBay account is linked).
+# Scopes needed to create listings, read/fetch business policies, run Promoted
+# Listings, and read the connected seller's identity (so we can show WHICH eBay
+# account is linked). sell.marketing was added later: a seller who connected
+# before it must reconnect once to grant it (their existing refresh token only
+# carries the scopes they originally approved).
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.account",
+    "https://api.ebay.com/oauth/api_scope/sell.marketing",
     "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ]
 

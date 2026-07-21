@@ -22,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
 from .models import Listing, PublishRequest, RefineRequest, SessionOnlyRequest
-from .services import claude_ai, ebay, images, preflight, pricing, taxonomy
+from .services import claude_ai, ebay, images, preflight, pricing, promotions, taxonomy
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -1616,6 +1616,12 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if result.get("listing_id"):
         dump["ebay_listing_id"] = str(result["listing_id"])
     db.upsert_listing(req.session_id, dump, status=status, user_id=_uid(request))
+    # Promoted Listings: once the item is live, best-effort create/refresh its
+    # ad at the chosen rate. Never blocks or fails the publish — the status is
+    # attached for the UI to show (incl. a 'reconnect to grant ad permissions').
+    if result.get("published") and req.listing.promote:
+        result["promote_status"] = promotions.promote_listing(
+            req.session_id, req.listing, creds)
     return JSONResponse(result)
 
 

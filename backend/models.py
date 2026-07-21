@@ -37,6 +37,11 @@ class Listing(BaseModel):
     # means "use the account default from Settings".
     fulfillment_policy_id: str = ""
     item_specifics: list[ItemSpecific] = Field(default_factory=list)
+    # Promoted Listings (eBay Promoted Listings Standard): when `promote` is on,
+    # publishing live also creates an ad at `ad_rate_percent`% — eBay only
+    # charges that % of the sale price if the item sells through the promotion.
+    promote: bool = False
+    ad_rate_percent: float = 0.0
     # filenames (relative to the session image dir) of optimized images
     images: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
