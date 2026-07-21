@@ -53,14 +53,18 @@ def _flatten(img: Image.Image) -> Image.Image:
 # process-global so we pay that cost once, and only when background removal is
 # actually used.
 #
-# Model choice is a memory tradeoff. "isnet-general-use" gives the best edges
-# but runs a fixed 1024x1024 forward pass whose peak memory (+ its ~60s cold
-# load) OOM-kills / times out the 2GB shared-cpu machine — the recurring 502 on
-# Remove background. "u2netp" (~4MB, 320x320) is light and fast, so it's
-# reliable here; edges are a bit softer but our matte refinement + shadow close
-# most of the gap. Default to the reliable model; set REMBG_MODEL=isnet-general-use
-# only on a machine with more RAM (4GB+).
-_REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
+# Model choice is a memory tradeoff, and it's all about the INPUT resolution
+# (activation memory), not the weights:
+#   - "isnet-general-use" runs a 1024x1024 forward pass — best edges, but its
+#     peak memory (+ ~60s cold load) OOM-kills the 2GB machine (the 502/hang).
+#   - "u2netp" (~4MB) runs 320x320 — light, but too weak on dark/black or
+#     low-contrast items: it mangles them into a smeary blob.
+#   - "u2net" (full, ~176MB) also runs 320x320, so its activation memory is
+#     ~10x smaller than isnet and fits the 2GB machine, but it's a far deeper
+#     model than u2netp — much better on dark/complex subjects (jerseys, denim).
+# Default to u2net: the quality-vs-memory sweet spot here. For the very best
+# edges, set REMBG_MODEL=isnet-general-use on a 4GB+ machine.
+_REMBG_MODEL = os.getenv("REMBG_MODEL", "u2net").strip() or "u2net"
 _rembg_session = None
 
 # Harden the soft matte into a near-binary mask so the background is fully

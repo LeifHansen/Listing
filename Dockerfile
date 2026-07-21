@@ -22,9 +22,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Bake the background-removal model into the image so there's no slow/fragile
-# download at request time. u2netp (~4MB) is the light, memory-safe default for
-# the 2GB machine; must match REMBG_MODEL's default in services/images.py.
-RUN python -c "from rembg import new_session; new_session('u2netp')"
+# download at request time. u2net (full, ~176MB, 320x320 inference) is the
+# quality/memory sweet spot for the 2GB machine — far better on dark/complex
+# items than u2netp. Must match REMBG_MODEL's default in services/images.py.
+RUN python -c "from rembg import new_session; new_session('u2net')"
 
 COPY backend ./backend
 COPY --from=frontend /app/frontend/dist ./frontend/dist
