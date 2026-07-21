@@ -49,14 +49,27 @@ async def _cache_headers(request: Request, call_next):
     return response
 
 
+def _sweep_orphans() -> None:
+    """Reclaim volume space: delete session dirs on disk that aren't real
+    listings (leftover bulk staging + abandoned uploads). Skipped entirely when
+    the DB is unavailable, so live listings' images can never be mistaken for
+    orphans."""
+    ids = db.all_listing_ids()
+    if ids is None:  # no DB / read failed — don't risk deleting real images
+        return
+    removed = storage.sweep_orphan_sessions(ids, max_age_seconds=3 * 3600)
+    if removed:
+        log.info("startup: swept %d orphaned session dir(s) to reclaim space", removed)
+
+
 @app.on_event("startup")
 def _warm_models() -> None:
-    """Warm the in-house background-removal model in a daemon thread so uvicorn
-    binds the port immediately (machine stays reachable) while the ~60s
-    first-use import/JIT cost happens in the background."""
+    """Startup daemons (don't block uvicorn binding the port): warm the in-house
+    background-removal model, and sweep orphaned session dirs off the volume."""
     import threading
 
     threading.Thread(target=images.warm, daemon=True).start()
+    threading.Thread(target=_sweep_orphans, daemon=True).start()
 
 
 def _base_url(request: Request) -> str:
@@ -1289,6 +1302,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
     except Exception as exc:  # noqa: BLE001 - job-level failure
         log.warning("bulk %s failed: %s", job_id, exc)
         _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
+    finally:
+        # Staging photos were only needed to optimize + split into per-item
+        # sessions; drop them so the volume doesn't grow with every batch.
+        storage.purge_session(staging_id)
 
 
 @app.post("/api/bulk/upload")
@@ -1310,13 +1327,23 @@ async def bulk_upload(
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
-    for i, f in enumerate(files):
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
-        suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-        (orig / f"src_{i:02d}{suffix}").write_bytes(data)
+    try:
+        for i, f in enumerate(files):
+            data = await f.read()
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+            suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
+            (orig / f"src_{i:02d}{suffix}").write_bytes(data)
+    except OSError as exc:
+        # Disk full / write failure — clean up the partial staging and report it
+        # clearly instead of a raw 500. Old orphans are swept on restart.
+        storage.purge_session(staging_id)
+        log.error("bulk upload: disk write failed (%s)", exc)
+        raise HTTPException(
+            507, "The server is low on storage right now, so the upload couldn't "
+                 "be saved. Space is reclaimed automatically — try again in a "
+                 "minute, or delete a few old listings to free some up.") from exc
 
     # Capture per-request context now — the worker thread has no Request.
     uid = _uid(request)
