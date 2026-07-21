@@ -311,16 +311,19 @@ export function SpecificsCard({ w }) {
           </div>
         )}
 
-        <div className="flex flex-wrap gap-2.5">
-          <Button variant="soft" onClick={w.autofillSpecifics}>
-            <Sparkles aria-hidden /> Auto-fill from photos
-          </Button>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button
             variant="ghost"
             onClick={() => w.set("item_specifics", [...w.form.item_specifics, { name: "", value: "" }])}
           >
             <Plus aria-hidden /> Add specific
           </Button>
+          {w.form.item_specifics.length > 0 && (
+            <span className="text-[13px] text-ink-secondary inline-flex items-center gap-1.5">
+              <Sparkles size={14} className="text-blue" aria-hidden />
+              Auto-filled from your photos — edit anything that needs a tweak.
+            </span>
+          )}
         </div>
       </div>
     </WorkflowCard>
