@@ -231,11 +231,17 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
         required = bool(constraint.get("aspectRequired"))
         if name.strip().lower() in _NON_BLOCKING_ASPECTS:
             required = False  # eBay over-reports these; don't gate on them
+        # SINGLE vs MULTI: most aspects accept only one value, and sending two
+        # (e.g. a comma-joined string) makes eBay reject the whole publish with
+        # "<Aspect> should contain only one value". Publishing uses this to
+        # decide which aspects may hold several values.
+        cardinality = constraint.get("itemToAspectCardinality") or "SINGLE"
         aspects.append({
             "name": name,
             "required": required,
             "mode": mode,
             "values": capped,
+            "cardinality": cardinality,
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))

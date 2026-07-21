@@ -88,6 +88,23 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
                          image_urls: Optional[list[str]] = None) -> dict:
     aspects: dict[str, list[str]] = {}
     identifiers: dict[str, str] = {}
+    # eBay treats MOST aspects as single-value: sending two values (e.g. from a
+    # comma-joined string) triggers "<Aspect> should contain only one value" and
+    # rejects the whole publish — this hit Brand, then Region of Origin, and
+    # would hit any other single-value aspect. Ask the taxonomy which aspects
+    # are MULTI; only those may hold several values, everything else is capped
+    # to one. If the lookup fails we fall back to treating every aspect as
+    # single, which is always safe (it can never over-populate).
+    multi_value_names: set[str] = set()
+    try:
+        if listing.category_id:
+            from . import taxonomy
+            for a in taxonomy.item_aspects(listing.category_id).get("aspects", []):
+                if a.get("cardinality") == "MULTI":
+                    multi_value_names.add((a.get("name") or "").strip().lower())
+    except Exception:  # noqa: BLE001 - best-effort; single-value is the safe default
+        multi_value_names = set()
+
     # Brand is a SINGLE-value aspect on eBay — sending two values (e.g. a brand
     # field plus a duplicate "Brand" item specific, or a comma-joined value)
     # triggers "Brand should contain only one value". Seed it from the brand
@@ -115,18 +132,25 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
             aspects.setdefault("Brand", [raw_value.split(",")[0].strip()[:65]])
             continue
         aspects.setdefault(name, [])
-        # Split comma-separated values into eBay's multi-value array form, so
-        # "Season: Spring,Summer" maps to both instead of one token eBay's
-        # category doesn't recognize.
-        for piece in (p.strip()[:65] for p in raw_value.split(",")):
+        # Only MULTI aspects get comma-split into eBay's multi-value array form
+        # (so "Features: Stretch,Breathable" maps to both). A single-value
+        # aspect keeps its value whole — splitting it is exactly what caused the
+        # "should contain only one value" rejection.
+        if key in multi_value_names:
+            pieces = [p.strip()[:65] for p in raw_value.split(",")]
+        else:
+            pieces = [raw_value[:65]]
+        for piece in pieces:
             if piece and piece not in aspects[name] and len(aspects[name]) < 30:
                 aspects[name].append(piece)
         if not aspects[name]:
             del aspects[name]  # never send an empty aspect array (eBay rejects it)
 
-    # Final guard: whatever path set it, Brand ships as exactly one value.
-    if aspects.get("Brand"):
-        aspects["Brand"] = aspects["Brand"][:1]
+    # Final guard: any aspect eBay treats as single-value ships with exactly one
+    # value, no matter how it got populated (duplicate rows, seeded Brand, etc.).
+    for aname in list(aspects):
+        if aname.strip().lower() not in multi_value_names:
+            aspects[aname] = aspects[aname][:1]
 
     # eBay validates brand and MPN as a pair ('Input data for tag <BrandMPN>
     # is invalid or missing'): once a brand is present, an MPN must be too.
