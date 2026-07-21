@@ -96,6 +96,8 @@ export function AppProvider({ children }) {
   const [listingsState, setListingsState] = useState({
     loaded: false, loading: false, authed: true, dbConfigured: true, items: [],
   });
+  // eBay views/watchers per live listing, keyed by our listing record id.
+  const [metricsById, setMetricsById] = useState({});
 
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     setListingsState((s) => ({ ...s, loading: !quiet }));
@@ -194,6 +196,17 @@ export function AppProvider({ children }) {
     loadListings({ quiet: true });
   }, [user, loadListings]);
 
+  // eBay views/watchers for live listings (best-effort; empty until eBay is
+  // connected and the analytics scope granted). Refreshes as the set changes.
+  useEffect(() => {
+    if (!user || !ebay.connected) { setMetricsById({}); return; }
+    let alive = true;
+    api("/api/ebay/listing-metrics")
+      .then((r) => { if (alive) setMetricsById(r.metrics || {}); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [user, ebay.connected, listingsState.items.length]);
+
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView,
@@ -201,14 +214,14 @@ export function AppProvider({ children }) {
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
     policiesData, setPoliciesData,
-    listingsState, loadListings,
+    listingsState, loadListings, metricsById,
     session, setSession, startNew, openListing, deleteListing,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
-    listingsState, loadListings, session, startNew, openListing, deleteListing,
-    activeBulk, startBulk, bulkSettled, clearBulk,
+    listingsState, loadListings, metricsById, session, startNew, openListing,
+    deleteListing, activeBulk, startBulk, bulkSettled, clearBulk,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

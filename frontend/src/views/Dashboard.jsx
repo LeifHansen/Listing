@@ -56,7 +56,7 @@ const rise = {
 };
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, startNew, openListing, setView, session, deleteListing } = useApp();
+  const { user, openAuth, listingsState, startNew, openListing, setView, session, deleteListing, metricsById } = useApp();
   const { confirm } = useToast();
   const items = listingsState.items;
 
@@ -238,7 +238,8 @@ export function Dashboard() {
         ) : recent.length > 0 ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {recent.map((item) => (
-              <ListingCard key={item.id} item={item} onOpen={openListing} onDelete={askDelete} />
+              <ListingCard key={item.id} item={item} onOpen={openListing} onDelete={askDelete}
+                metrics={metricsById[item.id]} />
             ))}
           </div>
         ) : (

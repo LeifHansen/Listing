@@ -170,6 +170,7 @@ EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.account",
     "https://api.ebay.com/oauth/api_scope/sell.marketing",
+    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
     "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ]
 

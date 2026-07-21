@@ -50,7 +50,7 @@ export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
-    ebay, loadListings,
+    ebay, loadListings, metricsById,
   } = useApp();
   const { confirm } = useToast();
 
@@ -139,7 +139,8 @@ export function ListingsView({ kind, search = "" }) {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
-            <ListingCard item={item} onOpen={openListing} onDelete={askDelete} />
+            <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
+              metrics={metricsById[item.id]} />
           </motion.div>
         ))}
       </div>
