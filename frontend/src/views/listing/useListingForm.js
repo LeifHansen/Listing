@@ -247,6 +247,17 @@ export function useListingForm() {
     }
   }, [form.images, sessionId, toast]);
 
+  // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
+  // so order matters — it must survive a reload and be what we publish. Update
+  // the form + session immediately (optimistic) and save in the background.
+  const reorderImages = useCallback((nextImages) => {
+    const imgs = [...nextImages];
+    setForm((f) => ({ ...f, images: imgs }));
+    setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+    if (!sessionId) return;
+    postJson(`/api/save/${sessionId}`, { ...collect(), images: imgs }).catch(() => {});
+  }, [collect, sessionId, setForm, setSession]);
+
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
     setAiBusy(["Checking everything eBay requires…"]);
@@ -393,7 +404,7 @@ export function useListingForm() {
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, upsertSpecific,
-    deleteImage, rotateImage, imageVersion, setImageVersion,
+    deleteImage, rotateImage, reorderImages, imageVersion, setImageVersion,
     completion,
   };
 }
