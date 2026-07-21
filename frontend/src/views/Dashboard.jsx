@@ -66,8 +66,13 @@ export function Dashboard() {
     ? `${(minutesSaved / 60).toFixed(1)} h`
     : `${minutesSaved} min`;
 
-  // An in-memory session resumes directly; otherwise reopen the newest draft.
-  const lastOpen = session
+  // An in-memory session resumes directly — but NOT once it's gone live (or
+  // otherwise left the draft stage): there's nothing to "continue" on a
+  // published listing, so fall through to the newest actual draft instead.
+  const sessionItem = session ? items.find((i) => i.id === session.sessionId) : null;
+  const sessionDone = ["published", "live", "sold", "ended"].includes(
+    session?.status || sessionItem?.status);
+  const lastOpen = (session && !sessionDone)
     ? { title: session.listing?.title, go: () => setView("new") }
     : (drafts[0] && {
         title: drafts[0].listing?.title || drafts[0].title,
