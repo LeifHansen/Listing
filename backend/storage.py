@@ -8,10 +8,13 @@ Each session gets a directory under data/sessions/<id>/ containing:
 from __future__ import annotations
 
 import json
+import shutil
+import time
 import uuid
 from pathlib import Path
 
 from . import config
+from .config import log
 from .models import Listing
 
 
@@ -56,3 +59,42 @@ def write_export(session_id: str, name: str, payload: dict) -> Path:
     path = config.EXPORTS_DIR / f"{session_id}_{name}.json"
     path.write_text(json.dumps(payload, indent=2))
     return path
+
+
+def purge_session(session_id: str) -> None:
+    """Delete a session's whole directory (best-effort). Used to drop bulk
+    staging once its job is done, so it doesn't accumulate on the volume."""
+    try:
+        d = session_dir(session_id)
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 - cleanup must never raise
+        log.warning(f"storage: purge_session failed for {session_id}: {exc}")
+
+
+def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> int:
+    """Delete session dirs that aren't a known listing and haven't been touched
+    in `max_age_seconds` — i.e. leftover bulk staging and abandoned uploads that
+    were never saved. This reclaims volume space (bulk staging was never cleaned
+    up, growing until writes fail with a 500). Returns how many were removed.
+    Never raises. The caller MUST pass a real id set (never on a DB outage), or
+    live listings' images would look like orphans."""
+    removed = 0
+    try:
+        base = config.SESSIONS_DIR
+        if not base.exists():
+            return 0
+        cutoff = time.time() - max_age_seconds
+        for d in base.iterdir():
+            try:
+                if not d.is_dir() or d.name in valid_ids:
+                    continue
+                if d.stat().st_mtime > cutoff:
+                    continue  # too recent — may be an in-flight upload/session
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+            except Exception:  # noqa: BLE001 - keep sweeping the rest
+                continue
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"storage: orphan sweep failed: {exc}")
+    return removed

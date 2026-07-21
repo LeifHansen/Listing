@@ -169,6 +169,22 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
         return []
 
 
+def all_listing_ids() -> Optional[set[str]]:
+    """Every known listing id — lets the app tell real listing dirs from
+    orphaned bulk staging / abandoned uploads on disk. Returns None (not an
+    empty set) when there's no DB or the read fails, so callers can safely skip
+    cleanup rather than mistake every dir for an orphan."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            return set(s.execute(select(ListingRecord.id)).scalars().all())
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: all_listing_ids failed: {exc}")
+        return None
+
+
 # --- users -----------------------------------------------------------------
 
 def _user_to_dict(u: User) -> dict:
