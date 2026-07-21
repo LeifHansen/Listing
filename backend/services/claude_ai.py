@@ -10,6 +10,7 @@ import base64
 import json
 import mimetypes
 from pathlib import Path
+from typing import Optional
 
 from anthropic import Anthropic
 
@@ -421,6 +422,42 @@ Rules:
 """
 
 
+def _norm_aspect_value(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _match_selection_value(value: str, allowed: list[str]) -> Optional[str]:
+    """Map a model-supplied value to eBay's exact allowed value for a
+    fixed-value (SELECTION_ONLY / "checkbox") aspect. Returns the canonical
+    allowed string, or None when nothing fits. Only ever returns a string from
+    `allowed`, so eBay can never reject it — but it's far more forgiving than an
+    exact match, which used to drop things like "Machine Washable" (eBay:
+    "Machine Wash") or "Spandex" (eBay: "Spandex/Elastane"), leaving the
+    specific blank. Conservative order: exact > normalized-equal > unambiguous
+    containment (only when exactly one allowed value overlaps)."""
+    v = value.strip()
+    if not v:
+        return None
+    for a in allowed:  # 1) exact, case-insensitive
+        if a.strip().lower() == v.lower():
+            return a
+    nv = _norm_aspect_value(v)
+    if not nv:
+        return None
+    for a in allowed:  # 2) same once spacing/punctuation is ignored
+        if _norm_aspect_value(a) == nv:
+            return a
+    # 3) one contains the other, but only if a SINGLE allowed value qualifies,
+    #    so we never silently pick between rival options (e.g. Cotton vs
+    #    Cotton Blend both matching "cotton").
+    hits = []
+    for a in allowed:
+        na = _norm_aspect_value(a)
+        if na and (na in nv or nv in na):
+            hits.append(a)
+    return hits[0] if len(hits) == 1 else None
+
+
 def fill_aspects(image_paths: list[Path], listing: Listing,
                  aspects: list[dict]) -> list[ItemSpecific]:
     """Fill eBay's category item specifics from the product photos. `aspects`
@@ -471,11 +508,10 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
             continue
         a = by_name[key]
         if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
-            match = next((v for v in a["values"]
-                          if v.strip().lower() == value.lower()), None)
+            match = _match_selection_value(value, a["values"])
             if not match:
                 continue  # not a valid eBay value — drop rather than get rejected
-            value = match  # canonical casing eBay expects
+            value = match  # canonical value eBay expects
         seen.add(key)
         out.append(ItemSpecific(name=a["name"], value=value))
     return out
