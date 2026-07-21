@@ -36,9 +36,9 @@ primary_region = 'sjc'
   min_machines_running = 1
 
 [[vm]]
-  # Background removal loads onnxruntime + rembg (scipy/numba). At 2GB the app
-  # runs the u2net model (REMBG_MODEL default) — 320x320 inference fits here.
-  # For the best edges, bump memory to '4gb' AND set REMBG_MODEL=isnet-general-use
-  # (its 1024x1024 pass OOM-kills a 2GB machine).
+  # Background removal loads onnxruntime + rembg (scipy/numba). 2GB only runs
+  # the light u2netp model (REMBG_MODEL default) reliably — u2net and isnet
+  # OOM-kill it. For better dark-item quality, bump memory to '4gb' and set
+  # REMBG_MODEL=u2net (or isnet-general-use for the best edges).
   size = 'shared-cpu-2x'
   memory = '2gb'
