@@ -347,6 +347,22 @@ export function useListingForm() {
     }
   }), [form.category_id, sessionId, collect, setForm, toast]);
 
+  // Auto-populate item specifics right after a fresh AI identify (session has a
+  // confidence score), so listings come SEO-ready with no manual step. Runs
+  // once per session, and NOT when reopening a saved listing or a bulk item
+  // (confidence is null there) so we never re-spend on an already-filled item.
+  const autoFilledFor = useRef(null);
+  useEffect(() => {
+    const aspects = categoryMeta.aspects || [];
+    const fresh = !!session?.confidence;
+    if (!fresh || !aspects.length || autoFilledFor.current === sessionId) return;
+    const missingRequired = aspects.some((a) => a.required && !getSpecific(a.name));
+    if (!missingRequired) return;
+    autoFilledFor.current = sessionId;
+    autofillSpecifics();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryMeta.aspects, sessionId, session]);
+
   // ---------- completion per workflow card ----------
   const completion = useMemo(() => {
     const requiredAspects = categoryMeta.aspects.filter((a) => a.required);
