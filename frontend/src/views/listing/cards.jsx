@@ -3,9 +3,9 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles,
+  Sparkles, Megaphone,
 } from "lucide-react";
-import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
+import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -577,6 +577,118 @@ export function DescriptionCard({ w }) {
         needsFix={w.fixTarget === "description"}
         onChange={(e) => w.set("description", e.target.value)}
       />
+    </WorkflowCard>
+  );
+}
+
+// Promoted Listings — mirrors eBay's Promoted Listings Standard: a slider to
+// pick an ad rate, charged only when the item sells through the promotion.
+const PROMO_MIN = 2;
+const PROMO_MAX = 20;
+const PROMO_SUGGESTED = 6;
+
+export function PromoteCard({ w }) {
+  const { ebay } = useApp();
+  const on = !!w.form.promote;
+  const rate = Number(w.form.ad_rate_percent) || 0;
+  const price = Number(w.form.price) || 0;
+  const fee = price > 0 && rate > 0 ? (price * rate) / 100 : 0;
+
+  const toggle = () => {
+    if (on) { w.set("promote", false); return; }
+    w.set("promote", true);
+    if (!rate) w.set("ad_rate_percent", PROMO_SUGGESTED);
+  };
+
+  return (
+    <WorkflowCard
+      id="promote" icon={Megaphone} title="Promote"
+      hint="Boost this listing in eBay search — you only pay if it sells through the promotion"
+      state={on ? "complete" : "todo"}
+    >
+      <div className="flex flex-col gap-5">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0">
+            <p className="font-semibold text-ink text-[15px]">Promoted Listing</p>
+            <p className="text-[13px] text-ink-secondary mt-0.5">
+              eBay Promoted Listings Standard — more visibility, pay only per sale.
+            </p>
+          </div>
+          <button
+            type="button" role="switch" aria-checked={on} onClick={toggle}
+            aria-label="Promote this listing"
+            className={cn(
+              "relative shrink-0 h-7 w-12 rounded-full transition-colors duration-200 cursor-pointer",
+              on ? "bg-blue" : "bg-line-strong",
+            )}
+          >
+            <span className={cn(
+              "absolute top-0.5 left-0.5 size-6 rounded-full bg-white shadow-card transition-transform duration-200",
+              on && "translate-x-5",
+            )} />
+          </button>
+        </div>
+
+        {on && (
+          <motion.div
+            initial={{ opacity: 0, y: -6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex flex-col gap-4"
+          >
+            <div className="flex items-end justify-between gap-4">
+              <div>
+                <p className="text-[13px] font-medium text-ink-secondary">Ad rate</p>
+                <p className="text-[34px] font-bold text-ink tabular-nums leading-none mt-1">
+                  {rate.toFixed(1)}<span className="text-xl align-top">%</span>
+                </p>
+              </div>
+              <div className="text-right">
+                {fee > 0 ? (
+                  <>
+                    <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
+                    <p className="text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee)}</p>
+                  </>
+                ) : (
+                  <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <input
+                type="range" min={PROMO_MIN} max={PROMO_MAX} step={0.5} value={rate}
+                onChange={(e) => w.set("ad_rate_percent", parseFloat(e.target.value))}
+                className="w-full accent-blue cursor-pointer h-2"
+                aria-label="Ad rate percentage"
+              />
+              <div className="flex justify-between items-center text-[11px] text-ink-faint mt-1 tabular-nums">
+                <span>{PROMO_MIN}%</span>
+                <button
+                  type="button" onClick={() => w.set("ad_rate_percent", PROMO_SUGGESTED)}
+                  className="font-semibold text-blue hover:underline cursor-pointer"
+                >
+                  Suggested {PROMO_SUGGESTED}%
+                </button>
+                <span>{PROMO_MAX}%</span>
+              </div>
+            </div>
+
+            <p className="text-[13px] text-ink-secondary">
+              Promoted listings show higher in search and on more pages. Nothing upfront —
+              eBay charges the {rate.toFixed(1)}% ad rate <strong className="text-ink">only</strong> when
+              your item sells through the promotion.
+            </p>
+
+            {!ebay.connected && (
+              <p className="text-[13px] font-medium text-warning flex gap-1.5" role="note">
+                <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden />
+                Connect eBay to run the promotion — we'll save this rate and apply it when you publish live.
+              </p>
+            )}
+          </motion.div>
+        )}
+      </div>
     </WorkflowCard>
   );
 }

@@ -17,7 +17,7 @@ import { ImageEditor } from "./listing/ImageEditor";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
-  ShippingCard, DescriptionCard,
+  ShippingCard, DescriptionCard, PromoteCard,
 } from "./listing/cards";
 
 const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.04 } } };
@@ -87,6 +87,16 @@ function PublishedScreen({ w }) {
           >
             View it on eBay <ExternalLink size={14} aria-hidden />
           </a>
+        )}
+
+        {r?.promote_status && (
+          <p className={`text-[13px] max-w-sm ${r.promote_status.promoted ? "text-success font-semibold" : "text-ink-secondary"}`}>
+            {r.promote_status.promoted
+              ? `📣 ${r.promote_status.message}`
+              : r.promote_status.needs_reconnect
+                ? "Reconnect eBay in Settings to grant ad permissions, then republish to start the promotion."
+                : r.promote_status.message}
+          </p>
         )}
 
         <div className="mt-2 flex flex-wrap justify-center items-center gap-2.5">
@@ -198,6 +208,7 @@ function Workflow() {
         <PricingCard w={w} />
         <ShippingCard w={w} />
         <DescriptionCard w={w} />
+        <PromoteCard w={w} />
         <PublishCard w={w} />
       </motion.div>
 
