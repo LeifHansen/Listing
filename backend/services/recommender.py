@@ -33,7 +33,7 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
 
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
-                  rate: Optional[float] = None) -> list[dict]:
+                  rate: Optional[float] = None, promoted: bool = False) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
     {listing_id, listing_title, type, label, reason, action, priority, rate}.
     `rate` is eBay's recommended Promoted Listings ad rate (%) for this listing,
@@ -67,7 +67,9 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     watchers = m.get("watchers")
     age = _age_days(item.get("created_at"))
     images = listing.get("images") or []
-    promoted = bool(listing.get("promote"))
+    # Promoted if our own flag says so OR eBay reports a live ad (covers ads
+    # created straight in Seller Hub) — so we never nag an already-promoted item.
+    promoted = bool(listing.get("promote")) or promoted
 
     # Data-driven (real eBay traffic) beats the age heuristics below.
     if watchers and watchers >= 3:
@@ -100,18 +102,21 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
 
 
 def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
-                    rates_by_id: Optional[dict] = None, limit: int = 8) -> list[dict]:
+                    rates_by_id: Optional[dict] = None,
+                    promoted_ids: Optional[set] = None, limit: int = 8) -> list[dict]:
     """Ranked recommendations across many listing records (best first). Keeps
     the single strongest action per listing so the list spans the whole
     portfolio instead of piling onto one item."""
     metrics_by_id = metrics_by_id or {}
     rates_by_id = rates_by_id or {}
+    promoted_ids = promoted_ids or set()
     best: dict[str, dict] = {}
     ranked_all: list[dict] = []
     for it in items:
         ranked_all.extend(recommend_for(
             it, metrics=metrics_by_id.get(it.get("id")),
-            rate=rates_by_id.get(it.get("id"))))
+            rate=rates_by_id.get(it.get("id")),
+            promoted=it.get("id") in promoted_ids))
     for r in sorted(ranked_all, key=lambda x: -x["priority"]):
         if r["listing_id"] not in best:
             best[r["listing_id"]] = r

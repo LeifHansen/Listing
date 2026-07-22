@@ -38,6 +38,10 @@ _CAMPAIGN_CACHE: dict[str, str] = {}
 # eBay's recommended ad rate per listing, cached briefly.
 _RATE_CACHE: dict[str, tuple[float, dict]] = {}
 _RATE_TTL = 300
+# Which listings currently have an active ad (across ALL the seller's campaigns,
+# not just ours), cached briefly.
+_ADS_CACHE: dict[str, tuple[float, dict]] = {}
+_ADS_TTL = 180
 
 
 class _ScopeError(Exception):
@@ -203,4 +207,50 @@ def suggested_ad_rates(creds: dict | None, listing_ids: list[str]) -> dict[str, 
     if len(_RATE_CACHE) > 200:
         _RATE_CACHE.clear()
     _RATE_CACHE[cache_key] = (time.time(), out)
+    return out
+
+
+def active_ads(creds: dict | None) -> dict[str, dict]:
+    """Every listing that currently has an ACTIVE Promoted Listings ad, across
+    ALL of the seller's campaigns (not just ours) — so we correctly see items
+    promoted directly in eBay Seller Hub too. Keyed by BOTH the eBay listing id
+    and the inventory reference (SKU), since ads can be created either way:
+    {key: {'rate': '8.5', 'status': 'RUNNING'}}. Best-effort, cached."""
+    token = (creds or {}).get("access_token")
+    if not token:
+        return {}
+    cache_key = token[-16:]
+    hit = _ADS_CACHE.get(cache_key)
+    if hit and time.time() - hit[0] < _ADS_TTL:
+        return hit[1]
+    base = config.EBAY_API_BASE
+    out: dict[str, dict] = {}
+    try:
+        with httpx.Client(timeout=30) as client:
+            rc = client.get(f"{base}{_MARKETING}/ad_campaign",
+                            headers=_headers(token), params={"limit": "500"})
+            if rc.status_code != 200:
+                raise RuntimeError(f"getCampaigns {rc.status_code}")
+            for camp in (rc.json().get("campaigns") or []):
+                cid = camp.get("campaignId")
+                if not cid or str(camp.get("campaignStatus", "")).upper() == "ENDED":
+                    continue
+                ra = client.get(f"{base}{_MARKETING}/ad_campaign/{cid}/ad",
+                                headers=_headers(token), params={"limit": "500"})
+                if ra.status_code != 200:
+                    continue
+                for ad in (ra.json().get("ads") or []):
+                    status = str(ad.get("adStatus") or "").upper()
+                    if status in ("ENDED", "ARCHIVED", "PAUSED"):
+                        continue
+                    entry = {"rate": ad.get("bidPercentage"), "status": status or "RUNNING"}
+                    for key in (ad.get("listingId"), ad.get("inventoryReferenceId")):
+                        if key:
+                            out[str(key)] = entry
+    except Exception as exc:  # noqa: BLE001 - ad status is an optional overlay
+        log.info("active ads unavailable: %s", exc)
+        return {}
+    if len(_ADS_CACHE) > 100:
+        _ADS_CACHE.clear()
+    _ADS_CACHE[cache_key] = (time.time(), out)
     return out
