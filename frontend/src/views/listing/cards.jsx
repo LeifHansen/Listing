@@ -39,6 +39,12 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [w.form.images]);
 
+  // Pointer moves are coalesced to one hit-test per animation frame — the raw
+  // pointermove stream (60-120/s) each forced a synchronous elementFromPoint
+  // reflow, which is what made the drag stutter.
+  const rafRef = useRef(0);
+  const lastPtRef = useRef(null);
+
   const reorderTo = (targetIdx) => {
     const cur = orderRef.current;
     const from = cur.indexOf(dragNameRef.current);
@@ -58,16 +64,24 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     setDraggingName(name);
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported */ }
   };
-  const onMove = (e) => {
-    if (!dragNameRef.current) return;
-    const el = document.elementFromPoint(e.clientX, e.clientY);
+  const processMove = () => {
+    rafRef.current = 0;
+    const p = lastPtRef.current;
+    if (!p || !dragNameRef.current) return;
+    const el = document.elementFromPoint(p.x, p.y);
     const tile = el && el.closest ? el.closest("[data-photo-idx]") : null;
     if (tile) reorderTo(Number(tile.getAttribute("data-photo-idx")));
+  };
+  const onMove = (e) => {
+    if (!dragNameRef.current) return;
+    lastPtRef.current = { x: e.clientX, y: e.clientY };
+    if (!rafRef.current) rafRef.current = requestAnimationFrame(processMove);
   };
   const endDrag = () => {
     if (!dragNameRef.current) return;
     dragNameRef.current = null;
     setDraggingName(null);
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     const next = orderRef.current;
     if (next.join(SEP) !== (dragStartRef.current || []).join(SEP)) w.reorderImages(next);
   };
@@ -79,7 +93,14 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {order.length ? (
-        <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+        <div className={cn(
+          "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
+          // While dragging, kill hover scale + CSS transitions on every tile and
+          // hide the hover overlay — otherwise the pointer sweeping across the
+          // grid fires all their group-hover effects at once (the repaint storm
+          // behind the lag, plus the Edit button flashing on each tile).
+          draggingName && "select-none [&_img]:!scale-100 [&_*]:!transition-none [&_.ph-ov]:!opacity-0",
+        )}>
           <AnimatePresence>
             {order.map((name, i) => (
               <PhotoTile

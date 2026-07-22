@@ -96,7 +96,7 @@ export function PhotoTile({
         </button>
       )}
       <div
-        className="absolute inset-0 bg-ink/0 group-hover:bg-ink/25 transition-colors duration-200
+        className="ph-ov absolute inset-0 bg-ink/0 group-hover:bg-ink/25 transition-colors duration-200
           flex items-center justify-center p-2.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100"
       >
         <button
