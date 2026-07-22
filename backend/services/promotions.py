@@ -15,6 +15,7 @@ that scope existed), we surface a clear "reconnect" status instead.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -27,10 +28,16 @@ log = logging.getLogger("thryft.promotions")
 
 CAMPAIGN_NAME = "Thryft Shop Promoted Listings"
 _MARKETING = "/sell/marketing/v1"
+# Fallback ad rate when eBay has no recommended rate for a listing (or the
+# Recommendation API isn't reachable / the scope isn't granted yet).
+DEFAULT_AD_RATE = 5.0
 
 # Resolve the campaign id once per (marketplace, token) instead of listing
 # campaigns on every publish. Keyed by a short, non-sensitive token suffix.
 _CAMPAIGN_CACHE: dict[str, str] = {}
+# eBay's recommended ad rate per listing, cached briefly.
+_RATE_CACHE: dict[str, tuple[float, dict]] = {}
+_RATE_TTL = 300
 
 
 class _ScopeError(Exception):
@@ -146,3 +153,54 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
     return {"promoted": False,
             "message": "eBay couldn't start the promotion: "
                        + (res.get("detail") or "unknown error")}
+
+
+def _extract_bid(rec: dict):
+    """Pull eBay's suggested ad-rate % out of a listing recommendation."""
+    mr = rec.get("marketingRecommendations") or {}
+    ad = mr.get("ad") or {}
+    bp = ad.get("bidPercentages") or {}
+    val = bp.get("basic") or bp.get("suggested")
+    try:
+        r = round(float(val), 1)
+        return r if r > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def suggested_ad_rates(creds: dict | None, listing_ids: list[str]) -> dict[str, float]:
+    """eBay's recommended Promoted Listings ad rate (%) per eBay listing id, via
+    the Sell Recommendation API. Best-effort and cached; returns {} when the
+    scope isn't granted or nothing is recommended. {listing_id: rate}."""
+    token = (creds or {}).get("access_token")
+    ids = sorted(set(str(i) for i in listing_ids if i))
+    if not token or not ids:
+        return {}
+    cache_key = f"{token[-12:]}:{','.join(ids)}"
+    hit = _RATE_CACHE.get(cache_key)
+    if hit and time.time() - hit[0] < _RATE_TTL:
+        return hit[1]
+    out: dict[str, float] = {}
+    try:
+        r = httpx.post(
+            f"{config.EBAY_API_BASE}/sell/recommendation/v1/find",
+            headers={**_headers(token),
+                     "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID},
+            params={"filter": "recommendationTypes:{AD}"},
+            json={"listingIds": ids[:500]},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            for rec in r.json().get("listingRecommendations", []) or []:
+                lid = str(rec.get("listingId") or "")
+                bid = _extract_bid(rec)
+                if lid and bid:
+                    out[lid] = bid
+        else:
+            log.info("ad-rate recommendations %s: %s", r.status_code, r.text[:160])
+    except Exception as exc:  # noqa: BLE001 - recommendations are optional
+        log.info("ad-rate recommendations unavailable: %s", exc)
+    if len(_RATE_CACHE) > 200:
+        _RATE_CACHE.clear()
+    _RATE_CACHE[cache_key] = (time.time(), out)
+    return out
