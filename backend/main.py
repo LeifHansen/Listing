@@ -1557,6 +1557,30 @@ def _rates_by_record_id(creds: Optional[dict], items: list) -> dict:
     return {id_by_ebay[eid]: r for eid, r in raw.items() if eid in id_by_ebay}
 
 
+def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
+    """Record ids whose live listing currently has an ACTIVE eBay ad — ours OR
+    one created directly in Seller Hub — so we never suggest promoting an item
+    that's already promoted. Best-effort; empty when the scope isn't granted."""
+    if not creds:
+        return set()
+    ads = promotions.active_ads(creds)
+    if not ads:
+        return set()
+    promoted = set()
+    for it in items:
+        if it.get("status") not in ("published", "live"):
+            continue
+        listing = it.get("listing") or {}
+        eid = str(listing.get("ebay_listing_id") or "")
+        try:
+            sku = ebay._sku(it["id"], Listing(**listing))
+        except Exception:  # noqa: BLE001
+            sku = ""
+        if (eid and eid in ads) or (sku and sku in ads):
+            promoted.add(it["id"])
+    return promoted
+
+
 @app.get("/api/ebay/listing-metrics")
 def listing_metrics_route(request: Request) -> dict:
     """eBay views/impressions/watchers for the user's live listings, keyed by
@@ -1582,8 +1606,10 @@ def insights(request: Request) -> dict:
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         rates_by_id = _rates_by_record_id(creds, items)
+        promoted_ids = _promoted_record_ids(creds, items)
         return {"recommendations": recommender.recommendations(
-            items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id)}
+            items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
+            promoted_ids=promoted_ids)}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": []}
