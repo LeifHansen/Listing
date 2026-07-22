@@ -1518,22 +1518,22 @@ def listings(request: Request, limit: int = 50) -> dict:
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
 
 
-def _metrics_by_record_id(request: Request, items: list) -> dict:
-    """eBay views/watchers for the user's live listings, keyed by OUR listing
-    record id (not eBay's item id) so the frontend can look them up directly.
-    Best-effort — returns {} when eBay isn't connected or the analytics scope
-    hasn't been granted yet."""
-    creds = _ebay_creds_for(request)
-    if not creds:
-        return {}
-    id_by_ebay = {}
+def _live_ebay_id_map(items: list) -> dict:
+    """{eBay listing id: our record id} for the user's live listings."""
+    out = {}
     for it in items:
-        if it.get("status") not in ("published", "live"):
-            continue
-        eid = (it.get("listing") or {}).get("ebay_listing_id")
-        if eid:
-            id_by_ebay[str(eid)] = it["id"]
-    if not id_by_ebay:
+        if it.get("status") in ("published", "live"):
+            eid = (it.get("listing") or {}).get("ebay_listing_id")
+            if eid:
+                out[str(eid)] = it["id"]
+    return out
+
+
+def _metrics_by_record_id(creds: Optional[dict], items: list) -> dict:
+    """eBay views/watchers for the user's live listings, keyed by OUR listing
+    record id. Best-effort — {} when eBay isn't connected / scope not granted."""
+    id_by_ebay = _live_ebay_id_map(items)
+    if not creds or not id_by_ebay:
         return {}
     try:
         raw = metrics.listing_metrics(creds, list(id_by_ebay))
@@ -1541,6 +1541,20 @@ def _metrics_by_record_id(request: Request, items: list) -> dict:
         log.info("listing metrics unavailable: %s", exc)
         return {}
     return {id_by_ebay[eid]: m for eid, m in raw.items() if eid in id_by_ebay}
+
+
+def _rates_by_record_id(creds: Optional[dict], items: list) -> dict:
+    """eBay's recommended ad rate for the user's live listings, keyed by OUR
+    record id. Best-effort — {} when unavailable."""
+    id_by_ebay = _live_ebay_id_map(items)
+    if not creds or not id_by_ebay:
+        return {}
+    try:
+        raw = promotions.suggested_ad_rates(creds, list(id_by_ebay))
+    except Exception as exc:  # noqa: BLE001 - recommendations are optional
+        log.info("ad-rate recommendations unavailable: %s", exc)
+        return {}
+    return {id_by_ebay[eid]: r for eid, r in raw.items() if eid in id_by_ebay}
 
 
 @app.get("/api/ebay/listing-metrics")
@@ -1551,25 +1565,93 @@ def listing_metrics_route(request: Request) -> dict:
     if not user:
         return {"metrics": {}}
     items = db.list_listings(limit=200, user_id=user["id"])
-    return {"metrics": _metrics_by_record_id(request, items)}
+    return {"metrics": _metrics_by_record_id(_ebay_creds_for(request), items)}
 
 
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
     finish drafts, relist ended items, promote/reprice stale live ones. Folds in
-    eBay views/watchers when available for sharper advice. Returns an empty list
-    for logged-out users. Never raises."""
+    eBay views/watchers and recommended ad rates when available. Returns an empty
+    list for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
         return {"recommendations": []}
     try:
         items = db.list_listings(limit=200, user_id=user["id"])
-        metrics_by_id = _metrics_by_record_id(request, items)
-        return {"recommendations": recommender.recommendations(items, metrics_by_id=metrics_by_id)}
+        creds = _ebay_creds_for(request)
+        metrics_by_id = _metrics_by_record_id(creds, items)
+        rates_by_id = _rates_by_record_id(creds, items)
+        return {"recommendations": recommender.recommendations(
+            items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id)}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": []}
+
+
+@app.post("/api/ebay/promote")
+def promote_one(payload: dict, request: Request) -> dict:
+    """One-click promote a single LIVE listing via Promoted Listings Standard,
+    using the given ad rate, else eBay's recommended rate, else the default."""
+    user = auth.current_user(request)
+    creds = _ebay_creds_for(request)
+    if not user or not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    lid = str(payload.get("listing_id") or "").strip()
+    rec = db.get_listing(lid)
+    if not rec or (rec.get("user_id") and rec["user_id"] != user["id"]):
+        raise HTTPException(404, "Listing not found")
+    if rec.get("status") not in ("published", "live"):
+        raise HTTPException(400, "Only live listings can be promoted.")
+    listing = Listing(**(rec.get("listing") or {}))
+    try:
+        rate = float(payload.get("ad_rate_percent") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    if rate <= 0:
+        rates = _rates_by_record_id(creds, [rec])
+        rate = rates.get(lid) or promotions.DEFAULT_AD_RATE
+    listing.promote = True
+    listing.ad_rate_percent = round(rate, 1)
+    status = promotions.promote_listing(lid, listing, creds)
+    if status.get("promoted"):
+        storage.save_listing(lid, listing)
+        db.upsert_listing(lid, listing.model_dump(), status=rec.get("status"),
+                          user_id=user["id"])
+    return {"ok": bool(status.get("promoted")), "ad_rate": listing.ad_rate_percent,
+            "needs_reconnect": bool(status.get("needs_reconnect")),
+            "message": status.get("message")}
+
+
+@app.post("/api/ebay/promote-all")
+def promote_all(request: Request) -> dict:
+    """Promote every live, not-yet-promoted listing at eBay's recommended rate
+    (falling back to the default). Best-effort per item; stops early and asks the
+    user to reconnect if the token lacks ad permissions."""
+    user = auth.current_user(request)
+    creds = _ebay_creds_for(request)
+    if not user or not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    items = [i for i in db.list_listings(limit=200, user_id=user["id"])
+             if i.get("status") in ("published", "live")
+             and not (i.get("listing") or {}).get("promote")]
+    rates = _rates_by_record_id(creds, items)
+    promoted = 0
+    needs_reconnect = False
+    for it in items:
+        listing = Listing(**(it.get("listing") or {}))
+        listing.promote = True
+        listing.ad_rate_percent = round(rates.get(it["id"]) or promotions.DEFAULT_AD_RATE, 1)
+        status = promotions.promote_listing(it["id"], listing, creds)
+        if status.get("promoted"):
+            storage.save_listing(it["id"], listing)
+            db.upsert_listing(it["id"], listing.model_dump(), status=it.get("status"),
+                              user_id=user["id"])
+            promoted += 1
+        elif status.get("needs_reconnect"):
+            needs_reconnect = True
+            break
+    return {"promoted": promoted, "total": len(items), "needs_reconnect": needs_reconnect}
 
 
 @app.get("/api/listings/{listing_id}")

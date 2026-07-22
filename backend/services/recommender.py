@@ -32,9 +32,12 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
     return max(0, (datetime.now(timezone.utc) - dt).days)
 
 
-def recommend_for(item: dict, metrics: Optional[dict] = None) -> list[dict]:
+def recommend_for(item: dict, metrics: Optional[dict] = None,
+                  rate: Optional[float] = None) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
-    {listing_id, listing_title, type, label, reason, action, priority}.
+    {listing_id, listing_title, type, label, reason, action, priority, rate}.
+    `rate` is eBay's recommended Promoted Listings ad rate (%) for this listing,
+    carried on promote recs so the UI can one-click promote at that rate.
     Higher priority = surface sooner."""
     listing = item.get("listing") or {}
     status = item.get("status")
@@ -42,10 +45,11 @@ def recommend_for(item: dict, metrics: Optional[dict] = None) -> list[dict]:
     title = listing.get("title") or item.get("title") or "this listing"
     recs: list[dict] = []
 
-    def add(type_: str, label: str, reason: str, priority: int, action: str = "open"):
+    def add(type_: str, label: str, reason: str, priority: int,
+            action: str = "open", rate_: Optional[float] = None):
         recs.append({"listing_id": lid, "listing_title": title, "type": type_,
                      "label": label, "reason": reason, "action": action,
-                     "priority": priority})
+                     "priority": priority, "rate": rate_})
 
     if status == "unlisted":
         add("finish", "Finish & list",
@@ -74,12 +78,14 @@ def recommend_for(item: dict, metrics: Optional[dict] = None) -> list[dict]:
             f"{views} views but no watchers — buyers are looking; the price may be high.", 92)
     if views is not None and views < 5 and age and age >= 7:
         add("promote", "Promote",
-            f"Only {views} views in {age} days — promote it to reach more buyers.", 90)
+            f"Only {views} views in {age} days — promote it to reach more buyers.", 90,
+            rate_=rate)
 
     # Heuristics that need no eBay metrics.
     if not promoted:
         add("promote", "Promote",
-            "Not promoted yet — promoted listings show up far more often.", 70)
+            "Not promoted yet — promoted listings show up far more often.", 70,
+            rate_=rate)
     if age is not None and age >= STALE_DAYS:
         add("lower_price", "Lower price or add a sale",
             f"Live {age} days — a price drop or a sale can restart interest.", 68)
@@ -94,15 +100,18 @@ def recommend_for(item: dict, metrics: Optional[dict] = None) -> list[dict]:
 
 
 def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
-                    limit: int = 8) -> list[dict]:
+                    rates_by_id: Optional[dict] = None, limit: int = 8) -> list[dict]:
     """Ranked recommendations across many listing records (best first). Keeps
     the single strongest action per listing so the list spans the whole
     portfolio instead of piling onto one item."""
     metrics_by_id = metrics_by_id or {}
+    rates_by_id = rates_by_id or {}
     best: dict[str, dict] = {}
     ranked_all: list[dict] = []
     for it in items:
-        ranked_all.extend(recommend_for(it, metrics=metrics_by_id.get(it.get("id"))))
+        ranked_all.extend(recommend_for(
+            it, metrics=metrics_by_id.get(it.get("id")),
+            rate=rates_by_id.get(it.get("id"))))
     for r in sorted(ranked_all, key=lambda x: -x["priority"]):
         if r["listing_id"] not in best:
             best[r["listing_id"]] = r

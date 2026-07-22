@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
-import { api } from "@/lib/api";
+import { api, postJson } from "@/lib/api";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -56,20 +56,51 @@ const rise = {
 };
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, startNew, openListing, setView, session, deleteListing, metricsById } = useApp();
-  const { confirm } = useToast();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, session, deleteListing, metricsById } = useApp();
+  const { confirm, toast } = useToast();
   const items = listingsState.items;
 
   // "What to do next" — ranked actions across the user's listings.
   const [insights, setInsights] = useState([]);
-  useEffect(() => {
+  const [promoting, setPromoting] = useState(null); // listing id, or "all"
+  const refreshInsights = useCallback(() => {
     if (!user) { setInsights([]); return; }
-    let alive = true;
     api("/api/insights")
-      .then((r) => { if (alive) setInsights(r.recommendations || []); })
-      .catch(() => { if (alive) setInsights([]); });
-    return () => { alive = false; };
-  }, [user, items.length]);
+      .then((r) => setInsights(r.recommendations || []))
+      .catch(() => {});
+  }, [user]);
+  useEffect(() => { refreshInsights(); }, [refreshInsights, items.length]);
+
+  const afterPromote = (res) => {
+    if (res.needs_reconnect) {
+      toast("Reconnect eBay in Settings to grant ad permissions, then try again.", { kind: "warning" });
+    }
+    refreshInsights();
+    loadListings({ quiet: true });
+  };
+  const promoteOne = async (rec) => {
+    setPromoting(rec.listing_id);
+    try {
+      const res = await postJson("/api/ebay/promote",
+        { listing_id: rec.listing_id, ad_rate_percent: rec.rate || 0 });
+      if (res.ok) toast(`Promoting at ${res.ad_rate}% — you only pay if it sells through the ad.`, { kind: "success" });
+      else if (!res.needs_reconnect) toast(res.message || "Couldn't start the promotion.", { kind: "error" });
+      afterPromote(res);
+    } catch (e) {
+      toast(`Couldn't promote: ${e.message}`, { kind: "error" });
+    } finally { setPromoting(null); }
+  };
+  const promoteAll = async () => {
+    setPromoting("all");
+    try {
+      const res = await postJson("/api/ebay/promote-all", {});
+      if (res.promoted) toast(`Promoting ${res.promoted} listing${res.promoted === 1 ? "" : "s"} at eBay's recommended rate.`, { kind: "success" });
+      else if (!res.needs_reconnect) toast("No live listings to promote.", { kind: "info" });
+      afterPromote(res);
+    } catch (e) {
+      toast(`Couldn't promote all: ${e.message}`, { kind: "error" });
+    } finally { setPromoting(null); }
+  };
 
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
@@ -193,10 +224,20 @@ export function Dashboard() {
       {/* Suggested actions — the recommendation engine's picks */}
       {insights.length > 0 && (
         <motion.div variants={rise}>
-          <SectionHeader icon={Lightbulb} title="Suggested actions" />
+          <SectionHeader
+            icon={Lightbulb}
+            title="Suggested actions"
+            action={insights.some((r) => r.type === "promote") && (
+              <Button variant="soft" size="sm" loading={promoting === "all"}
+                disabled={!!promoting} onClick={promoteAll}>
+                <Megaphone aria-hidden /> Promote all
+              </Button>
+            )}
+          />
           <Card className="p-0 divide-y divide-line overflow-hidden">
             {insights.map((rec) => {
               const Icon = REC_ICON[rec.type] || Lightbulb;
+              const isPromote = rec.type === "promote";
               return (
                 <div key={`${rec.listing_id}-${rec.type}`} className="flex items-center gap-3.5 p-4">
                   <span className={cn(
@@ -209,10 +250,18 @@ export function Dashboard() {
                     <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
                     <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
                   </div>
-                  <Button variant="soft" size="sm" className="shrink-0"
-                    onClick={() => openListing(rec.listing_id)}>
-                    {rec.label} <ArrowRight aria-hidden />
-                  </Button>
+                  {isPromote ? (
+                    <Button variant="soft" size="sm" className="shrink-0"
+                      loading={promoting === rec.listing_id} disabled={!!promoting}
+                      onClick={() => promoteOne(rec)}>
+                      {rec.rate ? `Promote ${rec.rate}%` : "Promote"}
+                    </Button>
+                  ) : (
+                    <Button variant="soft" size="sm" className="shrink-0"
+                      onClick={() => openListing(rec.listing_id)}>
+                      {rec.label} <ArrowRight aria-hidden />
+                    </Button>
+                  )}
                 </div>
               );
             })}
