@@ -75,6 +75,11 @@ _ALPHA_HIGH = 170
 # the model ate the item (dark denim, close-up textures, low contrast) — keep
 # the original photo rather than saving a destroyed one.
 _MIN_FG_COVERAGE = 0.045
+# When the removed (background) region is both large (>50% of the frame) and
+# darker than this mean luminance, it's almost certainly a dark ITEM the model
+# mistook for background (not a real backdrop, which is white/neutral) — keep
+# the original. Tunable via DARK_BG_LUMA.
+_DARK_BG_LUMA = int(os.getenv("DARK_BG_LUMA", "70") or "70")
 # Cap the resolution the background model actually runs at. isnet on a full
 # 1600px image thrashes memory on a 2GB machine and can hang a bulk job for
 # minutes; running on a smaller copy is fast and light, and the resulting mask
@@ -126,17 +131,30 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.I
 def _refine_alpha(alpha: Image.Image) -> Image.Image:
     """Clean the matte into a natural cutout: despeckle, kill the faint
     background ghost, trim the ~1px background halo around the subject, then
-    lightly feather the edge so it blends instead of looking stickered-on."""
+    lightly feather the edge so it blends instead of looking stickered-on.
+
+    Border-aware: where the subject runs off the frame it has no background
+    fringe to trim, so eroding + feathering there just eats a white gutter into
+    the item (the 'bleeds off frame' artifact). We restore the hardened,
+    un-eroded alpha in a thin band along the frame so an edge-touching subject
+    stays solid to the border. Where the subject doesn't reach an edge the
+    hardened alpha is 0 there, so those borders are unchanged."""
+    w, h = alpha.size
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
     span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
-    alpha = alpha.point(lambda a: 0 if a < _ALPHA_LOW
-                        else 255 if a > _ALPHA_HIGH
-                        else round((a - _ALPHA_LOW) * 255 / span))
+    hardened = alpha.point(lambda a: 0 if a < _ALPHA_LOW
+                           else 255 if a > _ALPHA_HIGH
+                           else round((a - _ALPHA_LOW) * 255 / span))
     # Erode 1px to cut the residual background fringe, then a sub-pixel feather
     # so the composited edge is smooth rather than jagged.
-    alpha = alpha.filter(ImageFilter.MinFilter(3))
-    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
-    return alpha
+    refined = hardened.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.6))
+    band = 3
+    if w > 2 * band and h > 2 * band:
+        refined.paste(hardened.crop((0, 0, w, band)), (0, 0))               # top
+        refined.paste(hardened.crop((0, h - band, w, h)), (0, h - band))    # bottom
+        refined.paste(hardened.crop((0, 0, band, h)), (0, 0))               # left
+        refined.paste(hardened.crop((w - band, 0, w, h)), (w - band, 0))    # right
+    return refined
 
 
 def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
@@ -165,13 +183,29 @@ def _cutout_on_white(img: Image.Image,
     unless BG_SHADOW=off) — or None when the result is clearly a failure
     (subject erased), so callers keep the original photo instead of saving a
     destroyed one. `max_side` caps the matte resolution (higher = crisper)."""
+    from PIL import ImageStat
+
     rgb = img.convert("RGB")
     alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side))
+    total = max(1, alpha.width * alpha.height)
     opaque = sum(alpha.histogram()[128:])
-    if opaque / max(1, alpha.width * alpha.height) < _MIN_FG_COVERAGE:
+    if opaque / total < _MIN_FG_COVERAGE:
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
-                    100 * opaque / max(1, alpha.width * alpha.height))
+                    100 * opaque / total)
         return None
+    # Dark-background guard for the classic 'item bleeds off frame' failure: a
+    # dark garment that fills the frame gets called 'background', leaving only
+    # its bright printed graphic. A removed region that's both LARGE and DARK is
+    # almost never a real backdrop (those are white/neutral), so keep the
+    # original rather than a garment reduced to its logo. A normal white/neutral
+    # backdrop is light, so this never fires on good cutouts.
+    if (total - opaque) / total > 0.5:
+        bg_mask = alpha.point(lambda a: 255 if a < 128 else 0)
+        stat = ImageStat.Stat(rgb.convert("L"), mask=bg_mask)
+        if stat.count[0] and stat.mean[0] < _DARK_BG_LUMA:
+            log.warning("bg-removal: removed area large & dark (mean L=%.0f) — likely ate a "
+                        "dark item, keeping original", stat.mean[0])
+            return None
     return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW)
 
 
