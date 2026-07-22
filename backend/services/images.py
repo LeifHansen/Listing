@@ -177,12 +177,18 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
     return canvas
 
 
-def _cutout_on_white(img: Image.Image,
-                     max_side: Optional[int] = None) -> Optional[Image.Image]:
+def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
+                     dark_guard: bool = True) -> Optional[Image.Image]:
     """In-house rembg cutout composited on pure white (with a soft drop shadow
     unless BG_SHADOW=off) — or None when the result is clearly a failure
     (subject erased), so callers keep the original photo instead of saving a
-    destroyed one. `max_side` caps the matte resolution (higher = crisper)."""
+    destroyed one. `max_side` caps the matte resolution (higher = crisper).
+
+    `dark_guard` catches the classic 'item bleeds off frame' failure (see below)
+    by bailing to None — right for the automatic path, which would otherwise
+    silently save a mangled cutout. The photo studio passes dark_guard=False:
+    the seller is reviewing the result and can Revert, so it's better to SHOW
+    the cutout than to hard-fail with an error."""
     from PIL import ImageStat
 
     rgb = img.convert("RGB")
@@ -193,13 +199,13 @@ def _cutout_on_white(img: Image.Image,
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
                     100 * opaque / total)
         return None
-    # Dark-background guard for the classic 'item bleeds off frame' failure: a
-    # dark garment that fills the frame gets called 'background', leaving only
-    # its bright printed graphic. A removed region that's both LARGE and DARK is
-    # almost never a real backdrop (those are white/neutral), so keep the
-    # original rather than a garment reduced to its logo. A normal white/neutral
-    # backdrop is light, so this never fires on good cutouts.
-    if (total - opaque) / total > 0.5:
+    # Dark-background guard: a dark garment that fills the frame gets called
+    # 'background', leaving only its bright printed graphic. A removed region
+    # that's both LARGE and DARK is almost never a real backdrop (those are
+    # white/neutral), so keep the original rather than a garment reduced to its
+    # logo. A normal white/neutral backdrop is light, so this never fires on
+    # good cutouts.
+    if dark_guard and (total - opaque) / total > 0.5:
         bg_mask = alpha.point(lambda a: 255 if a < 128 else 0)
         stat = ImageStat.Stat(rgb.convert("L"), mask=bg_mask)
         if stat.count[0] and stat.mean[0] < _DARK_BG_LUMA:
@@ -228,7 +234,9 @@ def remove_background_white(img: Image.Image) -> Image.Image:
     editor can tell the user instead of silently doing nothing."""
     for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
         try:
-            out = _cutout_on_white(img, max_side=side)
+            # dark_guard off: the seller reviews the result and can Revert, so
+            # show the cutout rather than hard-failing on a borderline shot.
+            out = _cutout_on_white(img, max_side=side, dark_guard=False)
         except Exception as exc:  # noqa: BLE001 - retry smaller on OOM/model error
             log.warning("bg-removal: matte at %dpx failed (%s) — retrying smaller",
                         side, exc)
@@ -238,8 +246,8 @@ def remove_background_white(img: Image.Image) -> Image.Image:
         break  # a clean run that erased the subject won't improve when smaller
     raise ValueError(
         "Couldn't cleanly separate this photo from its background — it's "
-        "likely a close-up, dark, or low-contrast shot. Try Auto clean, or "
-        "paint the background out with the brush.")
+        "likely a close-up, dark, or low-contrast shot. Try cropping in "
+        "tighter, or paint the background out with the white brush.")
 
 
 def warm() -> None:

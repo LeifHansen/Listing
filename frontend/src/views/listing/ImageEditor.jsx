@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  RotateCcw, Crop, Highlighter, CheckCircle2, Eraser,
+  RotateCcw, Crop, Highlighter, CheckCircle2, Eraser, Wand2, Paintbrush,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -9,14 +9,38 @@ import { useToast } from "@/components/ui/Toaster";
 import { api } from "@/lib/api";
 import { cn, mediaUrl } from "@/lib/utils";
 
-/* Photo studio: two actions plus manual clean-up —
-   - remove background: in-house cutout onto pure white
-   - crop: drag a rectangle and apply
-   - highlight leftovers: re-check the item's borders and tint any leftover
-     background red, so you can paint it out with the white brush.
-   Every action only previews onto the canvas; nothing is stored until Save. */
+/* Photo studio — a small toolbar of one-tap tools, all previewed on the canvas
+   (nothing is stored until Save):
+   - Remove background: in-house cutout onto pure white
+   - Auto levels: stretch brightness/contrast to make the shot pop (client-side)
+   - Crop: drag a rectangle; it applies the moment you release
+   - Highlight leftovers: tint any background the cutout missed red, so you can
+     paint it out with the white brush (off until you turn it on). */
 
 const HIGHLIGHT_COLOR = "#e85c46"; // brand coral, tinted over leftovers
+
+// One toolbar button — icon + label, with a pressed/active state for the
+// toggle tools (Crop, Highlight).
+function Tool({ icon: Icon, label, active, className, ...props }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      className={cn(
+        "inline-flex items-center gap-1.5 h-9 px-3 rounded-[10px] text-[13px] font-semibold",
+        "cursor-pointer transition-colors duration-150 shrink-0",
+        "disabled:opacity-40 disabled:pointer-events-none",
+        active
+          ? "bg-blue text-on-accent shadow-card"
+          : "text-ink-secondary hover:bg-card hover:text-ink",
+        className,
+      )}
+      {...props}
+    >
+      <Icon size={16} aria-hidden /> {label}
+    </button>
+  );
+}
 
 function canvasBlob(canvas, type = "image/jpeg", q = 0.92) {
   return new Promise((r) => canvas.toBlob(r, type, q));
@@ -57,7 +81,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const [saving, setSaving] = useState(false);
   const [aiBusy, setAiBusy] = useState(null); // destructive op running (locks Save)
   const [checking, setChecking] = useState(null); // passive border re-check (never locks Save)
-  const [highlight, setHighlight] = useState(true);
+  const [highlight, setHighlight] = useState(false);
   const [residuePct, setResiduePct] = useState(null);
   // Manual crop tool: drag a rect, then Apply.
   const [tool, setTool] = useState("brush"); // "brush" | "crop"
@@ -127,7 +151,10 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       const res = await studioCall("/api/image/analyze", sessionId, name, blob, 30000);
       paintedSinceAnalyze.current = false;
       setResiduePct(res.residue_pct);
-      const shouldShow = show ?? (res.residue_pct >= 0.2);
+      // Highlight is opt-in now: only tint leftovers when the user explicitly
+      // turns it on (show === true). On load / after an edit we just record the
+      // residue for the status line, without the red overlay.
+      const shouldShow = show === true;
       setHighlight(shouldShow);
       await drawOverlay(shouldShow ? res.mask : null);
     } catch (e) {
@@ -185,6 +212,37 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     }
   }, [aiBusy, sessionId, name, applyPreview, toast]);
 
+  // Auto levels — a percentile contrast/brightness stretch, done right on the
+  // canvas so it's instant (no round-trip). Ignores the darkest/lightest 0.5%
+  // so a stray highlight or shadow doesn't skew the whole image, then maps the
+  // remaining luminance range across the full 0-255 span on every channel (so
+  // hues are preserved — it brightens and adds contrast without a color cast).
+  const autoLevels = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || aiBusy) return;
+    const ctx = canvas.getContext("2d");
+    const px = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = px.data;
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < d.length; i += 4) {
+      hist[(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0]++;
+    }
+    const clip = (d.length / 4) * 0.005;
+    let lo = 0, hi = 255, acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > clip) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > clip) { hi = v; break; } }
+    if (hi - lo < 8) { toast("This photo already uses the full range.", { kind: "info" }); return; }
+    const scale = 255 / (hi - lo);
+    const lut = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) lut[v] = (v - lo) * scale;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]];
+    }
+    ctx.putImageData(px, 0, 0);
+    toast("Auto levels applied — Revert to undo, Save to keep.", { kind: "success" });
+  }, [aiBusy, toast]);
+
   // Manual crop: toggle the tool, drag a rect, Apply.
   const toggleCropTool = useCallback(() => {
     if (aiBusy) return;
@@ -199,12 +257,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     setHighlight(false);
     setTool("crop");
   }, [aiBusy, clearOverlay]);
-
-  const cancelCrop = useCallback(() => {
-    setCropRect(null);
-    liveRect.current = null;
-    clearOverlay();
-  }, [clearOverlay]);
 
   const applyCrop = useCallback(async () => {
     const canvas = canvasRef.current;
@@ -222,10 +274,16 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     liveRect.current = null;
     clearOverlay();
     setTool("brush");
-    toast("Cropped — review and Save to keep it.", { kind: "success" });
+    toast("Cropped — Revert to undo, Save to keep it.", { kind: "success" });
     const blob = await canvasBlob(canvas);
     analyze(blob);
   }, [cropRect, clearOverlay, analyze, toast]);
+
+  // Crop applies the moment you release the drag — no separate Apply button.
+  useEffect(() => {
+    if (cropRect) applyCrop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cropRect]);
 
   const toggleHighlight = useCallback(async () => {
     if (aiBusy || checking) return;
@@ -384,43 +442,27 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const borderState = residuePct == null
     ? null
     : residuePct >= 0.2
-      ? `AI found leftover background (~${residuePct}% of the frame)${highlight ? " — highlighted in red" : ""}. Try Auto clean, or paint over it.`
+      ? `Found leftover background (~${residuePct}% of the frame)${highlight ? " — tinted red" : ""}. Turn on Highlight to see it, or paint it out with the brush.`
       : "Item borders look clean.";
 
   return (
     <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <Button variant="soft" size="sm" onClick={removeBg} disabled={!!aiBusy}>
-          <Eraser aria-hidden /> Remove background
-        </Button>
-        <Button
-          variant={tool === "crop" ? "primary" : "soft"} size="sm"
-          onClick={toggleCropTool} disabled={!!aiBusy}
-          aria-pressed={tool === "crop"}
-        >
-          <Crop aria-hidden /> Crop
-        </Button>
-        {tool === "crop" && cropRect && (
-          <>
-            <Button variant="primary" size="sm" onClick={applyCrop}>
-              <CheckCircle2 aria-hidden /> Apply crop
-            </Button>
-            <Button variant="ghost" size="sm" onClick={cancelCrop}>Cancel</Button>
-          </>
-        )}
-        <Button
-          variant={highlight ? "danger" : "ghost"} size="sm"
-          onClick={toggleHighlight} disabled={!!aiBusy}
-          aria-pressed={highlight}
-        >
-          <Highlighter aria-hidden /> {highlight ? "Hide highlight" : "Highlight leftovers"}
-        </Button>
-        <span className="ml-auto text-xs text-ink-secondary hidden sm:block">
-          {tool === "crop"
-            ? "Drag on the photo to frame the crop, then Apply."
-            : "Paint over anything with the white brush."}
-        </span>
+      <div className="flex items-center gap-1 p-1.5 mb-2 rounded-[14px] bg-bg-sunken border border-line overflow-x-auto">
+        <Tool icon={Eraser} label="Remove BG" onClick={removeBg} disabled={!!aiBusy} />
+        <Tool icon={Wand2} label="Auto levels" onClick={autoLevels} disabled={!!aiBusy} />
+        <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
+        <Tool icon={Crop} label="Crop" active={tool === "crop"}
+          onClick={toggleCropTool} disabled={!!aiBusy} />
+        <Tool icon={Highlighter} label="Highlight" active={highlight}
+          onClick={toggleHighlight} disabled={!!aiBusy} />
       </div>
+      <p className="text-xs text-ink-secondary mb-3 px-0.5">
+        {tool === "crop"
+          ? "Drag a box on the photo — it crops the moment you let go."
+          : highlight
+            ? "Leftover background is tinted red — paint over it with the white brush."
+            : "Paint the background out with the white brush, or turn on Highlight to spot leftovers."}
+      </p>
 
       <div className="rounded-tile overflow-hidden border border-line bg-bg-sunken grid place-items-center max-h-[52vh] p-2">
         <div className="relative inline-block max-w-full">
@@ -452,7 +494,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
 
       <div className="flex flex-wrap items-center gap-3 mt-4">
         <label className="flex items-center gap-2.5 text-sm font-semibold text-ink">
-          Brush
+          <Paintbrush size={16} className="text-ink-secondary" aria-hidden /> Brush
           <input
             type="range" min="8" max="120" value={brush}
             onChange={(e) => setBrush(parseInt(e.target.value, 10))}
