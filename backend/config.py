@@ -117,7 +117,18 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
-# --- Background removal (in-house) -----------------------------------------
+# --- Background removal -----------------------------------------------------
+# Photoroom (https://photoroom.com/api) is the PRIMARY remover when a key is
+# set — purpose-built, and far better on dark / low-contrast / bleeds-off-frame
+# shots than the local model. Falls back to the in-house rembg (below) when the
+# key is absent or Photoroom errors, so removal never fully breaks.
+PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
+
+
+def photoroom_ready() -> bool:
+    return bool(PHOTOROOM_API_KEY)
+
+# --- Background removal (in-house fallback) ---------------------------------
 # Removal runs in-process via rembg (see services/images.py). No external
 # service or API key. Tunables (all optional): REMBG_MODEL, REMBG_MAX_SIDE,
 # BG_SHADOW — read directly from the environment in images.py.
