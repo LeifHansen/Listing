@@ -781,6 +781,57 @@ async def upload(
     }
 
 
+@app.post("/api/upload-more/{session_id}")
+async def upload_more(
+    session_id: str,
+    request: Request,
+    files: list[UploadFile] = File(...),
+    remove_bg: str = Form("false"),
+) -> dict:
+    """Add more photos to an existing listing. Optimizes each new file into the
+    session with non-colliding names and returns the new filenames, so the
+    client can append them to the listing's image order."""
+    _assert_session_owner(session_id, request)
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+    existing = storage.list_optimized(session_id)
+    if len(existing) + len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
+    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+
+    def _idx(n: str) -> int:
+        try:
+            return int(n.replace("img_", "").replace(".jpg", ""))
+        except ValueError:
+            return -1
+    start = max((_idx(n) for n in existing), default=-1) + 1
+
+    orig = storage.original_dir(session_id)
+    opt_dir = storage.optimized_dir(session_id)
+    new_names: list[str] = []
+    for j, f in enumerate(files):
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+        idx = start + j
+        suffix = Path(f.filename or f"add_{idx}").suffix or ".jpg"
+        src = orig / f"add_{idx:02d}{suffix}"
+        try:
+            src.write_bytes(data)
+            await run_in_threadpool(images.optimize, src, opt_dir / f"img_{idx:02d}.jpg", strip_bg)
+            new_names.append(f"img_{idx:02d}.jpg")
+        except OSError:
+            raise HTTPException(507, "The server is out of storage space — try again shortly.")
+        except Exception as exc:  # noqa: BLE001 - skip a bad file, keep the rest
+            log.warning("upload-more: couldn't process %s: %s", f.filename, exc)
+    if not new_names:
+        raise HTTPException(400, "Could not process the uploaded image(s).")
+    await run_in_threadpool(objstore.upload_optimized, session_id, opt_dir, new_names)
+    log.info("upload-more: session=%s added=%d", session_id, len(new_names))
+    return {"added": new_names, "optimized": storage.list_optimized(session_id)}
+
+
 @app.post("/api/edit-image")
 async def edit_image(
     request: Request,

@@ -259,6 +259,33 @@ export function useListingForm() {
     postJson(`/api/save/${sessionId}`, { ...collect(), images: imgs }).catch(() => {});
   }, [collect, sessionId, setForm, setSession]);
 
+  // Upload more photos onto this listing: optimize server-side, append the new
+  // files to the image order, and persist.
+  const [addingPhotos, setAddingPhotos] = useState(false);
+  const addImages = useCallback(async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length || !sessionId) return;
+    setAddingPhotos(true);
+    try {
+      const fd = new FormData();
+      files.forEach((f) => fd.append("files", f));
+      const res = await api(`/api/upload-more/${sessionId}`, { method: "POST", body: fd });
+      const added = res.added || [];
+      if (added.length) {
+        const next = [...(form.images || []), ...added];
+        setForm((f) => ({ ...f, images: next }));
+        setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
+        setImageVersion((v) => v + 1);
+        postJson(`/api/save/${sessionId}`, { ...collect(), images: next }).catch(() => {});
+        toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`, { kind: "success" });
+      }
+    } catch (e) {
+      toast(`Couldn't add photos: ${e.message}`, { kind: "error" });
+    } finally {
+      setAddingPhotos(false);
+    }
+  }, [sessionId, form.images, collect, setForm, setSession, toast]);
+
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
     setAiBusy(["Checking everything eBay requires…"]);
@@ -405,7 +432,8 @@ export function useListingForm() {
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, upsertSpecific,
-    deleteImage, rotateImage, reorderImages, imageVersion, setImageVersion,
+    deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
+    imageVersion, setImageVersion,
     completion,
   };
 }

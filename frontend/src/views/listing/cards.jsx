@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone,
+  Sparkles, Megaphone, Loader2,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -92,40 +92,53 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       hint="Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
-      {order.length ? (
-        <div className={cn(
-          "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
-          // While dragging, kill hover scale + CSS transitions on every tile and
-          // hide the hover overlay — otherwise the pointer sweeping across the
-          // grid fires all their group-hover effects at once (the repaint storm
-          // behind the lag, plus the Edit button flashing on each tile).
-          draggingName && "select-none [&_img]:!scale-100 [&_*]:!transition-none [&_.ph-ov]:!opacity-0",
+      <div className={cn(
+        "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
+        // While dragging, kill hover scale + CSS transitions on every tile and
+        // hide the hover overlay — otherwise the pointer sweeping across the
+        // grid fires all their group-hover effects at once (the repaint storm
+        // behind the lag, plus the Edit button flashing on each tile).
+        draggingName && "select-none [&_img]:!scale-100 [&_*]:!transition-none [&_.ph-ov]:!opacity-0",
+      )}>
+        <AnimatePresence>
+          {order.map((name, i) => (
+            <PhotoTile
+              key={name}
+              sessionId={w.sessionId}
+              name={name}
+              index={i}
+              version={w.imageVersion}
+              reorderable={order.length > 1}
+              dragging={draggingName === name}
+              onDragStart={startDrag(name)}
+              onDragMove={onMove}
+              onDragEnd={endDrag}
+              onEdit={() => onEdit(name)}
+              onDelete={() => onDelete(name)}
+              onRotate={() => w.rotateImage(name)}
+            />
+          ))}
+        </AnimatePresence>
+        {/* Add more photos — optimizes + appends to this listing. */}
+        <label className={cn(
+          "relative rounded-tile border-2 border-dashed border-line bg-bg-sunken/40 aspect-square",
+          "grid place-items-center cursor-pointer text-ink-secondary transition-colors duration-150",
+          "hover:border-blue/50 hover:text-blue",
+          w.addingPhotos && "pointer-events-none opacity-70",
         )}>
-          <AnimatePresence>
-            {order.map((name, i) => (
-              <PhotoTile
-                key={name}
-                sessionId={w.sessionId}
-                name={name}
-                index={i}
-                version={w.imageVersion}
-                reorderable={order.length > 1}
-                dragging={draggingName === name}
-                onDragStart={startDrag(name)}
-                onDragMove={onMove}
-                onDragEnd={endDrag}
-                onEdit={() => onEdit(name)}
-                onDelete={() => onDelete(name)}
-                onRotate={() => w.rotateImage(name)}
-              />
-            ))}
-          </AnimatePresence>
-        </div>
-      ) : (
-        <p className="text-sm text-ink-secondary">
-          No photos on this listing — start a new one to upload photos.
-        </p>
-      )}
+          <input
+            type="file" accept="image/*" multiple className="sr-only"
+            disabled={w.addingPhotos}
+            onChange={(e) => { w.addImages(e.target.files); e.target.value = ""; }}
+          />
+          <span className="flex flex-col items-center gap-1 text-[12px] font-semibold">
+            {w.addingPhotos
+              ? <Loader2 size={20} className="animate-spin" aria-hidden />
+              : <Plus size={20} aria-hidden />}
+            {w.addingPhotos ? "Adding…" : "Add photos"}
+          </span>
+        </label>
+      </div>
     </WorkflowCard>
   );
 }
