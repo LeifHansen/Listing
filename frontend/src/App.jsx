@@ -11,6 +11,7 @@ import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
 import { ListingsView } from "@/views/ListingsView";
 import { SettingsView } from "@/views/SettingsView";
+import { EbayAccountView } from "@/views/EbayAccountView";
 
 function Main() {
   const { view, setView, health, activeBulk } = useApp();
@@ -62,6 +63,7 @@ function Main() {
             {view === "drafts" && <ListingsView kind="drafts" search={search} />}
             {view === "listings" && <ListingsView kind="listings" search={search} />}
             {view === "settings" && <SettingsView />}
+            {view === "ebay" && <EbayAccountView />}
           </motion.main>
         </AnimatePresence>
       </div>

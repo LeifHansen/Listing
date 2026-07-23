@@ -253,6 +253,39 @@ def fetch_policies_and_location(access_token: str) -> dict:
     return out
 
 
+def account_overview(access_token: str) -> dict:
+    """Mirror the seller's most-updated eBay account settings, best-effort.
+    Every section is fetched independently, so one failing leaves the rest
+    intact (e.g. a seller with no business policies still gets locations)."""
+    out: dict = {"policies": {"fulfillment": [], "payment": [], "return": []},
+                 "locations": [], "programs": [], "payments": {}}
+    try:
+        out["policies"] = list_business_policies(access_token)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        resp = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            out["locations"] = resp.json().get("locations", []) or []
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        data = _account_get("/sell/account/v1/program/get_opted_in_programs", access_token)
+        out["programs"] = [p.get("programType") for p in (data.get("programs") or [])
+                           if p.get("programType")]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["payments"] = fetch_payments_program(access_token)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Shipping services (per-listing selection + USPS Ground Advantage default)
 # ---------------------------------------------------------------------------

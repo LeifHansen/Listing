@@ -441,6 +441,36 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     return {"ok": not preflight.errors_only(issues), "issues": issues}
 
 
+@app.get("/api/ebay/account-overview")
+def ebay_account_overview(request: Request) -> dict:
+    """A live mirror of the seller's most-updated eBay account settings —
+    business policies (with the current defaults), ship-from locations, opted-in
+    programs, and managed-payments status. Best-effort; {connected: false} when
+    eBay isn't linked."""
+    creds = _ebay_creds_for(request)
+    if not creds or not creds.get("access_token"):
+        return {"connected": False}
+    try:
+        ov = ebay_auth.account_overview(creds["access_token"])
+    except Exception as exc:  # noqa: BLE001 - never fail the page
+        log.warning("account-overview failed: %s", exc)
+        ov = {}
+    acct = db.get_ebay_account(_uid(request)) or {}
+    ov["connected"] = True
+    ov["account"] = {
+        "username": acct.get("ebay_username", ""),
+        "email": acct.get("ebay_email", ""),
+        "marketplace": config.EBAY_MARKETPLACE_ID,
+    }
+    ov["selected"] = {
+        "fulfillment_policy_id": creds.get("fulfillment_policy_id", ""),
+        "payment_policy_id": creds.get("payment_policy_id", ""),
+        "return_policy_id": creds.get("return_policy_id", ""),
+        "merchant_location_key": creds.get("merchant_location_key", ""),
+    }
+    return ov
+
+
 @app.post("/api/ebay/policies")
 def set_ebay_policies(request: Request, payload: dict) -> dict:
     """Save the account's default shipping/payment/return policy selections and

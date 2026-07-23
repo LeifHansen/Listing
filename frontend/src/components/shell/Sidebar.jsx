@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   LayoutDashboard, PlusCircle, Store, Package, FileText, Tags, Settings,
-  Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
+  ShoppingBag, Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -15,8 +15,11 @@ const NAV = [
   { id: "inventory", label: "Inventory", icon: Package },
   { id: "drafts", label: "Drafts", icon: FileText },
   { id: "listings", label: "Listings", icon: Tags },
+  { id: "ebay", label: "eBay Account", icon: ShoppingBag },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+const byId = (id) => NAV.find((n) => n.id === id);
 
 export const APP_VERSION = "v2.0";
 
@@ -184,13 +187,8 @@ export function Sidebar() {
 // BottomNav — the sidebar's mobile form: five thumb-sized targets.
 export function BottomNav() {
   const { view, setView, startNew } = useApp();
-  const items = [
-    NAV[0], // dashboard
-    NAV[2], // shop
-    NAV[1], // new listing (center)
-    NAV[5], // listings
-    NAV[6], // settings
-  ];
+  // Reference by id (not index) so reordering NAV never scrambles the bar.
+  const items = ["dashboard", "shop", "new", "listings", "settings"].map(byId);
   return (
     <nav
       aria-label="Main"
