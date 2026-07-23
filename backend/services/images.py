@@ -14,6 +14,7 @@ from typing import Optional
 
 from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
+from .. import config
 from ..config import log
 
 # iPhone/Mac photos are HEIC by default; register the decoder if available so
@@ -215,12 +216,45 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW)
 
 
-def _remove_background(img: Image.Image) -> Image.Image:
-    """Cut out the subject onto white for the upload path. Falls back to the
-    original (flattened) on any failure — an auto/bulk upload must never die
-    or silently save a destroyed photo because one cutout call failed."""
+def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
+    """Cut out the subject via Photoroom's API and composite it on white (with
+    our soft shadow). Returns None when no key is configured or the call fails,
+    so callers fall back to the in-house remover. Photoroom is far stronger on
+    the dark / low-contrast / bleeds-off-frame shots the local model mangles."""
+    if not config.photoroom_ready():
+        return None
+    from io import BytesIO
+    import httpx
+    buf = BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=92)
+    buf.seek(0)
     try:
-        out = _cutout_on_white(img)
+        resp = httpx.post(
+            "https://sdk.photoroom.com/v1/segment",
+            headers={"x-api-key": config.PHOTOROOM_API_KEY},
+            files={"image_file": ("image.jpg", buf, "image/jpeg")},
+            data={"format": "png"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        cut = Image.open(BytesIO(resp.content)).convert("RGBA")
+    except Exception as exc:  # noqa: BLE001 - fall back to the in-house remover
+        log.warning("photoroom: cutout failed (%s) — falling back to local", exc)
+        return None
+    alpha = cut.split()[3]
+    if alpha.getbbox() is None:  # nothing kept — treat as a failure
+        return None
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+
+
+def _remove_background(img: Image.Image) -> Image.Image:
+    """Cut out the subject onto white for the upload path — Photoroom first,
+    then the in-house remover. Falls back to the original (flattened) on any
+    failure, so an auto/bulk upload never dies or saves a destroyed photo."""
+    try:
+        out = _photoroom_cutout(img)
+        if out is None:
+            out = _cutout_on_white(img)
     except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
         log.warning("bg-removal: cutout failed (%s) — keeping original", exc)
         out = None
@@ -232,6 +266,13 @@ def remove_background_white(img: Image.Image) -> Image.Image:
     resolution for crisper edges, falling back to the fast size if a big
     inference runs out of memory. Raises when the cutout genuinely fails so the
     editor can tell the user instead of silently doing nothing."""
+    # Photoroom first (best quality); the in-house remover is the fallback.
+    try:
+        pr = _photoroom_cutout(img)
+        if pr is not None:
+            return pr
+    except Exception as exc:  # noqa: BLE001 - fall back to the local remover
+        log.warning("photoroom: studio cutout failed (%s) — falling back", exc)
     for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
         try:
             # dark_guard off: the seller reviews the result and can Revert, so
