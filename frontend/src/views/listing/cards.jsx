@@ -364,36 +364,88 @@ export function SpecificsCard({ w }) {
   );
 }
 
+const LISTING_FORMATS = [
+  ["FIXED_PRICE", "Buy It Now"],
+  ["AUCTION", "Auction"],
+  ["AUCTION_BIN", "Auction + BIN"],
+];
+const AUCTION_DURATIONS = [
+  ["DAYS_1", "1 day"], ["DAYS_3", "3 days"], ["DAYS_5", "5 days"],
+  ["DAYS_7", "7 days"], ["DAYS_10", "10 days"],
+];
+
 export function PricingCard({ w }) {
   const conditions = w.categoryMeta.conditions?.length
     ? w.categoryMeta.conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
     : CONDITIONS.map((c) => ({ value: c, label: conditionLabel(c) }));
   const p = w.priceData;
+  const currency = w.form.currency || "USD";
+  const fmt = w.form.listing_format || "FIXED_PRICE";
+  const isAuction = fmt === "AUCTION" || fmt === "AUCTION_BIN";
 
   return (
     <WorkflowCard
       id="pricing" icon={Coins} title="Pricing & condition"
-      hint="Check live comps so you never guess"
+      hint="Buy It Now, auction, or both — check live comps so you never guess"
       state={w.completion.pricing}
       flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
     >
       <div className="flex flex-col gap-4">
+        <Field label="Listing format">
+          <div className="inline-flex w-full sm:w-auto rounded-input border border-line p-0.5 bg-bg-sunken">
+            {LISTING_FORMATS.map(([val, lbl]) => (
+              <button
+                key={val} type="button" onClick={() => w.set("listing_format", val)}
+                aria-pressed={fmt === val}
+                className={cn(
+                  "flex-1 sm:flex-none px-3.5 h-9 rounded-[9px] text-[13px] font-semibold cursor-pointer",
+                  "whitespace-nowrap transition-colors duration-150",
+                  fmt === val ? "bg-card text-ink shadow-card" : "text-ink-secondary hover:text-ink",
+                )}
+              >
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </Field>
+
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-          <Field label={`Price (${w.form.currency || "USD"})`}>
-            <Input
-              type="number" step="0.01" min="0" inputMode="decimal"
-              value={w.form.price}
-              needsFix={w.fixTarget === "price"}
-              onChange={(e) => w.set("price", e.target.value)}
-            />
-          </Field>
-          <Field label="Quantity">
-            <Input
-              type="number" min="1" inputMode="numeric"
-              value={w.form.quantity}
-              onChange={(e) => w.set("quantity", e.target.value)}
-            />
-          </Field>
+          {isAuction && (
+            <Field label={`Starting bid (${currency})`}>
+              <Input
+                type="number" step="0.01" min="0" inputMode="decimal"
+                value={w.form.auction_start_price}
+                needsFix={w.fixTarget === "price"}
+                onChange={(e) => w.set("auction_start_price", e.target.value)}
+              />
+            </Field>
+          )}
+          {(!isAuction || fmt === "AUCTION_BIN") && (
+            <Field label={isAuction ? `Buy It Now (${currency})` : `Price (${currency})`}>
+              <Input
+                type="number" step="0.01" min="0" inputMode="decimal"
+                value={w.form.price}
+                needsFix={w.fixTarget === "price"}
+                onChange={(e) => w.set("price", e.target.value)}
+              />
+            </Field>
+          )}
+          {isAuction ? (
+            <Field label="Duration">
+              <Select value={w.form.auction_duration}
+                onChange={(e) => w.set("auction_duration", e.target.value)}>
+                {AUCTION_DURATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </Select>
+            </Field>
+          ) : (
+            <Field label="Quantity">
+              <Input
+                type="number" min="1" inputMode="numeric"
+                value={w.form.quantity}
+                onChange={(e) => w.set("quantity", e.target.value)}
+              />
+            </Field>
+          )}
           <Field label="Condition" className="col-span-2 sm:col-span-1">
             <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}

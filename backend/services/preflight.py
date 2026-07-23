@@ -110,13 +110,23 @@ def validate(listing: Listing, mode: str, *,
         return issues
 
     # --- offer ---
-    if listing.price is None or listing.price <= 0:
-        add("price", "A price is required", "Set a price on the Pricing card.")
-    elif listing.price < EBAY_MIN_PRICE:
-        add("price", f"eBay's minimum price is ${EBAY_MIN_PRICE:.2f}",
-            f"Raise the price to at least ${EBAY_MIN_PRICE:.2f}.")
-    if (listing.quantity or 0) < 1:
-        add("price", "Quantity must be at least 1", "Set the quantity to 1 or more.")
+    fmt = (getattr(listing, "listing_format", "") or "FIXED_PRICE").upper()
+    if fmt in ("AUCTION", "AUCTION_BIN"):
+        start = getattr(listing, "auction_start_price", None)
+        if start is None or start <= 0:
+            add("price", "A starting bid is required",
+                "Set the starting bid on the Pricing card.")
+        if fmt == "AUCTION_BIN" and (listing.price is None or listing.price <= 0):
+            add("price", "A Buy It Now price is required",
+                "Set the Buy It Now price, or switch to a plain auction.")
+    else:
+        if listing.price is None or listing.price <= 0:
+            add("price", "A price is required", "Set a price on the Pricing card.")
+        elif listing.price < EBAY_MIN_PRICE:
+            add("price", f"eBay's minimum price is ${EBAY_MIN_PRICE:.2f}",
+                f"Raise the price to at least ${EBAY_MIN_PRICE:.2f}.")
+        if (listing.quantity or 0) < 1:
+            add("price", "Quantity must be at least 1", "Set the quantity to 1 or more.")
     cid = (listing.category_id or "").strip()
     if not cid:
         add("category", "An eBay category is required",

@@ -25,6 +25,12 @@ class Listing(BaseModel):
     price: Optional[float] = None
     currency: str = "USD"
     quantity: int = 1
+    # Listing format: FIXED_PRICE (Buy It Now, default), AUCTION, or AUCTION_BIN
+    # (an auction that also has a Buy It Now price = `price`). `price` is the
+    # fixed / Buy-It-Now price; `auction_start_price` is the starting bid.
+    listing_format: str = "FIXED_PRICE"
+    auction_start_price: Optional[float] = None
+    auction_duration: str = "DAYS_7"  # DAYS_1 | DAYS_3 | DAYS_5 | DAYS_7 | DAYS_10
     # Shipping package — eBay requires a valid package weight to publish an
     # offer. Weight is split pounds + ounces (US); dimensions are optional and
     # only sent when all three are provided (needed for calculated shipping).

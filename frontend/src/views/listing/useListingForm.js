@@ -10,6 +10,7 @@ import { once } from "@/lib/utils";
 
 const EMPTY = {
   title: "", subtitle: "", brand: "", price: "", quantity: 1,
+  listing_format: "FIXED_PRICE", auction_start_price: "", auction_duration: "DAYS_7",
   package_weight_lb: "", package_weight_oz: "",
   package_length_in: "", package_width_in: "", package_height_in: "",
   fulfillment_policy_id: "",
@@ -25,6 +26,7 @@ function fromListing(l) {
     ...EMPTY,
     ...l,
     price: l.price != null ? l.price : "",
+    auction_start_price: l.auction_start_price != null ? l.auction_start_price : "",
     quantity: l.quantity || 1,
     package_weight_lb: l.package_weight_lb || "",
     package_weight_oz: l.package_weight_oz || "",
@@ -81,6 +83,7 @@ export function useListingForm() {
       ...(session?.listing || {}),
       ...form,
       price: form.price === "" ? null : parseFloat(form.price),
+      auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
       quantity: parseInt(form.quantity || "1", 10),
       package_weight_lb: num(form.package_weight_lb),
       package_weight_oz: num(form.package_weight_oz),
@@ -414,7 +417,13 @@ export function useListingForm() {
       category: form.category_id.trim() ? "complete" : "attention",
       specifics: missingAspects.length > 0 ? "attention"
         : (form.item_specifics.some((s) => s.name.trim()) ? "complete" : "todo"),
-      pricing: form.price !== "" && Number(form.price) > 0 ? "complete" : "attention",
+      pricing: (
+        form.listing_format === "AUCTION"
+          ? Number(form.auction_start_price) > 0
+          : form.listing_format === "AUCTION_BIN"
+            ? Number(form.auction_start_price) > 0 && Number(form.price) > 0
+            : Number(form.price) > 0
+      ) ? "complete" : "attention",
       shipping: weight > 0 ? "complete" : "attention",
       description: form.description.trim() ? "complete" : "attention",
     };
