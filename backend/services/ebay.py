@@ -84,6 +84,10 @@ def _package_weight_and_size(listing: Listing) -> dict:
 _IDENTIFIER_KEYS = {"upc": "upc", "ean": "ean", "isbn": "isbn"}
 
 
+def _is_auction(listing: Listing) -> bool:
+    return (getattr(listing, "listing_format", "") or "").upper() in ("AUCTION", "AUCTION_BIN")
+
+
 def build_inventory_item(session_id: str, listing: Listing, base_url: str,
                          image_urls: Optional[list[str]] = None) -> dict:
     aspects: dict[str, list[str]] = {}
@@ -180,7 +184,9 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
         **_package_weight_and_size(listing),
         "sku": _sku(session_id, listing),
         "availability": {
-            "shipToLocationAvailability": {"quantity": max(1, listing.quantity)}
+            "shipToLocationAvailability": {
+                "quantity": 1 if _is_auction(listing) else max(1, listing.quantity)
+            }
         },
         "condition": listing.condition,
         "conditionDescription": listing.condition_description or None,
@@ -207,19 +213,38 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
         location = config.EBAY_MERCHANT_LOCATION_KEY or None
     # A shipping service chosen on the listing overrides the account default.
     fulfillment = listing.fulfillment_policy_id or fulfillment
+    currency = listing.currency or config.EBAY_CURRENCY
+
+    def _money(v) -> dict:
+        return {"value": f"{float(v or 0):.2f}", "currency": currency}
+
+    # Listing format → pricing shape. Auctions use auctionStartPrice + a listing
+    # duration and are always single-quantity; AUCTION_BIN adds a Buy It Now
+    # price. Fixed price is a GTC (Good 'Til Cancelled) listing.
+    fmt = (listing.listing_format or "FIXED_PRICE").upper()
+    if fmt in ("AUCTION", "AUCTION_BIN"):
+        start = listing.auction_start_price if listing.auction_start_price is not None else price
+        pricing = {"auctionStartPrice": _money(start)}
+        if fmt == "AUCTION_BIN" and price and price > 0:
+            pricing["price"] = _money(price)  # Buy It Now price on the auction
+        offer_format = "AUCTION"
+        duration = listing.auction_duration or "DAYS_7"
+        qty = 1
+    else:
+        pricing = {"price": _money(price)}
+        offer_format = "FIXED_PRICE"
+        duration = "GTC"
+        qty = max(1, listing.quantity)
+
     return _prune({
         "sku": _sku(session_id, listing),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
-        "format": "FIXED_PRICE",
-        "availableQuantity": max(1, listing.quantity),
+        "format": offer_format,
+        "availableQuantity": qty,
         "categoryId": listing.category_id or None,
         "listingDescription": listing.description or listing.title,
-        "pricingSummary": {
-            "price": {
-                "value": f"{price:.2f}",
-                "currency": listing.currency or config.EBAY_CURRENCY,
-            }
-        },
+        "listingDuration": duration,
+        "pricingSummary": pricing,
         "listingPolicies": {
             "fulfillmentPolicyId": fulfillment,
             "paymentPolicyId": payment,
