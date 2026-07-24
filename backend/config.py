@@ -118,10 +118,13 @@ VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
 # --- Background removal -----------------------------------------------------
-# Photoroom (https://photoroom.com/api) is the PRIMARY remover when a key is
-# set — purpose-built, and far better on dark / low-contrast / bleeds-off-frame
-# shots than the local model. Falls back to the in-house rembg (below) when the
-# key is absent or Photoroom errors, so removal never fully breaks.
+# Photoroom (https://photoroom.com/api) is THE remover when a key is set —
+# purpose-built, and far better on dark / low-contrast / bleeds-off-frame shots
+# than the local model. The in-house rembg (below) runs ONLY when no key is
+# set. When a key IS set and the call fails, the automatic path keeps the
+# ORIGINAL photo and the studio surfaces the exact reason (bad key / out of
+# credits / rate limit) — never a silent downgrade to the weaker local model,
+# which is how mangled cutouts used to get saved with no clue why.
 PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
 
 
