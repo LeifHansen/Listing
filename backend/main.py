@@ -88,6 +88,7 @@ def health() -> dict:
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
         "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
+        "photoroom_configured": config.photoroom_ready(),
         "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
     }
@@ -1064,12 +1065,19 @@ async def image_remove_bg(
 
     def _run() -> dict:
         img = _studio_load(session_id, name, data)
-        return {"ok": True, "image": _data_url(images.remove_background_white(img))}
+        return {
+            "ok": True,
+            "image": _data_url(images.remove_background_white(img)),
+            # Which remover ran — the editor names it so a misconfigured
+            # Photoroom key can't hide behind a silently-degraded result.
+            "engine": "photoroom" if config.photoroom_ready() else "local",
+        }
 
     try:
         return await run_in_threadpool(_run)
     except ValueError as exc:
-        # The cutout was a failure (subject erased) — tell the user why.
+        # Cutout failure OR a Photoroom problem (bad key / out of credits /
+        # rate limit) — the message tells the user exactly which.
         raise HTTPException(422, str(exc)) from exc
 
 

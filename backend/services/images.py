@@ -216,11 +216,18 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW)
 
 
+class PhotoroomError(ValueError):
+    """Photoroom is configured but the call failed — carries a user-facing
+    reason. Subclasses ValueError so the studio route's error mapping (422 +
+    message in a toast) surfaces the real cause instead of a silent fallback."""
+
+
 def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
     """Cut out the subject via Photoroom's API and composite it on white (with
-    our soft shadow). Returns None when no key is configured or the call fails,
-    so callers fall back to the in-house remover. Photoroom is far stronger on
-    the dark / low-contrast / bleeds-off-frame shots the local model mangles."""
+    our soft shadow). Returns None only when no key is configured; when a key
+    IS set, a failure raises PhotoroomError with the actual reason — silent
+    fallbacks to the weak local model are exactly how mangled photos kept
+    getting saved without anyone knowing why."""
     if not config.photoroom_ready():
         return None
     from io import BytesIO
@@ -236,29 +243,61 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
             data={"format": "png"},
             timeout=60,
         )
-        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - network/timeout
+        raise PhotoroomError(f"Couldn't reach Photoroom: {exc}") from exc
+    if resp.status_code in (401, 403):
+        raise PhotoroomError(
+            "Photoroom rejected the API key — check the PHOTOROOM_API_KEY "
+            "secret on the server (it may be missing, mistyped, or a sandbox key).")
+    if resp.status_code == 402:
+        raise PhotoroomError(
+            "The Photoroom account is out of credits — top it up at photoroom.com.")
+    if resp.status_code == 429:
+        raise PhotoroomError("Photoroom is rate-limiting us — try again in a minute.")
+    if resp.status_code != 200:
+        raise PhotoroomError(
+            f"Photoroom error {resp.status_code}: {resp.text[:160]}")
+    try:
         cut = Image.open(BytesIO(resp.content)).convert("RGBA")
-    except Exception as exc:  # noqa: BLE001 - fall back to the in-house remover
-        log.warning("photoroom: cutout failed (%s) — falling back to local", exc)
-        return None
+    except Exception as exc:  # noqa: BLE001
+        raise PhotoroomError("Photoroom returned an unreadable image.") from exc
     alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — treat as a failure
-        return None
+    if alpha.getbbox() is None:  # nothing kept — no subject found
+        raise PhotoroomError("Photoroom couldn't find a subject in this photo.")
     return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
 
 
-def _remove_background(img: Image.Image) -> Image.Image:
-    """Cut out the subject onto white for the upload path — Photoroom first,
-    then the in-house remover. Falls back to the original (flattened) on any
-    failure, so an auto/bulk upload never dies or saves a destroyed photo."""
+def _remove_background(img: Image.Image) -> tuple[Image.Image, str, Optional[str]]:
+    """Cut out the subject onto white for the automatic upload path.
+    Returns (image, engine, error) where engine is 'photoroom', 'local', or
+    'none' (kept the original).
+
+    When Photoroom is configured, it is the ONLY remover: on failure we keep
+    the ORIGINAL photo rather than let the weak local model mangle it — a busy
+    background is always better than a shredded item. The local model only
+    runs when no Photoroom key is set at all."""
+    if config.photoroom_ready():
+        try:
+            out = _photoroom_cutout(img)
+            if out is not None:
+                return out, "photoroom", None
+        except PhotoroomError as exc:
+            log.warning("photoroom: %s — keeping the original photo "
+                        "(local model is disabled while Photoroom is configured)", exc)
+            return _flatten(img), "none", str(exc)
+        except Exception as exc:  # noqa: BLE001 - e.g. OOM in re-encode/compose;
+            # the keep-original guarantee must hold for ANY failure, not just
+            # mapped Photoroom API errors — a photo must never fail optimize().
+            log.warning("photoroom: unexpected error (%s) — keeping the original", exc)
+            return _flatten(img), "none", f"Background removal failed: {exc}"
     try:
-        out = _photoroom_cutout(img)
-        if out is None:
-            out = _cutout_on_white(img)
+        out = _cutout_on_white(img)
     except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
         log.warning("bg-removal: cutout failed (%s) — keeping original", exc)
         out = None
-    return out if out is not None else _flatten(img)
+    if out is not None:
+        return out, "local", None
+    return _flatten(img), "none", "cutout failed"
 
 
 def remove_background_white(img: Image.Image) -> Image.Image:
@@ -266,13 +305,13 @@ def remove_background_white(img: Image.Image) -> Image.Image:
     resolution for crisper edges, falling back to the fast size if a big
     inference runs out of memory. Raises when the cutout genuinely fails so the
     editor can tell the user instead of silently doing nothing."""
-    # Photoroom first (best quality); the in-house remover is the fallback.
-    try:
-        pr = _photoroom_cutout(img)
-        if pr is not None:
-            return pr
-    except Exception as exc:  # noqa: BLE001 - fall back to the local remover
-        log.warning("photoroom: studio cutout failed (%s) — falling back", exc)
+    # Photoroom is the remover whenever a key is configured. A failure RAISES
+    # (PhotoroomError is a ValueError → the editor shows the real reason as a
+    # toast) instead of silently degrading to the weak local model — that
+    # silent fallback is how mangled cutouts kept appearing with no clue why.
+    pr = _photoroom_cutout(img)
+    if pr is not None:
+        return pr
     for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
         try:
             # dark_guard off: the seller reviews the result and can Revert, so
@@ -299,7 +338,10 @@ def warm() -> None:
     startup so the machine is reachable immediately while this warms up, and
     real uploads hit a warm (~1s) path."""
     try:
-        _remove_background(Image.new("RGB", (32, 32), (200, 100, 50)))
+        # Warm the LOCAL model directly (it still powers the highlight/subject
+        # masks) — never via _remove_background, which would burn a Photoroom
+        # API credit on every boot when a key is configured.
+        _cutout_on_white(Image.new("RGB", (32, 32), (200, 100, 50)))
         log.info("images: background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
@@ -399,9 +441,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
             img.thumbnail((MAX_WORK_SIDE, MAX_WORK_SIDE), Image.LANCZOS)
 
         bg_removed = False
+        bg_engine, bg_error = None, None
         if remove_bg:
-            img = _remove_background(img)
-            bg_removed = True
+            img, bg_engine, bg_error = _remove_background(img)
+            bg_removed = bg_engine in ("photoroom", "local")
         else:
             img = _autocrop_borders(img)
         # Fill the square frame by cropping to the subject instead of padding
@@ -416,12 +459,17 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         dst = dst.with_suffix(".jpg")
         img.save(dst, "JPEG", quality=JPEG_QUALITY, optimize=True)
 
-    return {
+    out = {
         "file": dst.name,
         "original_size": original_size,
         "output_size": (TARGET_SIZE, TARGET_SIZE),
         "background_removed": bg_removed,
     }
+    if bg_engine:
+        out["bg_engine"] = bg_engine
+    if bg_error:
+        out["bg_error"] = bg_error  # why the original was kept instead
+    return out
 
 
 def thumb_jpeg(path: Path, side: int = 512) -> bytes:

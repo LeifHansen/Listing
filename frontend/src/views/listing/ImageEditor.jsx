@@ -204,7 +204,10 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       const blob = await canvasBlob(canvas);
       const res = await studioCall("/api/image/remove-bg", sessionId, name, blob);
       await applyPreview(res.image);
-      toast("Background removed — review and Save to keep it.", { kind: "success" });
+      toast(
+        `Background removed${res.engine === "photoroom" ? " with Photoroom" : " (on-server model)"} — review and Save to keep it.`,
+        { kind: "success" },
+      );
     } catch (e) {
       toast(`Remove background failed: ${e.message}`, { kind: "error" });
     } finally {
