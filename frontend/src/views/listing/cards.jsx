@@ -378,6 +378,14 @@ export function PricingCard({ w }) {
   const conditions = w.categoryMeta.conditions?.length
     ? w.categoryMeta.conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
     : CONDITIONS.map((c) => ({ value: c, label: conditionLabel(c) }));
+  // A controlled <select> whose value isn't among its options renders BLANK —
+  // which happens when a saved listing's condition isn't in the category's
+  // allowed list (or the list is still loading). Always include the current
+  // value so the Condition field can never look empty/missing.
+  const curCondition = w.form.condition;
+  if (curCondition && !conditions.some((c) => c.value === curCondition)) {
+    conditions.unshift({ value: curCondition, label: conditionLabel(curCondition) });
+  }
   const p = w.priceData;
   const currency = w.form.currency || "USD";
   const fmt = w.form.listing_format || "FIXED_PRICE";
@@ -446,20 +454,24 @@ export function PricingCard({ w }) {
               />
             </Field>
           )}
-          <Field label="Condition" className="col-span-2 sm:col-span-1">
+        </div>
+
+        {/* Condition gets its own labeled row (not the last cell of the price
+            grid, where it was easy to miss) paired with its description. */}
+        <div className="grid sm:grid-cols-[minmax(200px,260px)_1fr] gap-4 pt-1 border-t border-line">
+          <Field label="Condition">
             <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </Select>
           </Field>
+          <Field label="Condition description" hint="(what a buyer should know)">
+            <Textarea
+              rows={2}
+              value={w.form.condition_description}
+              onChange={(e) => w.set("condition_description", e.target.value)}
+            />
+          </Field>
         </div>
-
-        <Field label="Condition description" hint="(what a buyer should know)">
-          <Textarea
-            rows={2}
-            value={w.form.condition_description}
-            onChange={(e) => w.set("condition_description", e.target.value)}
-          />
-        </Field>
 
         <div>
           <Button variant="soft" onClick={w.checkMarketPrice}>
