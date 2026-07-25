@@ -252,11 +252,16 @@ Return ONLY a JSON object (no markdown fences) with this shape:
 Rules:
 - The numbered photos are one bulk upload containing MULTIPLE distinct items
   for sale. Group photos that show the SAME physical item (different angles,
-  close-ups of tags/labels, flaws).
+  backs, close-ups of tags/labels/flaws, the item on a hanger vs laid flat).
 - Every photo index appears in EXACTLY ONE group. A group may have 1 photo.
-- When unsure whether two photos show the same item, prefer keeping them
-  together only if strong visual evidence matches (same color/pattern/brand);
-  otherwise split them.
+- Sellers photograph one item completely before moving to the next, so photo
+  ORDER is strong evidence: consecutive photos usually belong to the same item.
+  A close-up (tag, label, texture, flaw) almost always belongs to the item in
+  the surrounding overview shots — never make a close-up its own item.
+- Split ONLY when two photos clearly show different physical items (different
+  garment/object, clearly different color or print). When unsure, KEEP THEM
+  TOGETHER: a duplicate listing of the same item is a much worse mistake than
+  one extra photo on a listing, and the seller can drag a photo out later.
 - Order each group's indices with the best overview shot first.
 """
 
