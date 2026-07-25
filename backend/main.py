@@ -21,7 +21,8 @@ from starlette.concurrency import run_in_threadpool
 
 from . import auth, config, db, ebay_auth, objstore, storage
 from .config import log
-from .models import Listing, PublishRequest, RefineRequest, SessionOnlyRequest
+from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
+                     SessionOnlyRequest)
 from .services import (claude_ai, ebay, images, metrics, preflight, pricing,
                        promotions, recommender, taxonomy)
 
@@ -136,6 +137,60 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
     return added
+
+
+# Aspect names that mean "who made this". A wrong maker is worse than a blank
+# one, so these only get filled by the double-layer check below.
+_MAKER_ASPECT_NAMES = {"brand", "maker", "manufacturer"}
+# Placeholder values that mean the maker is effectively unknown.
+_GENERIC_MAKERS = {"", "unbranded", "unknown", "generic", "n/a", "none",
+                   "no brand", "handmade", "does not apply"}
+
+
+def _fill_maker(listing: Listing, image_paths: list) -> bool:
+    """Best-effort maker/manufacturer identification (double-layer check).
+
+    The generic identify pass is told never to guess, so Brand / Maker /
+    Manufacturer are rarely filled. When they're missing, run the dedicated
+    two-layer ID in claude_ai.identify_maker (hunt, then adversarial verify —
+    like a reverse-image lookup with a second opinion) and only write a maker
+    both layers agree on. NEVER raises. Returns True if anything was set."""
+    if not config.anthropic_ready():
+        return False
+    brand_missing = (listing.brand or "").strip().lower() in _GENERIC_MAKERS
+    have = {s.name.strip().lower() for s in listing.item_specifics if s.value.strip()}
+    # Maker-ish aspects this category defines that are still empty.
+    unfilled: list[str] = []
+    try:
+        if listing.category_id and config.taxonomy_ready():
+            for a in taxonomy.item_aspects(listing.category_id).get("aspects", []):
+                name = (a.get("name") or "").strip()
+                if name.lower() in _MAKER_ASPECT_NAMES and name.lower() not in have:
+                    unfilled.append(name)
+    except Exception:  # noqa: BLE001 - aspects are optional context here
+        pass
+    if not (brand_missing or unfilled):
+        return False  # maker already known — don't burn two vision calls
+    try:
+        paths = [p for p in image_paths if p.is_file()]
+        found = claude_ai.identify_maker(paths, listing)
+    except Exception as exc:  # noqa: BLE001 - enrichment is optional
+        log.info("maker id skipped: %s", exc)
+        return False
+    if not found:
+        return False
+    maker = found["maker"]
+    if brand_missing:
+        listing.brand = maker
+    for name in unfilled:
+        listing.item_specifics.append(ItemSpecific(name=name, value=maker))
+    # The maker is settled now — drop stale "verify the brand" style nags.
+    listing.missing_info = [m for m in listing.missing_info
+                            if not any(w in m.lower()
+                                       for w in ("brand", "maker", "manufacturer"))]
+    log.info("maker id: '%s' confirmed (%s) — evidence: %s",
+             maker, found.get("confidence"), (found.get("evidence") or "")[:120])
+    return True
 
 
 def _uid(request: Request):
@@ -555,7 +610,14 @@ _PREF_FIELDS = {
     "package_height_in": (float, 0, 120),
     "quantity": (int, 1, 999),
     "condition": (str, None, None),  # "" = let the AI decide
+    # How the AI prices drafts and comp suggestions: "quick_flip" (low end,
+    # sell fast), "median" (typical market), "long_sale" (high end, patient).
+    "pricing_strategy": (str, None, None),
+    # Promote every newly published listing at eBay's recommended ad rate.
+    # Missing = ON (see _auto_promote_enabled); 0 turns it off.
+    "auto_promote": (int, 0, 1),
 }
+_PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 
 
 @app.get("/api/prefs")
@@ -580,7 +642,10 @@ def save_prefs(request: Request, payload: dict) -> dict:
             continue
         raw = payload.get(key)
         if typ is str:
-            clean[key] = str(raw or "").strip()[:40]
+            value = str(raw or "").strip()[:40]
+            if key == "pricing_strategy" and value not in _PRICING_STRATEGIES:
+                continue  # unknown strategy — ignore rather than store garbage
+            clean[key] = value
             continue
         try:
             val = typ(float(raw or 0))
@@ -593,6 +658,53 @@ def save_prefs(request: Request, payload: dict) -> dict:
     if not merged and not db.enabled():
         raise HTTPException(503, "No database configured — defaults need DATABASE_URL set.")
     return {"ok": True, "prefs": merged}
+
+
+def _auto_promote_enabled(uid: Optional[str]) -> bool:
+    """Account default: promote every newly published listing at eBay's
+    recommended ad rate. ON unless explicitly turned off in Settings — sellers
+    reported publishes landing unpromoted and only discovering it later from
+    the Dashboard nags. Anonymous/env-token publishes stay explicit-only."""
+    if not uid:
+        return False
+    try:
+        value = db.get_prefs(uid).get("auto_promote")
+    except Exception:  # noqa: BLE001 - prefs are optional
+        return True
+    return True if value is None else bool(value)
+
+
+def _promote_published(session_id: str, listing: Listing, creds: Optional[dict],
+                       ebay_listing_id: Optional[str]) -> dict:
+    """Best-effort Promoted Listings ad for a just-published listing. Fills in
+    eBay's recommended rate (falling back to the default) when the listing has
+    none — a 0% rate used to make promote_listing silently no-op, which is why
+    even toggled-on listings never actually got promoted. Mutates
+    listing.promote/ad_rate_percent so the caller's persistence records what
+    ran. Never raises."""
+    try:
+        listing.promote = True
+        if not listing.ad_rate_percent or listing.ad_rate_percent <= 0:
+            rate = None
+            if ebay_listing_id:
+                rates = promotions.suggested_ad_rates(creds, [str(ebay_listing_id)])
+                rate = rates.get(str(ebay_listing_id))
+            listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
+        return promotions.promote_listing(session_id, listing, creds)
+    except Exception as exc:  # noqa: BLE001 - promotion must never break publish
+        log.warning("auto-promote failed (session=%s): %s", session_id, exc)
+        return {"promoted": False, "message": f"Promotion failed: {exc}"}
+
+
+def _pricing_strategy(uid: Optional[str]) -> str:
+    """The account's pricing strategy ("" when unset/anonymous). Never raises."""
+    if not uid:
+        return ""
+    try:
+        value = str(db.get_prefs(uid).get("pricing_strategy") or "")
+        return value if value in _PRICING_STRATEGIES else ""
+    except Exception:  # noqa: BLE001 - prefs are optional
+        return ""
 
 
 def _apply_listing_defaults(listing: Listing, uid: Optional[str]) -> Listing:
@@ -1121,7 +1233,8 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
     try:
-        result = claude_ai.identify(paths, names)
+        result = claude_ai.identify(paths, names,
+                                    strategy=_pricing_strategy(_uid(request)))
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         code, message = claude_ai.ai_error_message(exc)
         log.warning("identify failed (session=%s): %s", session_id, exc)
@@ -1209,11 +1322,12 @@ def category_suggestions(payload: dict) -> dict:
 
 
 @app.post("/api/price-suggestions")
-def price_suggestions(payload: dict) -> dict:
+def price_suggestions(payload: dict, request: Request) -> dict:
     """Market-price suggestion for the listing from live eBay comps.
 
     Uses the same application token as taxonomy (no seller login needed).
-    Sources are pluggable — see services/pricing.py.
+    Sources are pluggable — see services/pricing.py. The headline suggestion
+    honors the account's pricing strategy (Quick Flip / Median / Long Sale).
     """
     if not config.taxonomy_ready():
         raise HTTPException(
@@ -1229,6 +1343,7 @@ def price_suggestions(payload: dict) -> dict:
             query,
             category_id=str(payload.get("category_id") or "").strip() or None,
             condition=str(payload.get("condition") or "").strip() or None,
+            strategy=_pricing_strategy(_uid(request)),
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
@@ -1349,6 +1464,8 @@ def _bulk_set(job_id: str, **fields) -> None:
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                   uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
     """Background worker: optimize -> group -> per-item identify (-> publish)."""
+    strategy = _pricing_strategy(uid)          # once, not per item
+    auto_promote = _auto_promote_enabled(uid)  # ditto
     try:
         _bulk_set(job_id, phase="optimizing", current=0)
         images.optimize_all(
@@ -1392,7 +1509,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                     "error": None, "listing_id": None,
                     "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
             try:
-                result = claude_ai.identify([item_dir / n for n in item_names], item_names)
+                result = claude_ai.identify([item_dir / n for n in item_names],
+                                            item_names, strategy=strategy)
                 listing = _apply_listing_defaults(result.listing, uid)
                 if config.taxonomy_ready() and not listing.category_id:
                     try:
@@ -1407,6 +1525,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 # straight to eBay here, so without this the listing lands with
                 # only the generic first-pass specifics.
                 _fill_category_specifics(listing, [item_dir / n for n in item_names])
+                _fill_maker(listing, [item_dir / n for n in item_names])
                 storage.save_listing(sid, listing)
                 status = "draft"
                 if mode == "live":
@@ -1415,6 +1534,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                         status = "published"
                         item["status"] = "published"
                         item["listing_id"] = pub.get("listing_id")
+                        # Auto-promote each just-published listing (account
+                        # default, Settings) — the bulk path used to skip
+                        # promotion entirely, so live batches landed unpromoted.
+                        if creds and auto_promote:
+                            _promote_published(sid, listing, creds,
+                                               pub.get("listing_id"))
                     else:
                         # Stay a draft; surface why it couldn't go live.
                         item["error"] = pub.get("message") or "Couldn't publish automatically."
@@ -1516,7 +1641,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
         if not names:
             _bulk_set(job_id, done=True, error="No optimized images found for this session.")
             return
-        result = claude_ai.identify([opt_dir / n for n in names], names)
+        result = claude_ai.identify([opt_dir / n for n in names], names,
+                                    strategy=_pricing_strategy(uid))
         _apply_listing_defaults(result.listing, uid)
         # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
         if config.taxonomy_ready() and not result.listing.category_id:
@@ -1530,6 +1656,9 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
                 pass
         # Fill the category's item specifics now so the draft is SEO-ready.
         _fill_category_specifics(result.listing, [opt_dir / n for n in names])
+        # Second-layer maker ID — only runs when Brand/Maker/Manufacturer are
+        # still blank after the passes above.
+        _fill_maker(result.listing, [opt_dir / n for n in names])
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
@@ -1872,11 +2001,22 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         dump["ebay_listing_id"] = str(result["listing_id"])
     db.upsert_listing(req.session_id, dump, status=status, user_id=_uid(request))
     # Promoted Listings: once the item is live, best-effort create/refresh its
-    # ad at the chosen rate. Never blocks or fails the publish — the status is
-    # attached for the UI to show (incl. a 'reconnect to grant ad permissions').
-    if result.get("published") and req.listing.promote:
-        result["promote_status"] = promotions.promote_listing(
-            req.session_id, req.listing, creds)
+    # ad. Runs when the listing's Promote toggle is on OR the account's
+    # auto-promote default (Settings) is — at the chosen rate, else eBay's
+    # recommended rate. Never blocks or fails the publish; the status is
+    # attached for the UI to show (incl. 'reconnect to grant ad permissions').
+    if result.get("published") and (req.listing.promote
+                                    or _auto_promote_enabled(_uid(request))):
+        result["promote_status"] = _promote_published(
+            req.session_id, req.listing, creds, result.get("listing_id"))
+        if result["promote_status"].get("promoted"):
+            # Re-record with the promote flag + actual rate so the Dashboard
+            # and recommender see it as promoted.
+            dump = req.listing.model_dump()
+            if result.get("listing_id"):
+                dump["ebay_listing_id"] = str(result["listing_id"])
+            db.upsert_listing(req.session_id, dump, status=status,
+                              user_id=_uid(request))
     return JSONResponse(result)
 
 

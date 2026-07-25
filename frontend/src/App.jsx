@@ -11,7 +11,6 @@ import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
 import { ListingsView } from "@/views/ListingsView";
 import { SettingsView } from "@/views/SettingsView";
-import { EbayAccountView } from "@/views/EbayAccountView";
 
 function Main() {
   const { view, setView, health, activeBulk } = useApp();
@@ -62,8 +61,9 @@ function Main() {
             {view === "inventory" && <ListingsView kind="inventory" search={search} />}
             {view === "drafts" && <ListingsView kind="drafts" search={search} />}
             {view === "listings" && <ListingsView kind="listings" search={search} />}
-            {view === "settings" && <SettingsView />}
-            {view === "ebay" && <EbayAccountView />}
+            {/* "ebay" was a separate account mirror; it's part of Settings now,
+                so old links/bookmarks land there instead of a blank page. */}
+            {(view === "settings" || view === "ebay") && <SettingsView />}
           </motion.main>
         </AnimatePresence>
       </div>

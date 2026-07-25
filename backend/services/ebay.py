@@ -100,14 +100,32 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
     # to one. If the lookup fails we fall back to treating every aspect as
     # single, which is always safe (it can never over-populate).
     multi_value_names: set[str] = set()
+    # Canonical aspect names for the category, keyed by lowercase — plus
+    # "Item X" <-> "X" aliases. eBay matches aspects by EXACT name, so a
+    # seller-filled "Height" does NOT satisfy a required "Item Height" (error
+    # 25002 "The item specific Item Height is missing" even though the height
+    # is filled in). Renaming to eBay's own spelling fixes case drift and the
+    # dimension-alias mismatch in one place.
+    canonical_names: dict[str, str] = {}
     try:
         if listing.category_id:
             from . import taxonomy
             for a in taxonomy.item_aspects(listing.category_id).get("aspects", []):
+                aname = (a.get("name") or "").strip()
+                if not aname:
+                    continue
                 if a.get("cardinality") == "MULTI":
-                    multi_value_names.add((a.get("name") or "").strip().lower())
+                    multi_value_names.add(aname.lower())
+                canonical_names[aname.lower()] = aname
+                # "Item Height" also answers to plain "Height" (and vice versa
+                # for the rare category that defines the bare name).
+                if aname.lower().startswith("item "):
+                    canonical_names.setdefault(aname.lower()[5:], aname)
+                else:
+                    canonical_names.setdefault(f"item {aname.lower()}", aname)
     except Exception:  # noqa: BLE001 - best-effort; single-value is the safe default
         multi_value_names = set()
+        canonical_names = {}
 
     # Brand is a SINGLE-value aspect on eBay — sending two values (e.g. a brand
     # field plus a duplicate "Brand" item specific, or a comma-joined value)
@@ -125,6 +143,9 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
         raw_value = spec.value.strip()
         if not name or not raw_value:
             continue
+        # Snap to eBay's exact aspect name for this category (case drift and
+        # the "Height" vs "Item Height" alias both rejected publishes).
+        name = canonical_names.get(name.lower(), name)
         key = name.lower()
         # Route UPC/EAN/ISBN to the canonical product fields rather than aspects.
         if key in _IDENTIFIER_KEYS:

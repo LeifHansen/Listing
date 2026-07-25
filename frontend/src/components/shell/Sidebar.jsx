@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   LayoutDashboard, PlusCircle, Store, Package, FileText, Tags, Settings,
-  ShoppingBag, Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
+  Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -15,7 +15,6 @@ const NAV = [
   { id: "inventory", label: "Inventory", icon: Package },
   { id: "drafts", label: "Drafts", icon: FileText },
   { id: "listings", label: "Listings", icon: Tags },
-  { id: "ebay", label: "eBay Account", icon: ShoppingBag },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
-  PackageOpen, Truck, Plus,
+  PackageOpen, Truck, Plus, TrendingUp, Megaphone, Store, BadgeCheck,
 } from "lucide-react";
 import { api, postJson } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/utils";
@@ -232,6 +232,44 @@ export function SettingsView() {
         )}
 
         {/* ── New-listing defaults ── */}
+        {/* ── Pricing strategy (slider) ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={TrendingUp}
+            title="Pricing strategy"
+            hint="Where the AI prices every draft and comp suggestion — from priced-to-move to patient top dollar."
+          />
+          {prefs === null ? (
+            <div className="ai-shimmer h-16 rounded-tile" aria-hidden />
+          ) : (
+            <PricingStrategySlider prefs={prefs} set={setPref} />
+          )}
+        </div>
+
+        {/* ── Auto-promote on publish ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={Megaphone}
+            title="Promoted Listings"
+            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate (pay only when it sells through the ad)."
+          />
+          {prefs === null ? (
+            <div className="ai-shimmer h-12 rounded-tile" aria-hidden />
+          ) : (
+            <div className="max-w-lg">
+              <Field label="Auto-promote new listings">
+                <Select
+                  value={String(prefs.auto_promote ?? 1)}
+                  onChange={(e) => setPref("auto_promote", Number(e.target.value))}
+                >
+                  <option value="1">On — promote at eBay’s recommended rate</option>
+                  <option value="0">Off — only when I toggle Promote on a listing</option>
+                </Select>
+              </Field>
+            </div>
+          )}
+        </div>
+
         <div className="mt-7 pt-7 border-t border-line">
           <SectionHeader
             icon={PackageOpen}
@@ -340,8 +378,159 @@ export function SettingsView() {
             Save defaults
           </Button>
         </div>
+
+        {/* ── live mirror of the eBay account (was a separate nav page) ── */}
+        {ebay.connected && (
+          <div className="mt-7 pt-7 border-t border-line">
+            <SectionHeader
+              icon={Store}
+              title="Your eBay account"
+              hint="A live mirror of your seller settings. Handling time, store, and vacation settings live in Seller Hub."
+            />
+            <EbayAccountMirror />
+          </div>
+        )}
       </Card>
     </SettingsShell>
+  );
+}
+
+// The read-only side of the seller's eBay account — identity, ship-from
+// locations, and opted-in programs. Folded in from the old "eBay Account" nav
+// page, which duplicated the editable policy defaults above.
+function EbayAccountMirror() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api("/api/ebay/account-overview")
+      .then(setData)
+      .catch(() => setData({ connected: false }))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(load, [load]);
+
+  if (loading) return <div className="ai-shimmer h-24 rounded-tile" aria-hidden />;
+  if (!data?.connected) {
+    return <p className="text-[13px] text-ink-secondary">Couldn’t load your eBay account details.</p>;
+  }
+
+  const { account = {}, locations = [], programs = [], payments = {}, selected = {} } = data;
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="grid place-items-center size-10 rounded-[14px] bg-blue-soft text-blue shrink-0">
+          <BadgeCheck size={20} aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-ink truncate">{account.username || "Connected"}</p>
+          <p className="text-[13px] text-ink-secondary truncate">
+            {account.email ? `${account.email} · ` : ""}{account.marketplace}
+            {payments?.paymentsProgramStatus ? ` · Payments: ${payments.paymentsProgramStatus}` : ""}
+          </p>
+        </div>
+        <Button variant="ghost" size="sm" onClick={load}>
+          <RefreshCw aria-hidden /> Refresh
+        </Button>
+        <Button variant="soft" size="sm"
+          onClick={() => window.open("https://www.ebay.com/sh/ovw", "_blank", "noopener")}>
+          Seller Hub <ExternalLink aria-hidden />
+        </Button>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div>
+          <p className="text-[13px] font-semibold text-ink flex items-center gap-1.5 mb-2">
+            <MapPin size={14} className="text-blue" aria-hidden /> Ship-from locations
+          </p>
+          {locations.length ? (
+            <ul className="flex flex-col gap-1.5">
+              {locations.map((loc, i) => {
+                const a = (loc.location && loc.location.address) || {};
+                const line = [a.city, a.stateOrProvince, a.postalCode, a.country]
+                  .filter(Boolean).join(", ");
+                return (
+                  <li key={loc.merchantLocationKey || i}
+                      className="text-[13px] flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-ink">{loc.name || loc.merchantLocationKey}</span>
+                    {loc.merchantLocationKey === selected.merchant_location_key && (
+                      <TagPill tone="green">Default</TagPill>
+                    )}
+                    {line && <span className="text-ink-secondary">{line}</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="text-[13px] text-ink-secondary">No inventory locations found.</p>
+          )}
+        </div>
+
+        <div>
+          <p className="text-[13px] font-semibold text-ink flex items-center gap-1.5 mb-2">
+            <BadgeCheck size={14} className="text-blue" aria-hidden /> Opted-in programs
+          </p>
+          {programs.length ? (
+            <div className="flex flex-wrap gap-2">
+              {programs.map((p) => (
+                <TagPill key={p} tone="neutral">{p.replace(/_/g, " ").toLowerCase()}</TagPill>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[13px] text-ink-secondary">Not opted into any programs.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Pricing strategy — a three-stop slider deciding where on the market range
+// the AI prices every draft and comp suggestion.
+const PRICING_STRATEGIES = [
+  {
+    value: "quick_flip", label: "Quick Flip",
+    blurb: "Priced at the low end of comps to sell fast.",
+  },
+  {
+    value: "median", label: "Median Pricing",
+    blurb: "Typical middle-of-market price.",
+  },
+  {
+    value: "long_sale", label: "Long Sale",
+    blurb: "Priced at the high end — patient, maximizes the sale.",
+  },
+];
+
+function PricingStrategySlider({ prefs, set }) {
+  const idx = Math.max(
+    0, PRICING_STRATEGIES.findIndex((s) => s.value === (prefs.pricing_strategy || "median")));
+  const current = PRICING_STRATEGIES[idx];
+  return (
+    <div className="flex flex-col gap-2 max-w-lg">
+      <input
+        type="range" min="0" max="2" step="1" value={idx}
+        aria-label="Pricing strategy"
+        aria-valuetext={current.label}
+        onChange={(e) => set("pricing_strategy", PRICING_STRATEGIES[Number(e.target.value)].value)}
+        className="w-full accent-blue"
+      />
+      <div className="grid grid-cols-3 text-xs">
+        {PRICING_STRATEGIES.map((s, i) => (
+          <button
+            key={s.value} type="button"
+            onClick={() => set("pricing_strategy", s.value)}
+            className={`bg-transparent border-0 p-0 cursor-pointer ${
+              i === 0 ? "text-left" : i === 2 ? "text-right" : "text-center"} ${
+              i === idx ? "font-bold text-ink" : "text-ink-faint"}`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-[13px] text-ink-secondary">{current.blurb}</p>
+    </div>
   );
 }
 

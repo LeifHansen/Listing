@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink,
+  LayoutDashboard, ExternalLink, SkipForward, X,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -55,10 +55,15 @@ function RefineBar({ w }) {
 // publish so the user isn't left staring at the listing they just posted;
 // offers the next queued draft to keep the assembly line moving.
 function PublishedScreen({ w }) {
-  const { listingsState, openListing, startNew, setView } = useApp();
+  const {
+    listingsState, openListing, startNew, setView, skippedDraftIds, skipDraft,
+  } = useApp();
   const r = w.publishResult;
+  // Skipped drafts stay on the Dashboard but never come back as "next" —
+  // not even after publishing more drafts (the skip list lives in the store).
   const draftsLeft = (listingsState.items || [])
-    .filter((it) => (it.status === "draft" || it.status === "dry_run") && it.id !== w.sessionId)
+    .filter((it) => (it.status === "draft" || it.status === "dry_run")
+      && it.id !== w.sessionId && !skippedDraftIds.has(it.id))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
   const next = draftsLeft[0];
 
@@ -99,11 +104,22 @@ function PublishedScreen({ w }) {
           </p>
         )}
 
+        {next && (
+          <p className="text-[13px] text-ink-secondary -mb-1">
+            Next up: <span className="font-semibold text-ink">
+              “{next.listing?.title || next.title || "Untitled draft"}”</span>
+          </p>
+        )}
         <div className="mt-2 flex flex-wrap justify-center items-center gap-2.5">
           {next ? (
             <>
               <Button variant="primary" size="lg" onClick={() => openListing(next.id)}>
                 Next Draft <ArrowRight aria-hidden />
+              </Button>
+              {/* Skip = pass on this draft without opening it; the queue moves
+                  to the following one and never re-offers the skipped draft. */}
+              <Button variant="ghost" size="lg" onClick={() => skipDraft(next.id)}>
+                <SkipForward aria-hidden /> Skip
               </Button>
               <Button variant="ghost" size="lg" onClick={() => setView("dashboard")}>
                 <LayoutDashboard aria-hidden /> Dashboard
@@ -131,7 +147,7 @@ function PublishedScreen({ w }) {
 }
 
 function Workflow() {
-  const { session, startNew } = useApp();
+  const { session, startNew, setSession, setView } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
   // { name } — the photo open in the studio (clean up, remove background, crop).
@@ -143,6 +159,19 @@ function Workflow() {
       message: "Your current draft stays saved in Drafts — you can come back to it anytime.",
       confirmLabel: "Start new",
     })) startNew();
+  };
+
+  // Exit — close the editor without publishing. The listing stays saved as
+  // it last was; edits made since the last save are discarded.
+  const exit = async () => {
+    if (await confirm({
+      title: "Close this listing?",
+      message: "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
+      confirmLabel: "Close",
+    })) {
+      setSession(null);
+      setView("dashboard");
+    }
   };
 
   // A live publish replaces the workflow with the success screen — staying on
@@ -168,9 +197,14 @@ function Workflow() {
             {session.status === "ended" && <TagPill tone="neutral">Ended on eBay</TagPill>}
           </div>
         </div>
-        <Button variant="ghost" onClick={restart}>
-          <RotateCcw aria-hidden /> Start over
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" onClick={restart}>
+            <RotateCcw aria-hidden /> Start over
+          </Button>
+          <Button variant="ghost" onClick={exit} aria-label="Close this listing">
+            <X aria-hidden /> Exit
+          </Button>
+        </div>
       </motion.div>
 
       {(w.form.missing_info || []).length > 0 && (
