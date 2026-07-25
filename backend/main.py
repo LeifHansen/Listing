@@ -1801,6 +1801,72 @@ def delete_listing(listing_id: str, request: Request) -> dict:
     return {"ok": True}
 
 
+@app.post("/api/listings/merge")
+def merge_listings(payload: dict, request: Request) -> dict:
+    """Merge duplicate drafts into one listing: every source listing's photos
+    are appended to the target (order preserved), then the sources are deleted
+    (DB + disk + R2). The fix-up for bulk grouping splitting one item's photos
+    into several draft listings."""
+    target_id = str(payload.get("target_id") or "").strip()
+    raw_sources = [str(s).strip() for s in (payload.get("source_ids") or [])]
+    source_ids = [s for s in dict.fromkeys(raw_sources) if s and s != target_id]
+    if not target_id or not source_ids:
+        raise HTTPException(400, "Pick a target and at least one duplicate to merge.")
+    _assert_session_owner(target_id, request)
+    for sid in source_ids:
+        _assert_session_owner(sid, request)
+    uid = _uid(request)
+
+    trec = db.get_listing(target_id)
+    if not trec:
+        raise HTTPException(404, "Listing not found")
+    if trec.get("status") in ("published", "live"):
+        raise HTTPException(400, "Merge into a draft — this target is already live on eBay.")
+    listing = Listing(**(trec.get("listing") or {}))
+    tdir = storage.optimized_dir(target_id)
+    tdir.mkdir(parents=True, exist_ok=True)
+
+    def _idx(n: str) -> int:
+        try:
+            return int(n.replace("img_", "").replace(".jpg", ""))
+        except ValueError:
+            return -1
+
+    base = list(listing.images) or storage.list_optimized(target_id)
+    nxt = max([_idx(n) for n in base]
+              + [_idx(n) for n in storage.list_optimized(target_id)], default=-1) + 1
+    added: list[str] = []
+    for sid in source_ids:
+        srec = db.get_listing(sid) or {}
+        s_listing = srec.get("listing") or {}
+        sdir = storage.optimized_dir(sid)
+        for n in (s_listing.get("images") or storage.list_optimized(sid)):
+            src = sdir / n
+            if not src.is_file():
+                continue  # photo already lost from disk — skip, keep merging
+            dst_name = f"img_{nxt:02d}.jpg"
+            try:
+                shutil.copyfile(src, tdir / dst_name)
+            except OSError:
+                raise HTTPException(507, "The server is out of storage space — try again shortly.")
+            added.append(dst_name)
+            nxt += 1
+
+    listing.images = base + added
+    if added:
+        objstore.upload_optimized(target_id, tdir, added)
+    storage.save_listing(target_id, listing)
+    db.upsert_listing(target_id, listing.model_dump(), status="draft", user_id=uid)
+    # Sources are consumed: remove their records and reclaim their storage.
+    for sid in source_ids:
+        db.delete_listing(sid, uid)
+        _purge_session_images(sid)
+    log.info("merged %d listing(s) into %s (+%d photos) user=%s",
+             len(source_ids), target_id, len(added), uid)
+    return {"ok": True, "added": len(added), "removed": source_ids,
+            "listing": listing.model_dump()}
+
+
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
