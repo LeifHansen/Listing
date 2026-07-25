@@ -219,21 +219,30 @@ export function useListingForm() {
   }), [collect, sessionId, setSession, toast]);
 
   // ---------- images ----------
-  const [imageVersion, setImageVersion] = useState(0); // cache-bust after edits
+  // Cache-bust per PHOTO, not globally: a global counter made one rotate
+  // re-download every tile's full-size image — the main reason rotating felt
+  // slow on a listing with many photos.
+  const [imageVersions, setImageVersions] = useState({});
+  const bumpImageVersion = useCallback((name) => {
+    if (name) setImageVersions((m) => ({ ...m, [name]: (m[name] || 0) + 1 }));
+  }, []);
 
-  // One-tap 90° clockwise rotate; the version bump refreshes every tile.
+  // One-tap 90° clockwise rotate; only the rotated tile refreshes.
   const rotateImage = useCallback(async (name) => {
     try {
       await postJson("/api/rotate-image", { session_id: sessionId, name });
-      setImageVersion((v) => v + 1);
+      bumpImageVersion(name);
     } catch (e) {
       toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
     }
-  }, [sessionId, toast]);
+  }, [sessionId, bumpImageVersion, toast]);
 
   // One-click by default; pass a confirmFn to gate it behind a dialog.
+  // Optimistic: the tile disappears immediately and comes back only if the
+  // server delete fails.
   const deleteImage = useCallback(async (name, confirmFn) => {
-    if ((form.images || []).length <= 1) {
+    const prev = form.images || [];
+    if (prev.length <= 1) {
       toast("A listing needs at least one photo — add another before deleting this one.", { kind: "warning" });
       return;
     }
@@ -243,10 +252,11 @@ export function useListingForm() {
       confirmLabel: "Delete",
       danger: true,
     }))) return;
+    setForm((f) => ({ ...f, images: f.images.filter((n) => n !== name) }));
     try {
       await postJson("/api/delete-image", { session_id: sessionId, name });
-      setForm((f) => ({ ...f, images: f.images.filter((n) => n !== name) }));
     } catch (e) {
+      setForm((f) => ({ ...f, images: prev }));
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
   }, [form.images, sessionId, toast]);
@@ -278,7 +288,6 @@ export function useListingForm() {
         const next = [...(form.images || []), ...added];
         setForm((f) => ({ ...f, images: next }));
         setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
-        setImageVersion((v) => v + 1);
         postJson(`/api/save/${sessionId}`, { ...collect(), images: next }).catch(() => {});
         toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`, { kind: "success" });
       }
@@ -442,7 +451,7 @@ export function useListingForm() {
     categoryMeta, loadCategoryMeta,
     getSpecific, upsertSpecific,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
-    imageVersion, setImageVersion,
+    imageVersions, bumpImageVersion,
     completion,
   };
 }

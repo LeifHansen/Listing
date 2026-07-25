@@ -151,6 +151,23 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // Mass delete (drafts): one request for the whole selection.
+  const bulkDeleteListings = useCallback(async (ids) => {
+    try {
+      const res = await postJson("/api/listings/bulk-delete", { ids });
+      const gone = new Set(res.deleted || []);
+      setListingsState((s) => ({ ...s, items: s.items.filter((i) => !gone.has(i.id)) }));
+      setSession((cur) => (cur && gone.has(cur.sessionId) ? null : cur));
+      toast(`Deleted ${gone.size} listing${gone.size === 1 ? "" : "s"}.`
+        + (res.skipped?.length ? ` ${res.skipped.length} couldn't be removed.` : ""),
+        { kind: res.skipped?.length ? "warning" : "success" });
+      return true;
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+      return false;
+    }
+  }, [toast]);
+
   // ---------- active bulk job (survives navigation + reload) ----------
   // { jobId, mode } — persisted so leaving the progress screen (or a reload)
   // never strands a running batch. Completed items also auto-save to Drafts.
@@ -215,13 +232,13 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
-    session, setSession, startNew, openListing, deleteListing,
+    session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, metricsById, session, startNew, openListing,
-    deleteListing, activeBulk, startBulk, bulkSettled, clearBulk,
+    deleteListing, bulkDeleteListings, activeBulk, startBulk, bulkSettled, clearBulk,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
