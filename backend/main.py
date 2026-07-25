@@ -149,6 +149,20 @@ def _assert_session_owner(session_id: str, request: Request) -> None:
         raise HTTPException(404, "Listing not found")
 
 
+def _in_background(fn, *args, what: str = "") -> None:
+    """Run fn(*args) on a daemon thread — for mirror/bookkeeping work (R2
+    pushes/deletes, updated_at bumps, directory cleanup) that shouldn't hold
+    up the response. The user-visible change is already done locally by the
+    time this runs; failures are logged, never surfaced."""
+    def _run() -> None:
+        try:
+            fn(*args)
+        except Exception as exc:  # noqa: BLE001 - background work is best-effort
+            log.warning("background %s failed: %s",
+                        what or getattr(fn, "__name__", "task"), exc)
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _purge_session_images(session_id: str) -> None:
     """Delete a session's photos (local disk + R2) to reclaim storage once the
     listing is archived (sold). Keeps the DB record. Best-effort, never raises;
@@ -987,21 +1001,23 @@ async def rotate_image(payload: dict, request: Request) -> dict:
         with Image.open(path) as img:
             rotated = img.convert("RGB").transpose(Image.Transpose.ROTATE_270)
         tmp = path.with_name(path.name + ".tmp")
-        rotated.save(tmp, "JPEG", quality=88, optimize=True)
+        # No optimize=True here: the two-pass encode nearly doubles the time
+        # for a few KB — a one-tap rotate should feel instant.
+        rotated.save(tmp, "JPEG", quality=88)
         os.replace(tmp, path)
 
     try:
         await run_in_threadpool(_rotate)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Couldn't rotate that photo: {exc}") from exc
+    # Mirror + bookkeeping off the critical path: the rotate is already live
+    # locally (which /media serves first), so the R2 re-push and the
+    # updated_at bump don't need to hold the spinner. Each was a sequential
+    # network round-trip that made a one-tap rotate feel like seconds.
     if objstore.enabled():
-        url = await run_in_threadpool(
-            objstore.upload, path, objstore.key_for(session_id, name))
-        if not url:
-            raise HTTPException(
-                502, "Rotated locally, but couldn’t update the stored copy eBay "
-                     "uses. Try again in a moment.")
-    db.touch_listing(session_id)  # bump updated_at so list thumbnails refetch
+        _in_background(objstore.upload, path, objstore.key_for(session_id, name),
+                       what="rotate R2 push")
+    _in_background(db.touch_listing, session_id, what="rotate touch")
     return {"ok": True}
 
 
@@ -1308,8 +1324,11 @@ def delete_image(payload: dict, request: Request) -> dict:
             path.unlink()
         except OSError as exc:
             raise HTTPException(500, f"Couldn't delete the image: {exc}") from exc
+    # R2 mirror delete is a network round-trip the user shouldn't wait on —
+    # the local file (which /media serves first) is already gone.
     if objstore.enabled():
-        objstore.delete(objstore.key_for(session_id, name))
+        _in_background(objstore.delete, objstore.key_for(session_id, name),
+                       what="delete-image R2")
     log.info("delete-image: session=%s name=%s", session_id, name)
     return {"ok": True, "remaining": storage.list_optimized(session_id)}
 
@@ -1782,23 +1801,34 @@ def get_listing(listing_id: str, request: Request) -> dict:
 
 @app.delete("/api/listings/{listing_id}")
 def delete_listing(listing_id: str, request: Request) -> dict:
-    """Remove a saved listing/draft (ownership-checked) and clean up its
-    on-disk session files. A missing listing is a 404."""
-    rec = db.get_listing(listing_id)
-    if not rec:
+    """Remove a saved listing/draft and clean up its files. A missing (or
+    not-owned) listing is a 404. One DB round-trip — delete_listing does its
+    own ownership check — and the disk/R2 cleanup runs in the background, so
+    the button doesn't hang on a cold database + file I/O."""
+    if not db.delete_listing(listing_id, _uid(request)):
         raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
-        raise HTTPException(404, "Listing not found")
-    db.delete_listing(listing_id, _uid(request))
-    # Best-effort: drop the session's uploaded/optimized images from disk.
-    try:
-        d = storage.session_dir(listing_id)
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001 - never fail the delete on cleanup
-        log.warning(f"delete listing: fs cleanup failed for {listing_id}: {exc}")
+    _in_background(_purge_session_images, listing_id, what="delete cleanup")
     log.info("listing deleted: id=%s user=%s", listing_id, _uid(request))
     return {"ok": True}
+
+
+@app.post("/api/listings/bulk-delete")
+def bulk_delete_listings(payload: dict, request: Request) -> dict:
+    """Mass-delete listings (drafts) in ONE request: each id is deleted with
+    the same per-row ownership check as the single delete; file/R2 cleanup for
+    all of them runs in the background. Ids that don't exist or aren't owned
+    are skipped and reported back."""
+    ids = [str(s).strip() for s in (payload.get("ids") or []) if str(s).strip()]
+    ids = list(dict.fromkeys(ids))[:200]
+    if not ids:
+        raise HTTPException(400, "No listings selected.")
+    uid = _uid(request)
+    deleted = [lid for lid in ids if db.delete_listing(lid, uid)]
+    for lid in deleted:
+        _in_background(_purge_session_images, lid, what="bulk-delete cleanup")
+    log.info("bulk delete: %d/%d removed user=%s", len(deleted), len(ids), uid)
+    return {"ok": True, "deleted": deleted,
+            "skipped": [i for i in ids if i not in deleted]}
 
 
 @app.post("/api/listings/merge")
