@@ -22,6 +22,34 @@ const PHASE_MESSAGES = {
   identifying: ["Identifying items…", "Writing titles & prices…", "Detecting brands…"],
 };
 
+// Duplicate-suspect detection: two drafts whose titles share most of their
+// meaningful words are probably the same item split in two — surface a hint
+// pointing at "Merge into one" instead of silently letting both publish.
+const STOP_WORDS = new Set(["the", "and", "with", "for", "size", "mens", "womens", "new", "vintage"]);
+function titleTokens(t) {
+  return new Set((t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
+    .map((w) => w.replace(/s$/, ""))  // light stemming: phases ≈ phase
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w)));
+}
+function looksLikeSameItem(a, b) {
+  const A = titleTokens(a), B = titleTokens(b);
+  if (A.size < 3 || B.size < 3) return false;
+  let shared = 0;
+  A.forEach((w) => { if (B.has(w)) shared += 1; });
+  return shared >= 3 && shared / Math.min(A.size, B.size) >= 0.4;
+}
+function duplicateSuspects(drafts) {
+  const pairs = [];
+  for (let i = 0; i < drafts.length; i++) {
+    for (let j = i + 1; j < drafts.length; j++) {
+      const a = drafts[i].listing?.title || drafts[i].title || "";
+      const b = drafts[j].listing?.title || drafts[j].title || "";
+      if (looksLikeSameItem(a, b)) pairs.push([drafts[i], drafts[j]]);
+    }
+  }
+  return pairs;
+}
+
 // The fields eBay requires to publish — surfaced per auto-created draft so the
 // seller sees at a glance which items still need a value before going live.
 function missingRequired(l = {}) {
@@ -337,6 +365,26 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
           </p>
         </Card>
       )}
+
+      {job?.done && (() => {
+        const dupes = duplicateSuspects(drafts);
+        if (!dupes.length) return null;
+        const [a, b] = dupes[0];
+        return (
+          <Card className="py-3.5 border-warning/40 bg-warning-soft">
+            <p className="text-sm text-ink flex items-start gap-2">
+              <Combine size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>
+                <strong>Possible duplicate{dupes.length > 1 ? "s" : ""}:</strong>{" "}
+                "{(a.listing?.title || a.title || "").slice(0, 40)}…" and{" "}
+                "{(b.listing?.title || b.title || "").slice(0, 40)}…" look like the same item
+                {dupes.length > 1 ? ` (+${dupes.length - 1} more pair${dupes.length > 2 ? "s" : ""})` : ""}.
+                If so, tick just those drafts and hit <strong>Merge into one</strong> before publishing.
+              </span>
+            </p>
+          </Card>
+        );
+      })()}
 
       {job?.done && needInfo.length > 0 && (
         <Card className="py-3.5 border-warning/40 bg-warning-soft">

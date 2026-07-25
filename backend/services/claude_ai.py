@@ -266,8 +266,90 @@ Rules:
 """
 
 
+_GROUP_VERIFY_SCHEMA = """
+Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
+- Each inner list = the numbered GROUPS that actually show the SAME physical
+  item or set, and must become ONE listing. Groups you don't mention stay as
+  they are.
+- A close-up, back view, tag/label shot, or ONE COMPONENT OF A SET (e.g. a
+  single print from a print set, one shoe of a pair) belongs with its set's
+  overview group — those are the classic accidental splits.
+- Keep genuinely different physical products separate, even from the same
+  brand or artist.
+- Nothing to merge? Return {"merge": []}.
+"""
+
+
+def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
+    """Deterministically apply the verifier's merge instructions. Each merge
+    list combines those group indices into the FIRST one (photo order
+    preserved); invalid/overlapping instructions are dropped, never guessed."""
+    n = len(groups)
+    absorbed: dict[int, int] = {}  # source group -> target group
+    for lst in (merge_lists or []):
+        if not isinstance(lst, list):
+            continue
+        idxs = []
+        for i in lst:
+            try:
+                i = int(i)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < n and i not in idxs and i not in absorbed:
+                idxs.append(i)
+        if len(idxs) >= 2:
+            target = idxs[0]
+            for src in idxs[1:]:
+                if src != target and target not in absorbed:
+                    absorbed[src] = target
+    if not absorbed:
+        return groups
+    out: list[dict] = []
+    for gi, g in enumerate(groups):
+        if gi in absorbed:
+            continue
+        combined = list(g["indices"])
+        for src, tgt in absorbed.items():
+            if tgt == gi:
+                combined.extend(groups[src]["indices"])
+        out.append({"name": g["name"], "indices": combined})
+    return out
+
+
+def _verify_groups(client, images: list[bytes], groups: list[dict]) -> list[dict]:
+    """Second-pass duplicate check: show ONE representative photo per group and
+    ask which groups are actually the same item. This catches the split the
+    single-pass grouping keeps making (overview vs close-up / component of a
+    set becoming two 'items'). Best-effort — any failure keeps the original
+    grouping rather than blocking the batch."""
+    if len(groups) < 2:
+        return groups
+    content: list[dict] = []
+    for gi, g in enumerate(groups):
+        rep = images[g["indices"][0]]
+        content.append({"type": "text", "text": f'Group {gi} — "{g["name"]}":'})
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg",
+            "data": base64.standard_b64encode(rep).decode("ascii")}})
+    content.append({"type": "text", "text": (
+        "These are the item groups made from ONE reseller's bulk photo dump. "
+        "Some may accidentally be the SAME physical item split in two — that "
+        "creates duplicate eBay listings, which is the worst outcome.\n\n"
+        + _GROUP_VERIFY_SCHEMA)})
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=400,
+        messages=[{"role": "user", "content": content}],
+    )
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    data = _extract_json(text)
+    return _apply_group_merges(groups, data.get("merge"))
+
+
 def group_photos(images: list[bytes]) -> dict:
-    """Bulk mode: split a pile of photos into per-item groups.
+    """Bulk mode: split a pile of photos into per-item groups, then a second
+    verification pass re-checks the result for the same item accidentally
+    split into two groups (the duplicate-listing bug) and merges those.
 
     Returns {"groups": [{"name", "indices"}]} covering every input index
     exactly once (indices the model dropped/duplicated are repaired here).
@@ -315,6 +397,13 @@ def group_photos(images: list[bytes]) -> dict:
     for i in range(n):
         if i not in seen:
             groups.append({"name": f"Item {len(groups) + 1}", "indices": [i]})
+    # Duplicate check: a cheap second look (one photo per group) that merges
+    # groups which are actually the same item. Best-effort — the batch always
+    # proceeds with the first-pass grouping if this errs.
+    try:
+        groups = _verify_groups(client, images, groups)
+    except Exception:  # noqa: BLE001 - verification is an assist, never a gate
+        pass
     return {"groups": groups}
 
 
