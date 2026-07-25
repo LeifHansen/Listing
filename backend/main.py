@@ -88,6 +88,10 @@ def health() -> dict:
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
         "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
+        # adobe_configured = credentials present; adobe_ready = pipeline can
+        # actually run (Adobe's APIs need R2 as presigned-URL hand-off storage).
+        "adobe_configured": config.adobe_configured(),
+        "adobe_ready": config.adobe_ready(),
         "photoroom_configured": config.photoroom_ready(),
         "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
@@ -1057,8 +1061,9 @@ async def image_remove_bg(
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
-    """Full background removal: in-house rembg cutout composited onto pure
-    white. Returns the processed image for the editor to preview (not saved)."""
+    """Full background removal composited onto pure white — Adobe Photoshop's
+    Remove Background when configured, else Photoroom, else the in-house
+    model. Returns the processed image for the editor to preview (not saved)."""
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
@@ -1069,15 +1074,16 @@ async def image_remove_bg(
             "ok": True,
             "image": _data_url(images.remove_background_white(img)),
             # Which remover ran — the editor names it so a misconfigured
-            # Photoroom key can't hide behind a silently-degraded result.
-            "engine": "photoroom" if config.photoroom_ready() else "local",
+            # key can't hide behind a silently-degraded result.
+            "engine": ("adobe" if config.adobe_ready()
+                       else "photoroom" if config.photoroom_ready() else "local"),
         }
 
     try:
         return await run_in_threadpool(_run)
     except ValueError as exc:
-        # Cutout failure OR a Photoroom problem (bad key / out of credits /
-        # rate limit) — the message tells the user exactly which.
+        # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
+        # of credits / rate limit) — the message tells the user exactly which.
         raise HTTPException(422, str(exc)) from exc
 
 

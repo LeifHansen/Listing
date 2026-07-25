@@ -117,14 +117,53 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
-# --- Background removal -----------------------------------------------------
-# Photoroom (https://photoroom.com/api) is THE remover when a key is set —
-# purpose-built, and far better on dark / low-contrast / bleeds-off-frame shots
-# than the local model. The in-house rembg (below) runs ONLY when no key is
-# set. When a key IS set and the call fails, the automatic path keeps the
-# ORIGINAL photo and the studio surfaces the exact reason (bad key / out of
-# credits / rate limit) — never a silent downgrade to the weaker local model,
-# which is how mangled cutouts used to get saved with no clue why.
+# --- Adobe Lightroom / Photoshop (Firefly Services) --------------------------
+# THE photo pipeline when configured: every upload is handed to Adobe — the
+# Lightroom API applies our "studio" develop preset to all photos, and (when
+# background removal is on) the Photoshop Remove Background service does the
+# cutout — then the images come back down and the listing flow continues as
+# usual. Credentials are a server-to-server OAuth client (id + secret) from a
+# developer.adobe.com/console project with the Lightroom + Photoshop APIs
+# enabled; both APIs draw on the same Adobe credit pool.
+#
+# Adobe's APIs are async and pull/push files via presigned URLs, so R2 must
+# also be configured — it is the hand-off storage.
+ADOBE_CLIENT_ID = _env("ADOBE_CLIENT_ID")
+ADOBE_CLIENT_SECRET = _env("ADOBE_CLIENT_SECRET")
+ADOBE_SCOPES = os.getenv("ADOBE_SCOPES",
+                         "openid,AdobeID,firefly_api,ff_apis").strip()
+ADOBE_IMS_TOKEN_URL = os.getenv(
+    "ADOBE_IMS_TOKEN_URL", "https://ims-na1.adobelogin.com/ims/token/v3").strip()
+ADOBE_IMAGE_API_BASE = os.getenv(
+    "ADOBE_IMAGE_API_BASE", "https://image.adobe.io").strip().rstrip("/")
+# Optional: use your own Lightroom preset (a URL to an exported .xmp) instead
+# of the bundled studio look (backend/assets/studio-preset.xmp).
+ADOBE_STUDIO_PRESET_URL = os.getenv("ADOBE_STUDIO_PRESET_URL", "").strip()
+
+
+def adobe_configured() -> bool:
+    """Adobe credentials are present (says nothing about the R2 hand-off)."""
+    return bool(ADOBE_CLIENT_ID and ADOBE_CLIENT_SECRET)
+
+
+def adobe_ready() -> bool:
+    """The Adobe pipeline can actually run: credentials AND R2 hand-off."""
+    return adobe_configured() and r2_ready()
+
+
+if adobe_configured() and not r2_ready():
+    log.warning(
+        "Adobe credentials are set but R2 is not configured — the Lightroom/"
+        "Photoshop pipeline needs R2 as hand-off storage (Adobe's APIs only "
+        "accept presigned URLs). Falling back to the non-Adobe photo pipeline.")
+
+# --- Background removal (Photoroom) ------------------------------------------
+# Engine priority: Adobe (above) when ready, then Photoroom, then the in-house
+# rembg — which runs ONLY when no pro engine is configured at all. When a pro
+# engine IS configured and fails, the automatic path keeps the ORIGINAL photo
+# and the studio surfaces the exact reason (bad key / out of credits / rate
+# limit) — never a silent downgrade to the weaker local model, which is how
+# mangled cutouts used to get saved with no clue why.
 PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
 
 

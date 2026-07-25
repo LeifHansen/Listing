@@ -1,9 +1,15 @@
-"""Local image optimization tuned for eBay listing photos.
+"""Image optimization tuned for eBay listing photos.
 
 eBay recommends square-ish images with the longest side >= 1600px for zoom,
-clean framing, and good lighting. This module does that without any external
-service: auto-orient, trim borders, pad to square on a near-white canvas,
-upscale to target, and apply mild brightness/contrast/sharpness enhancement.
+clean framing, and good lighting.
+
+The pipeline (per photo): auto-orient -> Adobe Lightroom "studio" develop
+preset applied via API to every shot (when Adobe is configured) -> background
+removal (Adobe Photoshop Remove Background, then Photoroom, then the in-house
+model — first configured engine wins) -> subject-aware square crop -> resize
+to target -> save. Without Adobe, a mild local brightness/contrast/sharpness
+enhancement stands in for the studio preset, so the module still works with
+no external service at all.
 """
 from __future__ import annotations
 
@@ -216,6 +222,40 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW)
 
 
+def _apply_studio(img: Image.Image) -> tuple[Image.Image, bool, Optional[str]]:
+    """Lightroom "studio" develop preset via the Adobe API.
+
+    Returns (image, applied, error). Keep-the-photo guarantee: any failure
+    returns the ORIGINAL image plus the reason, so a batch never loses a shot
+    to a network blip or an out-of-credits account.
+    """
+    try:
+        from . import adobe
+        return adobe.apply_studio(img), True, None
+    except ValueError as exc:  # AdobeError — carries the user-facing reason
+        log.warning("lightroom studio: %s — continuing with the unedited photo", exc)
+        return img, False, str(exc)
+    except Exception as exc:  # noqa: BLE001 - a photo must never fail optimize()
+        log.warning("lightroom studio: unexpected error (%s) — continuing with "
+                    "the unedited photo", exc)
+        return img, False, f"Studio preset failed: {exc}"
+
+
+def _adobe_cutout(img: Image.Image) -> Optional[Image.Image]:
+    """Photoshop Remove Background cutout composited on white (with our soft
+    shadow). Returns None only when Adobe isn't ready; when it is, a failure
+    raises AdobeError with the actual reason — same loud-failure contract as
+    Photoroom below."""
+    if not config.adobe_ready():
+        return None
+    from . import adobe
+    cut = adobe.remove_background(img)
+    alpha = cut.split()[3]
+    if alpha.getbbox() is None:  # nothing kept — no subject found
+        raise adobe.AdobeError("Adobe couldn't find a subject in this photo.")
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+
+
 class PhotoroomError(ValueError):
     """Photoroom is configured but the call failed — carries a user-facing
     reason. Subclasses ValueError so the studio route's error mapping (422 +
@@ -269,27 +309,43 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
 
 def _remove_background(img: Image.Image) -> tuple[Image.Image, str, Optional[str]]:
     """Cut out the subject onto white for the automatic upload path.
-    Returns (image, engine, error) where engine is 'photoroom', 'local', or
-    'none' (kept the original).
+    Returns (image, engine, error) where engine is 'adobe', 'photoroom',
+    'local', or 'none' (kept the original).
 
-    When Photoroom is configured, it is the ONLY remover: on failure we keep
-    the ORIGINAL photo rather than let the weak local model mangle it — a busy
-    background is always better than a shredded item. The local model only
-    runs when no Photoroom key is set at all."""
+    Pro engines run in priority order — Adobe's Photoshop Remove Background,
+    then Photoroom. When at least one pro engine is configured and every one
+    of them fails, we keep the ORIGINAL photo rather than let the weak local
+    model mangle it — a busy background is always better than a shredded item.
+    The local model only runs when no pro engine is configured at all."""
+    last_err: Optional[str] = None
+    if config.adobe_ready():
+        try:
+            out = _adobe_cutout(img)
+            if out is not None:
+                return out, "adobe", None
+        except ValueError as exc:  # AdobeError
+            log.warning("adobe bg-removal: %s", exc)
+            last_err = str(exc)
+        except Exception as exc:  # noqa: BLE001 - keep-original must hold for ANY
+            # failure, not just mapped API errors — a photo must never fail
+            # optimize().
+            log.warning("adobe bg-removal: unexpected error (%s)", exc)
+            last_err = f"Background removal failed: {exc}"
     if config.photoroom_ready():
         try:
             out = _photoroom_cutout(img)
             if out is not None:
                 return out, "photoroom", None
         except PhotoroomError as exc:
-            log.warning("photoroom: %s — keeping the original photo "
-                        "(local model is disabled while Photoroom is configured)", exc)
-            return _flatten(img), "none", str(exc)
-        except Exception as exc:  # noqa: BLE001 - e.g. OOM in re-encode/compose;
-            # the keep-original guarantee must hold for ANY failure, not just
-            # mapped Photoroom API errors — a photo must never fail optimize().
-            log.warning("photoroom: unexpected error (%s) — keeping the original", exc)
-            return _flatten(img), "none", f"Background removal failed: {exc}"
+            log.warning("photoroom: %s", exc)
+            last_err = str(exc)
+        except Exception as exc:  # noqa: BLE001 - e.g. OOM in re-encode/compose
+            log.warning("photoroom: unexpected error (%s)", exc)
+            last_err = f"Background removal failed: {exc}"
+    if config.adobe_ready() or config.photoroom_ready():
+        log.warning("bg-removal: keeping the original photo (local model is "
+                    "disabled while a pro engine is configured)")
+        return _flatten(img), "none", last_err or "background removal failed"
     try:
         out = _cutout_on_white(img)
     except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
@@ -305,10 +361,20 @@ def remove_background_white(img: Image.Image) -> Image.Image:
     resolution for crisper edges, falling back to the fast size if a big
     inference runs out of memory. Raises when the cutout genuinely fails so the
     editor can tell the user instead of silently doing nothing."""
-    # Photoroom is the remover whenever a key is configured. A failure RAISES
-    # (PhotoroomError is a ValueError → the editor shows the real reason as a
-    # toast) instead of silently degrading to the weak local model — that
-    # silent fallback is how mangled cutouts kept appearing with no clue why.
+    # A pro engine is the remover whenever one is configured: Adobe first,
+    # then Photoroom. A failure RAISES (AdobeError/PhotoroomError are
+    # ValueErrors → the editor shows the real reason as a toast) instead of
+    # silently degrading to the weak local model — that silent fallback is how
+    # mangled cutouts kept appearing with no clue why.
+    if config.adobe_ready():
+        try:
+            out = _adobe_cutout(img)
+            if out is not None:
+                return out
+        except ValueError:
+            if not config.photoroom_ready():
+                raise  # no other pro engine — surface Adobe's reason
+            log.warning("adobe bg-removal failed — trying Photoroom")
     pr = _photoroom_cutout(img)
     if pr is not None:
         return pr
@@ -440,11 +506,18 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         if max(img.size) > MAX_WORK_SIDE:
             img.thumbnail((MAX_WORK_SIDE, MAX_WORK_SIDE), Image.LANCZOS)
 
+        # Studio pass first: hand the shot to the Lightroom API for the
+        # "studio" develop preset (tone/light/color) before any cutout, so the
+        # background remover works on a well-exposed image.
+        studio_applied, studio_error = False, None
+        if config.adobe_ready():
+            img, studio_applied, studio_error = _apply_studio(img)
+
         bg_removed = False
         bg_engine, bg_error = None, None
         if remove_bg:
             img, bg_engine, bg_error = _remove_background(img)
-            bg_removed = bg_engine in ("photoroom", "local")
+            bg_removed = bg_engine in ("adobe", "photoroom", "local")
         else:
             img = _autocrop_borders(img)
         # Fill the square frame by cropping to the subject instead of padding
@@ -454,7 +527,13 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         if img.size[0] != TARGET_SIZE:
             img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
 
-        img = _enhance(img)
+        if studio_applied:
+            # Lightroom already set tone/color — re-cooking it with the local
+            # brightness/contrast boost would double-process. Just a light
+            # sharpen to crisp up the post-resize pixels.
+            img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
+        else:
+            img = _enhance(img)
 
         dst = dst.with_suffix(".jpg")
         img.save(dst, "JPEG", quality=JPEG_QUALITY, optimize=True)
@@ -465,6 +544,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         "output_size": (TARGET_SIZE, TARGET_SIZE),
         "background_removed": bg_removed,
     }
+    if studio_applied:
+        out["studio"] = "lightroom"
+    if studio_error:
+        out["studio_error"] = studio_error  # why the preset didn't run
     if bg_engine:
         out["bg_engine"] = bg_engine
     if bg_error:
@@ -483,32 +566,59 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
         return buf.getvalue()
 
 
+# How many photos to run through the Adobe pipeline at once. The per-photo
+# work there is mostly waiting on Adobe's async jobs, so a small pool cuts a
+# 40-photo pile from ~minutes of serial polling to a few overlapping waves —
+# while keeping peak memory (a few 3200px working copies) modest on a 2GB box.
+_ADOBE_BATCH_WORKERS = int(os.getenv("ADOBE_BATCH_WORKERS", "4") or "4")
+
+
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
                  progress=None) -> list[dict]:
     """Optimize every image in src_dir. `progress(done, total)` (optional) is
-    called after each photo so long bulk jobs can show a live count."""
+    called after each photo so long bulk jobs can show a live count.
+
+    With Adobe configured, the set is processed a few photos at a time (each
+    one is an async Lightroom/Photoshop job we mostly just wait on). Without
+    it, photos run one at a time — all the work is local CPU/RAM then, and the
+    2GB box can't afford concurrent model inference."""
     dst_dir.mkdir(parents=True, exist_ok=True)
-    results = []
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
-    entries = sorted(src_dir.iterdir())
-    total = sum(1 for p in entries if p.suffix.lower() in exts)
+    jobs = [(i, src) for i, src in enumerate(sorted(src_dir.iterdir()))
+            if src.suffix.lower() in exts]
+    total = len(jobs)
     done = 0
-    for i, src in enumerate(entries):
-        if src.suffix.lower() not in exts:
-            continue
-        dst = dst_dir / f"img_{i:02d}.jpg"
-        try:
-            results.append(optimize(src, dst, remove_bg))
-        except Exception as exc:  # noqa: BLE001 - keep going on a bad image
-            results.append({"file": src.name, "error": str(exc)})
-        done += 1
+    done_lock = threading.Lock()
+
+    def _tick() -> None:
+        nonlocal done
+        with done_lock:
+            done += 1
+            count = done
         if progress:
             try:
-                progress(done, total)
+                progress(count, total)
             except Exception:  # noqa: BLE001 - progress is display-only
                 pass
-    return results
+
+    def _one(job: tuple[int, Path]) -> dict:
+        i, src = job
+        try:
+            result = optimize(src, dst_dir / f"img_{i:02d}.jpg", remove_bg)
+        except Exception as exc:  # noqa: BLE001 - keep going on a bad image
+            result = {"file": src.name, "error": str(exc)}
+        _tick()
+        return result
+
+    workers = min(_ADOBE_BATCH_WORKERS, total) if config.adobe_ready() else 1
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # map() preserves job order, so results line up with filenames.
+            return list(pool.map(_one, jobs))
+    return [_one(job) for job in jobs]
 
 
 # ---------------------------------------------------------------------------

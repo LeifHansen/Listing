@@ -179,7 +179,8 @@ backend/
   models.py          Pydantic models (Listing, etc.)
   storage.py         per-session filesystem store
   services/
-    images.py        Pillow optimization
+    images.py        photo pipeline (Adobe/Photoroom/local + Pillow finishing)
+    adobe.py         Lightroom studio preset + Photoshop Remove Background APIs
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
     ebay.py          Inventory API payloads + publish/dry-run
@@ -194,6 +195,31 @@ frontend/            React + Vite + Tailwind app (built to frontend/dist)
 Frontend dev with hot reload: `cd frontend && npm run dev` (proxies `/api` and
 `/media` to the backend on :8000). `./run.sh` and the Dockerfile build the
 production bundle automatically.
+
+## Photo pipeline (Adobe Lightroom + Photoshop)
+
+With `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` set (a server-to-server OAuth
+credential from [developer.adobe.com/console](https://developer.adobe.com/console)
+with the Lightroom + Photoshop APIs enabled), every upload — single listing or
+bulk pile — flows through Adobe:
+
+1. Each photo is staged to R2 and handed to the **Lightroom API**, which
+   applies the "studio" develop preset to all shots (bundled at
+   `backend/assets/studio-preset.xmp`; point `ADOBE_STUDIO_PRESET_URL` at your
+   own exported preset to use a different look).
+2. When "remove background" is on, the cutout runs on the **Photoshop Remove
+   Background** service — the same Adobe credential and credit pool. (The
+   Lightroom API itself only does develop edits — presets, tone, color — so
+   background removal is the Photoshop half of the pipeline.)
+3. The finished images are pulled back down and the listing flow continues as
+   usual: square crop, resize to 1600px, identify, draft, publish.
+
+R2 is required for the Adobe pipeline (its async APIs move files exclusively
+via presigned URLs). Without Adobe, the app falls back to Photoroom (if
+`PHOTOROOM_API_KEY` is set) for cutouts, and to the fully-local
+Pillow + rembg pipeline when neither is configured. A failed Adobe/Photoroom
+call never loses a photo: the original is kept and the reason is surfaced in
+the API response and the photo studio.
 
 ## Notes & limitations
 
