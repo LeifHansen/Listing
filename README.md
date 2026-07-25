@@ -196,30 +196,33 @@ Frontend dev with hot reload: `cd frontend && npm run dev` (proxies `/api` and
 `/media` to the backend on :8000). `./run.sh` and the Dockerfile build the
 production bundle automatically.
 
-## Photo pipeline (Adobe Lightroom + Photoshop)
+## Photo pipeline (Photoroom default, Adobe backup)
 
-With `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` set (a server-to-server OAuth
-credential from [developer.adobe.com/console](https://developer.adobe.com/console)
-with the Lightroom + Photoshop APIs enabled), every upload — single listing or
-bulk pile — flows through Adobe:
+Background removal + studio treatment run on pro engines in this order:
 
-1. Each photo is staged to R2 and handed to the **Lightroom API**, which
-   applies the "studio" develop preset to all shots (bundled at
-   `backend/assets/studio-preset.xmp`; point `ADOBE_STUDIO_PRESET_URL` at your
-   own exported preset to use a different look).
-2. When "remove background" is on, the cutout runs on the **Photoshop Remove
-   Background** service — the same Adobe credential and credit pool. (The
-   Lightroom API itself only does develop edits — presets, tone, color — so
-   background removal is the Photoshop half of the pipeline.)
-3. The finished images are pulled back down and the listing flow continues as
-   usual: square crop, resize to 1600px, identify, draft, publish.
+1. **Photoroom (default)** — with `PHOTOROOM_API_KEY` set, every "remove
+   background" photo gets a Photoroom cutout composited onto white with a
+   soft contact shadow and a studio enhancement pass. Batches run a few
+   photos at a time (`PHOTO_BATCH_WORKERS`, default 4).
+2. **Adobe (backup)** — when a Photoroom call fails for any reason (rate
+   limit, outage, credits) and `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` are
+   set (a server-to-server OAuth credential from
+   [developer.adobe.com/console](https://developer.adobe.com/console) with
+   the Lightroom + Photoshop APIs enabled), the photo is staged to R2 and
+   handed to Adobe instead: the **Lightroom API** applies the "studio"
+   develop preset (bundled at `backend/assets/studio-preset.xmp`;
+   `ADOBE_STUDIO_PRESET_URL` overrides it), then the **Photoshop Remove
+   Background** service does the cutout. (The Lightroom API only does
+   develop edits — presets/tone/color — so the cutout is the Photoshop half.)
+   R2 is required for this path: Adobe's async APIs move files exclusively
+   via presigned URLs.
+3. **Local (last resort)** — the in-process Pillow + rembg pipeline runs only
+   when neither pro engine is configured.
 
-R2 is required for the Adobe pipeline (its async APIs move files exclusively
-via presigned URLs). Without Adobe, the app falls back to Photoroom (if
-`PHOTOROOM_API_KEY` is set) for cutouts, and to the fully-local
-Pillow + rembg pipeline when neither is configured. A failed Adobe/Photoroom
-call never loses a photo: the original is kept and the reason is surfaced in
-the API response and the photo studio.
+Either way the finished images continue through the usual flow: square crop,
+resize to 1600px, identify, draft, publish. A failed pro-engine call never
+loses a photo: the original is kept and the reason is surfaced in the API
+response (`optimize_results`) and the photo studio.
 
 ## Notes & limitations
 

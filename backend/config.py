@@ -118,13 +118,14 @@ VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
 # --- Adobe Lightroom / Photoshop (Firefly Services) --------------------------
-# THE photo pipeline when configured: every upload is handed to Adobe — the
-# Lightroom API applies our "studio" develop preset to all photos, and (when
-# background removal is on) the Photoshop Remove Background service does the
-# cutout — then the images come back down and the listing flow continues as
-# usual. Credentials are a server-to-server OAuth client (id + secret) from a
+# The BACKUP photo engine: when Photoroom (below, the default) fails on a
+# photo for any reason, it is handed to Adobe — the Lightroom API applies our
+# "studio" develop preset, then the Photoshop Remove Background service does
+# the cutout — and the result comes back down into the usual listing flow.
+# Credentials are a server-to-server OAuth client (id + secret) from a
 # developer.adobe.com/console project with the Lightroom + Photoshop APIs
-# enabled; both APIs draw on the same Adobe credit pool.
+# enabled; both APIs draw on the same Adobe credit pool. NOTE: a single
+# "API key" string is not enough — IMS server-to-server auth needs the pair.
 #
 # Adobe's APIs are async and pull/push files via presigned URLs, so R2 must
 # also be configured — it is the hand-off storage.
@@ -158,9 +159,11 @@ if adobe_configured() and not r2_ready():
         "accept presigned URLs). Falling back to the non-Adobe photo pipeline.")
 
 # --- Background removal (Photoroom) ------------------------------------------
-# Engine priority: Adobe (above) when ready, then Photoroom, then the in-house
-# rembg — which runs ONLY when no pro engine is configured at all. When a pro
-# engine IS configured and fails, the automatic path keeps the ORIGINAL photo
+# Photoroom (https://photoroom.com/api) is the DEFAULT engine: its cutout on
+# white plus our shadow + enhancement pass is the studio treatment. Adobe
+# (above) is the backup when a Photoroom call fails; the in-house rembg runs
+# ONLY when no pro engine is configured at all. When a pro engine IS
+# configured and every one fails, the automatic path keeps the ORIGINAL photo
 # and the studio surfaces the exact reason (bad key / out of credits / rate
 # limit) — never a silent downgrade to the weaker local model, which is how
 # mangled cutouts used to get saved with no clue why.

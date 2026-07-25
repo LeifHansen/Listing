@@ -1061,23 +1061,20 @@ async def image_remove_bg(
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
-    """Full background removal composited onto pure white — Adobe Photoshop's
-    Remove Background when configured, else Photoroom, else the in-house
-    model. Returns the processed image for the editor to preview (not saved)."""
+    """Full background removal composited onto pure white — Photoroom by
+    default, Adobe Photoshop's Remove Background as the backup, the in-house
+    model when neither is configured. Returns the processed image for the
+    editor to preview (not saved)."""
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
         img = _studio_load(session_id, name, data)
-        return {
-            "ok": True,
-            "image": _data_url(images.remove_background_white(img)),
-            # Which remover ran — the editor names it so a misconfigured
-            # key can't hide behind a silently-degraded result.
-            "engine": ("adobe" if config.adobe_ready()
-                       else "photoroom" if config.photoroom_ready() else "local"),
-        }
+        out, engine = images.remove_background_white(img)
+        # engine = which remover actually ran — the editor names it so a
+        # misconfigured key can't hide behind a silently-degraded result.
+        return {"ok": True, "image": _data_url(out), "engine": engine}
 
     try:
         return await run_in_threadpool(_run)
