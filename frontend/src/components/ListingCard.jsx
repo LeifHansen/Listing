@@ -16,8 +16,16 @@ export function ListingCard({ item, onOpen, onDelete, metrics, className }) {
   // Version thumbnails by updated_at so a rotate/clean-up busts the hour-long
   // /media cache the moment the listing is touched — without killing caching.
   const ver = Date.parse(item.updated_at || "") || undefined;
-  const thumb = l.images && l.images[0] ? mediaUrl(item.id, l.images[0], ver) : null;
+  // Listings imported from eBay have no local files — their photos are
+  // eBay-hosted absolute URLs, used as-is.
+  const thumb = l.images && l.images[0]
+    ? mediaUrl(item.id, l.images[0], ver)
+    : (l.image_urls && l.image_urls[0]) || null;
   const inventory = item.status === "unlisted";
+  const fromEbay = (l.source || "") === "ebay";
+  // eBay's own watch count rides along on imported listings, so those cards
+  // aren't blank while the metrics endpoint only covers app-created ones.
+  const watchers = hasMetrics ? metrics.watchers : (fromEbay ? l.watch_count : null);
   // An image that 404s (e.g. an older photo lost from ephemeral storage) shows
   // the placeholder instead of a blank tile.
   const [imgFailed, setImgFailed] = useState(false);
@@ -50,21 +58,29 @@ export function ListingCard({ item, onOpen, onDelete, metrics, className }) {
             </div>
           )}
           <StatusBadge status={item.status} className="absolute top-3 left-3 shadow-card" />
+          {fromEbay && (
+            <span
+              className="absolute top-3 right-3 rounded-full bg-card/95 border border-line shadow-card px-2 py-0.5 text-[11px] font-bold text-ink-secondary"
+              title="Imported from your eBay account — edits here update it on eBay"
+            >
+              On eBay
+            </span>
+          )}
         </div>
         <div className="p-4 flex flex-col gap-2 flex-1">
           <p className="font-semibold text-sm text-ink line-clamp-2">
             {l.title || item.title || "(untitled)"}
           </p>
-          {hasMetrics && (
+          {(hasMetrics || watchers != null) && (
             <div className="flex items-center gap-3.5 text-[12px] font-medium text-ink-secondary">
-              {metrics.views != null && (
+              {hasMetrics && metrics.views != null && (
                 <span className="inline-flex items-center gap-1" title="Views (last 30 days)">
                   <Eye size={13} aria-hidden /> {metrics.views}
                 </span>
               )}
-              {metrics.watchers != null && (
+              {watchers != null && (
                 <span className="inline-flex items-center gap-1" title="Watchers">
-                  <Heart size={13} aria-hidden /> {metrics.watchers}
+                  <Heart size={13} aria-hidden /> {watchers}
                 </span>
               )}
             </div>

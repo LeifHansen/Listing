@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { PlusCircle, Store, LogIn } from "lucide-react";
+import { PlusCircle, Store, LogIn, RefreshCw } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -37,7 +37,7 @@ const CONFIGS = {
   },
   listings: {
     title: "Listings",
-    sub: "Everything you've created with Thryft Shop",
+    sub: "Your whole eBay store — listings from this app and everything already on eBay",
     filter: () => true,
     illustration: TagIllustration,
     emptyTitle: "No listings yet",
@@ -52,7 +52,7 @@ export function ListingsView({ kind, search = "" }) {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     ebay, loadListings, metricsById,
   } = useApp();
-  const { confirm } = useToast();
+  const { confirm, toast } = useToast();
 
   // Reconcile Live statuses with eBay once per visit: anything sold or ended
   // on eBay's side flips to Ended here instead of showing Live forever.
@@ -64,6 +64,33 @@ export function ListingsView({ kind, search = "" }) {
       .then((r) => { if (r.changed) loadListings({ quiet: true }); })
       .catch(() => {});
   }, [kind, user, ebay.connected, loadListings]);
+
+  // Import the seller's existing eBay listings (the ones this app didn't
+  // create). Runs on demand — it walks the whole store, so it's a button
+  // rather than something that fires on every visit.
+  const [importing, setImporting] = useState(false);
+  const importFromEbay = async () => {
+    setImporting(true);
+    try {
+      const r = await postJson("/api/ebay/import-listings", {});
+      await loadListings({ quiet: true });
+      const fresh = r.imported || 0;
+      toast(
+        fresh || r.updated
+          ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.`
+          : "Everything's already in sync with eBay.",
+        { kind: "success" },
+      );
+      if (r.failed) {
+        toast(`${r.failed} listing${r.failed === 1 ? "" : "s"} couldn't be read from eBay.`,
+          { kind: "warning" });
+      }
+    } catch (e) {
+      toast(`Couldn't sync with eBay: ${e.message}`, { kind: "error" });
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
@@ -149,9 +176,16 @@ export function ListingsView({ kind, search = "" }) {
 
   return (
     <div className="flex flex-col gap-5">
-      <div>
-        <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">{cfg.title}</h1>
-        <p className="text-sm text-ink-secondary mt-1">{cfg.sub}</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">{cfg.title}</h1>
+          <p className="text-sm text-ink-secondary mt-1">{cfg.sub}</p>
+        </div>
+        {kind === "listings" && user && ebay.connected && (
+          <Button variant="soft" onClick={importFromEbay} loading={importing}>
+            <RefreshCw aria-hidden /> Sync with eBay
+          </Button>
+        )}
       </div>
       {body}
     </div>

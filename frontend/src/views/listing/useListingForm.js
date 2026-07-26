@@ -17,7 +17,10 @@ const EMPTY = {
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
   condition_description: "", description: "", item_specifics: [],
   promote: false, ad_rate_percent: 0,
-  images: [], currency: "USD", missing_info: [],
+  images: [], image_urls: [], currency: "USD", missing_info: [],
+  // "ebay" for a listing imported from the seller's store (edits go back via
+  // the Trading API); "" for one created here.
+  source: "", sku: "", ebay_listing_id: "", view_url: "",
 };
 
 function fromListing(l) {
@@ -35,6 +38,7 @@ function fromListing(l) {
     package_height_in: l.package_height_in || "",
     item_specifics: (l.item_specifics || []).map((s) => ({ ...s })),
     images: l.images || [],
+    image_urls: l.image_urls || [],
   };
 }
 
@@ -53,7 +57,10 @@ export function useListingForm() {
   const sessionId = session?.sessionId;
   // Live = this session is (still) a live eBay listing being revised, so the
   // publish actions become Update / End instead of Publish / Save Draft.
-  const isLive = session?.status === "published" || session?.status === "live";
+  // An imported eBay listing is by definition already live, so it always gets
+  // the revise actions (Update / End) even before any status round-trip.
+  const isLive = session?.status === "published" || session?.status === "live"
+    || (session?.listing?.source || "") === "ebay";
   const ebayListingId = session?.listing?.ebay_listing_id
     || publishResult?.listing_id || "";
 
@@ -412,7 +419,10 @@ export function useListingForm() {
     const weight = (parseFloat(form.package_weight_lb) || 0) * 16
       + (parseFloat(form.package_weight_oz) || 0);
     return {
-      photos: (form.images || []).length > 0 ? "complete" : "attention",
+      // An imported eBay listing has no local files — its photos live on eBay,
+      // so image_urls counts as complete.
+      photos: ((form.images || []).length > 0 || (form.image_urls || []).length > 0)
+        ? "complete" : "attention",
       title: form.title.trim() ? "complete" : "attention",
       category: form.category_id.trim() ? "complete" : "attention",
       specifics: missingAspects.length > 0 ? "attention"

@@ -20,6 +20,27 @@ import { PhotoTile } from "./PhotoTile";
 
 const SEP = "|";
 
+// Photos of a listing imported from eBay: eBay hosts them, so there are no
+// local files to reorder, rotate, or run through the studio. They're shown
+// read-only with a pointer to where they can be changed.
+function EbayPhotos({ urls }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+        {urls.map((url, i) => (
+          <div key={url + i} className="rounded-tile overflow-hidden bg-bg-sunken aspect-square">
+            <img src={url} alt="" loading="lazy" className="size-full object-cover" />
+          </div>
+        ))}
+      </div>
+      <p className="text-[13px] text-ink-secondary">
+        These photos are hosted by eBay on your existing listing. Everything else
+        here is editable — photo changes are best made on eBay itself.
+      </p>
+    </div>
+  );
+}
+
 export function PhotosCard({ w, onEdit, onDelete }) {
   const formImages = w.form.images || [];
   // Local order is the source of truth while dragging; the ref mirrors it
@@ -86,12 +107,18 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     if (next.join(SEP) !== (dragStartRef.current || []).join(SEP)) w.reorderImages(next);
   };
 
+  const ebayUrls = w.form.image_urls || [];
+  const fromEbay = (w.form.source || "") === "ebay" && !formImages.length;
+
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"
+      hint={fromEbay
+        ? "The photos on your live eBay listing"
+        : "Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"}
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
+      {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
       <div className={cn(
         "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
         // While dragging, kill hover scale + CSS transitions on every tile and
@@ -139,6 +166,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           </span>
         </label>
       </div>
+      )}
     </WorkflowCard>
   );
 }

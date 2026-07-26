@@ -50,11 +50,26 @@ class Listing(BaseModel):
     ad_rate_percent: float = 0.0
     # filenames (relative to the session image dir) of optimized images
     images: list[str] = Field(default_factory=list)
+    # Absolute photo URLs hosted by eBay. Listings IMPORTED from eBay have no
+    # local files, so the app renders these directly; app-created listings
+    # leave this empty and use `images`.
+    image_urls: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
     missing_info: list[str] = Field(default_factory=list)
     # Set once the listing goes live: eBay's item id (the /itm/ number).
     # Powers "View on eBay" links and survives every save/publish round-trip.
     ebay_listing_id: str = ""
+    # Where this listing came from: "" / "app" = created here (managed through
+    # the Inventory API), "ebay" = imported from the seller's eBay account and
+    # edited back through the Trading API. Routes every publish/end correctly.
+    source: str = ""
+    # eBay's SKU for an imported listing, when it has one.
+    sku: str = ""
+    # Live eBay counters carried along on import/sync (display only).
+    watch_count: int = 0
+    sold_quantity: int = 0
+    # eBay's own view URL for an imported listing (avoids guessing the domain).
+    view_url: str = ""
 
 
 class IdentifyResult(BaseModel):

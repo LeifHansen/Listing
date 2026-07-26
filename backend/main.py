@@ -19,12 +19,13 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, db, ebay_auth, objstore, storage
+from . import auth, config, db, ebay_auth, ebay_errors, objstore, storage
 from .config import log
 from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
                      SessionOnlyRequest)
-from .services import (claude_ai, ebay, images, metrics, preflight, pricing,
-                       promotions, recommender, taxonomy)
+from .services import (claude_ai, ebay, ebay_trading, images, listing_sync,
+                       metrics, preflight, pricing, promotions, recommender,
+                       taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -1940,6 +1941,38 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
+
+    # A listing IMPORTED from eBay isn't Inventory-API managed, so edits go
+    # back through the Trading API instead of the publish path below.
+    if listing_sync.is_imported(req.listing):
+        uid = _uid(request)
+        if req.mode == "draft":
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="published", user_id=uid)
+            return JSONResponse({"dry_run": False, "mode": "draft",
+                                 "message": "Saved. Choose Update on eBay to push "
+                                            "these changes to your live listing."})
+        if not creds:
+            raise HTTPException(400, "Connect eBay first.")
+        try:
+            res = listing_sync.push_edit(creds["access_token"], req.listing)
+        except ValueError as exc:  # TradingError — eBay's own reason
+            log.warning("revise (imported) failed: session=%s: %s", req.session_id, exc)
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="published", user_id=uid)
+            return JSONResponse({
+                "dry_run": False, "error": True, "mode": "live",
+                "message": str(exc),
+                "issues": ebay_errors.from_response(str(exc)),
+            })
+        db.upsert_listing(req.session_id, req.listing.model_dump(),
+                          status="published", user_id=uid)
+        log.info("revise (imported) ok: session=%s item=%s",
+                 req.session_id, res.get("listing_id"))
+        return JSONResponse({"published": True, "revised": True, "mode": "live",
+                             "listing_id": res.get("listing_id"),
+                             "message": "Your eBay listing has been updated."})
+
     # A listing that's already live must NEVER lose its 'published' status in
     # our records just because a revise attempt was blocked or errored — the
     # listing is still live on eBay either way.
@@ -2034,7 +2067,14 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
     try:
-        res = ebay.withdraw(req.session_id, listing, creds=creds)
+        # Imported listings live outside the Inventory API — end them through
+        # the Trading API instead.
+        if listing_sync.is_imported(listing):
+            if not creds:
+                raise HTTPException(400, "Connect eBay first.")
+            res = listing_sync.end(creds["access_token"], listing)
+        else:
+            res = ebay.withdraw(req.session_id, listing, creds=creds)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     if res.get("ended") or res.get("not_live"):
@@ -2053,10 +2093,20 @@ def sync_listings(request: Request) -> dict:
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0, "archived": 0}
-    items = [i for i in db.list_listings(limit=200, user_id=user["id"])
-             if i.get("status") in ("published", "live")][:40]
+    live = [i for i in db.list_listings(limit=200, user_id=user["id"])
+            if i.get("status") in ("published", "live")]
+    # Imported listings are reconciled through the Trading API (the Inventory
+    # API can't see them at all); app-created ones keep the offer check below.
+    imported = [i for i in live if listing_sync.is_imported(i.get("listing") or {})]
+    items = [i for i in live if i not in imported][:40]
     changed = 0
     archived = 0
+    if imported and creds:
+        try:
+            changed += listing_sync.refresh_statuses(
+                creds["access_token"], user["id"], imported[:60])
+        except Exception as exc:  # noqa: BLE001 - sync is best-effort
+            log.info("ebay sync: imported refresh failed: %s", exc)
     for it in items:
         listing = Listing(**(it.get("listing") or {}))
         status, lid = ebay.live_status(it["id"], listing, creds=creds)
@@ -2076,7 +2126,42 @@ def sync_listings(request: Request) -> dict:
     if changed:
         log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
                  changed, archived, user["id"])
-    return {"checked": len(items), "changed": changed, "archived": archived}
+    return {"checked": len(items) + len(imported), "changed": changed,
+            "archived": archived}
+
+
+# Bounds one import run. A store bigger than this imports across repeated
+# syncs rather than tying up a single request indefinitely.
+IMPORT_LIMIT = 300
+
+
+@app.post("/api/ebay/import-listings")
+def import_listings(request: Request) -> dict:
+    """Pull the seller's ENTIRE active eBay store into the app.
+
+    The Inventory API only knows about listings this app published, so listings
+    created on eBay directly (or with another tool) are fetched through the
+    Trading API instead. Imported listings become normal records the seller can
+    open, edit, and push back — see services/listing_sync.
+    """
+    user = auth.current_user(request)
+    creds = _ebay_creds_for(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    if not creds:
+        raise HTTPException(400, "Connect eBay first — Settings → Connect eBay.")
+    if not db.enabled():
+        raise HTTPException(503, "No database configured — imported listings need "
+                                 "DATABASE_URL set.")
+    try:
+        result = listing_sync.import_active(
+            creds["access_token"], user["id"], limit=IMPORT_LIMIT)
+    except ebay_trading.TradingError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface a clear reason
+        log.warning("import-listings failed for user=%s: %s", user["id"], exc)
+        raise HTTPException(502, f"Couldn't import your eBay listings: {exc}") from exc
+    return result
 
 
 @app.get("/media/{session_id}/optimized/{name}")
