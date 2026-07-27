@@ -122,15 +122,16 @@ export function AppProvider({ children }) {
   // or a saved listing is opened.
   const [session, setSession] = useState(null);
 
-  // Drafts the user skipped in the post-publish "Next Draft" queue. A skipped
-  // draft stays on the Dashboard but is never offered as "next" again — even
-  // after publishing more drafts. In-memory on purpose: a reload clears the
+  // Drafts the user has set aside. A skipped draft still lives in Drafts (and
+  // can be un-skipped from its card), but the post-publish queue never offers
+  // it as the "next" one to work on. In-memory on purpose: a reload clears the
   // skips, so nothing is ever permanently hidden.
   const [skippedDraftIds, setSkippedDraftIds] = useState(() => new Set());
-  const skipDraft = useCallback((id) => {
+  const toggleSkipDraft = useCallback((id) => {
     setSkippedDraftIds((cur) => {
       const next = new Set(cur);
-      next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }, []);
@@ -246,13 +247,13 @@ export function AppProvider({ children }) {
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
-    skippedDraftIds, skipDraft,
+    skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, metricsById, session, startNew, openListing,
-    deleteListing, bulkDeleteListings, skippedDraftIds, skipDraft,
+    deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   ]);
 

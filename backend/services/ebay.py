@@ -60,6 +60,12 @@ def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
     return [f"{base_url}/media/{session_id}/optimized/{n}" for n in names]
 
 
+def image_urls_for(session_id: str, listing: Listing, base_url: str) -> list[str]:
+    """Public URLs for a listing's photos — the Trading publish path needs the
+    same URLs the Inventory path sends."""
+    return _image_urls(session_id, listing.images, base_url)
+
+
 def _package_weight_and_size(listing: Listing) -> dict:
     """Build eBay's packageWeightAndSize. Publishing requires a valid weight;
     dimensions are optional and only included when all three are set."""

@@ -1493,11 +1493,19 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
     auto_promote = _auto_promote_enabled(uid)  # ditto
     try:
         _bulk_set(job_id, phase="optimizing", current=0)
-        images.optimize_all(
+        opt_results = images.optimize_all(
             storage.original_dir(staging_id), storage.optimized_dir(staging_id),
             strip_bg,
             progress=lambda done, total: _bulk_set(job_id, current=done,
                                                    total_photos=total))
+        # Surface a background-removal failure (out of credits, bad key, rate
+        # limit) on the job so the UI can say WHY the photos came back with
+        # their backgrounds intact — silence here reads as "the feature is
+        # broken" when the photo was deliberately kept unchanged.
+        bg_failed = [r for r in opt_results if r.get("bg_error")]
+        if bg_failed:
+            _bulk_set(job_id, bg_error=bg_failed[0]["bg_error"],
+                      bg_failed=len(bg_failed))
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
@@ -1537,6 +1545,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 result = claude_ai.identify([item_dir / n for n in item_names],
                                             item_names, strategy=strategy)
                 listing = _apply_listing_defaults(result.listing, uid)
+                # Carry the account's Promote default onto the draft itself, so
+                # the queue card shows what will actually happen at publish
+                # rather than an unchecked box that promotes anyway.
+                listing.promote = listing.promote or auto_promote
                 if config.taxonomy_ready() and not listing.category_id:
                     try:
                         best = taxonomy.best_category_id(_category_query(listing))
@@ -1554,7 +1566,19 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 storage.save_listing(sid, listing)
                 status = "draft"
                 if mode == "live":
-                    pub = ebay.publish(sid, listing, "live", base_url, creds=creds)
+                    # Same reason as the single-listing path: publish through
+                    # Trading so the seller can edit these in Seller Hub too,
+                    # not just in this app.
+                    if creds:
+                        try:
+                            urls = ebay.image_urls_for(sid, listing, base_url)
+                            res = listing_sync.create_on_ebay(
+                                creds["access_token"], listing, urls, creds=creds)
+                            pub = {"published": True, "listing_id": res["listing_id"]}
+                        except ValueError as exc:  # TradingError
+                            pub = {"published": False, "message": str(exc)}
+                    else:
+                        pub = ebay.publish(sid, listing, "live", base_url, creds=creds)
                     if pub.get("published"):
                         status = "published"
                         item["status"] = "published"
@@ -2039,8 +2063,12 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
 
-    # A listing IMPORTED from eBay isn't Inventory-API managed, so edits go
-    # back through the Trading API instead of the publish path below.
+    prev_rec = db.get_listing(req.session_id) or {}
+    already_live = prev_rec.get("status") in ("published", "live")
+
+    # A listing IMPORTED from eBay (or published by us through Trading) isn't
+    # Inventory-API managed, so edits go back through the Trading API instead
+    # of the publish path below.
     if listing_sync.is_imported(req.listing):
         uid = _uid(request)
         if req.mode == "draft":
@@ -2073,8 +2101,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     # A listing that's already live must NEVER lose its 'published' status in
     # our records just because a revise attempt was blocked or errored — the
     # listing is still live on eBay either way.
-    prev = db.get_listing(req.session_id) or {}
-    was_live = prev.get("status") in ("published", "live")
+    was_live = already_live
     # Pre-publish checklist: catch everything eBay would reject BEFORE the
     # round-trip, with field-targeted fixes. Only gates a real (connected)
     # live publish — dry-runs and drafts stay permissive.
@@ -2106,6 +2133,44 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                 db.save_ebay_account(creds["_uid"], merchant_location_key=key)
         except Exception as exc:  # noqa: BLE001 - don't block publish on this
             log.warning(f"ebay: location re-ensure failed: {exc}")
+    # NEW live listings go out through the Trading API, not the Inventory API.
+    # An Inventory-API listing is "inventory-based" and eBay refuses to let the
+    # seller edit it anywhere but the tool that made it — Seller Hub answers
+    # "Inventory-based listing management is not currently supported by this
+    # tool." Publishing through Trading produces an ordinary listing they can
+    # edit in Seller Hub, the eBay app, or here; source="ebay" then routes later
+    # edits from this app down the same revise path imported listings use.
+    if (req.mode == "live" and creds and not already_live
+            and not listing_sync.is_imported(req.listing)
+            and not req.listing.ebay_listing_id):
+        urls = ebay.image_urls_for(req.session_id, req.listing, _base_url(request))
+        try:
+            res = listing_sync.create_on_ebay(
+                creds["access_token"], req.listing, urls, creds=creds)
+        except ValueError as exc:  # TradingError — eBay's own reason
+            log.warning("trading publish failed: session=%s: %s", req.session_id, exc)
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="draft", user_id=_uid(request))
+            return JSONResponse({
+                "dry_run": False, "error": True, "mode": "live",
+                "message": str(exc),
+                "issues": ebay_errors.from_response(str(exc)),
+            })
+        storage.save_listing(req.session_id, req.listing)
+        result = {"published": True, "mode": "live",
+                  "listing_id": res["listing_id"],
+                  "message": "Your listing is live on eBay."}
+        if req.listing.promote or _auto_promote_enabled(_uid(request)):
+            result["promote_status"] = _promote(
+                req.session_id, req.listing, creds,
+                rate=req.listing.ad_rate_percent,
+                ebay_listing_id=res["listing_id"])
+        db.upsert_listing(req.session_id, req.listing.model_dump(),
+                          status="published", user_id=_uid(request))
+        log.info("trading publish ok: session=%s item=%s",
+                 req.session_id, res["listing_id"])
+        return JSONResponse(result)
+
     log.info("publish request: session=%s mode=%s connected=%s", req.session_id,
              req.mode, bool(creds))
     result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),

@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { ImageOff, ArrowRight, Trash2, Eye, Heart, Check } from "lucide-react";
+import {
+  ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
+  SkipForward, Undo2,
+} from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import { PriceBadge, StatusBadge } from "@/components/ui/badges";
 
@@ -11,7 +14,8 @@ import { PriceBadge, StatusBadge } from "@/components/ui/badges";
 // In select mode (`selectable`), clicking toggles `selected` via `onSelect`
 // instead of opening — powers mass actions like delete-selected in Drafts.
 export function ListingCard({
-  item, onOpen, onDelete, metrics, selectable, selected, onSelect, className,
+  item, onOpen, onDelete, onStartOver, startingOver, onSkip, skipped,
+  metrics, selectable, selected, onSelect, className,
 }) {
   const l = item.listing || {};
   const isLive = item.status === "published" || item.status === "live";
@@ -47,6 +51,8 @@ export function ListingCard({
           "w-full text-left bg-card rounded-card border shadow-card overflow-hidden",
           "flex flex-col cursor-pointer",
           selectable && selected ? "border-blue ring-2 ring-blue/60" : "border-line",
+          // A skipped draft stays fully usable — just visibly set aside.
+          skipped && !selectable && "opacity-60",
         )}
       >
         <div className="aspect-[4/3] bg-bg-sunken relative overflow-hidden">
@@ -123,20 +129,68 @@ export function ListingCard({
         >
           <Check size={15} strokeWidth={3} />
         </span>
-      ) : onDelete && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onDelete(item); }}
-          aria-label="Delete listing"
-          title="Delete listing"
-          className={cn(
-            "absolute top-3 right-3 z-10 grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-error hover:border-error/40 transition-colors",
+      ) : (onDelete || onStartOver || onSkip) && (
+        <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
+          {/* Skip: set this draft aside. It stays in Drafts, but the queue
+              after a publish stops offering it as the next one to work on. */}
+          {onSkip && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onSkip(item); }}
+              aria-pressed={!!skipped}
+              aria-label={skipped ? "Un-skip this draft" : "Skip this draft"}
+              title={skipped
+                ? "Skipped — won't be offered as the next draft. Click to undo."
+                : "Skip — set aside so it isn't offered as the next draft"}
+              className={cn(
+                "grid place-items-center size-8 rounded-full cursor-pointer",
+                "backdrop-blur border shadow-card transition-colors",
+                skipped
+                  ? "bg-blue border-blue text-on-accent"
+                  : "bg-card/85 border-line text-ink-faint hover:text-blue hover:border-blue/40",
+              )}
+            >
+              {skipped ? <Undo2 size={15} aria-hidden /> : <SkipForward size={15} aria-hidden />}
+            </button>
           )}
-        >
-          <Trash2 size={15} aria-hidden />
-        </button>
+          {/* Start over: re-run the AI on this listing's own photos, replacing
+              the drafted content. Drafts only — it would overwrite a live
+              listing's copy with a fresh guess. */}
+          {onStartOver && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onStartOver(item); }}
+              disabled={startingOver}
+              aria-label="Start over — re-run the AI on these photos"
+              title="Start over — re-run the AI on these photos"
+              className={cn(
+                "grid place-items-center size-8 rounded-full cursor-pointer",
+                "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+                "hover:text-blue hover:border-blue/40 transition-colors",
+                startingOver && "cursor-wait text-blue",
+              )}
+            >
+              {startingOver
+                ? <Loader2 size={15} className="animate-spin" aria-hidden />
+                : <RotateCcw size={15} aria-hidden />}
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDelete(item); }}
+              aria-label="Delete listing"
+              title="Delete listing"
+              className={cn(
+                "grid place-items-center size-8 rounded-full cursor-pointer",
+                "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+                "hover:text-error hover:border-error/40 transition-colors",
+              )}
+            >
+              <Trash2 size={15} aria-hidden />
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
