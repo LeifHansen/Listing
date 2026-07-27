@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { ImageOff, ArrowRight, Trash2, Eye, Heart } from "lucide-react";
+import { ImageOff, ArrowRight, Trash2, Eye, Heart, Check } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import { PriceBadge, StatusBadge } from "@/components/ui/badges";
 
@@ -8,7 +8,11 @@ import { PriceBadge, StatusBadge } from "@/components/ui/badges";
 // when onDelete is provided, a trash button removes it. The delete control is a
 // sibling of the card button (not nested) so it stays valid, focusable HTML.
 // `metrics` (optional) shows eBay views/watchers for a live listing.
-export function ListingCard({ item, onOpen, onDelete, metrics, className }) {
+// In select mode (`selectable`), clicking toggles `selected` via `onSelect`
+// instead of opening — powers mass actions like delete-selected in Drafts.
+export function ListingCard({
+  item, onOpen, onDelete, metrics, selectable, selected, onSelect, className,
+}) {
   const l = item.listing || {};
   const isLive = item.status === "published" || item.status === "live";
   const hasMetrics = isLive && metrics
@@ -34,13 +38,15 @@ export function ListingCard({ item, onOpen, onDelete, metrics, className }) {
     <div className={cn("relative group", className)}>
       <motion.button
         type="button"
-        onClick={() => onOpen(item.id)}
+        onClick={() => (selectable ? onSelect?.() : onOpen(item.id))}
+        aria-pressed={selectable ? !!selected : undefined}
         whileHover={{ y: -2, boxShadow: "var(--shadow-card-hover)" }}
         whileTap={{ scale: 0.985 }}
         transition={{ duration: 0.18, ease: "easeOut" }}
         className={cn(
-          "w-full text-left bg-card rounded-card border border-line shadow-card overflow-hidden",
+          "w-full text-left bg-card rounded-card border shadow-card overflow-hidden",
           "flex flex-col cursor-pointer",
+          selectable && selected ? "border-blue ring-2 ring-blue/60" : "border-line",
         )}
       >
         <div className="aspect-[4/3] bg-bg-sunken relative overflow-hidden">
@@ -106,7 +112,18 @@ export function ListingCard({ item, onOpen, onDelete, metrics, className }) {
         </div>
       </motion.button>
 
-      {onDelete && (
+      {selectable ? (
+        <span
+          aria-hidden
+          className={cn(
+            "absolute top-3 right-3 z-10 grid place-items-center size-7 rounded-full",
+            "border-2 shadow-card pointer-events-none transition-colors",
+            selected ? "bg-blue border-blue text-on-accent" : "bg-card/90 border-line-strong text-transparent",
+          )}
+        >
+          <Check size={15} strokeWidth={3} />
+        </span>
+      ) : onDelete && (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onDelete(item); }}

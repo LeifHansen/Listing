@@ -255,7 +255,7 @@ function Workflow() {
         name={editing?.name}
         initialAction={editing?.action}
         onClose={() => setEditing(null)}
-        onSaved={() => w.setImageVersion((v) => v + 1)}
+        onSaved={() => editing && w.bumpImageVersion(editing.name)}
       />
     </motion.div>
   );

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { PlusCircle, Store, LogIn, RefreshCw } from "lucide-react";
+import {
+  PlusCircle, Store, LogIn, RefreshCw, CheckSquare, Trash2, X,
+} from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -50,9 +52,26 @@ export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
-    ebay, loadListings, metricsById,
+    bulkDeleteListings, ebay, loadListings, metricsById,
   } = useApp();
   const { confirm, toast } = useToast();
+
+  // Select mode (Drafts): tap cards to select, then delete them all at once.
+  const canSelect = kind === "drafts";
+  const [selecting, setSelecting] = useState(false);
+  const [sel, setSel] = useState({});
+  const selIds = Object.keys(sel).filter((id) => sel[id]);
+  const exitSelect = () => { setSelecting(false); setSel({}); };
+  const deleteSelected = async () => {
+    if (!selIds.length) return;
+    if (!(await confirm({
+      title: `Delete ${selIds.length} draft${selIds.length === 1 ? "" : "s"}?`,
+      message: "They'll be permanently removed, photos included. This can't be undone.",
+      confirmLabel: "Delete all selected",
+      danger: true,
+    }))) return;
+    if (await bulkDeleteListings(selIds)) exitSelect();
+  };
 
   // Reconcile Live statuses with eBay once per visit: anything sold or ended
   // on eBay's side flips to Ended here instead of showing Live forever.
@@ -167,25 +186,51 @@ export function ListingsView({ kind, search = "" }) {
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
             <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
-              metrics={metricsById[item.id]} />
+              metrics={metricsById[item.id]}
+              selectable={selecting}
+              selected={!!sel[item.id]}
+              onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
           </motion.div>
         ))}
       </div>
     );
   }
 
+  const hasItems = user && listingsState.dbConfigured && items.length > 0;
+
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">{cfg.title}</h1>
           <p className="text-sm text-ink-secondary mt-1">{cfg.sub}</p>
         </div>
-        {kind === "listings" && user && ebay.connected && (
-          <Button variant="soft" onClick={importFromEbay} loading={importing}>
-            <RefreshCw aria-hidden /> Sync with eBay
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {kind === "listings" && user && ebay.connected && (
+            <Button variant="soft" onClick={importFromEbay} loading={importing}>
+              <RefreshCw aria-hidden /> Sync with eBay
+            </Button>
+          )}
+          {canSelect && hasItems && (selecting ? (
+            <>
+              <Button variant="danger" size="sm" onClick={deleteSelected}
+                disabled={!selIds.length}>
+                <Trash2 aria-hidden /> Delete selected ({selIds.length})
+              </Button>
+              <Button variant="ghost" size="sm"
+                onClick={() => setSel(Object.fromEntries(items.map((i) => [i.id, true])))}>
+                All
+              </Button>
+              <Button variant="ghost" size="sm" onClick={exitSelect}>
+                <X aria-hidden /> Cancel
+              </Button>
+            </>
+          ) : (
+            <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
+              <CheckSquare aria-hidden /> Select
+            </Button>
+          ))}
+        </div>
       </div>
       {body}
     </div>

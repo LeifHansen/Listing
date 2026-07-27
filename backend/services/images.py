@@ -504,7 +504,58 @@ def _fill_square(img: Image.Image) -> Image.Image:
     return rgb.crop((left, top, left + side, top + side))
 
 
+def _auto_tone(img: Image.Image) -> Image.Image:
+    """Lightroom-style auto tone, computed locally (no API): neutralize the
+    color cast using the photo's border — the backdrop/table, which should be
+    neutral — as the gray reference, then stretch levels adaptively.
+
+    Conservative by design: white balance only runs when the border looks like
+    a plausible neutral backdrop (bright-ish, mild cast), per-channel gains are
+    clamped, and the levels stretch clips 0.5% outliers with a capped gain —
+    so a colorful item filling the frame is never washed out. Fixes the
+    classic indoor yellow/warm cast on listing photos."""
+    rgb = img.convert("RGB")
+    small = rgb.resize((64, 64), Image.BILINEAR)
+
+    # --- white balance from the border ring (outer ~12%) ---
+    px = list(small.getdata())
+    ring = [px[y * 64 + x] for y in range(64) for x in range(64)
+            if x < 8 or x >= 56 or y < 8 or y >= 56]
+    n = max(1, len(ring))
+    means = [sum(p[c] for p in ring) / n for c in range(3)]
+    mx, mn = max(means), max(1.0, min(means))
+    out = rgb
+    if mx > 90 and mx / mn < 1.6:  # bright-ish border with at most a mild cast
+        target = sum(means) / 3
+        gains = [min(1.3, max(0.8, target / max(1.0, m))) for m in means]
+        if any(abs(g - 1) > 0.02 for g in gains):
+            luts = []
+            for g in gains:
+                luts.extend(min(255, round(v * g)) for v in range(256))
+            out = out.point(luts)
+
+    # --- white-point lift only: brighten dull/dingy photos so the backdrop
+    # reads white. Deliberately NO black-point move — on a backdrop-dominated
+    # product shot the dark percentile lands on the ITEM itself, and stretching
+    # from there crushes its colors. A capped uniform gain can't do that.
+    hist = out.convert("L").histogram()
+    total = max(1, sum(hist))
+    clip = total * 0.005
+    hi, acc = 255, 0
+    for v in range(255, -1, -1):
+        acc += hist[v]
+        if acc > clip:
+            hi = v
+            break
+    if 120 < hi < 235:
+        gain = min(1.25, 255 / hi)
+        lut = [min(255, round(v * gain)) for v in range(256)]
+        out = out.point(lut * 3)
+    return out
+
+
 def _enhance(img: Image.Image) -> Image.Image:
+    img = _auto_tone(img)
     img = ImageEnhance.Brightness(img).enhance(1.04)
     img = ImageEnhance.Contrast(img).enhance(1.08)
     img = ImageEnhance.Color(img).enhance(1.05)

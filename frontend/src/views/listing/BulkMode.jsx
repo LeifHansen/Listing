@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -21,6 +21,34 @@ const PHASE_MESSAGES = {
   grouping: ["Sorting photos into items…", "Matching angles of the same item…"],
   identifying: ["Identifying items…", "Writing titles & prices…", "Detecting brands…"],
 };
+
+// Duplicate-suspect detection: two drafts whose titles share most of their
+// meaningful words are probably the same item split in two — surface a hint
+// pointing at "Merge into one" instead of silently letting both publish.
+const STOP_WORDS = new Set(["the", "and", "with", "for", "size", "mens", "womens", "new", "vintage"]);
+function titleTokens(t) {
+  return new Set((t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
+    .map((w) => w.replace(/s$/, ""))  // light stemming: phases ≈ phase
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w)));
+}
+function looksLikeSameItem(a, b) {
+  const A = titleTokens(a), B = titleTokens(b);
+  if (A.size < 3 || B.size < 3) return false;
+  let shared = 0;
+  A.forEach((w) => { if (B.has(w)) shared += 1; });
+  return shared >= 3 && shared / Math.min(A.size, B.size) >= 0.4;
+}
+function duplicateSuspects(drafts) {
+  const pairs = [];
+  for (let i = 0; i < drafts.length; i++) {
+    for (let j = i + 1; j < drafts.length; j++) {
+      const a = drafts[i].listing?.title || drafts[i].title || "";
+      const b = drafts[j].listing?.title || drafts[j].title || "";
+      if (looksLikeSameItem(a, b)) pairs.push([drafts[i], drafts[j]]);
+    }
+  }
+  return pairs;
+}
 
 // The fields eBay requires to publish — surfaced per auto-created draft so the
 // seller sees at a glance which items still need a value before going live.
@@ -140,8 +168,12 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const [items, setItems] = useState([]);
   const [checked, setChecked] = useState({});
   const [publishing, setPublishing] = useState({});
+  const [merging, setMerging] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
+  // Items merged away client-side — the still-running job's status would
+  // otherwise resurrect them on the next poll.
+  const removed = useRef(new Set());
 
   // Poll the job until done; items render as they arrive. Resilient to transient
   // poll failures — a busy server (heavy batch) can blip a request even though
@@ -163,10 +195,12 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
           // condition/price) and only pick up new items from the poll.
           setItems((cur) => {
             const mine = new Map(cur.map((it) => [it.session_id, it]));
-            return j.items.map((srv) => {
-              const local = mine.get(srv.session_id);
-              return local ? { ...srv, listing: local.listing ?? srv.listing } : srv;
-            });
+            return j.items
+              .filter((srv) => !removed.current.has(srv.session_id))
+              .map((srv) => {
+                const local = mine.get(srv.session_id);
+                return local ? { ...srv, listing: local.listing ?? srv.listing } : srv;
+              });
           });
           setChecked((c) => {
             const next = { ...c };
@@ -245,6 +279,46 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
     }
   }, []);
 
+  // Merge duplicate drafts of the SAME item into one listing: photos combine
+  // under the first selected item; the other drafts are deleted.
+  const mergeSelected = async () => {
+    const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
+    if (targets.length < 2) {
+      toast("Select the duplicate drafts (2 or more) to merge.", { kind: "warning" });
+      return;
+    }
+    const [target, ...sources] = targets;
+    const name = target.listing?.title || target.title || "the first selected draft";
+    if (!(await confirm({
+      title: `Merge ${targets.length} drafts into one?`,
+      message: `All their photos combine under "${name}". The other ${sources.length === 1 ? "draft is" : `${sources.length} drafts are`} deleted. Use this when one item got split into duplicates.`,
+      confirmLabel: "Merge",
+    }))) return;
+    setMerging(true);
+    try {
+      const res = await postJson("/api/listings/merge", {
+        target_id: target.session_id,
+        source_ids: sources.map((s) => s.session_id),
+      });
+      sources.forEach((s) => removed.current.add(s.session_id));
+      setItems((cur) => cur
+        .filter((it) => !removed.current.has(it.session_id))
+        .map((it) => (it.session_id === target.session_id ? { ...it, listing: res.listing } : it)));
+      setChecked((c) => {
+        const next = { ...c };
+        sources.forEach((s) => delete next[s.session_id]);
+        return next;
+      });
+      loadListings({ quiet: true });
+      toast(`Merged into "${name}" — ${res.added} photo${res.added === 1 ? "" : "s"} moved over.`,
+        { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't merge: ${e.message}`, { kind: "error" });
+    } finally {
+      setMerging(false);
+    }
+  };
+
   const publishSelected = async () => {
     const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
     if (!targets.length) { toast("Nothing selected to publish.", { kind: "warning" }); return; }
@@ -292,6 +366,26 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         </Card>
       )}
 
+      {job?.done && (() => {
+        const dupes = duplicateSuspects(drafts);
+        if (!dupes.length) return null;
+        const [a, b] = dupes[0];
+        return (
+          <Card className="py-3.5 border-warning/40 bg-warning-soft">
+            <p className="text-sm text-ink flex items-start gap-2">
+              <Combine size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>
+                <strong>Possible duplicate{dupes.length > 1 ? "s" : ""}:</strong>{" "}
+                "{(a.listing?.title || a.title || "").slice(0, 40)}…" and{" "}
+                "{(b.listing?.title || b.title || "").slice(0, 40)}…" look like the same item
+                {dupes.length > 1 ? ` (+${dupes.length - 1} more pair${dupes.length > 2 ? "s" : ""})` : ""}.
+                If so, tick just those drafts and hit <strong>Merge into one</strong> before publishing.
+              </span>
+            </p>
+          </Card>
+        );
+      })()}
+
       {job?.done && needInfo.length > 0 && (
         <Card className="py-3.5 border-warning/40 bg-warning-soft">
           <p className="text-sm text-ink flex items-start gap-2">
@@ -311,6 +405,12 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
           <Button variant="primary" onClick={publishSelected}>
             <Rocket aria-hidden /> Publish selected ({drafts.filter((d) => checked[d.session_id]).length})
           </Button>
+          {drafts.filter((d) => checked[d.session_id]).length >= 2 && (
+            <Button variant="secondary" onClick={mergeSelected} loading={merging}
+              title="Same item split into duplicates? Combine the selected drafts into one listing.">
+              <Combine aria-hidden /> Merge into one
+            </Button>
+          )}
           <Button variant="ghost" onClick={onExit}>
             <PenLine aria-hidden /> Start another batch
           </Button>

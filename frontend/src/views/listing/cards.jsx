@@ -134,7 +134,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
               sessionId={w.sessionId}
               name={name}
               index={i}
-              version={w.imageVersion}
+              version={w.imageVersions[name] || 0}
               reorderable={order.length > 1}
               dragging={draggingName === name}
               onDragStart={startDrag(name)}
