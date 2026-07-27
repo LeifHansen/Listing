@@ -321,6 +321,120 @@ def get_listing(token: str, item_id: str) -> dict:
     return _item_to_listing(item)
 
 
+def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> list[str]:
+    """The <Item> children shared by create and revise: the listing's content."""
+    parts: list[str] = []
+    if listing.title:
+        parts.append(f"<Title>{_esc(listing.title[:80])}</Title>")
+    if listing.description:
+        parts.append(f"<Description>{_cdata(listing.description)}</Description>")
+    if listing.category_id:
+        parts.append("<PrimaryCategory><CategoryID>"
+                     f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
+    cond_id = _CONDITION_TO_ID.get((listing.condition or "").upper())
+    if cond_id:
+        parts.append(f"<ConditionID>{cond_id}</ConditionID>")
+    if listing.condition_description:
+        parts.append("<ConditionDescription>"
+                     f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
+    specifics = [s for s in listing.item_specifics if s.name.strip() and s.value.strip()]
+    if specifics:
+        rows = "".join(
+            f"<NameValueList><Name>{_esc(s.name.strip()[:40])}</Name>"
+            f"<Value>{_esc(s.value.strip()[:65])}</Value></NameValueList>"
+            for s in specifics[:60])
+        parts.append(f"<ItemSpecifics>{rows}</ItemSpecifics>")
+    if image_urls:
+        urls = "".join(f"<PictureURL>{_esc(u)}</PictureURL>" for u in image_urls[:24])
+        parts.append(f"<PictureDetails>{urls}</PictureDetails>")
+    return parts
+
+
+def _package_details(listing: Listing) -> str:
+    """ShippingPackageDetails — eBay needs a weight for calculated shipping."""
+    lb = int(listing.package_weight_lb or 0)
+    oz = float(listing.package_weight_oz or 0)
+    if not (lb or oz):
+        return ""
+    dims = ""
+    if listing.package_length_in and listing.package_width_in and listing.package_height_in:
+        dims = (f"<PackageLength>{int(listing.package_length_in)}</PackageLength>"
+                f"<PackageWidth>{int(listing.package_width_in)}</PackageWidth>"
+                f"<PackageDepth>{int(listing.package_height_in)}</PackageDepth>")
+    return ("<ShippingPackageDetails>"
+            f"<WeightMajor unit=\"lbs\">{lb}</WeightMajor>"
+            f"<WeightMinor unit=\"oz\">{oz:g}</WeightMinor>"
+            f"{dims}</ShippingPackageDetails>")
+
+
+def create_listing(token: str, listing: Listing, image_urls: list[str],
+                   policies: Optional[dict] = None,
+                   postal_code: str = "") -> dict:
+    """Publish a NEW listing through the Trading API.
+
+    This is what keeps a listing editable everywhere. A listing published via
+    the Sell Inventory API becomes "inventory-based", and eBay then refuses to
+    edit it anywhere but the tool that created it — Seller Hub says
+    "Inventory-based listing management is not currently supported by this
+    tool." A Trading-API listing is an ordinary listing the seller can edit in
+    Seller Hub, the eBay app, or here.
+
+    `policies` carries the seller's business-policy ids (fulfillment/payment/
+    return); with those set eBay takes shipping, payment, and returns from the
+    profiles, so they don't have to be spelled out per listing.
+    """
+    fmt = (listing.listing_format or "FIXED_PRICE").upper()
+    is_auction = fmt.startswith("AUCTION")
+    parts = _item_fields(listing, image_urls)
+
+    if is_auction:
+        start = listing.auction_start_price or listing.price or 0
+        parts.append(f"<StartPrice>{float(start):.2f}</StartPrice>")
+        if fmt == "AUCTION_BIN" and listing.price:
+            parts.append(f"<BuyItNowPrice>{float(listing.price):.2f}</BuyItNowPrice>")
+        parts.append("<ListingType>Chinese</ListingType>"
+                     "<ListingDuration>Days_7</ListingDuration>"
+                     "<Quantity>1</Quantity>")
+    else:
+        parts.append(f"<StartPrice>{float(listing.price or 0):.2f}</StartPrice>")
+        parts.append("<ListingType>FixedPriceItem</ListingType>"
+                     "<ListingDuration>GTC</ListingDuration>"
+                     f"<Quantity>{max(1, int(listing.quantity or 1))}</Quantity>")
+
+    parts.append(f"<Country>{_esc(config.EBAY_MARKETPLACE_ID[-2:] or 'US')}</Country>")
+    parts.append(f"<Currency>{_esc(listing.currency or config.EBAY_CURRENCY)}</Currency>")
+    if postal_code:
+        parts.append(f"<PostalCode>{_esc(postal_code)}</PostalCode>")
+    parts.append("<CategoryMappingAllowed>true</CategoryMappingAllowed>")
+    parts.append(_package_details(listing))
+
+    p = policies or {}
+    profiles = ""
+    if p.get("fulfillment_policy_id"):
+        profiles += ("<SellerShippingProfile><ShippingProfileID>"
+                     f"{_esc(p['fulfillment_policy_id'])}</ShippingProfileID>"
+                     "</SellerShippingProfile>")
+    if p.get("payment_policy_id"):
+        profiles += ("<SellerPaymentProfile><PaymentProfileID>"
+                     f"{_esc(p['payment_policy_id'])}</PaymentProfileID>"
+                     "</SellerPaymentProfile>")
+    if p.get("return_policy_id"):
+        profiles += ("<SellerReturnProfile><ReturnProfileID>"
+                     f"{_esc(p['return_policy_id'])}</ReturnProfileID>"
+                     "</SellerReturnProfile>")
+    if profiles:
+        parts.append(f"<SellerProfiles>{profiles}</SellerProfiles>")
+
+    call = "AddItem" if is_auction else "AddFixedPriceItem"
+    root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
+    item_id = _text(root, "ItemID")
+    if not item_id:
+        raise TradingError("eBay accepted the listing but returned no item id.")
+    log.info("trading: %s ok item=%s", call, item_id)
+    return {"published": True, "listing_id": item_id,
+            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+
+
 def _revise_call_name(listing: Listing) -> str:
     """ReviseFixedPriceItem for Buy It Now, ReviseItem for auctions — eBay
     rejects the wrong one for the listing's format."""
@@ -338,19 +452,7 @@ def revise_listing(token: str, item_id: str, listing: Listing,
     if not item_id:
         raise TradingError("This listing has no eBay item id to update.")
     parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
-    if listing.title:
-        parts.append(f"<Title>{_esc(listing.title[:80])}</Title>")
-    if listing.description:
-        parts.append(f"<Description>{_cdata(listing.description)}</Description>")
-    if listing.category_id:
-        parts.append("<PrimaryCategory><CategoryID>"
-                     f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
-    cond_id = _CONDITION_TO_ID.get((listing.condition or "").upper())
-    if cond_id:
-        parts.append(f"<ConditionID>{cond_id}</ConditionID>")
-    if listing.condition_description:
-        parts.append("<ConditionDescription>"
-                     f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
+    parts.extend(_item_fields(listing, image_urls))
     is_auction = (listing.listing_format or "").upper().startswith("AUCTION")
     if listing.price is not None and listing.price > 0:
         # On an auction the editable price is Buy It Now; the start price can't
@@ -359,16 +461,6 @@ def revise_listing(token: str, item_id: str, listing: Listing,
         parts.append(f"<{tag}>{listing.price:.2f}</{tag}>")
     if listing.quantity and listing.quantity > 0:
         parts.append(f"<Quantity>{int(listing.quantity)}</Quantity>")
-    specifics = [s for s in listing.item_specifics if s.name.strip() and s.value.strip()]
-    if specifics:
-        rows = "".join(
-            f"<NameValueList><Name>{_esc(s.name.strip()[:40])}</Name>"
-            f"<Value>{_esc(s.value.strip()[:65])}</Value></NameValueList>"
-            for s in specifics[:60])
-        parts.append(f"<ItemSpecifics>{rows}</ItemSpecifics>")
-    if image_urls:
-        urls = "".join(f"<PictureURL>{_esc(u)}</PictureURL>" for u in image_urls[:24])
-        parts.append(f"<PictureDetails>{urls}</PictureDetails>")
 
     call = _revise_call_name(listing)
     root = _call(call, token, f"<Item>{''.join(parts)}</Item>")

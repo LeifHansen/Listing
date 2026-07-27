@@ -12,6 +12,19 @@ import { WorkflowSkeleton } from "@/components/ui/Skeleton";
 import { CameraIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
+// When background removal can't run (out of credits, bad key, rate limit) the
+// server KEEPS the original photo — the right call, but silent: the photos just
+// come back with their backgrounds, looking like the feature does nothing. Say
+// so, with the reason the server gave.
+function bgFailureMessage(results, total) {
+  const failed = (results || []).filter((r) => r && r.bg_error);
+  if (!failed.length) return null;
+  const scope = failed.length === total
+    ? "Backgrounds weren't removed"
+    : `${failed.length} of ${total} photos kept their background`;
+  return `${scope} — ${failed[0].bg_error} Your photos were saved unchanged.`;
+}
+
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
@@ -84,6 +97,10 @@ export function UploadPhase({ onBulkStarted }) {
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
       const up = await api("/api/upload", { method: "POST", body: fd });
+      if (removeBg) {
+        const warning = bgFailureMessage(up.optimize_results, prepped.length);
+        if (warning) toast(warning, { kind: "warning", ttl: 10000 });
+      }
 
       // Identify runs as a background job we poll, so a slow multi-photo vision
       // call can't outlive the browser/proxy timeout.

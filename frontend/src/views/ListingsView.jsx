@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, RefreshCw, CheckSquare, Trash2, X,
 } from "lucide-react";
-import { postJson } from "@/lib/api";
+import { pollJob, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
@@ -48,11 +48,16 @@ const CONFIGS = {
   },
 };
 
+// Start over and Skip are draft-only actions: on a live listing they'd rewrite
+// or shelve something already published.
+const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
+
 export function ListingsView({ kind, search = "" }) {
   const cfg = CONFIGS[kind];
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     bulkDeleteListings, ebay, loadListings, metricsById,
+    skippedDraftIds, toggleSkipDraft,
   } = useApp();
   const { confirm, toast } = useToast();
 
@@ -108,6 +113,32 @@ export function ListingsView({ kind, search = "" }) {
       toast(`Couldn't sync with eBay: ${e.message}`, { kind: "error" });
     } finally {
       setImporting(false);
+    }
+  };
+
+  // Start over on a draft: throw away the drafted copy and re-run the AI over
+  // the listing's own photos. Drafts only — on a live listing this would
+  // replace real published copy with a fresh guess.
+  const [startingOver, setStartingOver] = useState(null); // id, or null
+  const startOver = async (item) => {
+    const name = item.listing?.title || item.title || "this draft";
+    if (!(await confirm({
+      title: "Start this listing over?",
+      message: `The AI will look at "${name}"'s photos again and rewrite the `
+        + "title, description, and item specifics. Your photos are kept; any "
+        + "edits you made to the text are replaced.",
+      confirmLabel: "Start over",
+    }))) return;
+    setStartingOver(item.id);
+    try {
+      const { job_id } = await postJson(`/api/identify-async/${item.id}`, {});
+      await pollJob(job_id);
+      await loadListings({ quiet: true });
+      toast("Rewritten from the photos.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't start over: ${e.message}`, { kind: "error" });
+    } finally {
+      setStartingOver(null);
     }
   };
 
@@ -186,6 +217,10 @@ export function ListingsView({ kind, search = "" }) {
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
             <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
+              onStartOver={isDraft(item) ? startOver : undefined}
+              startingOver={startingOver === item.id}
+              onSkip={isDraft(item) ? () => toggleSkipDraft(item.id) : undefined}
+              skipped={skippedDraftIds.has(item.id)}
               metrics={metricsById[item.id]}
               selectable={selecting}
               selected={!!sel[item.id]}

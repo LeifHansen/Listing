@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, SkipForward, X,
+  LayoutDashboard, ExternalLink, X,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -55,12 +55,10 @@ function RefineBar({ w }) {
 // publish so the user isn't left staring at the listing they just posted;
 // offers the next queued draft to keep the assembly line moving.
 function PublishedScreen({ w }) {
-  const {
-    listingsState, openListing, startNew, setView, skippedDraftIds, skipDraft,
-  } = useApp();
+  const { listingsState, openListing, startNew, setView, skippedDraftIds } = useApp();
   const r = w.publishResult;
-  // Skipped drafts stay on the Dashboard but never come back as "next" —
-  // not even after publishing more drafts (the skip list lives in the store).
+  // Drafts set aside with Skip (on the draft's own card) never come back as
+  // "next" — not even after publishing more drafts.
   const draftsLeft = (listingsState.items || [])
     .filter((it) => (it.status === "draft" || it.status === "dry_run")
       && it.id !== w.sessionId && !skippedDraftIds.has(it.id))
@@ -115,11 +113,6 @@ function PublishedScreen({ w }) {
             <>
               <Button variant="primary" size="lg" onClick={() => openListing(next.id)}>
                 Next Draft <ArrowRight aria-hidden />
-              </Button>
-              {/* Skip = pass on this draft without opening it; the queue moves
-                  to the following one and never re-offers the skipped draft. */}
-              <Button variant="ghost" size="lg" onClick={() => skipDraft(next.id)}>
-                <SkipForward aria-hidden /> Skip
               </Button>
               <Button variant="ghost" size="lg" onClick={() => setView("dashboard")}>
                 <LayoutDashboard aria-hidden /> Dashboard

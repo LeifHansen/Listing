@@ -6,7 +6,7 @@ import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Select } from "@/components/ui/fields";
+import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
@@ -62,9 +62,21 @@ function missingRequired(l = {}) {
   return miss;
 }
 
+// Selling formats, mirroring the full editor's Pricing card.
+const LISTING_FORMATS = [
+  ["FIXED_PRICE", "Buy It Now"],
+  ["AUCTION", "Auction"],
+  ["AUCTION_BIN", "Auction + BIN"],
+];
+// eBay's own recommendation replaces this at publish time; it's just the
+// starting number in the box.
+const DEFAULT_AD_RATE = 5;
+
 function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, publishing }) {
   const l = item.listing || {};
   const editable = item.status !== "error";
+  const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
+  const isAuction = fmt.startsWith("AUCTION");
   const missing = item.status === "draft" ? missingRequired(l) : [];
   return (
     <motion.div
@@ -118,7 +130,9 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
           />
           <div className="grid grid-cols-2 gap-2.5">
             <Input
-              type="number" step="0.01" min="0" placeholder="Price" inputMode="decimal"
+              type="number" step="0.01" min="0"
+              placeholder={isAuction ? "Buy It Now" : "Price"} inputMode="decimal"
+              aria-label={isAuction ? "Buy It Now price" : "Price"}
               value={l.price != null ? l.price : ""}
               onChange={(e) => onChange({ ...l, price: e.target.value === "" ? null : parseFloat(e.target.value) })}
             />
@@ -128,6 +142,65 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
             >
               {CONDITIONS.map((c) => <option key={c} value={c}>{conditionLabel(c)}</option>)}
             </Select>
+          </div>
+
+          {/* Selling format, and the fields each one needs. Defaults come from
+              the account's listing settings, so a whole batch is priced the way
+              the seller set up once — per-item overrides stay one tap away. */}
+          <div className="grid grid-cols-2 gap-2.5">
+            <Select
+              aria-label="Listing format"
+              value={fmt}
+              onChange={(e) => onChange({ ...l, listing_format: e.target.value })}
+            >
+              {LISTING_FORMATS.map(([v, label]) => (
+                <option key={v} value={v}>{label}</option>
+              ))}
+            </Select>
+            {isAuction ? (
+              <Input
+                type="number" step="0.01" min="0" inputMode="decimal"
+                placeholder="Start price" aria-label="Auction start price"
+                value={l.auction_start_price != null ? l.auction_start_price : ""}
+                onChange={(e) => onChange({
+                  ...l,
+                  auction_start_price: e.target.value === "" ? null : parseFloat(e.target.value),
+                })}
+              />
+            ) : (
+              <Select
+                aria-label="Quantity"
+                value={String(l.quantity || 1)}
+                onChange={(e) => onChange({ ...l, quantity: parseInt(e.target.value, 10) })}
+              >
+                {[1, 2, 3, 4, 5, 10].map((q) => (
+                  <option key={q} value={q}>{q === 1 ? "Qty 1" : `Qty ${q}`}</option>
+                ))}
+              </Select>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            <Toggle
+              checked={!!l.promote}
+              onChange={(on) => onChange({
+                ...l, promote: on,
+                ad_rate_percent: on ? (l.ad_rate_percent || DEFAULT_AD_RATE) : 0,
+              })}
+              label="Promote"
+            />
+            {l.promote && (
+              <Input
+                type="number" step="0.5" min="0.5" max="100" inputMode="decimal"
+                aria-label="Ad rate percent"
+                className="w-24"
+                value={l.ad_rate_percent || DEFAULT_AD_RATE}
+                onChange={(e) => onChange({
+                  ...l, ad_rate_percent: parseFloat(e.target.value) || DEFAULT_AD_RATE,
+                })}
+              />
+            )}
+            {l.promote && <span className="text-xs text-ink-faint">% ad rate</span>}
           </div>
         </>
       ) : (
@@ -362,6 +435,22 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
                   <CheckCircle2 size={17} className="text-success" aria-hidden />
                   {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}. Review below — they're also saved in Drafts.
                 </>}
+          </p>
+        </Card>
+      )}
+
+      {/* Background removal was asked for but couldn't run: the photos were
+          deliberately kept unchanged, so say why instead of leaving the user
+          to conclude the feature is broken. */}
+      {job?.done && job.bg_error && (
+        <Card className="py-3.5 border-warning/40 bg-warning-soft">
+          <p className="text-sm text-ink flex items-start gap-2">
+            <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
+            <span>
+              <strong>Backgrounds weren't removed</strong> on {job.bg_failed || "some"}{" "}
+              photo{job.bg_failed === 1 ? "" : "s"} — {job.bg_error}{" "}
+              The photos were saved unchanged.
+            </span>
           </p>
         </Card>
       )}

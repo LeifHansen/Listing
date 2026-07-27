@@ -530,19 +530,28 @@ _ASPECTS_FILL_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "specifics": [ {"name": "<exact aspect name>", "value": "<value>"} ] }
 Rules:
-- Fill each listed eBay item specific you can SEE in the photos or confidently
-  infer. Use the aspect's EXACT name as given.
+- Return an entry for EVERY aspect listed below — none may be left out. Buyers
+  filter on these, so a blank specific is a listing that never gets found.
+  Use the aspect's EXACT name as given.
+- Prefer a real value: anything you can SEE in the photos or confidently infer
+  from the item, its tags/labels, or the context provided.
 - For an aspect shown as "(choose one of: ...)", the value MUST be exactly one
   of those allowed values, copied verbatim (this is how eBay's fixed-value /
-  checkbox specifics are matched). If none fits, omit that aspect.
-- For "(free text)" aspects, give the single best concise value eBay expects.
-- Omit any aspect you cannot determine — never guess or invent.
-- EXCEPTION — physical size aspects (Item Height, Item Length, Item Width,
-  Item Depth, Item Diameter, Item Weight): when listed, ALWAYS provide a
-  best-effort ESTIMATE of the actual item's dimensions (not the shipping box)
-  judged from the photos' real-world scale, as a number with unit (e.g.
-  "7 in", "1.5 lb"). Some categories refuse to publish without these; the
-  seller can correct an estimate, but a blank blocks the listing.
+  checkbox specifics are matched). If none of the allowed values fits the item,
+  use the one that means "not applicable" if the list offers one; otherwise
+  return the empty string "" for that aspect and it will be dropped.
+- For "(free text)" aspects you genuinely cannot determine, decide which is
+  true and answer accordingly:
+    * the aspect does not apply to this kind of item  -> "Does Not Apply"
+    * it applies but isn't visible/known from photos  -> "Unbranded" for brand-
+      like aspects, otherwise "Not Specified"
+  Never invent a specific factual claim (a model number, a size, a material,
+  a year) that the photos don't support — use the wording above instead.
+- Physical size aspects (Item Height, Item Length, Item Width, Item Depth,
+  Item Diameter, Item Weight): ALWAYS give a best-effort ESTIMATE of the actual
+  item (not the shipping box), judged from the photos' real-world scale, as a
+  number with unit (e.g. "7 in", "1.5 lb"). Never "Does Not Apply" for these —
+  some categories refuse to publish without a real measurement.
 - One value per aspect name.
 """
 

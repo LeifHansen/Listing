@@ -158,6 +158,32 @@ def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
     return changed
 
 
+def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
+                   creds: Optional[dict] = None) -> dict:
+    """Publish a NEW listing through the Trading API and mark it as one.
+
+    Listings published via the Sell Inventory API are "inventory-based": eBay
+    locks them out of Seller Hub's own editors ("Inventory-based listing
+    management is not currently supported by this tool"). Publishing through
+    Trading instead gives the seller an ordinary listing they can edit
+    anywhere — here, Seller Hub, or the eBay app — and edits from this app
+    keep flowing back through revise_listing.
+    """
+    c = creds or {}
+    res = ebay_trading.create_listing(
+        token, listing, image_urls,
+        policies={k: c.get(k) for k in ("fulfillment_policy_id",
+                                        "payment_policy_id",
+                                        "return_policy_id")},
+        postal_code=c.get("ship_from_postal") or "")
+    # source="ebay" is what routes later edits down the Trading path, exactly
+    # like a listing imported from the seller's store.
+    listing.source = "ebay"
+    listing.ebay_listing_id = res["listing_id"]
+    listing.view_url = res.get("view_url", "")
+    return res
+
+
 def push_edit(token: str, listing: Listing) -> dict:
     """Send an edited imported listing back to eBay. Raises TradingError with
     eBay's own reason on failure."""
