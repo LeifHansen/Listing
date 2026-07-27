@@ -179,8 +179,10 @@ backend/
   models.py          Pydantic models (Listing, etc.)
   storage.py         per-session filesystem store
   services/
-    images.py        photo pipeline (Adobe/Photoroom/local + Pillow finishing)
+    images.py        photo pipeline (Photoroom/Adobe/local + Pillow finishing)
     adobe.py         Lightroom studio preset + Photoshop Remove Background APIs
+    ebay_trading.py  Trading API (XML) client — sees listings we didn't create
+    listing_sync.py  bi-directional sync: import the store, push edits back
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
     ebay.py          Inventory API payloads + publish/dry-run
@@ -223,6 +225,28 @@ Either way the finished images continue through the usual flow: square crop,
 resize to 1600px, identify, draft, publish. A failed pro-engine call never
 loses a photo: the original is kept and the reason is surfaced in the API
 response (`optimize_results`) and the photo studio.
+
+## Bi-directional eBay sync
+
+The Sell Inventory API that publishes listings can only see listings created
+*through* it, so a seller's existing store was invisible to the app. **Sync with
+eBay** (on the Listings page, once eBay is connected) closes that gap using the
+Trading API with the same user OAuth token — no extra credentials:
+
+- **eBay → app.** `GetMyeBaySelling` enumerates every active listing; `GetItem`
+  pulls the detail (title, price, quantity, condition, category, item specifics,
+  photos, package, watch/sold counts). Imported records get the stable id
+  `ebay-<itemId>`, so re-syncing updates in place instead of duplicating.
+- **app → eBay.** Edits to an imported listing go back through
+  `ReviseFixedPriceItem` (or `ReviseItem` for auctions), and ending one uses
+  `EndItem`. Listings the app created keep using the Inventory API.
+
+A re-sync only refreshes the fields eBay owns — price, quantity, counters,
+photos — plus anything still blank locally, so a background sync never reverts
+an in-app edit. Sold and ended listings are reconciled on the same pass. One run
+imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
+repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
+default 6) so a big store doesn't outlive the request.
 
 ## Notes & limitations
 

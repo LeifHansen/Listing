@@ -18,6 +18,8 @@ is skipped rather than failing the whole sync.
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .. import db
@@ -30,6 +32,11 @@ from . import ebay_trading
 # so a local edit isn't silently reverted by a background sync.
 _LIVE_FIELDS = ("price", "quantity", "watch_count", "sold_quantity",
                 "view_url", "image_urls")
+# Detail fetches run a few at a time: each listing is its own GetItem round
+# trip, so a 300-item store takes minutes when they run one after another —
+# long enough for the browser to give up on the request. Small pool, because
+# eBay rate-limits per-account calls.
+_FETCH_WORKERS = int(os.getenv("EBAY_SYNC_WORKERS", "6") or "6")
 
 
 def record_id(item_id: str) -> str:
@@ -40,6 +47,22 @@ def is_imported(listing: Listing | dict) -> bool:
     source = (listing.get("source") if isinstance(listing, dict)
               else getattr(listing, "source", ""))
     return (source or "").lower() == "ebay"
+
+
+def _is_blank(value) -> bool:
+    """True for a field the seller has never filled in.
+
+    Deliberately NOT a plain falsiness test: `0`, `0.0` and `False` compare
+    equal to each other in Python, so a blanket "falsy means empty" check would
+    treat a real zero (a free item, an unchecked flag) as missing and let a
+    sync overwrite it."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value == 0
+    return len(value) == 0 if hasattr(value, "__len__") else False
 
 
 def _merge(existing: Optional[dict], fresh: dict) -> dict:
@@ -58,32 +81,40 @@ def _merge(existing: Optional[dict], fresh: dict) -> dict:
     for key, value in fresh.items():
         if key in _LIVE_FIELDS:
             continue
-        current = merged.get(key)
-        if current in (None, "", [], 0) and value not in (None, "", []):
+        if _is_blank(merged.get(key)) and not _is_blank(value):
             merged[key] = value
     merged["source"] = "ebay"
     merged["ebay_listing_id"] = fresh.get("ebay_listing_id") or merged.get("ebay_listing_id", "")
     return merged
 
 
-def import_active(token: str, user_id: str, limit: int = 300,
-                  progress=None) -> dict:
-    """Import every active eBay listing for this user.
+def import_active(token: str, user_id: str, limit: int = 300) -> dict:
+    """Import every active eBay listing for this user (up to `limit`).
 
-    Returns {"found", "imported", "updated", "failed"}. `progress(done, total)`
-    is called after each listing so a long first sync can show a live count.
+    Returns {"found", "imported", "updated", "failed"}.
     """
-    ids = ebay_trading.active_listing_ids(token)[:limit]
+    ids = ebay_trading.active_listing_ids(token, limit=limit)
     known = {r["id"]: r for r in db.list_listings(limit=1000, user_id=user_id)}
     imported = updated = failed = 0
-    for i, item_id in enumerate(ids, start=1):
-        rid = record_id(item_id)
+
+    def _fetch(item_id: str):
+        """(item_id, detail) — None detail when that one listing failed."""
         try:
-            fresh = ebay_trading.get_listing(token, item_id)
+            return item_id, ebay_trading.get_listing(token, item_id)
         except Exception as exc:  # noqa: BLE001 - skip one bad listing
             log.info("sync: couldn't import eBay item %s: %s", item_id, exc)
+            return item_id, None
+
+    # Fetch in parallel, but write to the DB from this thread only, in eBay's
+    # original order — so the import stays deterministic and needs no locking.
+    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(1, len(ids)))) as pool:
+        fetched = list(pool.map(_fetch, ids)) if ids else []
+
+    for item_id, fresh in fetched:
+        if fresh is None:
             failed += 1
             continue
+        rid = record_id(item_id)
         prior = known.get(rid)
         data = _merge(prior.get("listing") if prior else None, fresh)
         # Validate through the model so a malformed field can't poison the DB.
@@ -99,11 +130,6 @@ def import_active(token: str, user_id: str, limit: int = 300,
             updated += 1
         else:
             imported += 1
-        if progress:
-            try:
-                progress(i, len(ids))
-            except Exception:  # noqa: BLE001 - display only
-                pass
     log.info("sync: user=%s found=%d imported=%d updated=%d failed=%d",
              user_id, len(ids), imported, updated, failed)
     return {"found": len(ids), "imported": imported, "updated": updated,

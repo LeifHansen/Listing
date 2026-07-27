@@ -13,9 +13,8 @@ bi-directional sync:
   - EndItem           -> end one of those listings
 
 It authenticates with the SAME user OAuth token as the REST APIs (passed in the
-X-EBAY-API-IAF-TOKEN header), so a connected seller needs no extra setup. The
-one requirement is EBAY_CLIENT_ID (the App ID) as the compatibility "DevName"
-header trio, which config already has.
+X-EBAY-API-IAF-TOKEN header), so a connected seller needs no extra setup and no
+legacy Auth'n'Auth token or DevName/AppName/CertName header trio is involved.
 
 Everything here returns plain dicts and raises TradingError with a user-facing
 message on failure — no XML leaks past this module.
@@ -73,13 +72,23 @@ def _esc(value: Any) -> str:
     return html.escape(str(value if value is not None else ""), quote=False)
 
 
+def _cdata(value: str) -> str:
+    """Wrap text in CDATA so listing HTML survives intact.
+
+    A literal "]]>" inside the text would otherwise close the section early and
+    make the rest of the description parse as markup — eBay rejects the call at
+    best, and at worst the description injects elements into the request. The
+    standard fix is to split the sequence across two CDATA sections."""
+    return "<![CDATA[" + str(value or "").replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
 def _call(call: str, token: str, body: str) -> ET.Element:
     """POST one Trading API call and return the parsed response root."""
     xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
         f'<{call}Request xmlns="{_NS}">'
-        # RequesterCredentials is required by the schema even when the token
-        # rides in the IAF header; eBay ignores an empty one.
+        # No RequesterCredentials element: the IAF header carries the token, and
+        # sending an empty credentials block makes eBay reject the call.
         "<ErrorLanguage>en_US</ErrorLanguage><WarningLevel>High</WarningLevel>"
         f"{body}"
         f"</{call}Request>"
@@ -119,7 +128,8 @@ def _name(el: ET.Element) -> str:
 
 
 def _find(parent: ET.Element, path: str) -> Optional[ET.Element]:
-    """First descendant matching a '/'-separated path of local tag names."""
+    """Follow a '/'-separated path of local (namespace-stripped) tag names,
+    one child level per segment, and return the element it lands on."""
     node: Optional[ET.Element] = parent
     for part in path.split("/"):
         if node is None:
@@ -129,7 +139,7 @@ def _find(parent: ET.Element, path: str) -> Optional[ET.Element]:
 
 
 def _findall(parent: ET.Element, path: str) -> list[ET.Element]:
-    """Every descendant matching the path (last segment repeats)."""
+    """Like _find, but returns EVERY child matching the last path segment."""
     *head, last = path.split("/")
     node: Optional[ET.Element] = parent
     for part in head:
@@ -258,17 +268,21 @@ def _item_to_listing(item: ET.Element) -> dict:
 
 # --- public API -------------------------------------------------------------
 
-# eBay caps GetMyeBaySelling at 200 entries per page; walk pages up to this many
-# so a large store imports fully without an unbounded loop.
+# GetMyeBaySelling accepts up to 200 entries per page; 100 keeps each response
+# small enough to parse quickly. _MAX_PAGES bounds the walk so a pathological
+# account can never spin here forever.
 _PAGE_SIZE = 100
 _MAX_PAGES = 25
 
 
-def active_listing_ids(token: str, max_pages: int = _MAX_PAGES) -> list[str]:
+def active_listing_ids(token: str, limit: Optional[int] = None,
+                       max_pages: int = _MAX_PAGES) -> list[str]:
     """Every ACTIVE listing id on the connected account, oldest page first.
 
     GetMyeBaySelling's ActiveList is the authoritative "what's live in my
-    store" view — it includes listings created anywhere, not just by us."""
+    store" view — it includes listings created anywhere, not just by us.
+    `limit` stops the walk as soon as that many ids are in hand, so a caller
+    that only wants the first N doesn't pay for pages it will discard."""
     ids: list[str] = []
     page = 1
     while page <= max_pages:
@@ -286,10 +300,11 @@ def active_listing_ids(token: str, max_pages: int = _MAX_PAGES) -> list[str]:
         page_ids = [_text(i, "ItemID") for i in _findall(active, "ItemArray/Item")]
         ids.extend([i for i in page_ids if i])
         total_pages = _int(active, "PaginationResult/TotalNumberOfPages", 1)
-        if page >= max(1, total_pages) or not page_ids:
+        if (page >= max(1, total_pages) or not page_ids
+                or (limit is not None and len(ids) >= limit)):
             break
         page += 1
-    return ids
+    return ids[:limit] if limit is not None else ids
 
 
 def get_listing(token: str, item_id: str) -> dict:
@@ -326,8 +341,7 @@ def revise_listing(token: str, item_id: str, listing: Listing,
     if listing.title:
         parts.append(f"<Title>{_esc(listing.title[:80])}</Title>")
     if listing.description:
-        # CDATA so listing HTML survives intact.
-        parts.append(f"<Description><![CDATA[{listing.description}]]></Description>")
+        parts.append(f"<Description>{_cdata(listing.description)}</Description>")
     if listing.category_id:
         parts.append("<PrimaryCategory><CategoryID>"
                      f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")

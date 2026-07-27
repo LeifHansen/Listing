@@ -295,8 +295,3 @@ def remove_background(img: Image.Image) -> Image.Image:
     finally:
         objstore.delete(in_key)
         objstore.delete(out_key)
-
-
-def ping() -> None:
-    """Cheap credential check (token fetch only) — used by health reporting."""
-    _access_token()

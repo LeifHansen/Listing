@@ -689,25 +689,30 @@ def _auto_promote_enabled(uid: Optional[str]) -> bool:
     return True if value is None else bool(value)
 
 
-def _promote_published(session_id: str, listing: Listing, creds: Optional[dict],
-                       ebay_listing_id: Optional[str]) -> dict:
-    """Best-effort Promoted Listings ad for a just-published listing. Fills in
-    eBay's recommended rate (falling back to the default) when the listing has
-    none — a 0% rate used to make promote_listing silently no-op, which is why
-    even toggled-on listings never actually got promoted. Mutates
-    listing.promote/ad_rate_percent so the caller's persistence records what
-    ran. Never raises."""
+def _promote(record_id: str, listing: Listing, creds: Optional[dict],
+             rate: Optional[float] = None,
+             ebay_listing_id: Optional[str] = None) -> dict:
+    """Turn Promoted Listings on for one listing and run the ad call.
+
+    The single place that decides an ad rate: an explicit `rate` wins, else
+    eBay's recommendation for `ebay_listing_id`, else the default. A 0% rate
+    makes promote_listing silently no-op — which is exactly why listings with
+    Promote toggled on were never actually promoted — so the rate is always
+    filled in here. Mutates listing.promote/ad_rate_percent so the caller can
+    persist what really ran, and never raises: a promotion problem must not
+    fail the publish that preceded it."""
     try:
         listing.promote = True
-        if not listing.ad_rate_percent or listing.ad_rate_percent <= 0:
+        if not rate or rate <= 0:
             rate = None
             if ebay_listing_id:
-                rates = promotions.suggested_ad_rates(creds, [str(ebay_listing_id)])
-                rate = rates.get(str(ebay_listing_id))
-            listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
-        return promotions.promote_listing(session_id, listing, creds)
+                recommended = promotions.suggested_ad_rates(
+                    creds, [str(ebay_listing_id)])
+                rate = recommended.get(str(ebay_listing_id))
+        listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
+        return promotions.promote_listing(record_id, listing, creds)
     except Exception as exc:  # noqa: BLE001 - promotion must never break publish
-        log.warning("auto-promote failed (session=%s): %s", session_id, exc)
+        log.warning("promote failed (%s): %s", record_id, exc)
         return {"promoted": False, "message": f"Promotion failed: {exc}"}
 
 
@@ -1558,8 +1563,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                         # default, Settings) — the bulk path used to skip
                         # promotion entirely, so live batches landed unpromoted.
                         if creds and auto_promote:
-                            _promote_published(sid, listing, creds,
-                                               pub.get("listing_id"))
+                            _promote(sid, listing, creds,
+                                     rate=listing.ad_rate_percent,
+                                     ebay_listing_id=pub.get("listing_id"))
                     else:
                         # Stay a draft; surface why it couldn't go live.
                         item["error"] = pub.get("message") or "Couldn't publish automatically."
@@ -1876,11 +1882,8 @@ def promote_one(payload: dict, request: Request) -> dict:
     except (TypeError, ValueError):
         rate = 0.0
     if rate <= 0:
-        rates = _rates_by_record_id(creds, [rec])
-        rate = rates.get(lid) or promotions.DEFAULT_AD_RATE
-    listing.promote = True
-    listing.ad_rate_percent = round(rate, 1)
-    status = promotions.promote_listing(lid, listing, creds)
+        rate = _rates_by_record_id(creds, [rec]).get(lid) or 0
+    status = _promote(lid, listing, creds, rate=rate)
     if status.get("promoted"):
         storage.save_listing(lid, listing)
         db.upsert_listing(lid, listing.model_dump(), status=rec.get("status"),
@@ -1907,9 +1910,7 @@ def promote_all(request: Request) -> dict:
     needs_reconnect = False
     for it in items:
         listing = Listing(**(it.get("listing") or {}))
-        listing.promote = True
-        listing.ad_rate_percent = round(rates.get(it["id"]) or promotions.DEFAULT_AD_RATE, 1)
-        status = promotions.promote_listing(it["id"], listing, creds)
+        status = _promote(it["id"], listing, creds, rate=rates.get(it["id"]))
         if status.get("promoted"):
             storage.save_listing(it["id"], listing)
             db.upsert_listing(it["id"], listing.model_dump(), status=it.get("status"),
@@ -2136,8 +2137,10 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     # attached for the UI to show (incl. 'reconnect to grant ad permissions').
     if result.get("published") and (req.listing.promote
                                     or _auto_promote_enabled(_uid(request))):
-        result["promote_status"] = _promote_published(
-            req.session_id, req.listing, creds, result.get("listing_id"))
+        result["promote_status"] = _promote(
+            req.session_id, req.listing, creds,
+            rate=req.listing.ad_rate_percent,
+            ebay_listing_id=result.get("listing_id"))
         if result["promote_status"].get("promoted"):
             # Re-record with the promote flag + actual rate so the Dashboard
             # and recommender see it as promoted.
@@ -2193,14 +2196,20 @@ def sync_listings(request: Request) -> dict:
             if i.get("status") in ("published", "live")]
     # Imported listings are reconciled through the Trading API (the Inventory
     # API can't see them at all); app-created ones keep the offer check below.
-    imported = [i for i in live if listing_sync.is_imported(i.get("listing") or {})]
-    items = [i for i in live if i not in imported][:40]
+    # EVERY imported listing must be excluded from `items` — not just the ones
+    # this run refreshes — or the offer check would call an eBay listing it
+    # can't see "ended". Each side is capped so one sync click can't fan out
+    # into hundreds of eBay calls; the rest are picked up by the next sync.
+    imported_ids = {i["id"] for i in live
+                    if listing_sync.is_imported(i.get("listing") or {})}
+    imported = [i for i in live if i["id"] in imported_ids][:60]
+    items = [i for i in live if i["id"] not in imported_ids][:40]
     changed = 0
     archived = 0
     if imported and creds:
         try:
             changed += listing_sync.refresh_statuses(
-                creds["access_token"], user["id"], imported[:60])
+                creds["access_token"], user["id"], imported)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: imported refresh failed: %s", exc)
     for it in items:
