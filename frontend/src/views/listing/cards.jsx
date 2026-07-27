@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2,
+  Sparkles, Megaphone, Loader2, Ruler,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -19,6 +19,27 @@ import { PhotoTile } from "./PhotoTile";
    useListingForm (passed down as `w`). */
 
 const SEP = "|";
+
+// Photos of a listing imported from eBay: eBay hosts them, so there are no
+// local files to reorder, rotate, or run through the studio. They're shown
+// read-only with a pointer to where they can be changed.
+function EbayPhotos({ urls }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+        {urls.map((url, i) => (
+          <div key={url + i} className="rounded-tile overflow-hidden bg-bg-sunken aspect-square">
+            <img src={url} alt="" loading="lazy" className="size-full object-cover" />
+          </div>
+        ))}
+      </div>
+      <p className="text-[13px] text-ink-secondary">
+        These photos are hosted by eBay on your existing listing. Everything else
+        here is editable — photo changes are best made on eBay itself.
+      </p>
+    </div>
+  );
+}
 
 export function PhotosCard({ w, onEdit, onDelete }) {
   const formImages = w.form.images || [];
@@ -86,12 +107,18 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     if (next.join(SEP) !== (dragStartRef.current || []).join(SEP)) w.reorderImages(next);
   };
 
+  const ebayUrls = w.form.image_urls || [];
+  const fromEbay = (w.form.source || "") === "ebay" && !formImages.length;
+
   return (
     <WorkflowCard
       id="photos" icon={ImageIcon} title="Photos"
-      hint="Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"
+      hint={fromEbay
+        ? "The photos on your live eBay listing"
+        : "Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"}
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
+      {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
       <div className={cn(
         "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
         // While dragging, kill hover scale + CSS transitions on every tile and
@@ -139,6 +166,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           </span>
         </label>
       </div>
+      )}
     </WorkflowCard>
   );
 }
@@ -268,12 +296,23 @@ export function CategoryCard({ w }) {
   );
 }
 
+// Physical item-size aspects — pinned into their own "Item size" group so
+// they're easy to find (they used to drown alphabetically in Recommended, and
+// some categories refuse to publish without them).
+const DIMENSION_ASPECTS = new Set([
+  "item height", "item length", "item width", "item depth", "item diameter",
+  "item weight", "height", "length", "width", "depth", "diameter",
+]);
+
 export function SpecificsCard({ w }) {
   const aspects = w.categoryMeta.aspects || [];
   const required = aspects.filter((a) => a.required);
-  const recommended = aspects.filter((a) => !a.required).slice(0, 8);
+  const dimensions = aspects.filter(
+    (a) => !a.required && DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
+  const recommended = aspects.filter(
+    (a) => !a.required && !DIMENSION_ASPECTS.has(a.name.trim().toLowerCase())).slice(0, 8);
   const aspectNames = new Set(
-    [...required, ...recommended].map((a) => a.name.toLowerCase()));
+    [...required, ...dimensions, ...recommended].map((a) => a.name.toLowerCase()));
   // Free-form rows: everything not already shown as a category aspect field.
   const freeRows = w.form.item_specifics
     .map((s, i) => ({ ...s, i }))
@@ -288,6 +327,31 @@ export function SpecificsCard({ w }) {
     w.set("item_specifics", w.form.item_specifics.filter((_, j) => j !== i));
   };
 
+  const renderAspect = (a) => {
+    const cur = w.getSpecific(a.name);
+    const badge = (
+      <TagPill tone={a.required ? "red" : "neutral"}>
+        {a.required ? "Required" : "Recommended"}
+      </TagPill>
+    );
+    return (
+      <Field key={a.name} label={a.name} hint={badge}>
+        {a.mode === "SELECTION_ONLY" && a.values?.length ? (
+          <Select value={cur} onChange={(e) => w.upsertSpecific(a.name, e.target.value)}>
+            <option value="">— select —</option>
+            {a.values.map((v) => <option key={v} value={v}>{v}</option>)}
+          </Select>
+        ) : (
+          <Input
+            value={cur}
+            placeholder={a.name}
+            onChange={(e) => w.upsertSpecific(a.name, e.target.value)}
+          />
+        )}
+      </Field>
+    );
+  };
+
   return (
     <WorkflowCard
       id="specifics" icon={ListChecks} title="Item specifics"
@@ -297,30 +361,24 @@ export function SpecificsCard({ w }) {
       <div className="flex flex-col gap-5">
         {(required.length > 0 || recommended.length > 0) && (
           <div className="grid sm:grid-cols-2 gap-4">
-            {[...required, ...recommended].map((a) => {
-              const cur = w.getSpecific(a.name);
-              const badge = (
-                <TagPill tone={a.required ? "red" : "neutral"}>
-                  {a.required ? "Required" : "Recommended"}
-                </TagPill>
-              );
-              return (
-                <Field key={a.name} label={a.name} hint={badge}>
-                  {a.mode === "SELECTION_ONLY" && a.values?.length ? (
-                    <Select value={cur} onChange={(e) => w.upsertSpecific(a.name, e.target.value)}>
-                      <option value="">— select —</option>
-                      {a.values.map((v) => <option key={v} value={v}>{v}</option>)}
-                    </Select>
-                  ) : (
-                    <Input
-                      value={cur}
-                      placeholder={a.name}
-                      onChange={(e) => w.upsertSpecific(a.name, e.target.value)}
-                    />
-                  )}
-                </Field>
-              );
-            })}
+            {[...required, ...recommended].map(renderAspect)}
+          </div>
+        )}
+
+        {/* Item size — the ITEM's own measurements (eBay sometimes rejects a
+            publish without them), distinct from the shipping box under
+            Shipping. AI pre-fills estimates; tweak as needed. */}
+        {dimensions.length > 0 && (
+          <div>
+            <p className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
+              <Ruler size={14} className="text-blue" aria-hidden /> Item size
+              <span className="font-normal text-ink-faint">
+                — the item itself, not the shipping box (e.g. “7 in”)
+              </span>
+            </p>
+            <div className="grid sm:grid-cols-3 gap-4 mt-2.5">
+              {dimensions.map(renderAspect)}
+            </div>
           </div>
         )}
 

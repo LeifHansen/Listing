@@ -117,10 +117,21 @@ def sold_comps(query: str, category_id: Optional[str] = None,
 _SOURCES = (sold_comps, active_comps)  # preferred first
 
 
+# Account pricing strategy → which end of the comp range the headline
+# suggestion lands on. "estimate" is the median; low/high are the quartiles.
+_STRATEGY_PICK = {
+    "quick_flip": ("low", "Quick Flip — priced at the low end to sell fast"),
+    "median": ("estimate", "Median — typical market price"),
+    "long_sale": ("high", "Long Sale — priced at the high end, patient sale"),
+}
+
+
 def suggest(query: str, category_id: Optional[str] = None,
-            condition: Optional[str] = None) -> dict:
+            condition: Optional[str] = None, strategy: str = "") -> dict:
     """Run every configured pricing source; never fail the whole call because
-    one source errored (log it and keep what we have)."""
+    one source errored (log it and keep what we have). `strategy`
+    (quick_flip | median | long_sale) picks which end of the comp range the
+    headline suggestion uses; the full low/median/high always rides along."""
     sources = []
     for src in _SOURCES:
         try:
@@ -130,15 +141,18 @@ def suggest(query: str, category_id: Optional[str] = None,
         except Exception as exc:  # noqa: BLE001 - a source is best-effort
             log.warning("pricing: %s failed for %r: %s", src.__name__, query, exc)
     best = sources[0] if sources else None
+    pick, strategy_label = _STRATEGY_PICK.get(strategy, (None, None))
     return {
         "query": query,
         "sources": sources,
+        "strategy": strategy or "median",
         "suggestion": None if not best else {
-            "price": best["estimate"],
+            "price": best[pick] if pick else best["estimate"],
             "low": best["low"],
             "high": best["high"],
             "count": best["count"],
-            "basis": best["label"],
+            "basis": (f"{best['label']} · {strategy_label}" if strategy_label
+                      else best["label"]),
             "sold_data": best["sold_data"],
         },
     }

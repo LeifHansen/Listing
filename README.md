@@ -179,7 +179,10 @@ backend/
   models.py          Pydantic models (Listing, etc.)
   storage.py         per-session filesystem store
   services/
-    images.py        Pillow optimization
+    images.py        photo pipeline (Photoroom/Adobe/local + Pillow finishing)
+    adobe.py         Lightroom studio preset + Photoshop Remove Background APIs
+    ebay_trading.py  Trading API (XML) client — sees listings we didn't create
+    listing_sync.py  bi-directional sync: import the store, push edits back
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
     ebay.py          Inventory API payloads + publish/dry-run
@@ -194,6 +197,56 @@ frontend/            React + Vite + Tailwind app (built to frontend/dist)
 Frontend dev with hot reload: `cd frontend && npm run dev` (proxies `/api` and
 `/media` to the backend on :8000). `./run.sh` and the Dockerfile build the
 production bundle automatically.
+
+## Photo pipeline (Photoroom default, Adobe backup)
+
+Background removal + studio treatment run on pro engines in this order:
+
+1. **Photoroom (default)** — with `PHOTOROOM_API_KEY` set, every "remove
+   background" photo gets a Photoroom cutout composited onto white with a
+   soft contact shadow and a studio enhancement pass. Batches run a few
+   photos at a time (`PHOTO_BATCH_WORKERS`, default 4).
+2. **Adobe (backup)** — when a Photoroom call fails for any reason (rate
+   limit, outage, credits) and `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` are
+   set (a server-to-server OAuth credential from
+   [developer.adobe.com/console](https://developer.adobe.com/console) with
+   the Lightroom + Photoshop APIs enabled), the photo is staged to R2 and
+   handed to Adobe instead: the **Lightroom API** applies the "studio"
+   develop preset (bundled at `backend/assets/studio-preset.xmp`;
+   `ADOBE_STUDIO_PRESET_URL` overrides it), then the **Photoshop Remove
+   Background** service does the cutout. (The Lightroom API only does
+   develop edits — presets/tone/color — so the cutout is the Photoshop half.)
+   R2 is required for this path: Adobe's async APIs move files exclusively
+   via presigned URLs.
+3. **Local (last resort)** — the in-process Pillow + rembg pipeline runs only
+   when neither pro engine is configured.
+
+Either way the finished images continue through the usual flow: square crop,
+resize to 1600px, identify, draft, publish. A failed pro-engine call never
+loses a photo: the original is kept and the reason is surfaced in the API
+response (`optimize_results`) and the photo studio.
+
+## Bi-directional eBay sync
+
+The Sell Inventory API that publishes listings can only see listings created
+*through* it, so a seller's existing store was invisible to the app. **Sync with
+eBay** (on the Listings page, once eBay is connected) closes that gap using the
+Trading API with the same user OAuth token — no extra credentials:
+
+- **eBay → app.** `GetMyeBaySelling` enumerates every active listing; `GetItem`
+  pulls the detail (title, price, quantity, condition, category, item specifics,
+  photos, package, watch/sold counts). Imported records get the stable id
+  `ebay-<itemId>`, so re-syncing updates in place instead of duplicating.
+- **app → eBay.** Edits to an imported listing go back through
+  `ReviseFixedPriceItem` (or `ReviseItem` for auctions), and ending one uses
+  `EndItem`. Listings the app created keep using the Inventory API.
+
+A re-sync only refreshes the fields eBay owns — price, quantity, counters,
+photos — plus anything still blank locally, so a background sync never reverts
+an in-app edit. Sold and ended listings are reconciled on the same pass. One run
+imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
+repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
+default 6) so a big store doesn't outlive the request.
 
 ## Notes & limitations
 

@@ -122,6 +122,19 @@ export function AppProvider({ children }) {
   // or a saved listing is opened.
   const [session, setSession] = useState(null);
 
+  // Drafts the user skipped in the post-publish "Next Draft" queue. A skipped
+  // draft stays on the Dashboard but is never offered as "next" again — even
+  // after publishing more drafts. In-memory on purpose: a reload clears the
+  // skips, so nothing is ever permanently hidden.
+  const [skippedDraftIds, setSkippedDraftIds] = useState(() => new Set());
+  const skipDraft = useCallback((id) => {
+    setSkippedDraftIds((cur) => {
+      const next = new Set(cur);
+      next.add(id);
+      return next;
+    });
+  }, []);
+
   const startNew = useCallback(() => {
     setSession(null);
     setView("new");
@@ -233,12 +246,14 @@ export function AppProvider({ children }) {
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
+    skippedDraftIds, skipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, metricsById, session, startNew, openListing,
-    deleteListing, bulkDeleteListings, activeBulk, startBulk, bulkSettled, clearBulk,
+    deleteListing, bulkDeleteListings, skippedDraftIds, skipDraft,
+    activeBulk, startBulk, bulkSettled, clearBulk,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

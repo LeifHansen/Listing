@@ -198,8 +198,31 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
     )
 
 
-def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
-    """Identify the item(s) in the images and draft a full listing."""
+# The seller's account-level pricing strategy, folded into the identify
+# prompt so the AI's suggested price lands where they want on the market range.
+_PRICING_STRATEGY_HINTS = {
+    "quick_flip": (
+        "\nPricing strategy — QUICK FLIP: the seller wants a FAST sale. "
+        "Suggest a price at the LOW end of the realistic market range for this "
+        "item and condition (around the 25th percentile of comparable "
+        "listings) — attractive enough to move within days."),
+    "median": (
+        "\nPricing strategy — MEDIAN: suggest the typical middle-of-market "
+        "price for this item and condition (around the median of comparable "
+        "listings)."),
+    "long_sale": (
+        "\nPricing strategy — LONG SALE: the seller is patient and wants to "
+        "maximize the sale price. Suggest a price at the HIGH end of the "
+        "realistic market range (around the 75th percentile of comparable "
+        "listings) — still defensible, not fantasy."),
+}
+
+
+def identify(image_paths: list[Path], image_names: list[str],
+             strategy: str = "") -> IdentifyResult:
+    """Identify the item(s) in the images and draft a full listing.
+    `strategy` (optional): quick_flip | median | long_sale — tilts the
+    suggested price toward that end of the market range."""
     client = _client()
     content: list[dict] = []
     for p in image_paths[:8]:  # cap images per request
@@ -210,7 +233,9 @@ def identify(image_paths: list[Path], image_names: list[str]) -> IdentifyResult:
             "text": (
                 "You are an expert eBay reseller and product cataloguer. "
                 "Examine these product photos and produce a complete, accurate "
-                "eBay listing draft.\n\n" + _LISTING_SCHEMA
+                "eBay listing draft."
+                + _PRICING_STRATEGY_HINTS.get(strategy, "")
+                + "\n\n" + _LISTING_SCHEMA
             ),
         }
     )
@@ -512,6 +537,12 @@ Rules:
   checkbox specifics are matched). If none fits, omit that aspect.
 - For "(free text)" aspects, give the single best concise value eBay expects.
 - Omit any aspect you cannot determine — never guess or invent.
+- EXCEPTION — physical size aspects (Item Height, Item Length, Item Width,
+  Item Depth, Item Diameter, Item Weight): when listed, ALWAYS provide a
+  best-effort ESTIMATE of the actual item's dimensions (not the shipping box)
+  judged from the photos' real-world scale, as a number with unit (e.g.
+  "7 in", "1.5 lb"). Some categories refuse to publish without these; the
+  seller can correct an estimate, but a blank blocks the listing.
 - One value per aspect name.
 """
 
@@ -609,3 +640,98 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
         seen.add(key)
         out.append(ItemSpecific(name=a["name"], value=value))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Maker / manufacturer identification — a double-layer check.
+#
+# The generic identify pass rarely commits to a maker (it's told never to
+# guess), so Brand/Maker/Manufacturer often ship empty. This dedicated pass
+# behaves like a reverse-image lookup: layer 1 HUNTS for maker evidence in the
+# photos and names a candidate; layer 2 independently tries to KNOCK IT DOWN.
+# Only a candidate that survives both layers is written to the listing —
+# accuracy over coverage, since a wrong maker is worse than a blank one.
+# ---------------------------------------------------------------------------
+
+_MAKER_HUNT_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{
+  "maker": "the exact maker/manufacturer/brand name, or \\"\\" if none is identifiable",
+  "evidence": "concise: what in the photos supports this (logo, tag text, stamp, hallmark, signature, model plate, distinctive design)",
+  "confidence": "low|medium|high"
+}
+Rules:
+- Inspect EVERY photo closely for maker evidence: logos, embossed or printed
+  marks, sewn tags, labels, stamps, hallmarks, signatures, serial/model
+  plates, packaging text, and distinctive design signatures (typography,
+  colorways, stitching, hardware, patterns) you recognize.
+- Work like a reverse-image search: match what you actually see against known
+  makers in this product category.
+- Name the MOST SPECIFIC maker the evidence supports (e.g. "Fenton" not
+  "a glass maker"; "Pyrex" not "vintage glassware").
+- If the photos genuinely show no identifiable maker, return "" — never guess.
+"""
+
+_MAKER_VERIFY_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{
+  "verdict": "confirm|reject|unsure",
+  "reason": "one concise sentence",
+  "confidence": "low|medium|high"
+}
+Rules:
+- You are the SECOND, INDEPENDENT layer of a two-step identification check.
+  Do not take the proposal on trust — re-derive the maker from the photos
+  yourself, then compare.
+- confirm ONLY when the visual evidence genuinely supports this exact maker:
+  the mark/logo/tag matches, and the item is consistent with that maker's
+  actual product lines. Watch for lookalikes, licensed reproductions, store
+  brands, and counterfeits — any of those means do NOT confirm.
+- reject when the evidence contradicts the proposal or points to a different
+  maker. unsure when the photos can't settle it.
+"""
+
+
+def identify_maker(image_paths: list[Path], listing: Listing) -> Optional[dict]:
+    """Double-layer maker/manufacturer identification from the photos.
+
+    Layer 1 hunts for a maker candidate with evidence; layer 2 independently
+    verifies it (adversarially — lookalikes and knockoffs mean no). Returns
+    {"maker", "evidence", "confidence"} only when the verifier confirms with
+    at least medium confidence; None otherwise. Raises on API errors — the
+    caller treats this enrichment as best-effort."""
+    if not image_paths:
+        return None
+    client = _client()
+    imgs = [_image_block(p) for p in image_paths[:8]]
+    context = (f"Item: {listing.title}\n"
+               f"Category: {listing.category_suggestion or 'unknown'}")
+
+    hunt = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=700,
+        messages=[{"role": "user", "content": imgs + [{"type": "text", "text": (
+            "You are an expert product identifier and appraiser hunting for the "
+            "maker of this item.\n\nCONTEXT:\n" + context + "\n" + _MAKER_HUNT_SCHEMA)}]}],
+    )
+    data = _extract_json("".join(b.text for b in hunt.content if b.type == "text"))
+    maker = str(data.get("maker", "")).strip()
+    evidence = str(data.get("evidence", "")).strip()
+    if not maker or len(maker) > 65:
+        return None
+
+    verify = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=400,
+        messages=[{"role": "user", "content": imgs + [{"type": "text", "text": (
+            "An identification system proposed that this item's maker is "
+            f"\"{maker}\", based on: {evidence or 'unspecified evidence'}.\n"
+            "CONTEXT:\n" + context + "\n\nIndependently verify that proposal "
+            "against the photos." + _MAKER_VERIFY_SCHEMA)}]}],
+    )
+    vdata = _extract_json("".join(b.text for b in verify.content if b.type == "text"))
+    verdict = str(vdata.get("verdict", "")).strip().lower()
+    vconf = str(vdata.get("confidence", "low")).strip().lower()
+    if verdict != "confirm" or vconf not in ("medium", "high"):
+        return None
+    return {"maker": maker, "evidence": evidence, "confidence": vconf}

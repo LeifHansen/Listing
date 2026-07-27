@@ -96,11 +96,26 @@ def explain(err: dict) -> dict:
                      title="eBay wants a product identifier (UPC/EAN)",
                      fix="Add an item specific “UPC” set to “Does not apply” for vintage/handmade items.")
     elif has("item specific", "aspect", "required attribute", "missing value"):
-        aspect = next((str(p.get("value")) for p in params
-                       if str(p.get("value", ""))[:1].isupper()), "")
-        issue.update(target="specifics",
-                     title=("Missing required item specific" + (f": {aspect}" if aspect else "")),
-                     fix="Add the required item specifics (e.g. Brand, Type, Size) under Item specifics.")
+        # The aspect name rides along in the parameters next to full-sentence
+        # copies of the message ("The item specific Item Height is missing.").
+        # Pick the value that looks like a NAME, not a sentence, so the title
+        # says "Missing required item specific: Item Height" instead of
+        # echoing the whole error text.
+        aspect = next((v for v in (str(p.get("value", "")).strip() for p in params)
+                       if v and v[:1].isupper() and len(v) <= 40
+                       and not v.endswith((".", "!")) and len(v.split()) <= 5), "")
+        dimension = aspect.lower().removeprefix("item ").strip() in (
+            "height", "length", "width", "depth", "diameter", "weight")
+        issue.update(
+            target="specifics",
+            title=("Missing required item specific" + (f": {aspect}" if aspect else "")),
+            fix=((f"Add “{aspect}” under Item specifics with a number and unit "
+                  f"(e.g. “3 in”). Note: the shipping Package size fields don’t "
+                  f"count — eBay wants it as an item specific.")
+                 if aspect and dimension else
+                 (f"Fill in “{aspect}” under Item specifics." if aspect else
+                  "Add the required item specifics (e.g. Brand, Type, Size) "
+                  "under Item specifics.")))
     elif has("return policy", "returnpolicy"):
         issue.update(target="policies",
                      title="A return policy is required",

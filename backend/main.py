@@ -19,11 +19,13 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, db, ebay_auth, objstore, storage
+from . import auth, config, db, ebay_auth, ebay_errors, objstore, storage
 from .config import log
-from .models import Listing, PublishRequest, RefineRequest, SessionOnlyRequest
-from .services import (claude_ai, ebay, images, metrics, preflight, pricing,
-                       promotions, recommender, taxonomy)
+from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
+                     SessionOnlyRequest)
+from .services import (claude_ai, ebay, ebay_trading, images, listing_sync,
+                       metrics, preflight, pricing, promotions, recommender,
+                       taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -88,6 +90,10 @@ def health() -> dict:
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
         "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
+        # adobe_configured = credentials present; adobe_ready = pipeline can
+        # actually run (Adobe's APIs need R2 as presigned-URL hand-off storage).
+        "adobe_configured": config.adobe_configured(),
+        "adobe_ready": config.adobe_ready(),
         "photoroom_configured": config.photoroom_ready(),
         "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
@@ -132,6 +138,60 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
     return added
+
+
+# Aspect names that mean "who made this". A wrong maker is worse than a blank
+# one, so these only get filled by the double-layer check below.
+_MAKER_ASPECT_NAMES = {"brand", "maker", "manufacturer"}
+# Placeholder values that mean the maker is effectively unknown.
+_GENERIC_MAKERS = {"", "unbranded", "unknown", "generic", "n/a", "none",
+                   "no brand", "handmade", "does not apply"}
+
+
+def _fill_maker(listing: Listing, image_paths: list) -> bool:
+    """Best-effort maker/manufacturer identification (double-layer check).
+
+    The generic identify pass is told never to guess, so Brand / Maker /
+    Manufacturer are rarely filled. When they're missing, run the dedicated
+    two-layer ID in claude_ai.identify_maker (hunt, then adversarial verify —
+    like a reverse-image lookup with a second opinion) and only write a maker
+    both layers agree on. NEVER raises. Returns True if anything was set."""
+    if not config.anthropic_ready():
+        return False
+    brand_missing = (listing.brand or "").strip().lower() in _GENERIC_MAKERS
+    have = {s.name.strip().lower() for s in listing.item_specifics if s.value.strip()}
+    # Maker-ish aspects this category defines that are still empty.
+    unfilled: list[str] = []
+    try:
+        if listing.category_id and config.taxonomy_ready():
+            for a in taxonomy.item_aspects(listing.category_id).get("aspects", []):
+                name = (a.get("name") or "").strip()
+                if name.lower() in _MAKER_ASPECT_NAMES and name.lower() not in have:
+                    unfilled.append(name)
+    except Exception:  # noqa: BLE001 - aspects are optional context here
+        pass
+    if not (brand_missing or unfilled):
+        return False  # maker already known — don't burn two vision calls
+    try:
+        paths = [p for p in image_paths if p.is_file()]
+        found = claude_ai.identify_maker(paths, listing)
+    except Exception as exc:  # noqa: BLE001 - enrichment is optional
+        log.info("maker id skipped: %s", exc)
+        return False
+    if not found:
+        return False
+    maker = found["maker"]
+    if brand_missing:
+        listing.brand = maker
+    for name in unfilled:
+        listing.item_specifics.append(ItemSpecific(name=name, value=maker))
+    # The maker is settled now — drop stale "verify the brand" style nags.
+    listing.missing_info = [m for m in listing.missing_info
+                            if not any(w in m.lower()
+                                       for w in ("brand", "maker", "manufacturer"))]
+    log.info("maker id: '%s' confirmed (%s) — evidence: %s",
+             maker, found.get("confidence"), (found.get("evidence") or "")[:120])
+    return True
 
 
 def _uid(request: Request):
@@ -565,7 +625,14 @@ _PREF_FIELDS = {
     "package_height_in": (float, 0, 120),
     "quantity": (int, 1, 999),
     "condition": (str, None, None),  # "" = let the AI decide
+    # How the AI prices drafts and comp suggestions: "quick_flip" (low end,
+    # sell fast), "median" (typical market), "long_sale" (high end, patient).
+    "pricing_strategy": (str, None, None),
+    # Promote every newly published listing at eBay's recommended ad rate.
+    # Missing = ON (see _auto_promote_enabled); 0 turns it off.
+    "auto_promote": (int, 0, 1),
 }
+_PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 
 
 @app.get("/api/prefs")
@@ -590,7 +657,10 @@ def save_prefs(request: Request, payload: dict) -> dict:
             continue
         raw = payload.get(key)
         if typ is str:
-            clean[key] = str(raw or "").strip()[:40]
+            value = str(raw or "").strip()[:40]
+            if key == "pricing_strategy" and value not in _PRICING_STRATEGIES:
+                continue  # unknown strategy — ignore rather than store garbage
+            clean[key] = value
             continue
         try:
             val = typ(float(raw or 0))
@@ -603,6 +673,58 @@ def save_prefs(request: Request, payload: dict) -> dict:
     if not merged and not db.enabled():
         raise HTTPException(503, "No database configured — defaults need DATABASE_URL set.")
     return {"ok": True, "prefs": merged}
+
+
+def _auto_promote_enabled(uid: Optional[str]) -> bool:
+    """Account default: promote every newly published listing at eBay's
+    recommended ad rate. ON unless explicitly turned off in Settings — sellers
+    reported publishes landing unpromoted and only discovering it later from
+    the Dashboard nags. Anonymous/env-token publishes stay explicit-only."""
+    if not uid:
+        return False
+    try:
+        value = db.get_prefs(uid).get("auto_promote")
+    except Exception:  # noqa: BLE001 - prefs are optional
+        return True
+    return True if value is None else bool(value)
+
+
+def _promote(record_id: str, listing: Listing, creds: Optional[dict],
+             rate: Optional[float] = None,
+             ebay_listing_id: Optional[str] = None) -> dict:
+    """Turn Promoted Listings on for one listing and run the ad call.
+
+    The single place that decides an ad rate: an explicit `rate` wins, else
+    eBay's recommendation for `ebay_listing_id`, else the default. A 0% rate
+    makes promote_listing silently no-op — which is exactly why listings with
+    Promote toggled on were never actually promoted — so the rate is always
+    filled in here. Mutates listing.promote/ad_rate_percent so the caller can
+    persist what really ran, and never raises: a promotion problem must not
+    fail the publish that preceded it."""
+    try:
+        listing.promote = True
+        if not rate or rate <= 0:
+            rate = None
+            if ebay_listing_id:
+                recommended = promotions.suggested_ad_rates(
+                    creds, [str(ebay_listing_id)])
+                rate = recommended.get(str(ebay_listing_id))
+        listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
+        return promotions.promote_listing(record_id, listing, creds)
+    except Exception as exc:  # noqa: BLE001 - promotion must never break publish
+        log.warning("promote failed (%s): %s", record_id, exc)
+        return {"promoted": False, "message": f"Promotion failed: {exc}"}
+
+
+def _pricing_strategy(uid: Optional[str]) -> str:
+    """The account's pricing strategy ("" when unset/anonymous). Never raises."""
+    if not uid:
+        return ""
+    try:
+        value = str(db.get_prefs(uid).get("pricing_strategy") or "")
+        return value if value in _PRICING_STRATEGIES else ""
+    except Exception:  # noqa: BLE001 - prefs are optional
+        return ""
 
 
 def _apply_listing_defaults(listing: Listing, uid: Optional[str]) -> Listing:
@@ -1073,27 +1195,26 @@ async def image_remove_bg(
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
-    """Full background removal: in-house rembg cutout composited onto pure
-    white. Returns the processed image for the editor to preview (not saved)."""
+    """Full background removal composited onto pure white — Photoroom by
+    default, Adobe Photoshop's Remove Background as the backup, the in-house
+    model when neither is configured. Returns the processed image for the
+    editor to preview (not saved)."""
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
         img = _studio_load(session_id, name, data)
-        return {
-            "ok": True,
-            "image": _data_url(images.remove_background_white(img)),
-            # Which remover ran — the editor names it so a misconfigured
-            # Photoroom key can't hide behind a silently-degraded result.
-            "engine": "photoroom" if config.photoroom_ready() else "local",
-        }
+        out, engine = images.remove_background_white(img)
+        # engine = which remover actually ran — the editor names it so a
+        # misconfigured key can't hide behind a silently-degraded result.
+        return {"ok": True, "image": _data_url(out), "engine": engine}
 
     try:
         return await run_in_threadpool(_run)
     except ValueError as exc:
-        # Cutout failure OR a Photoroom problem (bad key / out of credits /
-        # rate limit) — the message tells the user exactly which.
+        # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
+        # of credits / rate limit) — the message tells the user exactly which.
         raise HTTPException(422, str(exc)) from exc
 
 
@@ -1134,7 +1255,8 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
     try:
-        result = claude_ai.identify(paths, names)
+        result = claude_ai.identify(paths, names,
+                                    strategy=_pricing_strategy(_uid(request)))
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         code, message = claude_ai.ai_error_message(exc)
         log.warning("identify failed (session=%s): %s", session_id, exc)
@@ -1222,11 +1344,12 @@ def category_suggestions(payload: dict) -> dict:
 
 
 @app.post("/api/price-suggestions")
-def price_suggestions(payload: dict) -> dict:
+def price_suggestions(payload: dict, request: Request) -> dict:
     """Market-price suggestion for the listing from live eBay comps.
 
     Uses the same application token as taxonomy (no seller login needed).
-    Sources are pluggable — see services/pricing.py.
+    Sources are pluggable — see services/pricing.py. The headline suggestion
+    honors the account's pricing strategy (Quick Flip / Median / Long Sale).
     """
     if not config.taxonomy_ready():
         raise HTTPException(
@@ -1242,6 +1365,7 @@ def price_suggestions(payload: dict) -> dict:
             query,
             category_id=str(payload.get("category_id") or "").strip() or None,
             condition=str(payload.get("condition") or "").strip() or None,
+            strategy=_pricing_strategy(_uid(request)),
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
@@ -1365,6 +1489,8 @@ def _bulk_set(job_id: str, **fields) -> None:
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                   uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
     """Background worker: optimize -> group -> per-item identify (-> publish)."""
+    strategy = _pricing_strategy(uid)          # once, not per item
+    auto_promote = _auto_promote_enabled(uid)  # ditto
     try:
         _bulk_set(job_id, phase="optimizing", current=0)
         images.optimize_all(
@@ -1408,7 +1534,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                     "error": None, "listing_id": None,
                     "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
             try:
-                result = claude_ai.identify([item_dir / n for n in item_names], item_names)
+                result = claude_ai.identify([item_dir / n for n in item_names],
+                                            item_names, strategy=strategy)
                 listing = _apply_listing_defaults(result.listing, uid)
                 if config.taxonomy_ready() and not listing.category_id:
                     try:
@@ -1423,6 +1550,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 # straight to eBay here, so without this the listing lands with
                 # only the generic first-pass specifics.
                 _fill_category_specifics(listing, [item_dir / n for n in item_names])
+                _fill_maker(listing, [item_dir / n for n in item_names])
                 storage.save_listing(sid, listing)
                 status = "draft"
                 if mode == "live":
@@ -1431,6 +1559,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                         status = "published"
                         item["status"] = "published"
                         item["listing_id"] = pub.get("listing_id")
+                        # Auto-promote each just-published listing (account
+                        # default, Settings) — the bulk path used to skip
+                        # promotion entirely, so live batches landed unpromoted.
+                        if creds and auto_promote:
+                            _promote(sid, listing, creds,
+                                     rate=listing.ad_rate_percent,
+                                     ebay_listing_id=pub.get("listing_id"))
                     else:
                         # Stay a draft; surface why it couldn't go live.
                         item["error"] = pub.get("message") or "Couldn't publish automatically."
@@ -1532,7 +1667,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
         if not names:
             _bulk_set(job_id, done=True, error="No optimized images found for this session.")
             return
-        result = claude_ai.identify([opt_dir / n for n in names], names)
+        result = claude_ai.identify([opt_dir / n for n in names], names,
+                                    strategy=_pricing_strategy(uid))
         _apply_listing_defaults(result.listing, uid)
         # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
         if config.taxonomy_ready() and not result.listing.category_id:
@@ -1546,6 +1682,9 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
                 pass
         # Fill the category's item specifics now so the draft is SEO-ready.
         _fill_category_specifics(result.listing, [opt_dir / n for n in names])
+        # Second-layer maker ID — only runs when Brand/Maker/Manufacturer are
+        # still blank after the passes above.
+        _fill_maker(result.listing, [opt_dir / n for n in names])
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
@@ -1743,11 +1882,8 @@ def promote_one(payload: dict, request: Request) -> dict:
     except (TypeError, ValueError):
         rate = 0.0
     if rate <= 0:
-        rates = _rates_by_record_id(creds, [rec])
-        rate = rates.get(lid) or promotions.DEFAULT_AD_RATE
-    listing.promote = True
-    listing.ad_rate_percent = round(rate, 1)
-    status = promotions.promote_listing(lid, listing, creds)
+        rate = _rates_by_record_id(creds, [rec]).get(lid) or 0
+    status = _promote(lid, listing, creds, rate=rate)
     if status.get("promoted"):
         storage.save_listing(lid, listing)
         db.upsert_listing(lid, listing.model_dump(), status=rec.get("status"),
@@ -1774,9 +1910,7 @@ def promote_all(request: Request) -> dict:
     needs_reconnect = False
     for it in items:
         listing = Listing(**(it.get("listing") or {}))
-        listing.promote = True
-        listing.ad_rate_percent = round(rates.get(it["id"]) or promotions.DEFAULT_AD_RATE, 1)
-        status = promotions.promote_listing(it["id"], listing, creds)
+        status = _promote(it["id"], listing, creds, rate=rates.get(it["id"]))
         if status.get("promoted"):
             storage.save_listing(it["id"], listing)
             db.upsert_listing(it["id"], listing.model_dump(), status=it.get("status"),
@@ -1904,6 +2038,38 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     creds = _ebay_creds_for(request)
+
+    # A listing IMPORTED from eBay isn't Inventory-API managed, so edits go
+    # back through the Trading API instead of the publish path below.
+    if listing_sync.is_imported(req.listing):
+        uid = _uid(request)
+        if req.mode == "draft":
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="published", user_id=uid)
+            return JSONResponse({"dry_run": False, "mode": "draft",
+                                 "message": "Saved. Choose Update on eBay to push "
+                                            "these changes to your live listing."})
+        if not creds:
+            raise HTTPException(400, "Connect eBay first.")
+        try:
+            res = listing_sync.push_edit(creds["access_token"], req.listing)
+        except ValueError as exc:  # TradingError — eBay's own reason
+            log.warning("revise (imported) failed: session=%s: %s", req.session_id, exc)
+            db.upsert_listing(req.session_id, req.listing.model_dump(),
+                              status="published", user_id=uid)
+            return JSONResponse({
+                "dry_run": False, "error": True, "mode": "live",
+                "message": str(exc),
+                "issues": ebay_errors.from_response(str(exc)),
+            })
+        db.upsert_listing(req.session_id, req.listing.model_dump(),
+                          status="published", user_id=uid)
+        log.info("revise (imported) ok: session=%s item=%s",
+                 req.session_id, res.get("listing_id"))
+        return JSONResponse({"published": True, "revised": True, "mode": "live",
+                             "listing_id": res.get("listing_id"),
+                             "message": "Your eBay listing has been updated."})
+
     # A listing that's already live must NEVER lose its 'published' status in
     # our records just because a revise attempt was blocked or errored — the
     # listing is still live on eBay either way.
@@ -1965,11 +2131,24 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         dump["ebay_listing_id"] = str(result["listing_id"])
     db.upsert_listing(req.session_id, dump, status=status, user_id=_uid(request))
     # Promoted Listings: once the item is live, best-effort create/refresh its
-    # ad at the chosen rate. Never blocks or fails the publish — the status is
-    # attached for the UI to show (incl. a 'reconnect to grant ad permissions').
-    if result.get("published") and req.listing.promote:
-        result["promote_status"] = promotions.promote_listing(
-            req.session_id, req.listing, creds)
+    # ad. Runs when the listing's Promote toggle is on OR the account's
+    # auto-promote default (Settings) is — at the chosen rate, else eBay's
+    # recommended rate. Never blocks or fails the publish; the status is
+    # attached for the UI to show (incl. 'reconnect to grant ad permissions').
+    if result.get("published") and (req.listing.promote
+                                    or _auto_promote_enabled(_uid(request))):
+        result["promote_status"] = _promote(
+            req.session_id, req.listing, creds,
+            rate=req.listing.ad_rate_percent,
+            ebay_listing_id=result.get("listing_id"))
+        if result["promote_status"].get("promoted"):
+            # Re-record with the promote flag + actual rate so the Dashboard
+            # and recommender see it as promoted.
+            dump = req.listing.model_dump()
+            if result.get("listing_id"):
+                dump["ebay_listing_id"] = str(result["listing_id"])
+            db.upsert_listing(req.session_id, dump, status=status,
+                              user_id=_uid(request))
     return JSONResponse(result)
 
 
@@ -1987,7 +2166,14 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
     try:
-        res = ebay.withdraw(req.session_id, listing, creds=creds)
+        # Imported listings live outside the Inventory API — end them through
+        # the Trading API instead.
+        if listing_sync.is_imported(listing):
+            if not creds:
+                raise HTTPException(400, "Connect eBay first.")
+            res = listing_sync.end(creds["access_token"], listing)
+        else:
+            res = ebay.withdraw(req.session_id, listing, creds=creds)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     if res.get("ended") or res.get("not_live"):
@@ -2006,10 +2192,26 @@ def sync_listings(request: Request) -> dict:
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0, "archived": 0}
-    items = [i for i in db.list_listings(limit=200, user_id=user["id"])
-             if i.get("status") in ("published", "live")][:40]
+    live = [i for i in db.list_listings(limit=200, user_id=user["id"])
+            if i.get("status") in ("published", "live")]
+    # Imported listings are reconciled through the Trading API (the Inventory
+    # API can't see them at all); app-created ones keep the offer check below.
+    # EVERY imported listing must be excluded from `items` — not just the ones
+    # this run refreshes — or the offer check would call an eBay listing it
+    # can't see "ended". Each side is capped so one sync click can't fan out
+    # into hundreds of eBay calls; the rest are picked up by the next sync.
+    imported_ids = {i["id"] for i in live
+                    if listing_sync.is_imported(i.get("listing") or {})}
+    imported = [i for i in live if i["id"] in imported_ids][:60]
+    items = [i for i in live if i["id"] not in imported_ids][:40]
     changed = 0
     archived = 0
+    if imported and creds:
+        try:
+            changed += listing_sync.refresh_statuses(
+                creds["access_token"], user["id"], imported)
+        except Exception as exc:  # noqa: BLE001 - sync is best-effort
+            log.info("ebay sync: imported refresh failed: %s", exc)
     for it in items:
         listing = Listing(**(it.get("listing") or {}))
         status, lid = ebay.live_status(it["id"], listing, creds=creds)
@@ -2029,7 +2231,42 @@ def sync_listings(request: Request) -> dict:
     if changed:
         log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
                  changed, archived, user["id"])
-    return {"checked": len(items), "changed": changed, "archived": archived}
+    return {"checked": len(items) + len(imported), "changed": changed,
+            "archived": archived}
+
+
+# Bounds one import run. A store bigger than this imports across repeated
+# syncs rather than tying up a single request indefinitely.
+IMPORT_LIMIT = 300
+
+
+@app.post("/api/ebay/import-listings")
+def import_listings(request: Request) -> dict:
+    """Pull the seller's ENTIRE active eBay store into the app.
+
+    The Inventory API only knows about listings this app published, so listings
+    created on eBay directly (or with another tool) are fetched through the
+    Trading API instead. Imported listings become normal records the seller can
+    open, edit, and push back — see services/listing_sync.
+    """
+    user = auth.current_user(request)
+    creds = _ebay_creds_for(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    if not creds:
+        raise HTTPException(400, "Connect eBay first — Settings → Connect eBay.")
+    if not db.enabled():
+        raise HTTPException(503, "No database configured — imported listings need "
+                                 "DATABASE_URL set.")
+    try:
+        result = listing_sync.import_active(
+            creds["access_token"], user["id"], limit=IMPORT_LIMIT)
+    except ebay_trading.TradingError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface a clear reason
+        log.warning("import-listings failed for user=%s: %s", user["id"], exc)
+        raise HTTPException(502, f"Couldn't import your eBay listings: {exc}") from exc
+    return result
 
 
 @app.get("/media/{session_id}/optimized/{name}")

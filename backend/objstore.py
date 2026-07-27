@@ -71,6 +71,49 @@ def upload_optimized(session_id: str, local_dir: Path, names: list[str]) -> None
             upload(path, key_for(session_id, name))
 
 
+# --- Adobe hand-off helpers --------------------------------------------------
+# Unlike the best-effort functions above, these RAISE on failure: the Adobe
+# pipeline must know a staging step failed so it can keep the original photo
+# and surface the reason, not discover it later as a cryptic job error.
+
+def put_bytes(data: bytes, key: str, content_type: str) -> None:
+    """Upload raw bytes to R2. Raises when R2 is unconfigured or the put fails."""
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("object storage (R2) is not configured")
+    client.put_object(Bucket=config.R2_BUCKET, Key=key, Body=data,
+                      ContentType=content_type)
+
+
+def get_bytes(key: str) -> bytes:
+    """Download an object's bytes from R2. Raises on failure."""
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("object storage (R2) is not configured")
+    return client.get_object(Bucket=config.R2_BUCKET, Key=key)["Body"].read()
+
+
+def presigned_get(key: str, expires: int = 3600) -> str:
+    """Presigned GET URL (Adobe pulls job inputs from these). Raises on failure."""
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("object storage (R2) is not configured")
+    return client.generate_presigned_url(
+        "get_object", Params={"Bucket": config.R2_BUCKET, "Key": key},
+        ExpiresIn=expires)
+
+
+def presigned_put(key: str, expires: int = 3600) -> str:
+    """Presigned PUT URL (Adobe pushes job outputs to these). No Content-Type
+    constraint — Adobe chooses its own header on the PUT. Raises on failure."""
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("object storage (R2) is not configured")
+    return client.generate_presigned_url(
+        "put_object", Params={"Bucket": config.R2_BUCKET, "Key": key},
+        ExpiresIn=expires)
+
+
 def delete(key: str) -> None:
     """Best-effort delete of an object from R2. Never raises."""
     try:
