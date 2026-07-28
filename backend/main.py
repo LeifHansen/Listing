@@ -899,8 +899,9 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
 
 # Caps raised on request. A high bound stays so a pathological huge upload
 # can't OOM the box; per-image dimension downscale (MAX_WORK_SIDE) bounds pixel
-# memory regardless, and bulk upload has no count cap at all.
+# memory regardless.
 MAX_UPLOAD_FILES = 40   # per single listing (eBay itself accepts up to 24 live)
+MAX_BULK_FILES = 250    # per bulk batch (many items) — the supported batch size
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
 
 
@@ -929,7 +930,7 @@ async def upload(
             raise HTTPException(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-        (orig / f"src_{i:02d}{suffix}").write_bytes(data)
+        (orig / f"src_{i:03d}{suffix}").write_bytes(data)
 
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
@@ -988,11 +989,11 @@ async def upload_more(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         idx = start + j
         suffix = Path(f.filename or f"add_{idx}").suffix or ".jpg"
-        src = orig / f"add_{idx:02d}{suffix}"
+        src = orig / f"add_{idx:03d}{suffix}"
         try:
             src.write_bytes(data)
-            await run_in_threadpool(images.optimize, src, opt_dir / f"img_{idx:02d}.jpg", strip_bg)
-            new_names.append(f"img_{idx:02d}.jpg")
+            await run_in_threadpool(images.optimize, src, opt_dir / f"img_{idx:03d}.jpg", strip_bg)
+            new_names.append(f"img_{idx:03d}.jpg")
         except OSError as exc:
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
@@ -1468,8 +1469,8 @@ def delete_image(payload: dict, request: Request) -> dict:
 # lost job only means re-running the upload — listings themselves persist.
 _BULK_JOBS: dict[str, dict] = {}
 _BULK_LOCK = threading.Lock()
-# Claude vision accepts at most 100 images per request; bigger piles are
-# grouped in chunks of this size (no cap on the upload itself).
+# Claude vision accepts at most 100 images per request; bigger piles (bulk
+# takes up to MAX_BULK_FILES photos) are grouped in chunks of this size.
 BULK_GROUP_CHUNK = 100
 # Bound the in-memory job store. identify runs as a job on EVERY upload, so
 # without eviction this dict would grow monotonically until restart. Dicts keep
@@ -1539,7 +1540,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
             item_names = []
             for j, idx in enumerate(group["indices"]):
                 src = opt_dir / names[idx]
-                dst_name = f"img_{j:02d}.jpg"
+                dst_name = f"img_{j:03d}.jpg"
                 shutil.copyfile(src, item_dir / dst_name)
                 item_names.append(dst_name)
             objstore.upload_optimized(sid, item_dir, item_names)
@@ -1637,6 +1638,10 @@ async def bulk_upload(
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     if not files:
         raise HTTPException(400, "No files uploaded")
+    if len(files) > MAX_BULK_FILES:
+        raise HTTPException(
+            400, f"Too many photos ({len(files)}) — bulk mode takes up to "
+                 f"{MAX_BULK_FILES} at a time. Split the pile and run a second batch.")
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
@@ -1647,7 +1652,7 @@ async def bulk_upload(
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-            (orig / f"src_{i:02d}{suffix}").write_bytes(data)
+            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
     except OSError as exc:
         # Disk full / write failure — clean up the partial staging and report it
         # clearly instead of a raw 500. Old orphans are swept on restart.
@@ -2038,7 +2043,7 @@ def merge_listings(payload: dict, request: Request) -> dict:
             src = sdir / n
             if not src.is_file():
                 continue  # photo already lost from disk — skip, keep merging
-            dst_name = f"img_{nxt:02d}.jpg"
+            dst_name = f"img_{nxt:03d}.jpg"
             try:
                 shutil.copyfile(src, tdir / dst_name)
             except OSError as exc:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +24,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 
 from .. import config
 from ..config import log
+from ..storage import natural_key
 
 # iPhone/Mac photos are HEIC by default; register the decoder if available so
 # uploads don't fail. Falls back gracefully if the package isn't installed.
@@ -263,6 +265,28 @@ class PhotoroomError(ValueError):
     message in a toast) surfaces the real cause instead of a silent fallback."""
 
 
+# Cap what we send Photoroom: the final output is always TARGET_SIZE, so a
+# full 3200px working copy just wastes upload time and RAM — and on a
+# 250-photo batch those add up to minutes and hundreds of MB. 2048px keeps a
+# comfortable margin above the 1600px output.
+_PHOTOROOM_MAX_SIDE = int(os.getenv("PHOTOROOM_MAX_SIDE", "2048") or "2048")
+# Total attempts per photo. Big batches WILL trip Photoroom's per-minute rate
+# limit and the odd network blip; those retry with backoff instead of failing
+# the photo. Hard failures (bad key, out of credits) never retry — they'd fail
+# identically every time.
+_PHOTOROOM_TRIES = int(os.getenv("PHOTOROOM_TRIES", "4") or "4")
+
+
+def _photoroom_backoff(resp, attempt: int) -> float:
+    """Seconds to wait before retrying: Photoroom's own Retry-After when it
+    sends one, else 2s/4s/8s..., capped so a stuck batch photo can't stall a
+    worker slot for long."""
+    retry_after = (resp.headers.get("retry-after") or "").strip() if resp is not None else ""
+    if retry_after.isdigit():
+        return min(30.0, max(1.0, float(retry_after)))
+    return min(15.0, float(2 ** attempt))
+
+
 def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
     """Cut out the subject via Photoroom's API and composite it on white (with
     our soft shadow). Returns None only when no key is configured; when a key
@@ -273,19 +297,38 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         return None
     from io import BytesIO
     import httpx
+    rgb = img.convert("RGB")
+    if max(rgb.size) > _PHOTOROOM_MAX_SIDE:
+        rgb.thumbnail((_PHOTOROOM_MAX_SIDE, _PHOTOROOM_MAX_SIDE), Image.LANCZOS)
     buf = BytesIO()
-    img.convert("RGB").save(buf, "JPEG", quality=92)
-    buf.seek(0)
-    try:
-        resp = httpx.post(
-            "https://sdk.photoroom.com/v1/segment",
-            headers={"x-api-key": config.PHOTOROOM_API_KEY},
-            files={"image_file": ("image.jpg", buf, "image/jpeg")},
-            data={"format": "png"},
-            timeout=60,
-        )
-    except Exception as exc:  # noqa: BLE001 - network/timeout
-        raise PhotoroomError(f"Couldn't reach Photoroom: {exc}") from exc
+    rgb.save(buf, "JPEG", quality=92)
+    payload = buf.getvalue()
+    resp = None
+    for attempt in range(1, _PHOTOROOM_TRIES + 1):
+        try:
+            resp = httpx.post(
+                "https://sdk.photoroom.com/v1/segment",
+                headers={"x-api-key": config.PHOTOROOM_API_KEY},
+                files={"image_file": ("image.jpg", payload, "image/jpeg")},
+                data={"format": "png"},
+                timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001 - network/timeout
+            if attempt == _PHOTOROOM_TRIES:
+                raise PhotoroomError(f"Couldn't reach Photoroom: {exc}") from exc
+            wait = _photoroom_backoff(None, attempt)
+            log.info("photoroom: network error (%s) — retry %d/%d in %.0fs",
+                     exc, attempt, _PHOTOROOM_TRIES - 1, wait)
+            time.sleep(wait)
+            continue
+        if (resp.status_code == 429 or resp.status_code >= 500) \
+                and attempt < _PHOTOROOM_TRIES:
+            wait = _photoroom_backoff(resp, attempt)
+            log.info("photoroom: HTTP %d — retry %d/%d in %.0fs",
+                     resp.status_code, attempt, _PHOTOROOM_TRIES - 1, wait)
+            time.sleep(wait)
+            continue
+        break
     if resp.status_code in (401, 403):
         raise PhotoroomError(
             "Photoroom rejected the API key — check the PHOTOROOM_API_KEY "
@@ -294,7 +337,9 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         raise PhotoroomError(
             "The Photoroom account is out of credits — top it up at photoroom.com.")
     if resp.status_code == 429:
-        raise PhotoroomError("Photoroom is rate-limiting us — try again in a minute.")
+        raise PhotoroomError(
+            "Photoroom kept rate-limiting us even after several retries — "
+            "try again in a minute.")
     if resp.status_code != 200:
         raise PhotoroomError(
             f"Photoroom error {resp.status_code}: {resp.text[:160]}")
@@ -631,11 +676,13 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
 
 
 # How many photos to run through a pro engine (Photoroom/Adobe) at once. The
-# per-photo work there is mostly waiting on the remote API, so a small pool
-# cuts a 40-photo pile from ~minutes of serial waiting to a few overlapping
-# waves — while keeping peak memory (a few 3200px working copies) modest on a
-# 2GB box.
-_PHOTO_BATCH_WORKERS = int(os.getenv("PHOTO_BATCH_WORKERS", "4") or "4")
+# per-photo work there is mostly waiting on the remote API, so the pool turns
+# a 250-photo bulk batch from ~15 minutes of serial waiting into overlapping
+# waves — while keeping peak memory (a few 3200px working copies plus the
+# capped Photoroom payloads) tolerable on a 2GB box. Rate limits are handled
+# per-call with retry/backoff, so a bigger pool degrades to pacing, not
+# failures.
+_PHOTO_BATCH_WORKERS = int(os.getenv("PHOTO_BATCH_WORKERS", "8") or "8")
 
 
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
@@ -650,7 +697,10 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     dst_dir.mkdir(parents=True, exist_ok=True)
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
-    jobs = [(i, src) for i, src in enumerate(sorted(src_dir.iterdir()))
+    # Natural sort: past 99 files a lexicographic sort puts src_100 before
+    # src_20, scrambling the shooting order that bulk grouping relies on.
+    jobs = [(i, src) for i, src
+            in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
             if src.suffix.lower() in exts]
     total = len(jobs)
     done = 0
@@ -670,7 +720,7 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     def _one(job: tuple[int, Path]) -> dict:
         i, src = job
         try:
-            result = optimize(src, dst_dir / f"img_{i:02d}.jpg", remove_bg)
+            result = optimize(src, dst_dir / f"img_{i:03d}.jpg", remove_bg)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         _tick()

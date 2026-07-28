@@ -8,6 +8,7 @@ Each session gets a directory under data/sessions/<id>/ containing:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 import uuid
@@ -49,9 +50,18 @@ def save_listing(session_id: str, listing: Listing) -> None:
     (d / "listing.json").write_text(listing.model_dump_json(indent=2))
 
 
+def natural_key(name: str) -> list:
+    """Sort key that orders embedded numbers numerically, so "img_2" comes
+    before "img_10". Plain lexicographic sorting scrambles photo order past
+    file 99 ("img_100" < "img_20"), which matters to bulk batches of up to
+    250 photos: grouping leans on shooting order to keep one item's shots
+    adjacent."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
+
+
 def list_optimized(session_id: str) -> list[str]:
     d = optimized_dir(session_id)
-    return sorted(p.name for p in d.glob("*") if p.is_file())
+    return sorted((p.name for p in d.glob("*") if p.is_file()), key=natural_key)
 
 
 def write_export(session_id: str, name: str, payload: dict) -> Path:

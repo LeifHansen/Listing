@@ -89,6 +89,24 @@ export async function downscaleForUpload(file) {
   }
 }
 
+// Downscale a whole pile before upload, a few photos at a time. Decoding is
+// the expensive part — each in-flight photo holds a full-resolution bitmap —
+// so kicking off 250 at once (a full bulk batch) freezes the tab and can
+// crash it on phones. Order is preserved.
+export async function downscaleAllForUpload(files, limit = 4) {
+  const out = new Array(files.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= files.length) return;
+      out[i] = await downscaleForUpload(files[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, files.length) }, worker));
+  return out;
+}
+
 // HEIC/HEIF often arrive with an empty MIME type (Chrome, Windows), so accept
 // by extension too — the server decodes anything Pillow can.
 export const IMAGE_EXT_RE = /\.(jpe?g|png|webp|bmp|gif|tiff?|heic|heif|hif)$/i;
