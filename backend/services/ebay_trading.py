@@ -30,7 +30,7 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..models import ItemSpecific, Listing
+from ..models import Listing
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"

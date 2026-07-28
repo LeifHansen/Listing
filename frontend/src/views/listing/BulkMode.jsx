@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
@@ -31,20 +31,21 @@ function titleTokens(t) {
     .map((w) => w.replace(/s$/, ""))  // light stemming: phases ≈ phase
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w)));
 }
-function looksLikeSameItem(a, b) {
-  const A = titleTokens(a), B = titleTokens(b);
+function sharesEnough(A, B) {
   if (A.size < 3 || B.size < 3) return false;
   let shared = 0;
   A.forEach((w) => { if (B.has(w)) shared += 1; });
   return shared >= 3 && shared / Math.min(A.size, B.size) >= 0.4;
 }
 function duplicateSuspects(drafts) {
+  // Tokenize ONCE per draft, not once per pair: the comparison is already
+  // quadratic, and re-splitting both titles inside it made a big batch chew
+  // through thousands of regex passes on every render.
+  const tokens = drafts.map((d) => titleTokens(d.listing?.title || d.title || ""));
   const pairs = [];
   for (let i = 0; i < drafts.length; i++) {
     for (let j = i + 1; j < drafts.length; j++) {
-      const a = drafts[i].listing?.title || drafts[i].title || "";
-      const b = drafts[j].listing?.title || drafts[j].title || "";
-      if (looksLikeSameItem(a, b)) pairs.push([drafts[i], drafts[j]]);
+      if (sharesEnough(tokens[i], tokens[j])) pairs.push([drafts[i], drafts[j]]);
     }
   }
   return pairs;
@@ -414,6 +415,11 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const phase = job?.phase || "uploading";
   const drafts = items.filter((it) => it.status === "draft");
   const needInfo = drafts.filter((it) => missingRequired(it.listing).length > 0);
+  // Memoized: the queue re-renders on every status poll and on every keystroke
+  // in a card, and the pairwise scan is quadratic in the size of the batch.
+  const dupes = useMemo(() => duplicateSuspects(drafts),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [drafts.map((d) => `${d.session_id}:${d.listing?.title || d.title || ""}`).join("|")]);
   const progressDetail = phase === "identifying" && job?.total_items
     ? ` (${job.current}/${job.total_items})`
     : phase === "optimizing" && job?.total_photos
@@ -456,7 +462,6 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
       )}
 
       {job?.done && (() => {
-        const dupes = duplicateSuspects(drafts);
         if (!dupes.length) return null;
         const [a, b] = dupes[0];
         return (

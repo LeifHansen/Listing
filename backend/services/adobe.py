@@ -25,13 +25,12 @@ import time
 import uuid
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from PIL import Image
 
 from .. import config, objstore
-from ..config import log
 
 
 class AdobeError(ValueError):
