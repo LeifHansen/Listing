@@ -108,6 +108,25 @@ def _category_query(listing) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _tag_text_for(paths: list, aspects: list[dict]) -> str:
+    """Zoom-and-transcribe the item's tags when the category is one where the
+    facts live ON a tag (any Size-style aspect = clothing/shoes). Sizes are
+    what the single-pass read kept getting wrong: a size tag in a normal photo
+    is far too small to read, so this targeted close-up pass is what makes
+    Size/Material/Country come off the actual tag. Best-effort — a failure
+    just means the fill runs without a transcript."""
+    if not any("size" in (a.get("name") or "").lower() for a in aspects):
+        return ""
+    try:
+        text = claude_ai.read_tag_text(paths)
+        if text:
+            log.info("tag read: %d chars transcribed from tag close-ups", len(text))
+        return text
+    except Exception as exc:  # noqa: BLE001 - tag reading is an enhancement
+        log.info("tag read skipped: %s", exc)
+        return ""
+
+
 def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
     """Best-effort: fill eBay's category item specifics (required + recommended)
     from the photos and merge them in without overwriting anything already set.
@@ -127,7 +146,8 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
         paths = [p for p in image_paths if p.is_file()]
         if not aspects or not paths:
             return 0
-        filled = claude_ai.fill_aspects(paths, listing, aspects)
+        filled = claude_ai.fill_aspects(paths, listing, aspects,
+                                        tag_text=_tag_text_for(paths, aspects))
     except Exception as exc:  # noqa: BLE001 - enrichment is optional
         log.info("specifics enrich skipped (cat=%s): %s", listing.category_id, exc)
         return 0
@@ -1313,7 +1333,8 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     if not paths:
         raise HTTPException(400, "This listing's photos aren't on the server anymore.")
     try:
-        filled = claude_ai.fill_aspects(paths, listing, aspects)
+        filled = claude_ai.fill_aspects(paths, listing, aspects,
+                                        tag_text=_tag_text_for(paths, aspects))
     except Exception as exc:  # noqa: BLE001
         code, message = claude_ai.ai_error_message(exc)
         log.warning("autofill-specifics failed (session=%s): %s", session_id, exc)

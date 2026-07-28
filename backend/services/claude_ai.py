@@ -48,7 +48,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "package_length_in": number (estimated SHIPPING BOX length in inches, packed),
   "package_width_in": number (estimated SHIPPING BOX width in inches, packed),
   "package_height_in": number (estimated SHIPPING BOX height in inches, packed),
-  "item_specifics": [{"name": "string", "value": "string"}],
+  "item_specifics": [{"name": "string", "value": "string", "confidence": "high|medium"}],
   "missing_info": ["names of ITEM details a human should verify/fill, e.g. 'exact model number', 'size'. NEVER list where the item ships from, its location, shipping/return/payment policies, or handling time — the seller's account settles those once, not per listing"],
   "confidence": "low|medium|high",
   "raw_observations": "brief notes on what you actually see in the photos"
@@ -81,6 +81,13 @@ Rules:
   (e.g. {"name":"Season","value":"Spring"} and {"name":"Season","value":"Summer"})
   rather than one comma-joined value. Put anything you cannot verify in
   missing_info instead of guessing.
+  Read EVERYTHING legible in the photos before filling these: care tags, sewn
+  labels, stamps, box/packaging text, model plates, and the human-readable
+  digits printed under any barcode (that's the UPC/EAN; model numbers and MPN
+  often sit nearby). Mark each entry's "confidence": "high" when you can
+  literally read/see it or it's unambiguous, "medium" for a reasonable
+  inference (fill those too — the seller sees a review flag on them). Never
+  invent identifiers (UPC/EAN/ISBN/MPN/serial) you cannot actually read.
 """ % ", ".join(EBAY_CONDITIONS)
 
 
@@ -169,7 +176,10 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
     # aren't dicts — coerce defensively so a stray shape can't crash identify.
     raw_specs = data.get("item_specifics") or []
     specifics = [
-        ItemSpecific(name=str(s.get("name", "")), value=str(s.get("value", "")))
+        ItemSpecific(
+            name=str(s.get("name", "")), value=str(s.get("value", "")),
+            confidence=("high" if str(s.get("confidence", "")).strip().lower() == "high"
+                        else "medium"))
         for s in raw_specs
         if isinstance(s, dict) and s.get("name")
     ]
@@ -555,12 +565,150 @@ def refine(listing: Listing, prompt: str) -> Listing:
     return updated
 
 
+# ---------------------------------------------------------------------------
+# Tag targeting — the fix for "the AI can't read clothing sizes".
+#
+# A size/care tag in a normal product photo is tiny (often <150px across once
+# the shot is downscaled), so a single-pass model read comes back blank or
+# guessed. This two-step pass works the way a person does: first FIND every
+# tag across the photos, then ZOOM INTO each one and transcribe it. The
+# transcript is handed to the specifics fill as ground truth, so Size /
+# Material / Country / MPN / UPC come off the actual tag instead of being
+# inferred.
+# ---------------------------------------------------------------------------
+
+_TAG_SCAN_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{ "tags": [ {"photo": <1-based photo number>,
+             "box": [x0, y0, x1, y1],
+             "kind": "size|care|brand|model|barcode|other"} ] }
+Rules:
+- Find every TAG, LABEL, STAMP, or PRINTED MARKING that could carry item
+  facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
+  hang tags, box text, model plates, barcodes.
+- box is the tag's bounding region as FRACTIONS of that photo's width/height
+  (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is
+  cut off.
+- Include a tag even if you can't read it at this size — it will be zoomed.
+- At most 6 entries, best candidates first. No tags at all -> {"tags": []}.
+"""
+
+
+def _pil_block(img) -> dict:
+    """An Anthropic image block from an in-memory PIL image."""
+    from io import BytesIO
+    buf = BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=90)
+    return {"type": "image", "source": {
+        "type": "base64", "media_type": "image/jpeg",
+        "data": base64.standard_b64encode(buf.getvalue()).decode("ascii")}}
+
+
+def read_tag_text(image_paths: list[Path]) -> str:
+    """Locate tags/labels across the photos, zoom into each, and transcribe.
+
+    Returns a plain-text transcript ("" when no tags were found) for use as
+    ground-truth context in fill_aspects/identify. Two vision calls: a cheap
+    low-res scan to get tag bounding boxes, then one call with the high-res
+    crops. Raises on API failure — callers treat tag reading as best-effort.
+    """
+    from PIL import Image
+    paths = [p for p in image_paths[:8] if p.is_file()]
+    if not paths:
+        return ""
+    client = _client()
+
+    # Pass 1 — find the tags. Low-res copies are plenty for locating.
+    content: list[dict] = []
+    for p in paths:
+        with Image.open(p) as im:
+            im.thumbnail((768, 768), Image.LANCZOS)
+            content.append(_pil_block(im))
+    content.append({"type": "text", "text": (
+        f"These are photos 1 to {len(paths)} of one secondhand item being "
+        "listed for sale. Locate every tag/label worth reading up close.\n"
+        + _TAG_SCAN_SCHEMA)})
+    resp = client.messages.create(model=config.VISION_MODEL, max_tokens=600,
+                                  messages=[{"role": "user", "content": content}])
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    try:
+        tags = [t for t in (_extract_json(text).get("tags") or [])
+                if isinstance(t, dict)][:6]
+    except Exception:  # noqa: BLE001 - a malformed scan just means "no tags"
+        tags = []
+    if not tags:
+        return ""
+
+    # Pass 2 — zoom in and transcribe. Crop each box from the full-size photo
+    # (plus a margin) and upscale so small print reads at presentation size.
+    crops: list[dict] = []
+    for t in tags:
+        try:
+            idx = int(t.get("photo", 0)) - 1
+            x0, y0, x1, y1 = [float(v) for v in (t.get("box") or [])[:4]]
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < len(paths)) or not (x0 < x1 and y0 < y1):
+            continue
+        with Image.open(paths[idx]) as im:
+            w, h = im.size
+            mx, my = (x1 - x0) * 0.08, (y1 - y0) * 0.08
+            box = (max(0, int((x0 - mx) * w)), max(0, int((y0 - my) * h)),
+                   min(w, int((x1 + mx) * w)), min(h, int((y1 + my) * h)))
+            if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+                continue
+            crop = im.crop(box)
+            if max(crop.size) < 1100:
+                scale = 1100 / max(crop.size)
+                crop = crop.resize((round(crop.width * scale),
+                                    round(crop.height * scale)), Image.LANCZOS)
+            crops.append(_pil_block(crop))
+    if not crops:
+        return ""
+    crops.append({"type": "text", "text": (
+        "These are zoomed-in crops of the tags/labels on that same item. "
+        "Transcribe ALL text you can read on them, exactly as printed. Then, "
+        "on separate lines, state what the tags establish (only if actually "
+        "readable): SIZE (the exact marking, e.g. 'L', 'W32 L34', 'EU 42', "
+        "'US 10.5 M', and the size system), BRAND, MATERIAL percentages, "
+        "COUNTRY of manufacture, MODEL/STYLE number, RN number, and the "
+        "digits under any BARCODE (UPC/EAN). If a crop is unreadable, say "
+        "so — never fill in what you can't see. Plain text only.")})
+    resp = client.messages.create(model=config.VISION_MODEL, max_tokens=900,
+                                  messages=[{"role": "user", "content": crops}])
+    out = "".join(b.text for b in resp.content if b.type == "text").strip()
+    return out[:2000]
+
+
 _ASPECTS_FILL_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
-{ "specifics": [ {"name": "<exact aspect name>", "value": "<value>"} ] }
+{ "specifics": [ {"name": "<exact aspect name>", "value": "<value>",
+                  "confidence": "high|medium"} ] }
 Rules:
-- Fill each listed eBay item specific you can SEE in the photos or confidently
-  infer. Use the aspect's EXACT name as given.
+- GOAL: fill as many of the listed eBay item specifics as you legitimately
+  can — every filled specific is a search filter buyers use. Aim for all of
+  the required ones and nearly all of the recommended ones. Leave one out
+  only when you truly cannot tell.
+- Read EVERYTHING in the photos first: care tags, sewn labels, printed marks,
+  stamps, box/packaging text, model plates — and the human-readable DIGITS
+  printed under any barcode (that's the UPC/EAN; also look there for MPN and
+  model numbers). Exact text you can read is your best source. When the
+  context includes TAG TEXT (transcribed from zoomed tag close-ups), treat it
+  as ground truth — values taken from it are confidence "high".
+- Clothing/shoe SIZE comes from the size tag, not from guessing: neck label,
+  waistband tag, shoe tongue/heel label, or the care tag (the size often
+  follows "SIZE" there). Report the marking in the aspect's expected form
+  (e.g. "L", "32", "10.5"). Sizes read off a tag or TAG TEXT are "high";
+  a size judged from proportions or measurements is "medium".
+- confidence per specific:
+  * "high" — you can literally see/read it (tag, label, print, barcode
+    digits) or it is unambiguous from the photos (an obvious color, an
+    obvious type).
+  * "medium" — a reasonable inference from what the item clearly is (e.g.
+    Department from the garment's cut, Style from the design, Theme,
+    Occasion, estimated sizes). Fill these — a good inference beats a blank —
+    the seller is shown a "review" flag on them.
+- Use the aspect's EXACT name as given.
 - For an aspect shown as "(choose one of: ...)", the value MUST be exactly one
   of those allowed values, copied verbatim (this is how eBay's fixed-value /
   checkbox specifics are matched). If none fits, omit that aspect.
@@ -568,24 +716,27 @@ Rules:
   decimal at most, no words or units); "(4-digit year)" takes a year like
   "1985". If you can't tell, omit it — text there gets the listing rejected.
 - For "(free text)" aspects, give the single best concise value eBay expects.
-- Omit any aspect you cannot determine — never guess, and never fill an
-  aspect with "Not Specified"/"Does Not Apply" just to have an answer.
-- EXCEPTION — physical size aspects (Item Height, Item Length, Item Width,
-  Item Depth, Item Diameter, Item Weight): when listed, ALWAYS provide a
-  best-effort ESTIMATE of the actual item's dimensions (not the shipping box)
-  judged from the photos' real-world scale, as a number with unit (e.g.
-  "7 in", "1.5 lb") — some categories refuse to publish without these, and
-  the seller can correct an estimate.
+- Never invent identifiers: a UPC/EAN/ISBN/MPN/serial you cannot actually
+  read must be omitted, and never fill any aspect with "Not Specified"/
+  "Does Not Apply"/"Unknown" just to have an answer.
+- Physical size aspects (Item Height, Item Length, Item Width, Item Depth,
+  Item Diameter, Item Weight): when listed, ALWAYS provide a best-effort
+  ESTIMATE of the actual item's dimensions (not the shipping box) judged from
+  the photos' real-world scale, as a number with unit (e.g. "7 in",
+  "1.5 lb") at "medium" confidence — some categories refuse to publish
+  without these, and the seller can correct an estimate.
 - One value per aspect name.
 """
 
 
 def fill_aspects(image_paths: list[Path], listing: Listing,
-                 aspects: list[dict]) -> list[ItemSpecific]:
+                 aspects: list[dict], tag_text: str = "") -> list[ItemSpecific]:
     """Fill eBay's category item specifics from the product photos. `aspects`
     is the taxonomy list [{name, required, mode, values}]. Returns validated
     ItemSpecifics — SELECTION_ONLY values are matched to eBay's allowed list so
-    the fixed-value ("checkbox") specifics actually populate on eBay."""
+    the fixed-value ("checkbox") specifics actually populate on eBay.
+    `tag_text` (from read_tag_text) is passed as ground-truth context so Size/
+    Material/Country/MPN come off the actual tags."""
     named = [a for a in aspects if a.get("name")]
     if not named or not image_paths:
         return []
@@ -606,6 +757,9 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
     context = (f"Title: {listing.title}\nBrand: {listing.brand}\n"
                f"Category: {listing.category_suggestion}\n"
                f"Description: {(listing.description or '')[:500]}")
+    if tag_text:
+        context += ("\nTAG TEXT (transcribed from zoomed close-ups of this "
+                    "item's tags/labels — treat as ground truth):\n" + tag_text)
     content: list[dict] = [_image_block(p) for p in image_paths[:8]]
     content.append({"type": "text", "text": (
         "You are cataloguing an item for eBay. Using the product photos and the "
@@ -642,7 +796,12 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
         if legal is None:
             continue
         seen.add(key)
-        out.append(ItemSpecific(name=a["name"], value=legal))
+        conf = str(s.get("confidence", "")).strip().lower()
+        out.append(ItemSpecific(
+            name=a["name"], value=legal,
+            # Anything not explicitly "high" gets the review flag — safer to
+            # over-flag than to show an inference as read-off-the-tag fact.
+            confidence="high" if conf == "high" else "medium"))
     return out
 
 

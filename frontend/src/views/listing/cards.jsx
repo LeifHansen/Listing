@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2, Ruler,
+  Sparkles, Megaphone, Loader2, Ruler, Check,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -304,23 +304,49 @@ const DIMENSION_ASPECTS = new Set([
   "item weight", "height", "length", "width", "depth", "diameter",
 ]);
 
+// The ✓/⚠ trust badge for one specific: ✓ = the AI read it off the item
+// (tag, label, print) or it's unambiguous; ⚠ = a reasonable inference worth a
+// glance; nothing = the seller typed or confirmed it (or it's empty).
+function ConfidencePill({ row }) {
+  if (!row || !(row.value || "").trim() || !row.confidence) return null;
+  return row.confidence === "high" ? (
+    <TagPill tone="green"><Check size={11} aria-hidden /> AI</TagPill>
+  ) : (
+    <TagPill tone="yellow"><AlertTriangle size={11} aria-hidden /> Review</TagPill>
+  );
+}
+
 export function SpecificsCard({ w }) {
   const aspects = w.categoryMeta.aspects || [];
   const required = aspects.filter((a) => a.required);
   const dimensions = aspects.filter(
     (a) => !a.required && DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
-  const recommended = aspects.filter(
-    (a) => !a.required && !DIMENSION_ASPECTS.has(a.name.trim().toLowerCase())).slice(0, 8);
+  const recommendedAll = aspects.filter(
+    (a) => !a.required && !DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
+  // Every filled recommended aspect is always visible (a hidden ⚠ would be an
+  // un-reviewable flag); unfilled ones show the first 8 until "Show all".
+  const [showAll, setShowAll] = useState(false);
+  const recommended = showAll ? recommendedAll
+    : recommendedAll.filter((a, i) => i < 8 || w.getSpecific(a.name));
+  const hiddenCount = recommendedAll.length - recommended.length;
   const aspectNames = new Set(
-    [...required, ...dimensions, ...recommended].map((a) => a.name.toLowerCase()));
+    [...required, ...dimensions, ...recommendedAll].map((a) => a.name.toLowerCase()));
   // Free-form rows: everything not already shown as a category aspect field.
   const freeRows = w.form.item_specifics
     .map((s, i) => ({ ...s, i }))
     .filter((s) => !aspectNames.has(s.name.trim().toLowerCase()));
 
+  const catAspects = [...required, ...dimensions, ...recommendedAll];
+  const filledCount = catAspects.filter((a) => w.getSpecific(a.name)).length;
+  const reviewCount = w.form.item_specifics
+    .filter((s) => (s.value || "").trim() && s.confidence === "medium").length;
+
   const setRow = (i, key, value) => {
     const specs = [...w.form.item_specifics];
-    specs[i] = { ...specs[i], [key]: value };
+    // Editing a value makes it the seller's own — drop the AI badge.
+    specs[i] = key === "value"
+      ? { ...specs[i], value, confidence: "" }
+      : { ...specs[i], [key]: value };
     w.set("item_specifics", specs);
   };
   const removeRow = (i) => {
@@ -328,22 +354,26 @@ export function SpecificsCard({ w }) {
   };
 
   const renderAspect = (a) => {
-    const cur = w.getSpecific(a.name);
+    const row = w.getSpecificRow(a.name);
     const badge = (
-      <TagPill tone={a.required ? "red" : "neutral"}>
-        {a.required ? "Required" : "Recommended"}
-      </TagPill>
+      <span className="inline-flex items-center gap-1.5">
+        <ConfidencePill row={row} />
+        <TagPill tone={a.required ? "red" : "neutral"}>
+          {a.required ? "Required" : "Recommended"}
+        </TagPill>
+      </span>
     );
     return (
       <Field key={a.name} label={a.name} hint={badge}>
         {a.mode === "SELECTION_ONLY" && a.values?.length ? (
-          <Select value={cur} onChange={(e) => w.upsertSpecific(a.name, e.target.value)}>
+          <Select value={row?.value || ""}
+            onChange={(e) => w.upsertSpecific(a.name, e.target.value)}>
             <option value="">— select —</option>
             {a.values.map((v) => <option key={v} value={v}>{v}</option>)}
           </Select>
         ) : (
           <Input
-            value={cur}
+            value={row?.value || ""}
             placeholder={a.name}
             onChange={(e) => w.upsertSpecific(a.name, e.target.value)}
           />
@@ -355,13 +385,24 @@ export function SpecificsCard({ w }) {
   return (
     <WorkflowCard
       id="specifics" icon={ListChecks} title="Item specifics"
-      hint="Details buyers filter by — required ones gate publishing"
+      hint={catAspects.length
+        ? `${filledCount} of ${catAspects.length} filled`
+          + (reviewCount ? ` · ${reviewCount} for you to review` : "")
+          + " — required ones gate publishing"
+        : "Details buyers filter by — required ones gate publishing"}
       state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
     >
       <div className="flex flex-col gap-5">
         {(required.length > 0 || recommended.length > 0) && (
           <div className="grid sm:grid-cols-2 gap-4">
             {[...required, ...recommended].map(renderAspect)}
+          </div>
+        )}
+        {hiddenCount > 0 && (
+          <div>
+            <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
+              <Plus aria-hidden /> Show {hiddenCount} more optional specific{hiddenCount === 1 ? "" : "s"}
+            </Button>
           </div>
         )}
 
@@ -394,6 +435,7 @@ export function SpecificsCard({ w }) {
                   value={s.value} placeholder="Value" className="flex-[1.4]"
                   onChange={(e) => setRow(s.i, "value", e.target.value)}
                 />
+                <ConfidencePill row={s} />
                 <Button variant="ghost" size="iconSm" aria-label="Remove specific"
                   onClick={() => removeRow(s.i)}>
                   <X size={15} />
@@ -411,9 +453,11 @@ export function SpecificsCard({ w }) {
             <Plus aria-hidden /> Add specific
           </Button>
           {w.form.item_specifics.length > 0 && (
-            <span className="text-[13px] text-ink-secondary inline-flex items-center gap-1.5">
+            <span className="text-[13px] text-ink-secondary inline-flex items-center gap-1.5 flex-wrap">
               <Sparkles size={14} className="text-blue" aria-hidden />
-              Auto-filled from your photos — edit anything that needs a tweak.
+              <TagPill tone="green"><Check size={11} aria-hidden /> AI</TagPill> read from
+              your photos & tags · <TagPill tone="yellow"><AlertTriangle size={11} aria-hidden /> Review</TagPill> inferred
+              — worth a glance.
             </span>
           )}
         </div>

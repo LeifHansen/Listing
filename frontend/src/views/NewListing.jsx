@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft,
+  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
@@ -139,6 +140,65 @@ function PublishedScreen({ w }) {
   );
 }
 
+// The fields most listings never need to touch (the AI fills them, seller
+// defaults cover the rest) live behind this fold, keeping the visual weight on
+// photos / title / price / condition / category. It opens itself whenever
+// something inside actually needs the seller: an eBay fix-it target, a missing
+// required field, or AI-inferred specifics awaiting review.
+const FOLDED_TARGETS = ["specifics", "weight", "shipping", "description"];
+
+function MoreDetails({ w, children }) {
+  const reviewCount = (w.form.item_specifics || [])
+    .filter((s) => (s.value || "").trim() && s.confidence === "medium").length;
+  const attention = ["specifics", "shipping", "description"]
+    .filter((k) => w.completion[k] === "attention").length;
+  const auto = attention > 0 || reviewCount > 0;
+  const [manual, setManual] = useState(null); // null = follow `auto`
+  const open = manual === null ? auto : manual;
+  useEffect(() => {
+    if (FOLDED_TARGETS.includes(w.fixTarget)) setManual(true);
+  }, [w.fixTarget]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <button
+        type="button"
+        onClick={() => setManual(!open)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-3 px-1 text-left cursor-pointer group"
+      >
+        <span className="text-[15px] font-bold text-ink whitespace-nowrap">More details</span>
+        {!open && (
+          <span className="text-[13px] text-ink-secondary truncate">
+            Description · Item specifics · Shipping · Promote
+            {reviewCount > 0 && (
+              <span className="ml-2 font-semibold text-warning">
+                {reviewCount} specific{reviewCount === 1 ? "" : "s"} to review
+              </span>
+            )}
+          </span>
+        )}
+        <span className="flex-1 h-px bg-line" aria-hidden />
+        <ChevronDown
+          size={18} aria-hidden
+          className={cn("shrink-0 text-ink-secondary transition-transform duration-200",
+            open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.2 }}
+          className="flex flex-col gap-4"
+        >
+          {children}
+        </motion.div>
+      )}
+    </div>
+  );
+}
+
 function Workflow() {
   const {
     session, startNew, setSession, setView, deleteListing, activeBulk,
@@ -253,6 +313,9 @@ function Workflow() {
         <RefineBar w={w} />
       </motion.div>
 
+      {/* Hero fields first — photos, title, price & condition, category are
+          what the seller actually looks at; the AI-filled rest sits behind
+          the More Details fold (which opens itself when it needs a human). */}
       <motion.div variants={rise} className="flex flex-col gap-4">
         <PhotosCard
           w={w}
@@ -260,12 +323,14 @@ function Workflow() {
           onDelete={(name) => w.deleteImage(name)}
         />
         <TitleCard w={w} />
-        <CategoryCard w={w} />
-        <SpecificsCard w={w} />
         <PricingCard w={w} />
-        <ShippingCard w={w} />
-        <DescriptionCard w={w} />
-        <PromoteCard w={w} />
+        <CategoryCard w={w} />
+        <MoreDetails w={w}>
+          <SpecificsCard w={w} />
+          <DescriptionCard w={w} />
+          <ShippingCard w={w} />
+          <PromoteCard w={w} />
+        </MoreDetails>
         <PublishCard w={w} />
       </motion.div>
 

@@ -98,7 +98,7 @@ export function useListingForm() {
       package_width_in: num(form.package_width_in),
       package_height_in: num(form.package_height_in),
       item_specifics: form.item_specifics
-        .map((s) => ({ name: s.name.trim(), value: s.value.trim() }))
+        .map((s) => ({ name: s.name.trim(), value: s.value.trim(), confidence: s.confidence || "" }))
         .filter((s) => s.name),
       images: form.images || [],
       currency: form.currency || "USD",
@@ -106,18 +106,21 @@ export function useListingForm() {
   }, [form, session]);
 
   // ---------- item specifics (single source of truth) ----------
-  const getSpecific = useCallback((name) => {
-    const row = form.item_specifics.find(
-      (s) => s.name.trim().toLowerCase() === name.toLowerCase());
-    return row ? row.value : "";
-  }, [form.item_specifics]);
+  const getSpecificRow = useCallback((name) => form.item_specifics.find(
+    (s) => s.name.trim().toLowerCase() === name.toLowerCase()) || null,
+  [form.item_specifics]);
 
+  const getSpecific = useCallback(
+    (name) => getSpecificRow(name)?.value || "", [getSpecificRow]);
+
+  // A seller edit clears the AI confidence flag: the value is now theirs, so
+  // neither the ✓ (AI high) nor the ⚠ (review) badge applies anymore.
   const upsertSpecific = useCallback((name, value) => {
     setForm((f) => {
       const specs = [...f.item_specifics];
       const i = specs.findIndex((s) => s.name.trim().toLowerCase() === name.toLowerCase());
-      if (i >= 0) specs[i] = { ...specs[i], value };
-      else if (value) specs.push({ name, value });
+      if (i >= 0) specs[i] = { ...specs[i], value, confidence: "" };
+      else if (value) specs.push({ name, value, confidence: "" });
       return { ...f, item_specifics: specs };
     });
   }, []);
@@ -459,7 +462,7 @@ export function useListingForm() {
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,
-    getSpecific, upsertSpecific,
+    getSpecific, getSpecificRow, upsertSpecific,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
     imageVersions, bumpImageVersion,
     completion,

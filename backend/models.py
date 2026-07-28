@@ -9,6 +9,11 @@ from pydantic import BaseModel, Field
 class ItemSpecific(BaseModel):
     name: str
     value: str
+    # Where this value came from, driving the ✓/⚠ badges in the editor:
+    # "high" = the AI read it straight off the item (tag, label, print) or
+    # it's unambiguous from the photos; "medium" = a reasonable inference the
+    # seller should glance over; "" = entered or confirmed by the seller.
+    confidence: str = ""
 
 
 class Listing(BaseModel):
