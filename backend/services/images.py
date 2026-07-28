@@ -3,14 +3,15 @@
 eBay recommends square-ish images with the longest side >= 1600px for zoom,
 clean framing, and good lighting.
 
-The pipeline (per photo): auto-orient -> background removal + studio effect,
-with PHOTOROOM as the default engine (its cutout composited on white with our
-soft contact shadow, then the studio enhancement pass) and ADOBE as the backup
-when Photoroom fails for any reason (the Lightroom API's "studio" develop
-preset followed by Photoshop's Remove Background service) -> subject-aware
-square crop -> resize to target -> save. The in-house rembg model runs only
-when no pro engine is configured at all, so the module still works with no
-external service.
+The pipeline (per photo): auto-orient -> background removal + studio effect
+(the cutout composited on white with our soft contact shadow, then the studio
+enhancement pass) -> subject-aware square crop -> resize to target -> save.
+
+Which remover runs is config.bg_engine_chain() (BG_ENGINE): by default the
+budget Pixian.ai API when its keys are present, otherwise the in-house rembg
+model — so the module works with no external service at all. The pricey
+engines (Photoroom, and Adobe's Lightroom-preset + Photoshop-cutout combo)
+run only when BG_ENGINE explicitly selects them.
 """
 from __future__ import annotations
 
@@ -63,14 +64,14 @@ def _flatten(img: Image.Image) -> Image.Image:
 # process-global so we pay that cost once, and only when background removal is
 # actually used.
 #
-# Model choice is a hard memory ceiling on the 2GB machine. Empirically:
-#   - "u2netp" (~4MB) is the ONLY model that runs reliably here. It's light and
-#     stable, but weak on dark/black or low-contrast items (can mangle them).
-#   - "u2net" (full, ~176MB) and "isnet-general-use" (1024x1024) both OOM-kill
-#     the machine — u2net crashed it after a couple of cutouts, isnet on the
-#     first. They need a 4GB+ machine.
-# Default to the stable model. For better quality on dark items, bump the VM to
-# 4GB and set REMBG_MODEL=u2net (or isnet-general-use for the best edges).
+# Model choice is a hard memory ceiling. Empirically:
+#   - "u2netp" (~4MB) is light and stable even on a 2GB machine, but weak on
+#     dark/black or low-contrast items (can mangle them). It's the code
+#     default so dev machines and small boxes always work.
+#   - "u2net" (full, ~176MB) and "isnet-general-use" (1024x1024) need a 4GB+
+#     machine — on 2GB they OOM-kill the box. isnet has the best edges and is
+#     what production runs (fly.toml sets REMBG_MODEL=isnet-general-use with a
+#     4GB VM) now that the local model is the default no-per-image-cost engine.
 _REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 _rembg_session = None
 
@@ -265,26 +266,112 @@ class PhotoroomError(ValueError):
     message in a toast) surfaces the real cause instead of a silent fallback."""
 
 
-# Cap what we send Photoroom: the final output is always TARGET_SIZE, so a
-# full 3200px working copy just wastes upload time and RAM — and on a
+class PixianError(ValueError):
+    """Pixian is configured but the call failed — carries a user-facing
+    reason. A ValueError for the same reason PhotoroomError is."""
+
+
+# Cap what we send a remote engine: the final output is always TARGET_SIZE, so
+# a full 3200px working copy just wastes upload time and RAM — and on a
 # 250-photo batch those add up to minutes and hundreds of MB. 2048px keeps a
 # comfortable margin above the 1600px output.
-_PHOTOROOM_MAX_SIDE = int(os.getenv("PHOTOROOM_MAX_SIDE", "2048") or "2048")
-# Total attempts per photo. Big batches WILL trip Photoroom's per-minute rate
+_REMOTE_MAX_SIDE = int(os.getenv("BG_API_MAX_SIDE",
+                                 os.getenv("PHOTOROOM_MAX_SIDE", "2048"))
+                       or "2048")
+# Total attempts per photo. Big batches WILL trip an API's per-minute rate
 # limit and the odd network blip; those retry with backoff instead of failing
 # the photo. Hard failures (bad key, out of credits) never retry — they'd fail
 # identically every time.
-_PHOTOROOM_TRIES = int(os.getenv("PHOTOROOM_TRIES", "4") or "4")
+_REMOTE_TRIES = int(os.getenv("BG_API_TRIES",
+                              os.getenv("PHOTOROOM_TRIES", "4")) or "4")
 
 
-def _photoroom_backoff(resp, attempt: int) -> float:
-    """Seconds to wait before retrying: Photoroom's own Retry-After when it
+def _api_backoff(resp, attempt: int) -> float:
+    """Seconds to wait before retrying: the service's own Retry-After when it
     sends one, else 2s/4s/8s..., capped so a stuck batch photo can't stall a
     worker slot for long."""
     retry_after = (resp.headers.get("retry-after") or "").strip() if resp is not None else ""
     if retry_after.isdigit():
         return min(30.0, max(1.0, float(retry_after)))
     return min(15.0, float(2 ** attempt))
+
+
+def _post_with_retries(name: str, send, exc_cls: type):
+    """Run `send()` (an httpx POST) with retries on 429/5xx/network errors.
+    Returns the final response; raises `exc_cls` when the service stayed
+    unreachable through every attempt."""
+    resp = None
+    for attempt in range(1, _REMOTE_TRIES + 1):
+        try:
+            resp = send()
+        except Exception as exc:  # noqa: BLE001 - network/timeout
+            if attempt == _REMOTE_TRIES:
+                raise exc_cls(f"Couldn't reach {name}: {exc}") from exc
+            wait = _api_backoff(None, attempt)
+            log.info("%s: network error (%s) — retry %d/%d in %.0fs",
+                     name, exc, attempt, _REMOTE_TRIES - 1, wait)
+            time.sleep(wait)
+            continue
+        if (resp.status_code == 429 or resp.status_code >= 500) \
+                and attempt < _REMOTE_TRIES:
+            wait = _api_backoff(resp, attempt)
+            log.info("%s: HTTP %d — retry %d/%d in %.0fs",
+                     name, resp.status_code, attempt, _REMOTE_TRIES - 1, wait)
+            time.sleep(wait)
+            continue
+        break
+    return resp
+
+
+def _jpeg_payload(img: Image.Image) -> bytes:
+    """The JPEG bytes a remote engine gets, capped to _REMOTE_MAX_SIDE."""
+    from io import BytesIO
+    rgb = img.convert("RGB")
+    if max(rgb.size) > _REMOTE_MAX_SIDE:
+        rgb.thumbnail((_REMOTE_MAX_SIDE, _REMOTE_MAX_SIDE), Image.LANCZOS)
+    buf = BytesIO()
+    rgb.save(buf, "JPEG", quality=92)
+    return buf.getvalue()
+
+
+def _pixian_cutout(img: Image.Image) -> Optional[Image.Image]:
+    """Cut out the subject via Pixian.ai — the budget engine, around a tenth
+    of Photoroom's per-image price — and composite it on white with our soft
+    shadow. Returns None only when no credentials are configured; a real
+    failure raises PixianError with the actual reason."""
+    if not config.pixian_ready():
+        return None
+    from io import BytesIO
+    import httpx
+    payload = _jpeg_payload(img)
+    resp = _post_with_retries("pixian", lambda: httpx.post(
+        "https://api.pixian.ai/api/v2/remove-background",
+        auth=(config.PIXIAN_API_ID, config.PIXIAN_API_SECRET),
+        files={"image": ("image.jpg", payload, "image/jpeg")},
+        data={"test": "true"} if config.PIXIAN_TEST else {},
+        timeout=60,
+    ), PixianError)
+    if resp.status_code in (401, 403):
+        raise PixianError(
+            "Pixian rejected the API credentials — check the PIXIAN_API_ID and "
+            "PIXIAN_API_SECRET secrets on the server.")
+    if resp.status_code == 402:
+        raise PixianError(
+            "The Pixian account is out of credits — top it up at pixian.ai.")
+    if resp.status_code == 429:
+        raise PixianError(
+            "Pixian kept rate-limiting us even after several retries — "
+            "try again in a minute.")
+    if resp.status_code != 200:
+        raise PixianError(f"Pixian error {resp.status_code}: {resp.text[:160]}")
+    try:
+        cut = Image.open(BytesIO(resp.content)).convert("RGBA")
+    except Exception as exc:  # noqa: BLE001
+        raise PixianError("Pixian returned an unreadable image.") from exc
+    alpha = cut.split()[3]
+    if alpha.getbbox() is None:  # nothing kept — no subject found
+        raise PixianError("Pixian couldn't find a subject in this photo.")
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
 
 
 def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
@@ -297,38 +384,14 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         return None
     from io import BytesIO
     import httpx
-    rgb = img.convert("RGB")
-    if max(rgb.size) > _PHOTOROOM_MAX_SIDE:
-        rgb.thumbnail((_PHOTOROOM_MAX_SIDE, _PHOTOROOM_MAX_SIDE), Image.LANCZOS)
-    buf = BytesIO()
-    rgb.save(buf, "JPEG", quality=92)
-    payload = buf.getvalue()
-    resp = None
-    for attempt in range(1, _PHOTOROOM_TRIES + 1):
-        try:
-            resp = httpx.post(
-                "https://sdk.photoroom.com/v1/segment",
-                headers={"x-api-key": config.PHOTOROOM_API_KEY},
-                files={"image_file": ("image.jpg", payload, "image/jpeg")},
-                data={"format": "png"},
-                timeout=60,
-            )
-        except Exception as exc:  # noqa: BLE001 - network/timeout
-            if attempt == _PHOTOROOM_TRIES:
-                raise PhotoroomError(f"Couldn't reach Photoroom: {exc}") from exc
-            wait = _photoroom_backoff(None, attempt)
-            log.info("photoroom: network error (%s) — retry %d/%d in %.0fs",
-                     exc, attempt, _PHOTOROOM_TRIES - 1, wait)
-            time.sleep(wait)
-            continue
-        if (resp.status_code == 429 or resp.status_code >= 500) \
-                and attempt < _PHOTOROOM_TRIES:
-            wait = _photoroom_backoff(resp, attempt)
-            log.info("photoroom: HTTP %d — retry %d/%d in %.0fs",
-                     resp.status_code, attempt, _PHOTOROOM_TRIES - 1, wait)
-            time.sleep(wait)
-            continue
-        break
+    payload = _jpeg_payload(img)
+    resp = _post_with_retries("photoroom", lambda: httpx.post(
+        "https://sdk.photoroom.com/v1/segment",
+        headers={"x-api-key": config.PHOTOROOM_API_KEY},
+        files={"image_file": ("image.jpg", payload, "image/jpeg")},
+        data={"format": "png"},
+        timeout=60,
+    ), PhotoroomError)
     if resp.status_code in (401, 403):
         raise PhotoroomError(
             "Photoroom rejected the API key — check the PHOTOROOM_API_KEY "
@@ -353,64 +416,73 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
     return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
 
 
+# The remote engines a chain entry can name (adobe and local are special-cased
+# where the chain is walked: adobe needs its studio-preset pass, local runs
+# in-process).
+_REMOTE_CUTOUTS = {"pixian": _pixian_cutout, "photoroom": _photoroom_cutout}
+
+
 def _studio_and_cutout(
         img: Image.Image) -> tuple[Image.Image, str, Optional[str], bool, Optional[str]]:
     """Background removal + studio treatment for the automatic upload path.
     Returns (image, engine, error, studio_applied, studio_error) where engine
-    is 'photoroom', 'adobe', 'local', or 'none' (kept the original).
+    is the chain member that produced the cutout ('pixian', 'photoroom',
+    'adobe', 'local') or 'none' (kept the original).
 
-    PHOTOROOM is the default engine: its cutout goes on white with our soft
-    shadow, and the caller's enhancement pass supplies the studio polish.
-    ADOBE is the backup when Photoroom fails for any reason: the Lightroom
-    "studio" develop preset first, then Photoshop's Remove Background.
+    The engines and their order come from config.bg_engine_chain() (BG_ENGINE):
+    by default the budget Pixian API when configured (with the local model
+    behind it), otherwise local alone — the pricey Photoroom/Adobe engines run
+    only when BG_ENGINE explicitly picks them. Each engine's cutout goes on
+    white with our soft shadow; the caller's enhancement pass supplies the
+    studio polish (Adobe additionally runs its Lightroom preset first).
 
-    When at least one pro engine is configured and every one of them fails,
-    we keep the ORIGINAL photo rather than let the weak local model mangle
-    it — a busy background is always better than a shredded item. The local
-    model only runs when no pro engine is configured at all."""
+    When every engine in the chain fails, keep the ORIGINAL photo and surface
+    the last reason — a busy background is always better than a shredded item."""
     last_err: Optional[str] = None
-    if config.photoroom_ready():
-        try:
-            out = _photoroom_cutout(img)
-            if out is not None:
-                return out, "photoroom", None, False, None
-        except PhotoroomError as exc:
-            log.warning("photoroom: %s%s", exc,
-                        " — trying the Adobe backup" if config.adobe_ready() else "")
-            last_err = str(exc)
-        except Exception as exc:  # noqa: BLE001 - keep-original must hold for ANY
-            # failure, not just mapped API errors — a photo must never fail
-            # optimize().
-            log.warning("photoroom: unexpected error (%s)", exc)
-            last_err = f"Background removal failed: {exc}"
     studio_applied, studio_error = False, None
-    if config.adobe_ready():
-        # Backup path: Lightroom studio preset first so the cutout works on a
-        # well-exposed image (keep-the-photo guarantee inside _apply_studio).
-        img, studio_applied, studio_error = _apply_studio(img)
-        try:
-            out = _adobe_cutout(img)
+    for engine in config.bg_engine_chain():
+        if engine == "local":
+            try:
+                out = _cutout_on_white(img)
+            except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
+                log.warning("bg-removal: local cutout failed (%s)", exc)
+                out = None
             if out is not None:
-                return out, "adobe", None, studio_applied, studio_error
-        except ValueError as exc:  # AdobeError
-            log.warning("adobe bg-removal: %s", exc)
-            last_err = str(exc)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("adobe bg-removal: unexpected error (%s)", exc)
-            last_err = f"Background removal failed: {exc}"
-    if config.photoroom_ready() or config.adobe_ready():
-        log.warning("bg-removal: keeping the original photo (local model is "
-                    "disabled while a pro engine is configured)")
-        return (_flatten(img), "none", last_err or "background removal failed",
-                studio_applied, studio_error)
-    try:
-        out = _cutout_on_white(img)
-    except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
-        log.warning("bg-removal: cutout failed (%s) — keeping original", exc)
-        out = None
-    if out is not None:
-        return out, "local", None, False, None
-    return _flatten(img), "none", "cutout failed", False, None
+                return out, "local", None, studio_applied, studio_error
+            last_err = last_err or "cutout failed"
+        elif engine == "adobe":
+            if not config.adobe_ready():
+                continue
+            # Lightroom studio preset first so the cutout works on a
+            # well-exposed image (keep-the-photo guarantee inside _apply_studio).
+            img, studio_applied, studio_error = _apply_studio(img)
+            try:
+                out = _adobe_cutout(img)
+                if out is not None:
+                    return out, "adobe", None, studio_applied, studio_error
+            except ValueError as exc:  # AdobeError
+                log.warning("adobe bg-removal: %s", exc)
+                last_err = str(exc)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("adobe bg-removal: unexpected error (%s)", exc)
+                last_err = f"Background removal failed: {exc}"
+        else:
+            try:
+                out = _REMOTE_CUTOUTS[engine](img)
+                if out is not None:
+                    return out, engine, None, False, None
+            except ValueError as exc:  # PixianError/PhotoroomError — mapped reason
+                log.warning("%s: %s", engine, exc)
+                last_err = str(exc)
+            except Exception as exc:  # noqa: BLE001 - keep-original must hold for
+                # ANY failure, not just mapped API errors — a photo must never
+                # fail optimize().
+                log.warning("%s: unexpected error (%s)", engine, exc)
+                last_err = f"Background removal failed: {exc}"
+    log.warning("bg-removal: keeping the original photo (%s)",
+                last_err or "no engine produced a cutout")
+    return (_flatten(img), "none", last_err or "background removal failed",
+            studio_applied, studio_error)
 
 
 def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
@@ -418,39 +490,40 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     can name the remover that actually ran. Raises when the cutout genuinely
     fails so the editor can tell the user instead of silently doing nothing.
 
-    Engine order: Photoroom is the default; Adobe's Photoshop Remove
-    Background is the backup when Photoroom fails for any reason. A failure
-    RAISES (PhotoroomError/AdobeError are ValueErrors → the editor shows the
-    real reason as a toast) instead of silently degrading to the weak local
-    model — that silent fallback is how mangled cutouts kept appearing with
-    no clue why. The local model runs only when no pro engine is configured,
-    at the higher studio matte resolution, falling back to the fast size if a
-    big inference runs out of memory."""
-    if config.photoroom_ready():
+    Walks the same config.bg_engine_chain() as the automatic path. A failure
+    on the chain's LAST engine RAISES (PixianError/PhotoroomError/AdobeError
+    are ValueErrors → the editor shows the real reason as a toast) instead of
+    silently degrading — a silent fallback is how mangled cutouts kept
+    appearing with no clue why. The local model runs at the higher studio
+    matte resolution, falling back to the fast size if a big inference runs
+    out of memory."""
+    chain = config.bg_engine_chain()
+    for i, engine in enumerate(chain):
+        final = i == len(chain) - 1
+        if engine == "local":
+            for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
+                try:
+                    # dark_guard off: the seller reviews the result and can
+                    # Revert, so show the cutout rather than hard-failing on a
+                    # borderline shot.
+                    out = _cutout_on_white(img, max_side=side, dark_guard=False)
+                except Exception as exc:  # noqa: BLE001 - retry smaller on OOM/model error
+                    log.warning("bg-removal: matte at %dpx failed (%s) — retrying smaller",
+                                side, exc)
+                    continue
+                if out is not None:
+                    return out, "local"
+                break  # a clean run that erased the subject won't improve when smaller
+            break  # nothing worked — fall through to the raise below
         try:
-            pr = _photoroom_cutout(img)
-            if pr is not None:
-                return pr, "photoroom"
-        except PhotoroomError as exc:
-            if not config.adobe_ready():
-                raise  # no backup engine — surface Photoroom's reason
-            log.warning("photoroom: %s — trying the Adobe backup", exc)
-    if config.adobe_ready():
-        out = _adobe_cutout(img)  # raises AdobeError with the reason on failure
-        if out is not None:
-            return out, "adobe"
-    for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
-        try:
-            # dark_guard off: the seller reviews the result and can Revert, so
-            # show the cutout rather than hard-failing on a borderline shot.
-            out = _cutout_on_white(img, max_side=side, dark_guard=False)
-        except Exception as exc:  # noqa: BLE001 - retry smaller on OOM/model error
-            log.warning("bg-removal: matte at %dpx failed (%s) — retrying smaller",
-                        side, exc)
-            continue
-        if out is not None:
-            return out, "local"
-        break  # a clean run that erased the subject won't improve when smaller
+            out = (_adobe_cutout(img) if engine == "adobe"
+                   else _REMOTE_CUTOUTS[engine](img))
+            if out is not None:
+                return out, engine
+        except ValueError as exc:  # engine's own user-facing reason
+            if final:
+                raise
+            log.warning("%s: %s — trying the next engine", engine, exc)
     raise ValueError(
         "Couldn't cleanly separate this photo from its background — it's "
         "likely a close-up, dark, or low-contrast shot. Try cropping in "
@@ -465,9 +538,10 @@ def warm() -> None:
     startup so the machine is reachable immediately while this warms up, and
     real uploads hit a warm (~1s) path."""
     try:
-        # Warm the LOCAL model directly (it still powers the highlight/subject
-        # masks) — never via _studio_and_cutout, which would burn a Photoroom/
-        # Adobe API credit on every boot when a key is configured.
+        # Warm the LOCAL model directly (the default engine, and it powers the
+        # highlight/subject masks either way) — never via _studio_and_cutout,
+        # which would burn a paid API credit on every boot when a remote
+        # engine is configured.
         _cutout_on_white(Image.new("RGB", (32, 32), (200, 100, 50)))
         log.info("images: background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
@@ -622,11 +696,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         bg_removed = False
         bg_engine, bg_error = None, None
         if remove_bg:
-            # Photoroom default, Adobe backup (Lightroom studio preset +
-            # Photoshop cutout) — see _studio_and_cutout.
+            # Engine order comes from BG_ENGINE — see _studio_and_cutout.
             img, bg_engine, bg_error, studio_applied, studio_error = \
                 _studio_and_cutout(img)
-            bg_removed = bg_engine in ("photoroom", "adobe", "local")
+            bg_removed = bg_engine not in (None, "none")
         else:
             img = _autocrop_borders(img)
         # Fill the square frame by cropping to the subject instead of padding
@@ -675,11 +748,11 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
         return buf.getvalue()
 
 
-# How many photos to run through a pro engine (Photoroom/Adobe) at once. The
-# per-photo work there is mostly waiting on the remote API, so the pool turns
-# a 250-photo bulk batch from ~15 minutes of serial waiting into overlapping
-# waves — while keeping peak memory (a few 3200px working copies plus the
-# capped Photoroom payloads) tolerable on a 2GB box. Rate limits are handled
+# How many photos to run through a remote engine (Pixian/Photoroom/Adobe) at
+# once. The per-photo work there is mostly waiting on the API, so the pool
+# turns a 250-photo bulk batch from ~15 minutes of serial waiting into
+# overlapping waves — while keeping peak memory (a few 3200px working copies
+# plus the capped upload payloads) tolerable. Rate limits are handled
 # per-call with retry/backoff, so a bigger pool degrades to pacing, not
 # failures.
 _PHOTO_BATCH_WORKERS = int(os.getenv("PHOTO_BATCH_WORKERS", "8") or "8")
@@ -690,10 +763,11 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     """Optimize every image in src_dir. `progress(done, total)` (optional) is
     called after each photo so long bulk jobs can show a live count.
 
-    With a pro engine configured (Photoroom or Adobe), the set is processed a
-    few photos at a time (each one is a remote API call we mostly just wait
-    on). Without one, photos run one at a time — all the work is local
-    CPU/RAM then, and the 2GB box can't afford concurrent model inference."""
+    When the engine chain leads with a remote API (Pixian/Photoroom/Adobe),
+    the set is processed a few photos at a time (each one is a call we mostly
+    just wait on). With the local engine, photos run one at a time — all the
+    work is local CPU/RAM then, and concurrent model inference would stack
+    peak memory."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
@@ -727,9 +801,11 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
         return result
 
     # Pool only when photos will actually hit a remote engine; plain local
-    # optimization (no cutout) is CPU/RAM-bound and must stay serial.
-    pro_engine = remove_bg and (config.photoroom_ready() or config.adobe_ready())
-    workers = min(_PHOTO_BATCH_WORKERS, total) if pro_engine else 1
+    # optimization (no cutout, or the local model) is CPU/RAM-bound and must
+    # stay serial — inference is lock-serialized anyway.
+    chain = config.bg_engine_chain() if remove_bg else []
+    remote_first = bool(chain) and chain[0] != "local"
+    workers = min(_PHOTO_BATCH_WORKERS, total) if remote_first else 1
     if workers > 1:
         from concurrent.futures import ThreadPoolExecutor
 

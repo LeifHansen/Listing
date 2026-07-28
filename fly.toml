@@ -14,8 +14,14 @@ primary_region = 'sjc'
   EBAY_ENV = 'production'
   PORT = '8080'
   DATA_DIR = '/data'
-  # The background-removal model is baked into the image (see Dockerfile), so
-  # no runtime download and no volume dependency for it.
+  # Background removal defaults to the FREE on-server model (BG_ENGINE unset =
+  # auto: Pixian if its keys are ever added as secrets, else local). The paid
+  # Photoroom/Adobe engines only run if a BG_ENGINE secret explicitly selects
+  # them. isnet-general-use is the best-quality local model — it needs the 4GB
+  # VM below — and is baked into the image (see Dockerfile), so no runtime
+  # download and no volume dependency.
+  REMBG_MODEL = 'isnet-general-use'
+  REMBG_MAX_SIDE = '1024'
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...
@@ -36,9 +42,9 @@ primary_region = 'sjc'
   min_machines_running = 1
 
 [[vm]]
-  # Background removal loads onnxruntime + rembg (scipy/numba). 2GB only runs
-  # the light u2netp model (REMBG_MODEL default) reliably — u2net and isnet
-  # OOM-kill it. For better dark-item quality, bump memory to '4gb' and set
-  # REMBG_MODEL=u2net (or isnet-general-use for the best edges).
+  # Background removal loads onnxruntime + rembg (scipy/numba). The
+  # isnet-general-use model ([env] above) needs 4GB — on 2GB it OOM-kills the
+  # box and only the light u2netp runs reliably. 4GB is a flat ~$10/mo over
+  # 2GB, versus the per-image price of a paid cutout API.
   size = 'shared-cpu-2x'
-  memory = '2gb'
+  memory = '4gb'

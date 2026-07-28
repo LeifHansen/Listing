@@ -21,11 +21,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bake the background-removal model into the image so there's no slow/fragile
-# download at request time. u2netp (~4MB) is the only model that runs reliably
-# on the 2GB machine (u2net/isnet OOM-kill it). Must match REMBG_MODEL's default
-# in services/images.py; on a 4GB+ box, bake u2net/isnet instead.
-RUN python -c "from rembg import new_session; new_session('u2netp')"
+# Bake the background-removal models into the image so there's no slow/fragile
+# download at request time. u2netp (~4MB) is the safe fallback that runs even
+# on a 2GB machine; isnet-general-use (~176MB) is the quality model production
+# selects via REMBG_MODEL in fly.toml (needs the 4GB VM).
+RUN python -c "from rembg import new_session; new_session('u2netp'); new_session('isnet-general-use')"
 
 COPY backend ./backend
 COPY --from=frontend /app/frontend/dist ./frontend/dist

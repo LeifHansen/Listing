@@ -118,10 +118,10 @@ VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
 # --- Adobe Lightroom / Photoshop (Firefly Services) --------------------------
-# The BACKUP photo engine: when Photoroom (below, the default) fails on a
-# photo for any reason, it is handed to Adobe — the Lightroom API applies our
-# "studio" develop preset, then the Photoshop Remove Background service does
-# the cutout — and the result comes back down into the usual listing flow.
+# A paid photo engine, used only when BG_ENGINE (below) selects it — either
+# directly ("adobe") or as Photoroom's backup ("photoroom"). The Lightroom API
+# applies our "studio" develop preset, then the Photoshop Remove Background
+# service does the cutout, and the result comes back into the listing flow.
 # Credentials are a server-to-server OAuth client (id + secret) from a
 # developer.adobe.com/console project with the Lightroom + Photoshop APIs
 # enabled; both APIs draw on the same Adobe credit pool. NOTE: a single
@@ -158,25 +158,60 @@ if adobe_configured() and not r2_ready():
         "Photoshop pipeline needs R2 as hand-off storage (Adobe's APIs only "
         "accept presigned URLs). Falling back to the non-Adobe photo pipeline.")
 
-# --- Background removal (Photoroom) ------------------------------------------
-# Photoroom (https://photoroom.com/api) is the DEFAULT engine: its cutout on
-# white plus our shadow + enhancement pass is the studio treatment. Adobe
-# (above) is the backup when a Photoroom call fails; the in-house rembg runs
-# ONLY when no pro engine is configured at all. When a pro engine IS
-# configured and every one fails, the automatic path keeps the ORIGINAL photo
-# and the studio surfaces the exact reason (bad key / out of credits / rate
-# limit) — never a silent downgrade to the weaker local model, which is how
-# mangled cutouts used to get saved with no clue why.
+# --- Background removal engines ----------------------------------------------
+# BG_ENGINE picks which engine strips photo backgrounds:
+#   "pixian"    — Pixian.ai API: the budget engine, roughly a tenth of
+#                 Photoroom's per-image price (PIXIAN_API_ID + PIXIAN_API_SECRET)
+#   "photoroom" — Photoroom API (PHOTOROOM_API_KEY); Adobe backs it up when
+#                 configured. Good quality, but expensive per image.
+#   "adobe"     — Adobe Firefly: Lightroom studio preset + Photoshop cutout
+#   "local"     — the in-house rembg model on this server (free per photo;
+#                 tunables REMBG_MODEL / REMBG_MAX_SIDE / BG_SHADOW are read
+#                 in services/images.py)
+# Unset (or "auto") means: Pixian when its keys are present, otherwise local.
+# The pricey engines NEVER run in auto mode — a configured Photoroom/Adobe key
+# alone must not quietly spend money on every photo; set BG_ENGINE to opt in.
+#
+# Whatever the chain, a failed engine never loses a photo: the original is
+# kept and the exact reason (bad key / out of credits / rate limit) is
+# surfaced — never a silent mangled cutout.
+BG_ENGINE = os.getenv("BG_ENGINE", "auto").strip().lower() or "auto"
+
 PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
+
+PIXIAN_API_ID = _env("PIXIAN_API_ID")
+PIXIAN_API_SECRET = _env("PIXIAN_API_SECRET")
+# Pixian's free integration-test mode (results are for testing, not listings).
+PIXIAN_TEST = os.getenv("PIXIAN_TEST", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def photoroom_ready() -> bool:
     return bool(PHOTOROOM_API_KEY)
 
-# --- Background removal (in-house fallback) ---------------------------------
-# Removal runs in-process via rembg (see services/images.py). No external
-# service or API key. Tunables (all optional): REMBG_MODEL, REMBG_MAX_SIDE,
-# BG_SHADOW — read directly from the environment in images.py.
+
+def pixian_ready() -> bool:
+    return bool(PIXIAN_API_ID and PIXIAN_API_SECRET)
+
+
+def bg_engine_chain() -> list[str]:
+    """Background-removal engines to try, in order. Always non-empty: the
+    local model needs no credentials, so it's the floor. An explicit BG_ENGINE
+    whose credentials are missing falls back to the auto chain (with a warning
+    at import time, below)."""
+    if BG_ENGINE == "photoroom" and photoroom_ready():
+        return ["photoroom", "adobe"] if adobe_ready() else ["photoroom"]
+    if BG_ENGINE == "adobe" and adobe_ready():
+        return ["adobe"]
+    if BG_ENGINE == "pixian" and pixian_ready():
+        return ["pixian"]
+    if BG_ENGINE == "local":
+        return ["local"]
+    return ["pixian", "local"] if pixian_ready() else ["local"]
+
+
+if BG_ENGINE not in ("auto", "local") and BG_ENGINE not in bg_engine_chain():
+    log.warning("BG_ENGINE=%r isn't fully configured (missing credentials?) — "
+                "using %s instead.", BG_ENGINE, "/".join(bg_engine_chain()))
 
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
