@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks,
-  RefreshCw, ExternalLink, Ban,
+  RefreshCw, ExternalLink, Ban, Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -159,10 +159,23 @@ export function PublishCard({ w }) {
 // End listing (Save Draft disappears — on a published offer any eBay save
 // goes straight to the live listing, so a "draft" would mislead).
 export function PublishBar({ w }) {
-  const { canPublishLive } = useApp();
+  const { canPublishLive, deleteListing, setSession, setView } = useApp();
   const { confirm } = useToast();
   const attention = Object.values(w.completion).filter((s) => s === "attention").length;
   const ready = attention === 0;
+
+  const askDelete = async () => {
+    if (await confirm({
+      title: "Delete this listing?",
+      message: "It's permanently removed, photos included. This can't be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+    })) {
+      await deleteListing(w.sessionId);
+      setSession(null);
+      setView("drafts");
+    }
+  };
 
   const askEnd = async () => {
     if (await confirm({
@@ -228,6 +241,12 @@ export function PublishBar({ w }) {
             </>
           ) : (
             <>
+              {/* Right where a listing that won't publish leaves you — no
+                  hunting back through the list for its card. */}
+              <Button variant="ghost" size="md" onClick={askDelete}
+                aria-label="Delete this listing">
+                <Trash2 aria-hidden /> <span className="hidden sm:inline">Delete</span>
+              </Button>
               <Button variant="ghost" size="md" onClick={w.runPreflight} className="hidden sm:inline-flex">
                 <ListChecks aria-hidden /> Check
               </Button>

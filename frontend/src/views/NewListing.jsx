@@ -140,7 +140,9 @@ function PublishedScreen({ w }) {
 }
 
 function Workflow() {
-  const { session, startNew, setSession, setView, deleteListing } = useApp();
+  const {
+    session, startNew, setSession, setView, deleteListing, activeBulk,
+  } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
   // { name } — the photo open in the studio (clean up, remove background, crop).
@@ -205,7 +207,14 @@ function Workflow() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {/* Back to the queue — the way out to everything else in progress. */}
+          {/* Opening an item from a batch replaced the queue with this editor,
+              stranding the rest of the batch. Clearing the session brings the
+              queue straight back — it's still in memory. */}
+          {activeBulk && (
+            <Button variant="secondary" onClick={() => setSession(null)}>
+              <ArrowLeft aria-hidden /> Back to batch
+            </Button>
+          )}
           <Button variant="ghost" onClick={() => setView("drafts")}>
             <ArrowLeft aria-hidden /> My drafts
           </Button>
