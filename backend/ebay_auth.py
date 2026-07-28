@@ -253,6 +253,36 @@ def fetch_policies_and_location(access_token: str) -> dict:
     return out
 
 
+def ship_from_postal(access_token: str, merchant_location_key: str = "") -> str:
+    """The postal code of the seller's ship-from location, read off eBay.
+
+    Publishing through the Trading API has to state where the item ships from
+    — eBay rejects the listing outright with "Your item's location was not
+    filled in" otherwise. The app usually has the ZIP saved, but a seller who
+    connected before we started storing it (or who set their location up on
+    eBay directly) has only a merchantLocationKey, so fetch the address behind
+    it. Returns "" when it can't be determined; never raises."""
+    try:
+        resp = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Accept": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return ""
+        locs = resp.json().get("locations", []) or []
+    except Exception:  # noqa: BLE001 - best-effort lookup
+        return ""
+    if not locs:
+        return ""
+    match = next((loc for loc in locs
+                  if loc.get("merchantLocationKey") == merchant_location_key),
+                 locs[0])
+    address = (match.get("location") or {}).get("address") or {}
+    return str(address.get("postalCode") or "").strip()
+
+
 def account_overview(access_token: str) -> dict:
     """Mirror the seller's most-updated eBay account settings, best-effort.
     Every section is fetched independently, so one failing leaves the rest

@@ -22,7 +22,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from .. import db
+from .. import db, ebay_auth
 from ..config import log
 from ..models import Listing
 from . import ebay_trading
@@ -170,12 +170,24 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     keep flowing back through revise_listing.
     """
     c = creds or {}
+    # eBay rejects a Trading listing that doesn't say where it ships from. Use
+    # the saved ZIP, and when there isn't one, read it off the seller's eBay
+    # location and remember it so the next publish doesn't pay for the lookup.
+    postal = (c.get("ship_from_postal") or "").strip()
+    if not postal:
+        postal = ebay_auth.ship_from_postal(
+            token, c.get("merchant_location_key") or "")
+        if postal and c.get("_uid"):
+            try:
+                db.save_ebay_account(c["_uid"], ship_from_postal=postal)
+            except Exception as exc:  # noqa: BLE001 - caching is optional
+                log.info("sync: couldn't save the resolved ship-from ZIP: %s", exc)
     res = ebay_trading.create_listing(
         token, listing, image_urls,
         policies={k: c.get(k) for k in ("fulfillment_policy_id",
                                         "payment_policy_id",
                                         "return_policy_id")},
-        postal_code=c.get("ship_from_postal") or "")
+        postal_code=postal)
     # source="ebay" is what routes later edits down the Trading path, exactly
     # like a listing imported from the seller's store.
     listing.source = "ebay"
