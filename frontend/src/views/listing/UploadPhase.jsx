@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, FolderOpen, Trash2, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
-import { api, pollJob, downscaleForUpload, IMAGE_EXT_RE } from "@/lib/api";
+import { api, pollJob, downscaleAllForUpload, IMAGE_EXT_RE } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Toggle } from "@/components/ui/fields";
@@ -25,6 +25,13 @@ function bgFailureMessage(results, total) {
   return `${scope} — ${failed[0].bg_error} Your photos were saved unchanged.`;
 }
 
+// Server-side caps (backend/main.py): one listing takes up to 40 photos; a
+// bulk batch (many items) takes up to 250. Past 40 the pile can only be a
+// bulk batch, so the toggle locks on rather than letting the upload bounce
+// off the server with an error.
+const MAX_SINGLE_FILES = 40;
+const MAX_BATCH_FILES = 250;
+
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
@@ -39,8 +46,12 @@ export function UploadPhase({ onBulkStarted }) {
   const [bulkLive, setBulkLive] = useState(false);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Past the single-listing cap the pile can only be a bulk batch.
+  const forceBulk = files.length > MAX_SINGLE_FILES;
+  const bulkOn = bulk || forceBulk;
 
   const addFiles = (fileList) => {
+    let overflow = 0;
     setFiles((cur) => {
       const next = [...cur];
       for (const f of fileList) {
@@ -48,10 +59,15 @@ export function UploadPhase({ onBulkStarted }) {
         if (!f.type.startsWith("image/") && !IMAGE_EXT_RE.test(f.name || "")) continue;
         // Skip duplicates (same file picked twice) so we don't upload it twice.
         if (next.some((e) => e.file.name === f.name && e.file.size === f.size)) continue;
+        if (next.length >= MAX_BATCH_FILES) { overflow += 1; continue; }
         next.push({ file: f, url: URL.createObjectURL(f) });
       }
       return next;
     });
+    if (overflow) {
+      toast(`A batch takes up to ${MAX_BATCH_FILES} photos — ${overflow} weren't added. Run them as a second batch.`,
+        { kind: "warning" });
+    }
   };
 
   const removeFile = (i) => {
@@ -71,7 +87,7 @@ export function UploadPhase({ onBulkStarted }) {
     }))) return;
     setBusy(true);
     try {
-      const prepped = await Promise.all(files.map((f) => downscaleForUpload(f.file)));
+      const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("mode", mode);
@@ -89,10 +105,10 @@ export function UploadPhase({ onBulkStarted }) {
 
   const process = once("process", async () => {
     if (!files.length) return;
-    if (bulk) return startBulk();
+    if (bulkOn) return startBulk();
     setBusy(true);
     try {
-      const prepped = await Promise.all(files.map((f) => downscaleForUpload(f.file)));
+      const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
@@ -119,7 +135,7 @@ export function UploadPhase({ onBulkStarted }) {
     }
   });
 
-  if (busy && bulk) {
+  if (busy && bulkOn) {
     return <AIStatusCard messages={["Uploading your photo pile…", "This may take a moment…"]} />;
   }
   if (busy) {
@@ -227,7 +243,13 @@ export function UploadPhase({ onBulkStarted }) {
                 help="Cleaner, eBay-friendly product shots. Adds a few seconds per photo."
               />
 
-              {files.length >= 2 && (
+              {forceBulk ? (
+                <p className="text-sm text-ink-secondary">
+                  Bulk mode is on automatically — {files.length} photos is more
+                  than one listing holds (max {MAX_SINGLE_FILES}), so the AI
+                  will sort this pile into separate items.
+                </p>
+              ) : files.length >= 2 && (
                 <Toggle
                   checked={bulk}
                   onChange={setBulk}
@@ -236,7 +258,7 @@ export function UploadPhase({ onBulkStarted }) {
                 />
               )}
 
-              {bulk && (
+              {bulkOn && (
                 <Toggle
                   checked={bulkLive}
                   onChange={setBulkLive}
@@ -247,7 +269,7 @@ export function UploadPhase({ onBulkStarted }) {
 
               <Button variant="primary" size="lg" className="self-start" onClick={process}>
                 <Sparkles aria-hidden />
-                {bulk
+                {bulkOn
                   ? `Split ${files.length} photos into listings`
                   : "Identify with AI"}
               </Button>

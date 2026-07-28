@@ -416,9 +416,12 @@ def group_photos(images: list[bytes]) -> dict:
         "You are sorting a reseller's bulk photo dump into individual items "
         "to list on eBay.\n\n" + _GROUP_SCHEMA)})
 
+    # Headroom matters at the batch cap: a 100-photo chunk that turns out to be
+    # ~80 distinct items needs well over 1500 tokens of JSON, and a cut-off
+    # response aborts the whole bulk job.
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=1500,
+        max_tokens=4000,
         messages=[{"role": "user", "content": content}],
     )
     if resp.stop_reason == "max_tokens":
