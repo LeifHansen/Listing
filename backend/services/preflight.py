@@ -93,7 +93,9 @@ def validate(listing: Listing, mode: str, *,
         issues.append({"target": target, "level": level, "title": title, "fix": fix})
 
     # --- inventory item ---
-    if not (listing.images or []):
+    # An imported eBay listing has no local files — its photos are the
+    # eBay-hosted image_urls, which satisfy the requirement just the same.
+    if not (listing.images or []) and not (listing.image_urls or []):
         add("photos", "At least one photo is required",
             "Add a photo — listings without photos can't be saved to eBay.")
     elif len(listing.images) > MAX_PHOTOS:
