@@ -78,15 +78,19 @@ export function ListingsView({ kind, search = "" }) {
     if (await bulkDeleteListings(selIds)) exitSelect();
   };
 
-  // Reconcile Live statuses with eBay once per visit: anything sold or ended
-  // on eBay's side flips to Ended here instead of showing Live forever.
+  // Once per visit to Listings: import the seller's whole eBay store AND
+  // reconcile Live statuses. The import used to hide behind the "Sync with
+  // eBay" button, which read as "the sync doesn't work" to anyone who never
+  // spotted it — now it just happens; the button remains for manual re-runs.
   const synced = useRef(false);
   useEffect(() => {
     if (synced.current || kind !== "listings" || !user || !ebay.connected) return;
     synced.current = true;
+    importFromEbay();
     postJson("/api/ebay/sync-listings", {})
       .then((r) => { if (r.changed) loadListings({ quiet: true }); })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, user, ebay.connected, loadListings]);
 
   // Import the seller's existing eBay listings (the ones this app didn't

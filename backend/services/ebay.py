@@ -96,6 +96,10 @@ def _is_auction(listing: Listing) -> bool:
 
 def build_inventory_item(session_id: str, listing: Listing, base_url: str,
                          image_urls: Optional[list[str]] = None) -> dict:
+    from . import taxonomy
+    # Same guard as the Trading path: values coerced to each aspect's
+    # constraints so a chatty value can't sink the publish.
+    taxonomy.sanitize_specifics(listing)
     aspects: dict[str, list[str]] = {}
     identifiers: dict[str, str] = {}
     # eBay treats MOST aspects as single-value: sending two values (e.g. from a

@@ -148,9 +148,15 @@ def ensure_inventory_location(access_token: str, postal_code: str,
     }
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)
-    if r.status_code == 409:
-        # Already exists (maybe with a stale/missing address) — force it to the
-        # current ZIP+country, and surface it if the repair itself fails.
+    # "Already exists" arrives as 409 per the docs but as 400 (error 25801) in
+    # practice — treating only 409 as exists made every re-save of Settings
+    # fail on an account that already had the location.
+    already_exists = r.status_code == 409 or (
+        r.status_code == 400 and ("already exists" in r.text.lower()
+                                  or "25801" in r.text))
+    if already_exists:
+        # Force it to the current ZIP+country (it may hold a stale/missing
+        # address), and surface it if the repair itself fails.
         u = httpx.post(
             f"{base}/sell/inventory/v1/location/{key}/update_location_details",
             headers=headers, json={"location": {"address": addr}}, timeout=30)
