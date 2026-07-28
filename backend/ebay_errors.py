@@ -81,6 +81,22 @@ def explain(err: dict) -> dict:
                  f"{limit or 'a lower weight'}. Either switch this listing to a shipping "
                  "policy that supports heavier packages (Settings → Listing defaults, or "
                  "edit the policy on eBay), or lower the package weight to fit."))
+    elif has("must be greater than 0", "number after the decimal"):
+        # A NUMBER-typed item specific holding text or zero — "Fabric weight
+        # must be greater than 0. Enter up to 1 number after the decimal."
+        # NOT the shipping weight (that lives on the package), even though the
+        # word "weight" appears; the old mapping sent sellers to re-enter a
+        # package weight that was already fine.
+        aspect = next((v for v in (str(p.get("value", "")).strip() for p in params)
+                       if v and v[:1].isupper() and len(v) <= 40
+                       and not v.endswith((".", "!")) and len(v.split()) <= 5), "")
+        issue.update(
+            target="specifics",
+            title=(f"“{aspect}” needs a plain number" if aspect
+                   else "An item specific needs a plain number"),
+            fix="Under Item specifics, make it just a number (one decimal at "
+                "most, e.g. “14”) — or clear it if it doesn't apply. Your "
+                "shipping weight is a separate field and may already be fine.")
     elif has("weight", "package", "shipping package", "dimensions"):
         issue.update(target="weight",
                      title="eBay needs a valid shipping weight",

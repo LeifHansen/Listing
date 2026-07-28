@@ -15,6 +15,7 @@ from typing import Optional
 from anthropic import Anthropic
 
 from .. import config
+from . import taxonomy
 from ..models import IdentifyResult, ItemSpecific, Listing
 
 # eBay's well-known condition enum values (subset most listings use).
@@ -555,66 +556,25 @@ _ASPECTS_FILL_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "specifics": [ {"name": "<exact aspect name>", "value": "<value>"} ] }
 Rules:
-- Return an entry for EVERY aspect listed below — none may be left out. Buyers
-  filter on these, so a blank specific is a listing that never gets found.
-  Use the aspect's EXACT name as given.
-- Prefer a real value: anything you can SEE in the photos or confidently infer
-  from the item, its tags/labels, or the context provided.
+- Fill each listed eBay item specific you can SEE in the photos or confidently
+  infer. Use the aspect's EXACT name as given.
 - For an aspect shown as "(choose one of: ...)", the value MUST be exactly one
   of those allowed values, copied verbatim (this is how eBay's fixed-value /
-  checkbox specifics are matched). If none of the allowed values fits the item,
-  use the one that means "not applicable" if the list offers one; otherwise
-  return the empty string "" for that aspect and it will be dropped.
-- For "(free text)" aspects you genuinely cannot determine, decide which is
-  true and answer accordingly:
-    * the aspect does not apply to this kind of item  -> "Does Not Apply"
-    * it applies but isn't visible/known from photos  -> "Unbranded" for brand-
-      like aspects, otherwise "Not Specified"
-  Never invent a specific factual claim (a model number, a size, a material,
-  a year) that the photos don't support — use the wording above instead.
-- Physical size aspects (Item Height, Item Length, Item Width, Item Depth,
-  Item Diameter, Item Weight): ALWAYS give a best-effort ESTIMATE of the actual
-  item (not the shipping box), judged from the photos' real-world scale, as a
-  number with unit (e.g. "7 in", "1.5 lb"). Never "Does Not Apply" for these —
-  some categories refuse to publish without a real measurement.
+  checkbox specifics are matched). If none fits, omit that aspect.
+- An aspect shown as "(plain number)" takes ONLY a number like "14" (one
+  decimal at most, no words or units); "(4-digit year)" takes a year like
+  "1985". If you can't tell, omit it — text there gets the listing rejected.
+- For "(free text)" aspects, give the single best concise value eBay expects.
+- Omit any aspect you cannot determine — never guess, and never fill an
+  aspect with "Not Specified"/"Does Not Apply" just to have an answer.
+- EXCEPTION — physical size aspects (Item Height, Item Length, Item Width,
+  Item Depth, Item Diameter, Item Weight): when listed, ALWAYS provide a
+  best-effort ESTIMATE of the actual item's dimensions (not the shipping box)
+  judged from the photos' real-world scale, as a number with unit (e.g.
+  "7 in", "1.5 lb") — some categories refuse to publish without these, and
+  the seller can correct an estimate.
 - One value per aspect name.
 """
-
-
-def _norm_aspect_value(s: str) -> str:
-    return "".join(ch for ch in s.lower() if ch.isalnum())
-
-
-def _match_selection_value(value: str, allowed: list[str]) -> Optional[str]:
-    """Map a model-supplied value to eBay's exact allowed value for a
-    fixed-value (SELECTION_ONLY / "checkbox") aspect. Returns the canonical
-    allowed string, or None when nothing fits. Only ever returns a string from
-    `allowed`, so eBay can never reject it — but it's far more forgiving than an
-    exact match, which used to drop things like "Machine Washable" (eBay:
-    "Machine Wash") or "Spandex" (eBay: "Spandex/Elastane"), leaving the
-    specific blank. Conservative order: exact > normalized-equal > unambiguous
-    containment (only when exactly one allowed value overlaps)."""
-    v = value.strip()
-    if not v:
-        return None
-    for a in allowed:  # 1) exact, case-insensitive
-        if a.strip().lower() == v.lower():
-            return a
-    nv = _norm_aspect_value(v)
-    if not nv:
-        return None
-    for a in allowed:  # 2) same once spacing/punctuation is ignored
-        if _norm_aspect_value(a) == nv:
-            return a
-    # 3) one contains the other, but only if a SINGLE allowed value qualifies,
-    #    so we never silently pick between rival options (e.g. Cotton vs
-    #    Cotton Blend both matching "cotton").
-    hits = []
-    for a in allowed:
-        na = _norm_aspect_value(a)
-        if na and (na in nv or nv in na):
-            hits.append(a)
-    return hits[0] if len(hits) == 1 else None
 
 
 def fill_aspects(image_paths: list[Path], listing: Listing,
@@ -629,9 +589,15 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
     client = _client()
     lines = []
     for a in named:
+        dtype = (a.get("data_type") or "STRING").upper()
+        fmt = (a.get("format") or "").lower()
         if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
             vals = ", ".join(a["values"][:40])
             lines.append(f'- "{a["name"]}" (choose one of: {vals})')
+        elif dtype == "DATE" or "yyyy" in fmt:
+            lines.append(f'- "{a["name"]}" (4-digit year)')
+        elif dtype == "NUMBER":
+            lines.append(f'- "{a["name"]}" (plain number)')
         else:
             lines.append(f'- "{a["name"]}" (free text)')
     context = (f"Title: {listing.title}\nBrand: {listing.brand}\n"
@@ -666,13 +632,14 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
         if not name or not value or key not in by_name or key in seen:
             continue
         a = by_name[key]
-        if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
-            match = _match_selection_value(value, a["values"])
-            if not match:
-                continue  # not a valid eBay value — drop rather than get rejected
-            value = match  # canonical value eBay expects
+        # Coerce to the aspect's own constraints (fixed choices matched to
+        # eBay's exact wording, numbers stripped to plain numbers, years to
+        # YYYY) — an illegal value is dropped rather than rejected later.
+        legal = taxonomy.coerce_aspect_value(value, a)
+        if legal is None:
+            continue
         seen.add(key)
-        out.append(ItemSpecific(name=a["name"], value=value))
+        out.append(ItemSpecific(name=a["name"], value=legal))
     return out
 
 

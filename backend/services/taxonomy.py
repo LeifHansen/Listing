@@ -12,12 +12,14 @@ Endpoints used:
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 
 import httpx
 
 from .. import config
+from ..config import log
 
 # Simple in-process caches (token + per-marketplace tree id).
 _token_cache: dict = {"token": None, "expires_at": 0.0}
@@ -242,6 +244,13 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
             "mode": mode,
             "values": capped,
             "cardinality": cardinality,
+            # Value-format constraints. eBay enforces these at publish with
+            # errors like "Fabric weight must be greater than 0. Enter up to 1
+            # number after the decimal" — so senders must too, or one chatty
+            # value kills the whole listing.
+            "data_type": (constraint.get("aspectDataType") or "STRING").upper(),
+            "format": constraint.get("aspectFormat") or "",
+            "max_length": int(constraint.get("aspectMaxLength") or 0),
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
@@ -250,3 +259,138 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
         _ASPECTS_CACHE.clear()
     _ASPECTS_CACHE[cache_key] = (time.time(), result)
     return result
+
+
+# --- aspect-value validation -------------------------------------------------
+# eBay validates item-specific VALUES against the aspect's constraints at
+# publish time, and one bad value rejects the whole listing ("Fabric weight
+# must be greater than 0. Enter up to 1 number after the decimal"). Everything
+# below makes a value legal for its aspect — or says it can't be.
+
+# Values that mean "no real answer". Legitimate in a free-text STRING aspect
+# (eBay itself suggests "Does Not Apply" for MPN/UPC); poison in a NUMBER,
+# DATE, or fixed-choice aspect.
+NA_SENTINELS = {"does not apply", "not specified", "n/a", "na", "none",
+                "unknown", "unbranded"}
+
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _norm_value(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def match_selection_value(value: str, allowed: list[str]) -> Optional[str]:
+    """Map a value onto eBay's exact allowed value for a fixed-choice
+    (SELECTION_ONLY) aspect. Returns the canonical allowed string or None.
+    Conservative order: exact > normalized-equal > unambiguous containment
+    (only when exactly one allowed value overlaps), so it never silently picks
+    between rivals like Cotton vs Cotton Blend."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    for a in allowed:
+        if a.strip().lower() == v.lower():
+            return a
+    nv = _norm_value(v)
+    if not nv:
+        return None
+    for a in allowed:
+        if _norm_value(a) == nv:
+            return a
+    hits = [a for a in allowed
+            if _norm_value(a) and (_norm_value(a) in nv or nv in _norm_value(a))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def coerce_aspect_value(value: str, aspect: dict) -> Optional[str]:
+    """The eBay-legal form of `value` for `aspect` (an item_aspects entry),
+    or None when no legal form exists and the aspect should be dropped.
+
+    - NUMBER: keep just the number ("14 oz denim" -> "14"), integers when the
+      format says int; drop text/zero — that junk is a publish-killer.
+    - DATE/year formats: keep a plausible 4-digit year ("1980s vintage" ->
+      "1980"); drop otherwise.
+    - SELECTION_ONLY: map onto the allowed list; drop when nothing matches.
+    - N/A sentinels survive only where they're legal (free-text STRING).
+    - Length: clip to the aspect's own max (eBay rejects over-long values).
+    """
+    v = (value or "").strip()
+    if not v:
+        return None
+    data_type = (aspect.get("data_type") or "STRING").upper()
+    fmt = (aspect.get("format") or "").lower()
+    is_year = data_type == "DATE" or "yyyy" in fmt
+    if data_type == "NUMBER" or is_year:
+        if v.lower() in NA_SENTINELS:
+            return None
+        if is_year:
+            # Digit-boundary lookarounds, not \b: "1980s vintage" must yield
+            # 1980 (the "s" is a word character, so \b never matches there).
+            m = re.search(r"(?<!\d)(1[6-9]\d{2}|20\d{2})(?!\d)", v)
+            return m.group(1) if m else None
+        m = _NUMBER_RE.search(v)
+        if not m or float(m.group()) <= 0:
+            return None
+        number = float(m.group())
+        # "int32"-style formats take whole numbers; everything else follows
+        # eBay's "up to 1 number after the decimal".
+        v = str(int(number)) if "int" in fmt or number == int(number) \
+            else str(round(number, 1))
+    elif aspect.get("mode") == "SELECTION_ONLY" and aspect.get("values"):
+        matched = match_selection_value(v, aspect["values"])
+        if matched is None:
+            return None
+        v = matched
+    max_len = int(aspect.get("max_length") or 0) or 65
+    return v[:max_len]
+
+
+def sanitize_specifics(listing) -> None:
+    """Rewrite listing.item_specifics into publish-safe form, in place:
+    canonical aspect names for the category (case drift and the "Height" vs
+    "Item Height" alias both reject publishes), values coerced to each
+    aspect's constraints via coerce_aspect_value, one value per SINGLE-
+    cardinality aspect, and unfixable values dropped — a busy specific must
+    never sink the listing. Best-effort: without a category (or with the
+    Taxonomy API down) the specifics pass through untouched."""
+    if not listing.category_id:
+        return
+    try:
+        aspects = item_aspects(listing.category_id).get("aspects", [])
+    except Exception as exc:  # noqa: BLE001 - sanitizing is best-effort
+        log.info("sanitize_specifics skipped (cat=%s): %s", listing.category_id, exc)
+        return
+    by_key: dict[str, dict] = {}
+    for a in aspects:
+        name = (a.get("name") or "").strip()
+        if not name:
+            continue
+        by_key[name.lower()] = a
+        if name.lower().startswith("item "):
+            by_key.setdefault(name.lower()[5:], a)
+        else:
+            by_key.setdefault(f"item {name.lower()}", a)
+    cleaned, seen_single = [], set()
+    for spec in listing.item_specifics:
+        name = (spec.name or "").strip()
+        value = (spec.value or "").strip()
+        if not name or not value:
+            continue
+        aspect = by_key.get(name.lower())
+        if aspect is None:
+            cleaned.append(spec)  # seller's own free-form specific — keep as-is
+            continue
+        legal = coerce_aspect_value(value, aspect)
+        if legal is None:
+            log.info("specifics: dropped %r=%r (doesn't fit the aspect's "
+                     "constraints)", name, value)
+            continue
+        canonical = aspect["name"]
+        if (aspect.get("cardinality") or "SINGLE") != "MULTI":
+            if canonical.lower() in seen_single:
+                continue
+            seen_single.add(canonical.lower())
+        spec.name, spec.value = canonical, legal
+        cleaned.append(spec)
+    listing.item_specifics = cleaned

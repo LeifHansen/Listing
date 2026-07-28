@@ -25,7 +25,7 @@ from typing import Optional
 from .. import db, ebay_auth
 from ..config import log
 from ..models import Listing
-from . import ebay_trading
+from . import ebay_trading, taxonomy
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
 # live/market facts from eBay but keep everything else the record already has,
@@ -170,6 +170,11 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     keep flowing back through revise_listing.
     """
     c = creds or {}
+    # Make every specific legal for its aspect before it goes near eBay —
+    # canonical names, plain numbers where numbers are demanded, fixed choices
+    # matched to eBay's wording. One chatty value ("Fabric Weight: Midweight")
+    # otherwise rejects the whole listing.
+    taxonomy.sanitize_specifics(listing)
     # eBay rejects a Trading listing that doesn't say where it ships from. Use
     # the saved ZIP, and when there isn't one, read it off the seller's eBay
     # location and remember it so the next publish doesn't pay for the lookup.
@@ -199,6 +204,7 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
 def push_edit(token: str, listing: Listing) -> dict:
     """Send an edited imported listing back to eBay. Raises TradingError with
     eBay's own reason on failure."""
+    taxonomy.sanitize_specifics(listing)  # same guard as create_on_ebay
     return ebay_trading.revise_listing(
         token, listing.ebay_listing_id, listing,
         image_urls=listing.image_urls or None)
