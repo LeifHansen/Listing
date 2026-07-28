@@ -20,9 +20,9 @@ import { PhotoTile } from "./PhotoTile";
 
 const SEP = "|";
 
-// Photos of a listing imported from eBay: eBay hosts them, so there are no
-// local files to reorder, rotate, or run through the studio. They're shown
-// read-only with a pointer to where they can be changed.
+// Fallback strip for an imported listing whose photos couldn't be copied into
+// app storage yet (opening the listing normally imports them automatically,
+// making them fully editable). Read-only: ebayimg URLs never enter the editor.
 function EbayPhotos({ urls }) {
   return (
     <div className="flex flex-col gap-3">
@@ -34,8 +34,9 @@ function EbayPhotos({ urls }) {
         ))}
       </div>
       <p className="text-[13px] text-ink-secondary">
-        These photos are hosted by eBay on your existing listing. Everything else
-        here is editable — photo changes are best made on eBay itself.
+        These photos are still hosted by eBay — we couldn’t copy them for editing
+        just now. Close and reopen this listing to try again; everything else
+        here stays editable.
       </p>
     </div>
   );

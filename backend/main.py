@@ -23,9 +23,9 @@ from . import auth, config, db, ebay_auth, ebay_errors, objstore, storage
 from .config import log
 from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
                      SessionOnlyRequest)
-from .services import (claude_ai, ebay, ebay_trading, images, listing_sync,
-                       metrics, preflight, pricing, promotions, recommender,
-                       taxonomy)
+from .services import (claude_ai, ebay, ebay_trading, image_import, images,
+                       listing_sync, metrics, preflight, pricing, promotions,
+                       recommender, taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -60,7 +60,11 @@ def _sweep_orphans() -> None:
     ids = db.all_listing_ids()
     if ids is None:  # no DB / read failed — don't risk deleting real images
         return
-    removed = storage.sweep_orphan_sessions(ids, max_age_seconds=3 * 3600)
+    # Compare DIR names, not raw ids: session_dir() strips non-alphanumerics,
+    # so an imported listing "ebay-123" lives in dir "ebay123" — matching raw
+    # ids would sweep every imported listing's photos as orphans.
+    dir_names = {storage.session_dir(i).name for i in ids if i}
+    removed = storage.sweep_orphan_sessions(dir_names, max_age_seconds=3 * 3600)
     if removed:
         log.info("startup: swept %d orphaned session dir(s) to reclaim space", removed)
 
@@ -1064,9 +1068,11 @@ async def edit_image(
         import os
         from PIL import Image
         img = Image.open(BytesIO(data)).convert("RGB")
-        # Write to a temp file and atomically replace, so a concurrent reader
-        # (eBay fetching /media, or a thumbnail request) never sees a
-        # half-written JPEG.
+        # Every edit is a new version — the outgoing working copy is snapshot
+        # to history first (never destroyed), then atomically replaced so a
+        # concurrent reader (eBay fetching /media, or a thumbnail request)
+        # never sees a half-written JPEG.
+        storage.snapshot_image(session_id, name)
         tmp = path.with_name(path.name + ".tmp")
         img.save(tmp, "JPEG", quality=88, optimize=True)
         os.replace(tmp, path)
@@ -1150,6 +1156,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     def _rotate() -> None:
         import os
         from PIL import Image
+        storage.snapshot_image(session_id, name)  # rotations version too
         with Image.open(path) as img:
             rotated = img.convert("RGB").transpose(Image.Transpose.ROTATE_270)
         tmp = path.with_name(path.name + ".tmp")
@@ -1989,7 +1996,57 @@ def get_listing(listing_id: str, request: Request) -> dict:
     # Enforce ownership for listings that belong to an account.
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
+    _adopt_imported_images(listing_id, rec)
     return rec
+
+
+def _refresh_eps_urls(listing_id: str, token: str, item_id: str,
+                      uid: Optional[str]) -> None:
+    """After eBay ingests our /media photo URLs on a revise, fetch the fresh
+    EPS URLs it minted and store them as the listing's sync references. The
+    local working copies remain the editable truth either way — these URLs
+    only matter for unchanged-photo publishes and the read-only fallback."""
+    fresh = ebay_trading.get_listing(token, item_id)
+    urls = fresh.get("image_urls") or []
+    if not urls:
+        return
+    rec = db.get_listing(listing_id)
+    if not rec:
+        return
+    listing = rec.get("listing") or {}
+    listing["image_urls"] = urls
+    db.upsert_listing(listing_id, listing, status=rec.get("status") or "published",
+                      user_id=uid or rec.get("user_id"))
+    log.info("EPS refresh: %s now references %d eBay-hosted photos",
+             listing_id, len(urls))
+
+
+def _adopt_imported_images(listing_id: str, rec: dict) -> None:
+    """First open of an imported eBay listing: copy its EPS-hosted photos into
+    app storage so they're editable exactly like uploaded ones (the app owns
+    every editable image; ebayimg URLs never reach the browser editor). Runs
+    once — after this the listing has local `images` and the grid/editor treat
+    it like any other listing. Best-effort: on failure the record is returned
+    unchanged and the UI falls back to the read-only eBay photo strip."""
+    listing = rec.get("listing") or {}
+    if ((listing.get("source") or "") != "ebay" or listing.get("images")
+            or not listing.get("image_urls")):
+        return
+    # A previous open may have imported the files but failed the DB write.
+    names = storage.list_optimized(listing_id) \
+        or image_import.import_listing_images(listing_id, listing["image_urls"])
+    if not names:
+        return
+    listing["images"] = names
+    rec["listing"] = listing
+    try:
+        db.upsert_listing(listing_id, listing, status=rec.get("status") or "published",
+                          user_id=rec.get("user_id"))
+        storage.save_listing(listing_id, Listing(
+            **{k: v for k, v in listing.items() if k in Listing.model_fields}))
+    except Exception as exc:  # noqa: BLE001 - files are on disk; next open retries the DB
+        log.warning("image import: couldn't persist adopted photos for %s: %s",
+                    listing_id, exc)
 
 
 @app.delete("/api/listings/{listing_id}")
@@ -2115,8 +2172,20 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                                             "these changes to your live listing."})
         if not creds:
             raise HTTPException(400, "Connect eBay first.")
+        # Photo sync: local working copies are the truth. Edited since the
+        # last sync (or photos added/removed) → send OUR /media URLs so eBay
+        # ingests fresh copies; untouched → reuse the live EPS URLs and skip
+        # the re-upload churn entirely.
+        urls, pushed_local = req.listing.image_urls or None, False
+        local_names = [n for n in (req.listing.images or [])
+                       if (storage.optimized_dir(req.session_id) / n).is_file()]
+        if local_names and (not urls
+                            or image_import.images_changed(req.session_id, local_names)):
+            urls = ebay.image_urls_for(req.session_id, req.listing, _base_url(request))
+            pushed_local = True
         try:
-            res = listing_sync.push_edit(creds["access_token"], req.listing)
+            res = listing_sync.push_edit(creds["access_token"], req.listing,
+                                         image_urls=urls)
         except ValueError as exc:  # TradingError — eBay's own reason
             log.warning("revise (imported) failed: session=%s: %s", req.session_id, exc)
             db.upsert_listing(req.session_id, req.listing.model_dump(),
@@ -2128,8 +2197,18 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
             })
         db.upsert_listing(req.session_id, req.listing.model_dump(),
                           status="published", user_id=uid)
-        log.info("revise (imported) ok: session=%s item=%s",
-                 req.session_id, res.get("listing_id"))
+        if pushed_local:
+            # eBay accepted our copies: re-baseline the checksums and, in the
+            # background (after the upsert above, so it can't be overwritten),
+            # pull the new EPS URLs eBay minted so the sync references stay
+            # current.
+            image_import.mark_synced(req.session_id, local_names)
+            _in_background(_refresh_eps_urls, req.session_id,
+                           creds["access_token"], req.listing.ebay_listing_id,
+                           uid, what="EPS URL refresh")
+        log.info("revise (imported) ok: session=%s item=%s photos=%s",
+                 req.session_id, res.get("listing_id"),
+                 "local-updated" if pushed_local else "unchanged")
         return JSONResponse({"published": True, "revised": True, "mode": "live",
                              "listing_id": res.get("listing_id"),
                              "message": "Your eBay listing has been updated."})
