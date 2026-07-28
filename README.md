@@ -179,7 +179,7 @@ backend/
   models.py          Pydantic models (Listing, etc.)
   storage.py         per-session filesystem store
   services/
-    images.py        photo pipeline (Photoroom/Adobe/local + Pillow finishing)
+    images.py        photo pipeline (Pixian/Photoroom/Adobe/local + Pillow finishing)
     adobe.py         Lightroom studio preset + Photoshop Remove Background APIs
     ebay_trading.py  Trading API (XML) client — sees listings we didn't create
     listing_sync.py  bi-directional sync: import the store, push edits back
@@ -198,28 +198,31 @@ Frontend dev with hot reload: `cd frontend && npm run dev` (proxies `/api` and
 `/media` to the backend on :8000). `./run.sh` and the Dockerfile build the
 production bundle automatically.
 
-## Photo pipeline (Photoroom default, Adobe backup)
+## Photo pipeline (engine picked by `BG_ENGINE`)
 
-Background removal + studio treatment run on pro engines in this order:
+Background removal + studio treatment run on the engine `BG_ENGINE` selects.
+Unset (auto) means: **Pixian when its keys are present, otherwise the local
+model** — the paid Photoroom/Adobe engines never run in auto mode, so a
+configured key can't quietly spend money per photo.
 
-1. **Photoroom (default)** — with `PHOTOROOM_API_KEY` set, every "remove
-   background" photo gets a Photoroom cutout composited onto white with a
-   soft contact shadow and a studio enhancement pass. Batches run a few
-   photos at a time (`PHOTO_BATCH_WORKERS`, default 4).
-2. **Adobe (backup)** — when a Photoroom call fails for any reason (rate
-   limit, outage, credits) and `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` are
-   set (a server-to-server OAuth credential from
-   [developer.adobe.com/console](https://developer.adobe.com/console) with
-   the Lightroom + Photoshop APIs enabled), the photo is staged to R2 and
-   handed to Adobe instead: the **Lightroom API** applies the "studio"
-   develop preset (bundled at `backend/assets/studio-preset.xmp`;
-   `ADOBE_STUDIO_PRESET_URL` overrides it), then the **Photoshop Remove
-   Background** service does the cutout. (The Lightroom API only does
-   develop edits — presets/tone/color — so the cutout is the Photoshop half.)
-   R2 is required for this path: Adobe's async APIs move files exclusively
-   via presigned URLs.
-3. **Local (last resort)** — the in-process Pillow + rembg pipeline runs only
-   when neither pro engine is configured.
+- **`local` (the free default)** — the in-process Pillow + rembg pipeline; no
+  key, no per-image cost. Production runs the `isnet-general-use` model
+  (`REMBG_MODEL` in fly.toml — needs the 4GB VM; smaller boxes fall back to
+  the light `u2netp`).
+- **`pixian` (the budget API)** — [Pixian.ai](https://pixian.ai) with
+  `PIXIAN_API_ID`/`PIXIAN_API_SECRET` set: roughly a tenth of Photoroom's
+  per-image price, with the local model as its in-chain fallback. Batches run
+  several photos at a time (`PHOTO_BATCH_WORKERS`, default 8).
+- **`photoroom`** — the Photoroom API (`PHOTOROOM_API_KEY`); best quality,
+  priciest. When Adobe is also configured it backs Photoroom up.
+- **`adobe`** — `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` (a server-to-server
+  OAuth credential from
+  [developer.adobe.com/console](https://developer.adobe.com/console) with the
+  Lightroom + Photoshop APIs enabled): the **Lightroom API** applies the
+  "studio" develop preset (bundled at `backend/assets/studio-preset.xmp`;
+  `ADOBE_STUDIO_PRESET_URL` overrides it), then the **Photoshop Remove
+  Background** service does the cutout. R2 is required for this path: Adobe's
+  async APIs move files exclusively via presigned URLs.
 
 Either way the finished images continue through the usual flow: square crop,
 resize to 1600px, identify, draft, publish. A failed pro-engine call never

@@ -95,6 +95,9 @@ def health() -> dict:
         "adobe_configured": config.adobe_configured(),
         "adobe_ready": config.adobe_ready(),
         "photoroom_configured": config.photoroom_ready(),
+        "pixian_configured": config.pixian_ready(),
+        # The background-removal engines that will actually run, in order.
+        "bg_engines": config.bg_engine_chain(),
         "storage": "r2" if objstore.enabled() else "local",
         "db": db.db_status(),
     }

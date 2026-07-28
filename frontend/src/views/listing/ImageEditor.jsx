@@ -205,7 +205,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       const res = await studioCall("/api/image/remove-bg", sessionId, name, blob);
       await applyPreview(res.image);
       toast(
-        `Background removed${res.engine === "adobe" ? " with Adobe Photoshop" : res.engine === "photoroom" ? " with Photoroom" : " (on-server model)"} — review and Save to keep it.`,
+        `Background removed${res.engine === "adobe" ? " with Adobe Photoshop" : res.engine === "photoroom" ? " with Photoroom" : res.engine === "pixian" ? " with Pixian" : " (on-server model)"} — review and Save to keep it.`,
         { kind: "success" },
       );
     } catch (e) {
