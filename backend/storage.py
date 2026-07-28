@@ -45,6 +45,32 @@ def optimized_dir(session_id: str) -> Path:
     return ensure_session(session_id) / "optimized"
 
 
+def history_dir(session_id: str) -> Path:
+    d = session_dir(session_id) / "history"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def snapshot_image(session_id: str, name: str, keep: int = 10) -> None:
+    """Preserve the current working copy of a photo before it's overwritten —
+    edits never destroy a version. Snapshots land in history/<name>.<ms>.jpg,
+    oldest pruned beyond `keep` per photo. Best-effort: a failed snapshot must
+    never block the save itself."""
+    try:
+        src = optimized_dir(session_id) / name
+        if not src.is_file():
+            return
+        hist = history_dir(session_id)
+        shutil.copy2(src, hist / f"{name}.{int(time.time() * 1000)}")
+        stem = f"{name}."
+        old = sorted((p for p in hist.iterdir() if p.name.startswith(stem)),
+                     key=lambda p: p.name)
+        for p in old[:-keep]:
+            p.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"storage: snapshot failed for {session_id}/{name}: {exc}")
+
+
 def save_listing(session_id: str, listing: Listing) -> None:
     d = ensure_session(session_id)
     (d / "listing.json").write_text(listing.model_dump_json(indent=2))

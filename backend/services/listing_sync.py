@@ -201,13 +201,19 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     return res
 
 
-def push_edit(token: str, listing: Listing) -> dict:
+def push_edit(token: str, listing: Listing,
+              image_urls: Optional[list[str]] = None) -> dict:
     """Send an edited imported listing back to eBay. Raises TradingError with
-    eBay's own reason on failure."""
+    eBay's own reason on failure.
+
+    `image_urls` overrides which photo URLs eBay gets: the caller passes our
+    own /media URLs when the local working copies changed (eBay ingests fresh
+    EPS derivatives), and the existing ebayimg URLs when nothing changed (no
+    re-upload churn). Default: the listing's current eBay-hosted URLs."""
     taxonomy.sanitize_specifics(listing)  # same guard as create_on_ebay
     return ebay_trading.revise_listing(
         token, listing.ebay_listing_id, listing,
-        image_urls=listing.image_urls or None)
+        image_urls=image_urls or listing.image_urls or None)
 
 
 def end(token: str, listing: Listing) -> dict:
