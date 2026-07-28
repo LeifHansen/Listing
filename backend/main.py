@@ -481,7 +481,12 @@ def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dic
         fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
         has_payment = bool(creds.get("payment_policy_id"))
         has_return = bool(creds.get("return_policy_id"))
-        has_location = bool(creds.get("merchant_location_key"))
+        # A saved ship-from ZIP is enough: the Trading publish path sends the
+        # postal code directly, and the Inventory path re-creates the eBay
+        # location from that ZIP just before publishing. Demanding a
+        # merchantLocationKey here blocked publishes that would have worked.
+        has_location = bool(creds.get("merchant_location_key")
+                            or creds.get("ship_from_postal"))
     else:
         fulfillment = listing.fulfillment_policy_id or config.EBAY_FULFILLMENT_POLICY_ID or ""
         has_payment = bool(config.EBAY_PAYMENT_POLICY_ID)
@@ -988,8 +993,9 @@ async def upload_more(
             src.write_bytes(data)
             await run_in_threadpool(images.optimize, src, opt_dir / f"img_{idx:02d}.jpg", strip_bg)
             new_names.append(f"img_{idx:02d}.jpg")
-        except OSError:
-            raise HTTPException(507, "The server is out of storage space — try again shortly.")
+        except OSError as exc:
+            raise HTTPException(
+                507, "The server is out of storage space — try again shortly.") from exc
         except Exception as exc:  # noqa: BLE001 - skip a bad file, keep the rest
             log.warning("upload-more: couldn't process %s: %s", f.filename, exc)
     if not new_names:
@@ -2035,8 +2041,9 @@ def merge_listings(payload: dict, request: Request) -> dict:
             dst_name = f"img_{nxt:02d}.jpg"
             try:
                 shutil.copyfile(src, tdir / dst_name)
-            except OSError:
-                raise HTTPException(507, "The server is out of storage space — try again shortly.")
+            except OSError as exc:
+                raise HTTPException(
+                    507, "The server is out of storage space — try again shortly.") from exc
             added.append(dst_name)
             nxt += 1
 

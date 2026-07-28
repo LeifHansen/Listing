@@ -99,6 +99,31 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
     raise RuntimeError(f"campaign create failed ({r.status_code}): {r.text[:200]}")
 
 
+def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
+                                    campaign_id: str, listing_id: str,
+                                    rate: float) -> dict:
+    """Ad for a listing eBay knows by ITEM ID — anything published through the
+    Trading API. The inventory-reference route below only works for listings
+    the Sell Inventory API created; using it for a Trading listing fails with
+    "inventory reference not found", which is how promotions silently stopped
+    working for every listing after the publish path moved to Trading."""
+    req = {"listingId": str(listing_id), "bidPercentage": f"{rate:.1f}"}
+    r = client.post(
+        f"{base}{_MARKETING}/ad_campaign/{campaign_id}/bulk_create_ads_by_listing_id",
+        headers=_headers(token), json={"requests": [req]})
+    if r.status_code in (200, 201, 207) and "error" not in r.text.lower():
+        return {"ok": True}
+    if _is_scope_error(r):
+        raise _ScopeError()
+    # Already advertised (a re-publish or a second promote) → move its bid.
+    u = client.post(
+        f"{base}{_MARKETING}/ad_campaign/{campaign_id}/bulk_update_ads_bid_by_listing_id",
+        headers=_headers(token), json={"requests": [req]})
+    if u.status_code in (200, 207) and "error" not in u.text.lower():
+        return {"ok": True, "updated": True}
+    return {"ok": False, "detail": (r.text or u.text)[:300]}
+
+
 def _create_or_update_ad(client: httpx.Client, base: str, token: str,
                          campaign_id: str, sku: str, rate: float) -> dict:
     payload = {
@@ -137,11 +162,19 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
                 "message": "Connect your eBay account to run promotions."}
     base = config.EBAY_API_BASE
     marketplace = config.EBAY_MARKETPLACE_ID
-    sku = ebay._sku(session_id, listing)
+    # Which handle eBay knows this listing by: a Trading-published (or
+    # imported) listing is addressed by item id; an Inventory-API listing by
+    # the SKU we gave its inventory item.
+    by_listing_id = bool(listing.ebay_listing_id) and (listing.source or "") == "ebay"
     try:
         with httpx.Client(timeout=30) as client:
             campaign_id = _ensure_campaign(client, base, token, marketplace)
-            res = _create_or_update_ad(client, base, token, campaign_id, sku, rate)
+            if by_listing_id:
+                res = _create_or_update_ad_by_listing(
+                    client, base, token, campaign_id, listing.ebay_listing_id, rate)
+            else:
+                res = _create_or_update_ad(client, base, token, campaign_id,
+                                           ebay._sku(session_id, listing), rate)
     except _ScopeError:
         return {"promoted": False, "needs_reconnect": True,
                 "message": "Reconnect your eBay account to grant ad permissions, "
