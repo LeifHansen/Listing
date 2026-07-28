@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, X,
+  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -140,7 +140,9 @@ function PublishedScreen({ w }) {
 }
 
 function Workflow() {
-  const { session, startNew, setSession, setView } = useApp();
+  const {
+    session, startNew, setSession, setView, deleteListing, activeBulk,
+  } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
   // { name } — the photo open in the studio (clean up, remove background, crop).
@@ -152,6 +154,20 @@ function Workflow() {
       message: "Your current draft stays saved in Drafts — you can come back to it anytime.",
       confirmLabel: "Start new",
     })) startNew();
+  };
+
+  // Delete — for a listing that can't be salvaged. Without this the only way
+  // out of a broken listing was to leave the editor and hunt for its card.
+  const remove = async () => {
+    if (await confirm({
+      title: "Delete this listing?",
+      message: "It's permanently removed, photos included. This can't be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+    })) {
+      await deleteListing(session.sessionId);
+      setView("dashboard");
+    }
   };
 
   // Exit — close the editor without publishing. The listing stays saved as
@@ -191,8 +207,22 @@ function Workflow() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Opening an item from a batch replaced the queue with this editor,
+              stranding the rest of the batch. Clearing the session brings the
+              queue straight back — it's still in memory. */}
+          {activeBulk && (
+            <Button variant="secondary" onClick={() => setSession(null)}>
+              <ArrowLeft aria-hidden /> Back to batch
+            </Button>
+          )}
+          <Button variant="ghost" onClick={() => setView("drafts")}>
+            <ArrowLeft aria-hidden /> My drafts
+          </Button>
           <Button variant="ghost" onClick={restart}>
             <RotateCcw aria-hidden /> Start over
+          </Button>
+          <Button variant="ghost" onClick={remove} aria-label="Delete this listing">
+            <Trash2 aria-hidden /> Delete
           </Button>
           <Button variant="ghost" onClick={exit} aria-label="Close this listing">
             <X aria-hidden /> Exit

@@ -48,7 +48,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "package_width_in": number (estimated SHIPPING BOX width in inches, packed),
   "package_height_in": number (estimated SHIPPING BOX height in inches, packed),
   "item_specifics": [{"name": "string", "value": "string"}],
-  "missing_info": ["names of fields a human should verify/fill, e.g. 'exact model number', 'size'"],
+  "missing_info": ["names of ITEM details a human should verify/fill, e.g. 'exact model number', 'size'. NEVER list where the item ships from, its location, shipping/return/payment policies, or handling time — the seller's account settles those once, not per listing"],
   "confidence": "low|medium|high",
   "raw_observations": "brief notes on what you actually see in the photos"
 }
@@ -138,6 +138,31 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
+# Things the ACCOUNT settles once, not the seller per listing: where it ships
+# from, which policies apply, how fast it goes out. The model likes to add
+# these to missing_info because a listing does carry them, but asking the
+# seller to type their own city on every item is noise — the app already has
+# it from Settings and sends it at publish time.
+_ACCOUNT_LEVEL_FIELDS = (
+    "location", "ship from", "ship-from", "shipping origin", "zip", "postal",
+    "handling time", "dispatch time", "return policy", "payment policy",
+    "shipping policy", "seller name", "store name",
+)
+
+
+def _drop_account_level(entries: list) -> list[str]:
+    """missing_info minus anything Settings already answers."""
+    out = []
+    for raw in entries:
+        text = str(raw).strip()
+        if not text:
+            continue
+        if any(term in text.lower() for term in _ACCOUNT_LEVEL_FIELDS):
+            continue
+        out.append(text)
+    return out
+
+
 def _to_listing(data: dict, image_names: list[str]) -> Listing:
     # The model sometimes returns null (not []) for these, or entries that
     # aren't dicts — coerce defensively so a stray shape can't crash identify.
@@ -194,7 +219,7 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         package_height_in=_f("package_height_in"),
         item_specifics=specifics,
         images=image_names,
-        missing_info=[str(m) for m in raw_missing if m],
+        missing_info=_drop_account_level(raw_missing),
     )
 
 

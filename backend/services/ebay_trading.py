@@ -383,6 +383,13 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     return); with those set eBay takes shipping, payment, and returns from the
     profiles, so they don't have to be spelled out per listing.
     """
+    if not postal_code:
+        # eBay's own words for this are "Your item's location was not filled
+        # in" — accurate but useless to a seller who never saw a location
+        # field. Say what to actually do instead of letting the call fail.
+        raise TradingError(
+            "eBay needs to know where this ships from. Add your ship-from ZIP "
+            "in Settings → Listing settings and publish again.")
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
     parts = _item_fields(listing, image_urls)
