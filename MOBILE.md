@@ -33,8 +33,11 @@ cd frontend
 npm install --save-dev @capacitor/cli
 npm install @capacitor/core @capacitor/ios @capacitor/android
 
-# capacitor.config.ts is already in this folder. Build the web bundle once so
-# `dist/` exists (Capacitor needs a webDir even when loading a remote URL):
+# capacitor.config.json is already in this folder (deliberately JSON, not TS:
+# the CLI's TypeScript config loader breaks on TypeScript 6 with
+# "Cannot read properties of undefined (reading 'CommonJS')").
+# Build the web bundle once so `dist/` exists (Capacitor needs a webDir even
+# when loading a remote URL):
 npm run build
 
 # Generate the native projects:
@@ -44,12 +47,15 @@ npx cap add android    # optional, only if you also want Android/Play
 
 ## 2. App icon + splash from the logo
 
+`frontend/assets/` already holds the sources this tool expects — `icon.png`
+(1024²) and `splash.png` / `splash-dark.png` (2732²), pre-rendered from the
+brand logo on white. Point `--assetPath` at that FOLDER, never at a single
+image file (that's the "No assets found in the asset path" error).
+
 ```bash
-# Uses the existing brand logo as the source.
 npm install --save-dev @capacitor/assets
-npx capacitor-assets generate --iconBackgroundColor '#ffffff' \
-  --splashBackgroundColor '#ffffff' \
-  --assetPath public/thryft-shop-logo-final.png
+npx capacitor-assets generate --assetPath assets \
+  --iconBackgroundColor '#ffffff' --splashBackgroundColor '#ffffff'
 npx cap sync
 ```
 

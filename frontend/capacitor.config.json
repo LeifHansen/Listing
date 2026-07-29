@@ -1,0 +1,12 @@
+{
+  "appId": "com.thryftshop.app",
+  "appName": "Thryft Shop",
+  "webDir": "dist",
+  "server": {
+    "url": "https://listing-lfwjrg.fly.dev",
+    "cleartext": false
+  },
+  "ios": {
+    "contentInset": "never"
+  }
+}

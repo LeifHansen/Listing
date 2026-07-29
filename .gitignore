@@ -25,3 +25,8 @@ data/.secret_key
 # Frontend build
 frontend/node_modules/
 frontend/dist/
+
+# Capacitor native projects — generated on a Mac by `npx cap add ios/android`
+# (see MOBILE.md); never committed.
+frontend/ios/
+frontend/android/
