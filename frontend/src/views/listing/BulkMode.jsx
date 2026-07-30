@@ -71,7 +71,7 @@ const LISTING_FORMATS = [
 ];
 // eBay's own recommendation replaces this at publish time; it's just the
 // starting number in the box.
-const DEFAULT_AD_RATE = 5;
+const DEFAULT_AD_RATE = 10;
 
 function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, publishing }) {
   const l = item.listing || {};

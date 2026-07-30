@@ -789,7 +789,10 @@ export function DescriptionCard({ w }) {
 // pick an ad rate, charged only when the item sells through the promotion.
 const PROMO_MIN = 2;
 const PROMO_MAX = 20;
-const PROMO_SUGGESTED = 6;
+// Starting rate when the seller turns Promote on by hand. On the automatic
+// path (auto-promote at publish) the rate is left at 0, which tells the server
+// to use eBay's own recommendation for the listing and fall back to this.
+const PROMO_SUGGESTED = 10;
 
 export function PromoteCard({ w }) {
   const { ebay } = useApp();
