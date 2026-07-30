@@ -356,18 +356,29 @@ export function SpecificsCard({ w }) {
 
   const renderAspect = (a) => {
     const row = w.getSpecificRow(a.name);
+    // An empty REQUIRED aspect blocks publishing — it must be unmissable in
+    // the grid, not discovered via a failed publish. Amber ring + "Missing"
+    // pill until it's filled.
+    const missing = a.required && !(row?.value || "").trim();
+    const ringCls = missing ? "ring-2 ring-warning/60" : undefined;
     const badge = (
       <span className="inline-flex items-center gap-1.5">
         <ConfidencePill row={row} />
-        <TagPill tone={a.required ? "red" : "neutral"}>
-          {a.required ? "Required" : "Recommended"}
-        </TagPill>
+        {missing ? (
+          <TagPill tone="yellow">
+            <AlertTriangle size={11} aria-hidden /> Missing — required
+          </TagPill>
+        ) : (
+          <TagPill tone={a.required ? "red" : "neutral"}>
+            {a.required ? "Required" : "Recommended"}
+          </TagPill>
+        )}
       </span>
     );
     return (
       <Field key={a.name} label={a.name} hint={badge}>
         {a.mode === "SELECTION_ONLY" && a.values?.length ? (
-          <Select value={row?.value || ""}
+          <Select value={row?.value || ""} className={ringCls}
             onChange={(e) => w.upsertSpecific(a.name, e.target.value)}>
             <option value="">— select —</option>
             {a.values.map((v) => <option key={v} value={v}>{v}</option>)}
@@ -376,6 +387,7 @@ export function SpecificsCard({ w }) {
           <Input
             value={row?.value || ""}
             placeholder={a.name}
+            className={ringCls}
             onChange={(e) => w.upsertSpecific(a.name, e.target.value)}
           />
         )}

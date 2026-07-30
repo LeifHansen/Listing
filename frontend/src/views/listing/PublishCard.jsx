@@ -158,11 +158,46 @@ export function PublishCard({ w }) {
 // For a LIVE listing the actions flip to revise mode: Update Live Listing +
 // End listing (Save Draft disappears — on a published offer any eBay save
 // goes straight to the live listing, so a "draft" would mislead).
+// What each unfinished card is called in the publish bar, and which fix-it
+// target jumps to it (flagging a card scrolls to it and pops the More Details
+// fold open if it lives in there).
+const GAP_META = {
+  photos: { label: "Photos", target: "photos" },
+  title: { label: "Title", target: "title" },
+  category: { label: "eBay category", target: "category" },
+  specifics: { label: "Required item specifics", target: "specifics" },
+  pricing: { label: "Price", target: "price" },
+  shipping: { label: "Package weight", target: "weight" },
+  description: { label: "Description", target: "description" },
+};
+
 export function PublishBar({ w }) {
   const { canPublishLive, deleteListing, setSession, setView, openListings } = useApp();
   const { confirm } = useToast();
-  const attention = Object.values(w.completion).filter((s) => s === "attention").length;
-  const ready = attention === 0;
+  const gaps = Object.entries(w.completion)
+    .filter(([, s]) => s === "attention")
+    .map(([k]) => GAP_META[k])
+    .filter(Boolean);
+  const ready = gaps.length === 0;
+  // Never say "N fields left" without SAYING WHICH — these chips name each
+  // gap and clicking one scrolls straight to the field that needs finishing.
+  const jumpTo = (target) => {
+    w.setFixTarget(null);
+    requestAnimationFrame(() => w.setFixTarget(target));
+  };
+
+  const askCancel = async () => {
+    if (await confirm({
+      title: "Close without saving?",
+      message: w.isLive
+        ? "Changes you made here since the last update are discarded — the live listing stays as it is on eBay."
+        : "Changes since the last save are discarded — the listing stays in Drafts exactly as last saved.",
+      confirmLabel: "Close",
+    })) {
+      setSession(null);
+      openListings(w.isLive ? "active" : "drafts");
+    }
+  };
 
   const askDelete = async () => {
     if (await confirm({
@@ -218,9 +253,25 @@ export function PublishBar({ w }) {
             <span className="block text-[15px] sm:text-base font-bold text-ink leading-tight truncate">
               {status.head}
             </span>
-            <span className="block text-[13px] text-ink-secondary leading-snug mt-0.5">
-              {status.sub}
-            </span>
+            {ready ? (
+              <span className="block text-[13px] text-ink-secondary leading-snug mt-0.5">
+                {status.sub}
+              </span>
+            ) : (
+              <span className="flex flex-wrap items-center gap-1.5 mt-1">
+                {gaps.map((g) => (
+                  <button
+                    key={g.target}
+                    type="button"
+                    onClick={() => jumpTo(g.target)}
+                    className="inline-flex items-center gap-1 rounded-full bg-warning-soft border border-warning/40 px-2.5 py-0.5 text-[12px] font-bold text-warning cursor-pointer hover:border-warning transition-colors"
+                  >
+                    {g.label} <ArrowRight size={11} aria-hidden />
+                  </button>
+                ))}
+                <span className="text-[12px] text-ink-faint">tap to jump — or save a draft</span>
+              </span>
+            )}
           </span>
         </span>
         <span className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto">
@@ -232,6 +283,9 @@ export function PublishBar({ w }) {
                   <ExternalLink aria-hidden /> View
                 </Button>
               )}
+              <Button variant="ghost" size="md" onClick={askCancel} aria-label="Cancel editing">
+                Cancel
+              </Button>
               <Button variant="secondary" size="lg" onClick={askEnd}>
                 <Ban aria-hidden /> End
               </Button>
@@ -243,6 +297,9 @@ export function PublishBar({ w }) {
             <>
               {/* Right where a listing that won't publish leaves you — no
                   hunting back through the list for its card. */}
+              <Button variant="ghost" size="md" onClick={askCancel} aria-label="Cancel editing">
+                Cancel
+              </Button>
               <Button variant="ghost" size="md" onClick={askDelete}
                 aria-label="Delete this listing">
                 <Trash2 aria-hidden /> <span className="hidden sm:inline">Delete</span>

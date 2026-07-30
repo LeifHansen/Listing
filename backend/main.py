@@ -1769,7 +1769,27 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         log.warning("identify job %s failed: %s", job_id, exc)
-        _bulk_set(job_id, done=True, error=claude_ai.ai_error_message(exc)[1])
+        reason = claude_ai.ai_error_message(exc)[1]
+        # The upload must never vanish: without a DB record the photos are
+        # invisible in the app AND the orphan sweep deletes the session dir
+        # within hours — "my shirt never saved as a draft". Save a stub draft
+        # so the photos land in Drafts and Start over can retry the AI.
+        try:
+            names = storage.list_optimized(session_id)
+            if names and not db.get_listing(session_id):
+                stub = Listing(images=names, missing_info=[
+                    f"The AI couldn't identify this item ({reason}). "
+                    "Your photos are safe — use Start over to retry, or fill "
+                    "the listing in by hand."])
+                storage.save_listing(session_id, stub)
+                db.upsert_listing(session_id, stub.model_dump(),
+                                  status="draft", user_id=uid)
+                log.info("identify job %s: saved stub draft for session=%s",
+                         job_id, session_id)
+        except Exception as exc2:  # noqa: BLE001 - stub save is best-effort
+            log.warning("identify job %s: couldn't save stub draft: %s",
+                        job_id, exc2)
+        _bulk_set(job_id, done=True, error=reason)
 
 
 @app.post("/api/identify-async/{session_id}")

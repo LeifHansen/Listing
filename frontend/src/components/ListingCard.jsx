@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban,
 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
@@ -14,7 +14,7 @@ import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 // In select mode (`selectable`), clicking toggles `selected` via `onSelect`
 // instead of opening — powers mass actions like delete-selected in Drafts.
 export function ListingCard({
-  item, onOpen, onDelete, onStartOver, startingOver, onSkip, skipped,
+  item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   stale, metrics, selectable, selected, onSelect, className,
 }) {
   const l = item.listing || {};
@@ -152,7 +152,7 @@ export function ListingCard({
         >
           <Check size={15} strokeWidth={3} />
         </span>
-      ) : (onDelete || onStartOver || onSkip) && (
+      ) : (onDelete || onEnd || onStartOver || onSkip) && (
         <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
           {/* Skip: set this draft aside. It stays in Drafts, but the queue
               after a publish stops offering it as the next one to work on. */}
@@ -198,7 +198,28 @@ export function ListingCard({
                 : <RotateCcw size={15} aria-hidden />}
             </button>
           )}
-          {onDelete && (
+          {/* A LIVE listing's card action is End (→ Inactive tab), never a
+              permanent delete: the listing is a real thing on eBay. Delete
+              stays for drafts/finds and already-inactive records. */}
+          {onEnd ? (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onEnd(item); }}
+              disabled={ending}
+              aria-label="End listing on eBay"
+              title="End this listing on eBay — it moves to Inactive and can be relisted anytime"
+              className={cn(
+                "grid place-items-center size-8 rounded-full cursor-pointer",
+                "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+                "hover:text-error hover:border-error/40 transition-colors",
+                ending && "cursor-wait text-error",
+              )}
+            >
+              {ending
+                ? <Loader2 size={15} className="animate-spin" aria-hidden />
+                : <Ban size={15} aria-hidden />}
+            </button>
+          ) : onDelete && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onDelete(item); }}

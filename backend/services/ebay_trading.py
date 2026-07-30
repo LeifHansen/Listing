@@ -275,6 +275,42 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 25
 
 
+def _my_ebay_ids(token: str, container: str, sort: str,
+                 limit: Optional[int], max_pages: int) -> list[str]:
+    """Item ids from one GetMyeBaySelling container (ActiveList / UnsoldList /
+    SoldList), page by page. SoldList nests items inside order transactions
+    rather than a flat ItemArray, so ids are swept from every ItemID element
+    under the container (deduped, order kept)."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    page = 1
+    while page <= max_pages:
+        body = (
+            f"<{container}><Include>true</Include>"
+            f"<Pagination><EntriesPerPage>{_PAGE_SIZE}</EntriesPerPage>"
+            f"<PageNumber>{page}</PageNumber></Pagination>"
+            + (f"<Sort>{sort}</Sort>" if sort else "")
+            + f"</{container}>"
+            "<DetailLevel>ReturnAll</DetailLevel>"
+        )
+        root = _call("GetMyeBaySelling", token, body)
+        cont = _find(root, container)
+        if cont is None:
+            break
+        page_ids = [el.text.strip() for el in cont.iter()
+                    if el.tag.endswith("ItemID") and el.text and el.text.strip()]
+        for i in page_ids:  # dedupe as we go — a multi-qty sale repeats its id
+            if i not in seen:
+                seen.add(i)
+                ids.append(i)
+        total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
+        if (page >= max(1, total_pages) or not page_ids
+                or (limit is not None and len(ids) >= limit)):
+            break
+        page += 1
+    return ids[:limit] if limit is not None else ids
+
+
 def active_listing_ids(token: str, limit: Optional[int] = None,
                        max_pages: int = _MAX_PAGES) -> list[str]:
     """Every ACTIVE listing id on the connected account, oldest page first.
@@ -283,28 +319,20 @@ def active_listing_ids(token: str, limit: Optional[int] = None,
     store" view — it includes listings created anywhere, not just by us.
     `limit` stops the walk as soon as that many ids are in hand, so a caller
     that only wants the first N doesn't pay for pages it will discard."""
-    ids: list[str] = []
-    page = 1
-    while page <= max_pages:
-        body = (
-            "<ActiveList><Include>true</Include>"
-            f"<Pagination><EntriesPerPage>{_PAGE_SIZE}</EntriesPerPage>"
-            f"<PageNumber>{page}</PageNumber></Pagination>"
-            "<Sort>TimeLeft</Sort></ActiveList>"
-            "<DetailLevel>ReturnAll</DetailLevel>"
-        )
-        root = _call("GetMyeBaySelling", token, body)
-        active = _find(root, "ActiveList")
-        if active is None:
-            break
-        page_ids = [_text(i, "ItemID") for i in _findall(active, "ItemArray/Item")]
-        ids.extend([i for i in page_ids if i])
-        total_pages = _int(active, "PaginationResult/TotalNumberOfPages", 1)
-        if (page >= max(1, total_pages) or not page_ids
-                or (limit is not None and len(ids) >= limit)):
-            break
-        page += 1
-    return ids[:limit] if limit is not None else ids
+    return _my_ebay_ids(token, "ActiveList", "TimeLeft", limit, max_pages)
+
+
+def unsold_listing_ids(token: str, limit: Optional[int] = None,
+                       max_pages: int = _MAX_PAGES) -> list[str]:
+    """Listings that ENDED WITHOUT SELLING (eBay keeps ~90 days of these) —
+    the store's inactive pile, importable so it mirrors here too."""
+    return _my_ebay_ids(token, "UnsoldList", "", limit, max_pages)
+
+
+def sold_listing_ids(token: str, limit: Optional[int] = None,
+                     max_pages: int = _MAX_PAGES) -> list[str]:
+    """Listings SOLD in the recent period (~90 days) per GetMyeBaySelling."""
+    return _my_ebay_ids(token, "SoldList", "", limit, max_pages)
 
 
 def get_listing(token: str, item_id: str) -> dict:

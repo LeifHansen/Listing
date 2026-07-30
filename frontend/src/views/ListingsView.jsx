@@ -8,7 +8,7 @@ import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { ORIGIN_META, TagPill, originOf } from "@/components/ui/badges";
+import { OriginChip, originOf } from "@/components/ui/badges";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -51,11 +51,12 @@ const TABS = [
     },
   },
   {
-    id: "unsold", label: "Unsold", statuses: ["ended"],
-    sub: "Ended without selling — open one to relist it fresh",
+    id: "inactive", label: "Inactive", statuses: ["ended"],
+    sub: "Ended listings — no longer on eBay; open one to relist it fresh",
     empty: {
-      illustration: TagIllustration, title: "Nothing unsold",
-      message: "Listings that end without a sale collect here so they're one tap from a fresh relist.",
+      illustration: TagIllustration, title: "No inactive listings",
+      message: "Listings you end (the ⊘ button on an active card) and eBay listings that "
+        + "end without selling both collect here, one tap from a fresh relist.",
     },
   },
   {
@@ -176,6 +177,29 @@ export function ListingsView({ search = "", forceTab }) {
     })) deleteListing(item.id);
   };
 
+  // End a live listing straight from its card: it comes off eBay and moves to
+  // the Inactive tab, relistable anytime — never a permanent delete.
+  const [endingId, setEndingId] = useState(null);
+  const askEnd = async (item) => {
+    const name = item.listing?.title || item.title || "this listing";
+    if (!(await confirm({
+      title: "End this listing on eBay?",
+      message: `"${name}" comes off eBay immediately and moves to Inactive — you can edit and relist it anytime.`,
+      confirmLabel: "End listing",
+      danger: true,
+    }))) return;
+    setEndingId(item.id);
+    try {
+      await postJson("/api/ebay/end-listing", { session_id: item.id });
+      await loadListings({ quiet: true });
+      toast("Listing ended — find it under Inactive.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
+    } finally {
+      setEndingId(null);
+    }
+  };
+
   const q = search.trim().toLowerCase();
   const items = listingsState.items
     .filter((i) => (tab.statuses ? tab.statuses.includes(i.status) : true))
@@ -243,6 +267,8 @@ export function ListingsView({ search = "", forceTab }) {
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
             <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
+              onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
+              ending={endingId === item.id}
               onStartOver={tab.draftTools && isDraft(item) ? startOver : undefined}
               startingOver={startingOver === item.id}
               onSkip={tab.draftTools && isDraft(item) ? () => toggleSkipDraft(item.id) : undefined}
@@ -331,11 +357,7 @@ export function ListingsView({ search = "", forceTab }) {
         const present = [...new Set(items.map(originOf))];
         return (
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[12px] text-ink-faint -mt-1">
-            {present.map((k) => (
-              <span key={k} title={ORIGIN_META[k].tip} className="cursor-help">
-                <TagPill tone={ORIGIN_META[k].tone}>{ORIGIN_META[k].label}</TagPill>
-              </span>
-            ))}
+            {present.map((k) => <OriginChip key={k} kind={k} />)}
             <span>— hover a badge to see what it can and can’t do</span>
           </div>
         );
