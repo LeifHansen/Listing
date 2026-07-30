@@ -77,6 +77,53 @@ export function ProgressChip({ state = "todo", className }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Listing origin — created here vs. published on eBay and imported — and what
+// that means for editing. The record id is the reliable tell: imported
+// listings are stored as "ebay-<itemId>", app-created ones as session ids.
+// (`listing.source === "ebay"` alone can't distinguish them: app listings
+// published through the Trading API set that too.)
+// ---------------------------------------------------------------------------
+
+export function originOf(item) {
+  const l = item.listing || {};
+  if (String(item.id || "").startsWith("ebay-")) return "imported";
+  const live = item.status === "published" || item.status === "live";
+  // Live but NOT Trading-routed and carrying an eBay id = published back when
+  // the app used the Inventory API. eBay locks those out of Seller Hub's own
+  // editors, so the seller needs to know edits belong here.
+  if (live && (l.source || "") !== "ebay" && l.ebay_listing_id) return "app_classic";
+  return "app";
+}
+
+export const ORIGIN_META = {
+  app: {
+    label: "Thryft",
+    tone: "blue",
+    tip: "Created with Thryft Shop. Fully editable here and in eBay Seller Hub — no restrictions.",
+  },
+  app_classic: {
+    label: "Thryft · app-managed",
+    tone: "yellow",
+    tip: "Created with Thryft Shop before the Seller Hub upgrade. eBay doesn't let its own Seller Hub edit this kind of listing — make changes here and they go live. Ending and relisting it converts it to a fully unrestricted listing.",
+  },
+  imported: {
+    label: "eBay import",
+    tone: "neutral",
+    tip: "Published on eBay, mirrored here. Fully editable from this app — edited photos upload as fresh copies to eBay. Two limits: the format (auction vs Buy It Now) can't be changed after publishing, and listings with variations aren't supported yet.",
+  },
+};
+
+// The origin chip on a listing card. Hover/long-press shows the rules.
+export function OriginBadge({ item, className }) {
+  const meta = ORIGIN_META[originOf(item)];
+  return (
+    <span title={meta.tip} className={cn("cursor-help", className)}>
+      <TagPill tone={meta.tone}>{meta.label}</TagPill>
+    </span>
+  );
+}
+
 export function ConfidenceBadge({ level, className }) {
   const l = ["low", "medium", "high"].includes(level) ? level : "medium";
   const tone = { low: "red", medium: "yellow", high: "green" }[l];

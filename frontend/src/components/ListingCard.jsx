@@ -5,7 +5,7 @@ import {
   SkipForward, Undo2,
 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
-import { PriceBadge, StatusBadge } from "@/components/ui/badges";
+import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 
 // ListingCard — one saved listing in a grid. Click opens it in the workflow;
 // when onDelete is provided, a trash button removes it. The delete control is a
@@ -70,13 +70,12 @@ export function ListingCard({
             </div>
           )}
           <StatusBadge status={item.status} className="absolute top-3 left-3 shadow-card" />
-          {fromEbay && (
-            <span
-              className="absolute top-3 right-3 rounded-full bg-card/95 border border-line shadow-card px-2 py-0.5 text-[11px] font-bold text-ink-secondary"
-              title="Imported from your eBay account — edits here update it on eBay"
-            >
-              On eBay
-            </span>
+          {/* Origin chip — created here vs. imported from eBay — only where
+              the distinction matters (the listing exists on eBay). Hover for
+              exactly what each kind allows. */}
+          {(isLive || item.status === "ended" || item.status === "sold") && (
+            <OriginBadge item={item}
+              className="absolute bottom-3 right-3 [&>span]:shadow-card [&>span]:bg-card/95 [&>span]:border [&>span]:border-line" />
           )}
         </div>
         <div className="p-4 flex flex-col gap-2 flex-1">

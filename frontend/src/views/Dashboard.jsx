@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Timer, Coins, Lightbulb, Megaphone, TrendingDown, Tag, RotateCcw,
-  ListChecks,
+  Tags, Coins, Lightbulb, Megaphone, TrendingDown, Tag, RotateCcw,
+  ListChecks, Loader2, RefreshCw, CheckCircle2,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -54,6 +54,44 @@ const rise = {
   hidden: { opacity: 0, y: 10 },
   show: { opacity: 1, y: 0, transition: { duration: 0.25, ease: "easeOut" } },
 };
+
+// One line of truth about the mirror: syncing / synced / not connected. Lives
+// in the hero so "is this my real store?" is answered before anything else.
+function MirrorStatus() {
+  const { user, ebay, storeSync, setView } = useApp();
+  if (!user) return null;
+  if (!ebay.connected) {
+    return (
+      <button
+        type="button"
+        onClick={() => setView("settings")}
+        className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warning cursor-pointer hover:underline"
+      >
+        <Store size={14} aria-hidden /> Connect eBay in Settings to mirror your store here
+      </button>
+    );
+  }
+  if (storeSync.syncing) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary">
+        <Loader2 size={14} className="animate-spin" aria-hidden /> Syncing your eBay store…
+      </span>
+    );
+  }
+  if (storeSync.error) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warning">
+        <RefreshCw size={14} aria-hidden /> Store sync hit a snag — retry from Listings
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary"
+      title="Everything below reflects your actual eBay store — created here or not.">
+      <CheckCircle2 size={14} className="text-success" aria-hidden /> Live mirror of your eBay store
+    </span>
+  );
+}
 
 export function Dashboard() {
   const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, session, deleteListing, metricsById } = useApp();
@@ -116,12 +154,13 @@ export function Dashboard() {
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");
+  const soldEnded = items.filter((i) => i.status === "sold" || i.status === "ended");
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
-  // Sellers report ~12 min per hand-written listing; Thryft Shop takes ~2.
-  const minutesSaved = items.length * 10;
-  const timeSaved = minutesSaved >= 90
-    ? `${(minutesSaved / 60).toFixed(1)} h`
-    : `${minutesSaved} min`;
+  const watcherTotal = live.reduce((sum, i) => {
+    const m = metricsById[i.id];
+    const w = m?.watchers ?? i.listing?.watch_count ?? 0;
+    return sum + (Number(w) || 0);
+  }, 0);
 
   // An in-memory session resumes directly — but NOT once it's gone live (or
   // otherwise left the draft stage): there's nothing to "continue" on a
@@ -163,6 +202,7 @@ export function Dashboard() {
                   : "Ready to flip something today?"}
                 {drafts.length > 0 && <> {drafts.length} draft{drafts.length === 1 ? "" : "s"} waiting.</>}
               </p>
+              <div className="mt-2"><MirrorStatus /></div>
               <div className="mt-5 flex flex-wrap items-center gap-2.5">
                 {lastOpen ? (
                   <Button variant="primary" size="lg" onClick={lastOpen.go} className="max-w-full">
@@ -210,15 +250,29 @@ export function Dashboard() {
         ))}
       </motion.div>
 
-      {/* Performance */}
+      {/* Your store, mirrored — the tiles are the seller's REAL numbers and
+          each one jumps to the matching view. */}
       <motion.div variants={rise} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={Rocket} tone="blue" label="Today's listings" value={todays.length} />
-        <StatCard icon={FileText} tone="yellow" label="Drafts" value={drafts.length}
-          sub={inventory.length ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"}` : undefined} />
-        <StatCard icon={Coins} tone="green" label="Live value"
-          value={formatMoney(revenue) || "$0"} sub={`${live.length} live listing${live.length === 1 ? "" : "s"}`} />
-        <StatCard icon={Timer} tone="red" label="Time saved" value={items.length ? `~${timeSaved}` : "—"}
-          sub="vs. writing listings by hand" />
+        <StatCard icon={Coins} tone="green" label="Active on eBay"
+          value={live.length}
+          sub={revenue > 0
+            ? `${formatMoney(revenue)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
+            : "everything currently live"}
+          onClick={() => setView("listings")} />
+        <StatCard icon={FileText} tone="yellow" label="Drafts in progress"
+          value={drafts.length}
+          sub={inventory.length
+            ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"} from Shop Mode`
+            : "open one to finish & publish"}
+          onClick={() => setView("drafts")} />
+        <StatCard icon={Tag} tone="blue" label="Sold & ended"
+          value={soldEnded.length}
+          sub="relist ended items in one tap"
+          onClick={() => setView("listings")} />
+        <StatCard icon={Rocket} tone="red" label="Listed today"
+          value={todays.length}
+          sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}
+          onClick={startNew} />
       </motion.div>
 
       {/* Suggested actions — the recommendation engine's picks */}
