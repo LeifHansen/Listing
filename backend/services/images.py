@@ -549,7 +549,7 @@ def warm() -> None:
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
 
-def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
+def _autocrop_borders(img: Image.Image) -> Image.Image:
     """Trim near-uniform borders (e.g. plain background) around the subject."""
     rgb = _flatten(img)
     # Compare against the top-left corner color as the assumed background.

@@ -242,7 +242,7 @@ def suggested_ad_rates(creds: dict | None, listing_ids: list[str]) -> dict[str, 
     the Sell Recommendation API. Best-effort and cached; returns {} when the
     scope isn't granted or nothing is recommended. {listing_id: rate}."""
     token = (creds or {}).get("access_token")
-    ids = sorted(set(str(i) for i in listing_ids if i))
+    ids = sorted({str(i) for i in listing_ids if i})
     if not token or not ids:
         return {}
     cache_key = f"{token[-12:]}:{','.join(ids)}"
