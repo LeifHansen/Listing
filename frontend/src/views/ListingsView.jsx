@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, RefreshCw, CheckSquare, Trash2, X,
@@ -8,6 +8,7 @@ import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { ORIGIN_META, TagPill, originOf } from "@/components/ui/badges";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -39,7 +40,8 @@ const CONFIGS = {
   },
   listings: {
     title: "Listings",
-    sub: "Your whole eBay store — listings from this app and everything already on eBay",
+    sub: "A live mirror of your whole eBay store — created here or already on eBay",
+    legend: true,
     filter: () => true,
     illustration: TagIllustration,
     emptyTitle: "No listings yet",
@@ -57,7 +59,7 @@ export function ListingsView({ kind, search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     bulkDeleteListings, ebay, loadListings, metricsById,
-    skippedDraftIds, toggleSkipDraft,
+    skippedDraftIds, toggleSkipDraft, storeSync, syncStore,
   } = useApp();
   const { confirm, toast } = useToast();
 
@@ -78,45 +80,25 @@ export function ListingsView({ kind, search = "" }) {
     if (await bulkDeleteListings(selIds)) exitSelect();
   };
 
-  // Once per visit to Listings: import the seller's whole eBay store AND
-  // reconcile Live statuses. The import used to hide behind the "Sync with
-  // eBay" button, which read as "the sync doesn't work" to anyone who never
-  // spotted it — now it just happens; the button remains for manual re-runs.
-  const synced = useRef(false);
-  useEffect(() => {
-    if (synced.current || kind !== "listings" || !user || !ebay.connected) return;
-    synced.current = true;
-    importFromEbay();
-    postJson("/api/ebay/sync-listings", {})
-      .then((r) => { if (r.changed) loadListings({ quiet: true }); })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, user, ebay.connected, loadListings]);
-
-  // Import the seller's existing eBay listings (the ones this app didn't
-  // create). Runs on demand — it walks the whole store, so it's a button
-  // rather than something that fires on every visit.
-  const [importing, setImporting] = useState(false);
+  // The store-level mirror (store.jsx syncStore) imports the whole eBay store
+  // on app load, so this view just re-runs it on demand and narrates.
   const importFromEbay = async () => {
-    setImporting(true);
-    try {
-      const r = await postJson("/api/ebay/import-listings", {});
-      await loadListings({ quiet: true });
-      const fresh = r.imported || 0;
-      toast(
-        fresh || r.updated
-          ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.`
-          : "Everything's already in sync with eBay.",
-        { kind: "success" },
-      );
-      if (r.failed) {
-        toast(`${r.failed} listing${r.failed === 1 ? "" : "s"} couldn't be read from eBay.`,
-          { kind: "warning" });
-      }
-    } catch (e) {
-      toast(`Couldn't sync with eBay: ${e.message}`, { kind: "error" });
-    } finally {
-      setImporting(false);
+    const r = await syncStore({ force: true });
+    if (!r) return;
+    if (r.error) {
+      toast(`Couldn't sync with eBay: ${r.error}`, { kind: "error" });
+      return;
+    }
+    const fresh = r.imported || 0;
+    toast(
+      fresh || r.updated
+        ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.`
+        : "Everything's already in sync with eBay.",
+      { kind: "success" },
+    );
+    if (r.failed) {
+      toast(`${r.failed} listing${r.failed === 1 ? "" : "s"} couldn't be read from eBay.`,
+        { kind: "warning" });
     }
   };
 
@@ -246,7 +228,7 @@ export function ListingsView({ kind, search = "" }) {
         </div>
         <div className="flex items-center gap-2">
           {kind === "listings" && user && ebay.connected && (
-            <Button variant="soft" onClick={importFromEbay} loading={importing}>
+            <Button variant="soft" onClick={importFromEbay} loading={storeSync.syncing}>
               <RefreshCw aria-hidden /> Sync with eBay
             </Button>
           )}
@@ -271,6 +253,21 @@ export function ListingsView({ kind, search = "" }) {
           ))}
         </div>
       </div>
+      {/* Origin legend: which badges appear in this grid and what each one is
+          allowed to do — hover (or long-press) a chip for the full rules. */}
+      {cfg.legend && user && items.length > 0 && (() => {
+        const present = [...new Set(items.map(originOf))];
+        return (
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[12px] text-ink-faint -mt-1">
+            {present.map((k) => (
+              <span key={k} title={ORIGIN_META[k].tip} className="cursor-help">
+                <TagPill tone={ORIGIN_META[k].tone}>{ORIGIN_META[k].label}</TagPill>
+              </span>
+            ))}
+            <span>— hover a badge to see what it can and can’t do</span>
+          </div>
+        );
+      })()}
       {body}
     </div>
   );

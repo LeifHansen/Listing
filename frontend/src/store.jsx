@@ -117,6 +117,37 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // ---------- eBay store mirror ----------
+  // The app mirrors the seller's WHOLE eBay store, not just what it created:
+  // once eBay is connected, the first load imports every active listing and
+  // reconciles live statuses — so the dashboard and Listings ARE the store.
+  // Runs once per app session; `syncStore({ force: true })` re-runs it (the
+  // "Sync with eBay" button).
+  const [storeSync, setStoreSync] = useState({
+    syncing: false, lastSynced: null, error: null,
+  });
+  const syncedOnce = useRef(false);
+  const syncStore = useCallback(async ({ force = false } = {}) => {
+    if (!user || !ebay.connected) return null;
+    if (syncedOnce.current && !force) return null;
+    syncedOnce.current = true;
+    setStoreSync((s) => ({ ...s, syncing: true, error: null }));
+    try {
+      const res = await postJson("/api/ebay/import-listings", {});
+      // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
+      postJson("/api/ebay/sync-listings", {})
+        .then((r) => { if (r.changed) loadListings({ quiet: true }); })
+        .catch(() => {});
+      await loadListings({ quiet: true });
+      setStoreSync({ syncing: false, lastSynced: Date.now(), error: null });
+      return res;
+    } catch (e) {
+      setStoreSync({ syncing: false, lastSynced: null, error: e.message });
+      return { error: e.message };
+    }
+  }, [user, ebay.connected, loadListings]);
+  useEffect(() => { syncStore(); }, [syncStore]);
+
   // ---------- the listing being worked on ----------
   // session: { sessionId, listing, confidence } — null until AI identify runs
   // or a saved listing is opened.
@@ -246,13 +277,15 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
+    storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
-    listingsState, loadListings, metricsById, session, startNew, openListing,
+    listingsState, loadListings, metricsById, storeSync, syncStore,
+    session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   ]);
