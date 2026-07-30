@@ -10,6 +10,8 @@ import hashlib
 import json
 import shutil
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -345,6 +347,28 @@ def auth_me(request: Request) -> dict:
 
 # --- eBay connect (Sign in with eBay) --------------------------------------
 
+# Access tokens live ~2 hours; refreshing one per request added a serial
+# ~300-600ms eBay round-trip to every creds-needing call (a dashboard load
+# fires several). Keyed by the refresh token itself, so a reconnect (new
+# refresh token) naturally misses the cache.
+_TOKEN_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _access_token_for(refresh_token: str) -> str:
+    hit = _TOKEN_CACHE.get(refresh_token)
+    if hit and time.time() < hit[0]:
+        return hit[1]
+    fresh = ebay_auth.refresh_access_token(refresh_token)
+    # Drop the cached token 90s before eBay's expiry so an in-flight request
+    # never carries one that dies mid-call.
+    expires = float(fresh.get("expires_at") or (time.time() + 1800))
+    if len(_TOKEN_CACHE) > 50:
+        _TOKEN_CACHE.clear()
+    _TOKEN_CACHE[refresh_token] = (max(time.time() + 60, expires - 90),
+                                   fresh["access_token"])
+    return fresh["access_token"]
+
+
 def _ebay_creds_for(request: Request):
     """Build live eBay creds for the logged-in user, or None if not connected."""
     uid = _uid(request)
@@ -354,14 +378,14 @@ def _ebay_creds_for(request: Request):
     if not acct or not acct.get("refresh_token"):
         return None
     try:
-        fresh = ebay_auth.refresh_access_token(acct["refresh_token"])
+        access_token = _access_token_for(acct["refresh_token"])
     except Exception as exc:  # noqa: BLE001 - fall back to dry-run, but log it
         # A token-refresh outage otherwise looks identical to "not connected"
         # and silently dry-runs a live publish; log so it's debuggable.
         log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
         return None
     return {
-        "access_token": fresh["access_token"],
+        "access_token": access_token,
         "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
         "payment_policy_id": acct.get("payment_policy_id", ""),
         "return_policy_id": acct.get("return_policy_id", ""),
@@ -1154,7 +1178,7 @@ def _studio_load(session_id: str, name: str, data: Optional[bytes]):
     name = (name or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
-    opt_dir = storage.optimized_dir(session_id).resolve()
+    opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not path.is_file():
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
@@ -1441,6 +1465,21 @@ def price_suggestions(payload: dict, request: Request) -> dict:
         raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
 
 
+
+# A background save/refine/autofill must never DEMOTE a listing's lifecycle
+# status: image edits auto-save, bulk publish saves, and flattening
+# published/live/ended/sold/unlisted to "draft" made live listings vanish
+# from Active, resurrected sold ones as drafts, and pulled Shop-Mode finds
+# out of the Finds tab (architect findings #3 and #7).
+_STICKY_STATUSES = ("published", "live", "ended", "sold", "unlisted")
+
+
+def _preserved_status(session_id: str, default: str = "draft") -> str:
+    prev = db.get_listing(session_id) or {}
+    cur = prev.get("status")
+    return cur if cur in _STICKY_STATUSES else default
+
+
 @app.post("/api/refine")
 def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
@@ -1452,7 +1491,8 @@ def refine(req: RefineRequest, request: Request) -> dict:
         log.warning("refine failed (session=%s): %s", req.session_id, exc)
         raise HTTPException(code, message) from exc
     storage.save_listing(req.session_id, updated)
-    db.upsert_listing(req.session_id, updated.model_dump(), status="draft", user_id=_uid(request))
+    db.upsert_listing(req.session_id, updated.model_dump(),
+                      status=_preserved_status(req.session_id), user_id=_uid(request))
     return updated.model_dump()
 
 
@@ -1460,12 +1500,8 @@ def refine(req: RefineRequest, request: Request) -> dict:
 def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     _assert_session_owner(session_id, request)
     storage.save_listing(session_id, listing)
-    # A save must never demote a listing's lifecycle status: bulk publish and
-    # image edits auto-save, and flattening 'published'/'ended' to 'draft'
-    # here made live listings vanish from the Live bucket.
-    prev = db.get_listing(session_id) or {}
-    status = prev.get("status") if prev.get("status") in ("published", "ended") else "draft"
-    db.upsert_listing(session_id, listing.model_dump(), status=status, user_id=_uid(request))
+    db.upsert_listing(session_id, listing.model_dump(),
+                      status=_preserved_status(session_id), user_id=_uid(request))
     return {"saved": True}
 
 
@@ -1875,8 +1911,15 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     return {"ok": True, "id": req.session_id}
 
 
+# One cap for "the whole store, mirrored": the import brings in up to 300
+# active + 100 sold + 100 ended listings, so every consumer of the list (the
+# grid, sync reconciliation, insights, promote-all) must see at least that
+# many — a 50-row default silently hid most of a big store (architect #6).
+LIST_CAP = 600
+
+
 @app.get("/api/listings")
-def listings(request: Request, limit: int = 50) -> dict:
+def listings(request: Request, limit: int = LIST_CAP) -> dict:
     """History of the current user's saved listings (most recent first)."""
     user = auth.current_user(request)
     items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
@@ -1937,10 +1980,7 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
             continue
         listing = it.get("listing") or {}
         eid = str(listing.get("ebay_listing_id") or "")
-        try:
-            sku = ebay._sku(it["id"], Listing(**listing))
-        except Exception:  # noqa: BLE001
-            sku = ""
+        sku = ebay._sku(it["id"])
         if (eid and eid in ads) or (sku and sku in ads):
             promoted.add(it["id"])
     return promoted
@@ -1953,7 +1993,7 @@ def listing_metrics_route(request: Request) -> dict:
     user = auth.current_user(request)
     if not user:
         return {"metrics": {}}
-    items = db.list_listings(limit=200, user_id=user["id"])
+    items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
     return {"metrics": _metrics_by_record_id(_ebay_creds_for(request), items)}
 
 
@@ -1967,7 +2007,7 @@ def insights(request: Request) -> dict:
     if not user:
         return {"recommendations": []}
     try:
-        items = db.list_listings(limit=200, user_id=user["id"])
+        items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         rates_by_id = _rates_by_record_id(creds, items)
@@ -2020,7 +2060,7 @@ def promote_all(request: Request) -> dict:
     creds = _ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
-    items = [i for i in db.list_listings(limit=200, user_id=user["id"])
+    items = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
              if i.get("status") in ("published", "live")
              and not (i.get("listing") or {}).get("promote")]
     rates = _rates_by_record_id(creds, items)
@@ -2083,6 +2123,10 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> None:
     listing = rec.get("listing") or {}
     if ((listing.get("source") or "") != "ebay" or listing.get("images")
             or not listing.get("image_urls")):
+        return
+    if (rec.get("status") or "") == "sold":
+        # Archived — its session dir is purged on sale; adopting here would
+        # re-download photos for a listing that can't be edited anyway.
         return
     # A previous open may have imported the files but failed the DB write.
     names = storage.list_optimized(listing_id) \
@@ -2216,32 +2260,48 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     # of the publish path below.
     if listing_sync.is_imported(req.listing):
         uid = _uid(request)
+        # The record's REAL lifecycle stage decides what "publish" means here:
+        # live → revise in place; ended/sold → relist as a NEW listing (eBay
+        # refuses to revise an ended item). Status writes preserve the truth —
+        # a failed attempt must not move an Inactive record back to Active.
+        prev_status = (prev_rec.get("status")
+                       if prev_rec.get("status") in _STICKY_STATUSES else "published")
         if req.mode == "draft":
             db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status="published", user_id=uid)
+                              status=prev_status, user_id=uid)
             return JSONResponse({"dry_run": False, "mode": "draft",
                                  "message": "Saved. Choose Update on eBay to push "
                                             "these changes to your live listing."})
         if not creds:
             raise HTTPException(400, "Connect eBay first.")
+        relist = prev_status in ("ended", "sold")
         # Photo sync: local working copies are the truth. Edited since the
         # last sync (or photos added/removed) → send OUR /media URLs so eBay
         # ingests fresh copies; untouched → reuse the live EPS URLs and skip
-        # the re-upload churn entirely.
+        # the re-upload churn entirely. A relist always needs URLs.
         urls, pushed_local = req.listing.image_urls or None, False
         local_names = [n for n in (req.listing.images or [])
                        if (storage.optimized_dir(req.session_id) / n).is_file()]
-        if local_names and (not urls
+        if local_names and (not urls or relist
                             or image_import.images_changed(req.session_id, local_names)):
             urls = ebay.image_urls_for(req.session_id, req.listing, _base_url(request))
             pushed_local = True
         try:
-            res = listing_sync.push_edit(creds["access_token"], req.listing,
-                                         image_urls=urls)
+            if relist:
+                # "Open one to relist it fresh" — the Inactive tab's promise.
+                # A fresh listing also mints a new item id (search boost).
+                if not urls:
+                    raise ValueError("This listing has no photos left to relist with.")
+                res = listing_sync.create_on_ebay(
+                    creds["access_token"], req.listing, urls, creds=creds)
+            else:
+                res = listing_sync.push_edit(creds["access_token"], req.listing,
+                                             image_urls=urls)
         except ValueError as exc:  # TradingError — eBay's own reason
-            log.warning("revise (imported) failed: session=%s: %s", req.session_id, exc)
+            log.warning("%s (imported) failed: session=%s: %s",
+                        "relist" if relist else "revise", req.session_id, exc)
             db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status="published", user_id=uid)
+                              status=prev_status, user_id=uid)
             return JSONResponse({
                 "dry_run": False, "error": True, "mode": "live",
                 "message": str(exc),
@@ -2258,12 +2318,17 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
             _in_background(_refresh_eps_urls, req.session_id,
                            creds["access_token"], req.listing.ebay_listing_id,
                            uid, what="EPS URL refresh")
-        log.info("revise (imported) ok: session=%s item=%s photos=%s",
+        log.info("%s (imported) ok: session=%s item=%s photos=%s",
+                 "relist" if relist else "revise",
                  req.session_id, res.get("listing_id"),
                  "local-updated" if pushed_local else "unchanged")
-        return JSONResponse({"published": True, "revised": True, "mode": "live",
+        return JSONResponse({"published": True, "revised": not relist,
+                             "relisted": relist, "mode": "live",
                              "listing_id": res.get("listing_id"),
-                             "message": "Your eBay listing has been updated."})
+                             "message": ("Relisted! It's live on eBay as a fresh "
+                                         "listing with a new item number."
+                                         if relist else
+                                         "Your eBay listing has been updated.")})
 
     # A listing that's already live must NEVER lose its 'published' status in
     # our records just because a revise attempt was blocked or errored — the
@@ -2424,7 +2489,7 @@ def sync_listings(request: Request) -> dict:
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0, "archived": 0}
-    live = [i for i in db.list_listings(limit=200, user_id=user["id"])
+    live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
             if i.get("status") in ("published", "live")]
     # Imported listings are reconciled through the Trading API (the Inventory
     # API can't see them at all); app-created ones keep the offer check below.
@@ -2444,9 +2509,23 @@ def sync_listings(request: Request) -> dict:
                 creds["access_token"], user["id"], imported)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: imported refresh failed: %s", exc)
-    for it in items:
-        listing = Listing(**(it.get("listing") or {}))
-        status, lid = ebay.live_status(it["id"], listing, creds=creds)
+
+    # Each check is its own eBay round-trip; serially that pinned a request
+    # thread for up to ~40x the API latency right at app load (architect #15).
+    # Fetch in parallel, write to the DB serially below.
+    def _check(it):
+        try:
+            return it, ebay.live_status(
+                it["id"], Listing(**(it.get("listing") or {})), creds=creds)
+        except Exception as exc:  # noqa: BLE001 - one blip must not stop the sweep
+            log.info("ebay sync: status check failed for %s: %s", it["id"], exc)
+            return it, (None, "")
+
+    checked = []
+    if items:
+        with ThreadPoolExecutor(max_workers=min(6, len(items))) as pool:
+            checked = list(pool.map(_check, items))
+    for it, (status, lid) in checked:
         if status == "sold":
             db.upsert_listing(it["id"], it.get("listing") or {},
                               status="sold", user_id=user["id"])
@@ -2457,7 +2536,8 @@ def sync_listings(request: Request) -> dict:
             db.upsert_listing(it["id"], it.get("listing") or {},
                               status="ended", user_id=user["id"])
             changed += 1
-        elif status == "published" and lid and not listing.ebay_listing_id:
+        elif (status == "published" and lid
+              and not (it.get("listing") or {}).get("ebay_listing_id")):
             data = {**(it.get("listing") or {}), "ebay_listing_id": lid}
             db.upsert_listing(it["id"], data, status="published", user_id=user["id"])
     if changed:
@@ -2503,7 +2583,7 @@ def import_listings(request: Request) -> dict:
 
 @app.get("/media/{session_id}/optimized/{name}")
 def media(session_id: str, name: str, v: str = ""):
-    opt_dir = storage.optimized_dir(session_id).resolve()
+    opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name` (e.g. "../../etc/passwd").
     if opt_dir not in path.parents:

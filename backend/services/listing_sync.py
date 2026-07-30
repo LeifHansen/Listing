@@ -22,7 +22,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from .. import db, ebay_auth
+from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
 from . import ebay_trading, taxonomy
@@ -164,21 +164,42 @@ def import_active(token: str, user_id: str, limit: int = 300) -> dict:
 def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
     """Re-check imported listings that are still marked live: sold/ended items
     get their status corrected, and watch/sold counters refreshed. Returns how
-    many records changed. A None status (API blip) changes nothing."""
-    changed = 0
-    for rec in records:
-        data = rec.get("listing") or {}
-        item_id = str(data.get("ebay_listing_id") or "")
+    many records changed. A None status (API blip) changes nothing.
+
+    Status calls run in parallel (each is its own eBay round-trip; serially
+    a 60-listing sweep pinned a request thread for a minute); DB writes stay
+    on this thread, in order."""
+    def _probe(rec):
+        item_id = str((rec.get("listing") or {}).get("ebay_listing_id") or "")
         if not item_id:
+            return rec, None
+        try:
+            return rec, ebay_trading.listing_status(token, item_id)
+        except Exception as exc:  # noqa: BLE001 - one blip skips one record
+            log.info("sync: status check failed for %s: %s", rec.get("id"), exc)
+            return rec, None
+
+    probed = []
+    if records:
+        with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(records))) as pool:
+            probed = list(pool.map(_probe, records))
+    changed = 0
+    for rec, result in probed:
+        if result is None:
             continue
-        status, sold, watch = ebay_trading.listing_status(token, item_id)
+        status, sold, watch = result
         if status is None:
             continue
+        data = rec.get("listing") or {}
         updates = dict(data)
         updates["sold_quantity"] = sold
         updates["watch_count"] = watch
         if status != rec.get("status") or updates != data:
             db.upsert_listing(rec["id"], updates, status=status, user_id=user_id)
+            if status == "sold":
+                # Archived — reclaim the volume space its working copies held,
+                # matching what the app-listing sync path already does.
+                storage.purge_session(rec["id"])
             changed += 1
     return changed
 
@@ -214,9 +235,13 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                 log.info("sync: couldn't save the resolved ship-from ZIP: %s", exc)
     res = ebay_trading.create_listing(
         token, listing, image_urls,
-        policies={k: c.get(k) for k in ("fulfillment_policy_id",
-                                        "payment_policy_id",
-                                        "return_policy_id")},
+        # A per-listing shipping choice (the editor's / bulk card's Shipping
+        # service dropdown) beats the account default; payment/returns stay
+        # account-level.
+        policies={"fulfillment_policy_id": (listing.fulfillment_policy_id
+                                            or c.get("fulfillment_policy_id")),
+                  "payment_policy_id": c.get("payment_policy_id"),
+                  "return_policy_id": c.get("return_policy_id")},
         postal_code=postal)
     # source="ebay" is what routes later edits down the Trading path, exactly
     # like a listing imported from the seller's store.

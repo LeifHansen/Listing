@@ -12,6 +12,7 @@ whether the DB is actually reachable.
 from __future__ import annotations
 
 import datetime as _dt
+import time as _time
 from typing import Optional
 
 from sqlalchemy import DateTime, JSON, String, create_engine, select, text
@@ -344,20 +345,6 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
         return None
 
 
-def delete_ebay_account(user_id: str) -> None:
-    """Disconnect: remove the user's stored eBay connection. Never raises."""
-    try:
-        eng = _get_engine()
-        if eng is None:
-            return
-        with Session(eng) as s:
-            acct = s.get(EbayAccount, user_id)
-            if acct is not None:
-                s.delete(acct)
-                s.commit()
-    except Exception as exc:  # noqa: BLE001
-        log.warning(f"db: delete_ebay_account failed: {exc}")
-
 
 def disconnect_ebay_account(user_id: str) -> None:
     """Disconnect the live link (clear the refresh token) but KEEP the saved
@@ -419,7 +406,11 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
             rec = s.get(ListingRecord, listing_id)
             if rec is None:
                 return False
-            if rec.user_id and user_id and rec.user_id != user_id:
+            # An owned record is NEVER deletable anonymously: session ids leak
+            # via public /media image URLs on live eBay listings, so requiring
+            # a user match only when the caller is logged in would let anyone
+            # delete any listing (architect finding #2).
+            if rec.user_id and rec.user_id != user_id:
                 return False
             s.delete(rec)
             s.commit()
@@ -429,10 +420,21 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
         return False
 
 
+# db_status() round-trips to the DB, and several hot paths call it per
+# request (login errors, /api/listings payloads) — a short TTL keeps the
+# probe honest about outages without paying a SELECT on every call.
+_STATUS_TTL = 30  # seconds
+_status_cache: tuple[float, dict] | None = None
+
+
 def db_status() -> dict:
-    """Health probe: is a DB configured, and can we actually reach it?"""
+    """Health probe: is a DB configured, and can we actually reach it?
+    Cached briefly (see _STATUS_TTL)."""
+    global _status_cache
     if not enabled():
         return {"configured": False, "connected": False}
+    if _status_cache and _time.time() - _status_cache[0] < _STATUS_TTL:
+        return _status_cache[1]
     try:
         eng = _get_engine()
         # Actually round-trip to the DB. _get_engine() only reaches the server
@@ -441,6 +443,8 @@ def db_status() -> dict:
         # went down.
         with eng.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return {"configured": True, "connected": True}
+        result = {"configured": True, "connected": True}
     except Exception as exc:  # noqa: BLE001
-        return {"configured": True, "connected": False, "error": str(exc)}
+        result = {"configured": True, "connected": False, "error": str(exc)}
+    _status_cache = (_time.time(), result)
+    return result

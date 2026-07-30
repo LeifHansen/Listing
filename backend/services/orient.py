@@ -102,11 +102,11 @@ def _detect_batch(batch: list[Path]) -> dict[str, int]:
             f"These are photos 1 to {len(batch)} of secondhand items being "
             "listed for sale. For each, say how it must be rotated to appear "
             "upright.\n" + _SCHEMA)})
-        resp = claude_ai._client().messages.create(
+        resp = claude_ai.client().messages.create(
             model=_model(), max_tokens=400,
             messages=[{"role": "user", "content": content}])
         text = "".join(b.text for b in resp.content if b.type == "text")
-        data = claude_ai._extract_json(text)
+        data = claude_ai.extract_json(text)
     except Exception as exc:  # noqa: BLE001 - orientation is an enhancement
         log.info("auto-orient: batch skipped (%s)", exc)
         return {}
@@ -144,15 +144,15 @@ def _verify_batch(proposals: list[tuple[Path, int]]) -> dict[str, int]:
                 im = ImageOps.exif_transpose(im).convert("RGB")
                 im.thumbnail((_THUMB, _THUMB), Image.LANCZOS)
                 content.append(_pil_content_block(
-                    im.transpose(_images._CW_TRANSPOSE[deg])))
+                    im.transpose(_images.CW_TRANSPOSE[deg])))
         content.append({"type": "text", "text": (
             f"These are photos 1 to {len(proposals)} of secondhand items, "
             "after auto-rotation.\n" + _VERIFY_SCHEMA)})
-        resp = claude_ai._client().messages.create(
+        resp = claude_ai.client().messages.create(
             model=_model(), max_tokens=300,
             messages=[{"role": "user", "content": content}])
         text = "".join(b.text for b in resp.content if b.type == "text")
-        answers = claude_ai._extract_json(text).get("photos") or []
+        answers = claude_ai.extract_json(text).get("photos") or []
     except Exception as exc:  # noqa: BLE001 - no confirmation = no rotation
         log.info("auto-orient: verify pass failed (%s) — applying nothing", exc)
         return {}

@@ -175,7 +175,7 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
                     client, base, token, campaign_id, listing.ebay_listing_id, rate)
             else:
                 res = _create_or_update_ad(client, base, token, campaign_id,
-                                           ebay._sku(session_id, listing), rate)
+                                           ebay._sku(session_id), rate)
     except _ScopeError:
         return {"promoted": False, "needs_reconnect": True,
                 "message": "Reconnect your eBay account to grant ad permissions, "

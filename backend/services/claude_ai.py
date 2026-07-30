@@ -43,6 +43,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "category_suggestion": "human-readable eBay category path",
   "description": "string, 2-4 short paragraphs, buyer-friendly, no false claims",
   "price": number or null (suggested USD price based on item & condition),
+  "purchase_price": number or null (ONLY the price on a store/thrift PRICE STICKER or price tag visible in the photos — what it costs to buy this item right now. null when no price sticker is legible. Never estimate; never confuse with the resale price above),
   "quantity": integer (default 1),
   "package_weight_oz": number (estimated TOTAL shipping weight in ounces, packed; best-effort estimate the seller can correct),
   "package_length_in": number (estimated SHIPPING BOX length in inches, packed),
@@ -146,6 +147,12 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
+# Public aliases for other services (orient.py) — cross-module callers
+# shouldn't have to reach for underscored internals.
+client = _client
+extract_json = _extract_json
+
+
 # Things the ACCOUNT settles once, not the seller per listing: where it ships
 # from, which policies apply, how fast it goes out. The model likes to add
 # these to missing_info because a listing does carry them, but asking the
@@ -193,6 +200,16 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         price = round(float(price), 2) if price is not None else None
     except (TypeError, ValueError):
         price = None
+    # Price read off a store sticker in the photos (what the seller would PAY,
+    # not the resale suggestion). Optional; feeds profit-per-item once sold.
+    purchase_price = data.get("purchase_price")
+    try:
+        purchase_price = (round(float(purchase_price), 2)
+                          if purchase_price is not None else None)
+        if purchase_price is not None and purchase_price <= 0:
+            purchase_price = None
+    except (TypeError, ValueError):
+        purchase_price = None
     try:
         quantity = max(1, int(float(data.get("quantity") or 1)))
     except (TypeError, ValueError):
@@ -221,6 +238,7 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         category_suggestion=(data.get("category_suggestion") or "").strip(),
         description=(data.get("description") or "").strip(),
         price=price,
+        purchase_price=purchase_price,
         currency=config.EBAY_CURRENCY,
         quantity=quantity,
         package_weight_lb=weight_lb,
@@ -562,6 +580,10 @@ def refine(listing: Listing, prompt: str) -> Listing:
     updated = _to_listing(data, listing.images)
     # Preserve images explicitly.
     updated.images = listing.images
+    # What the seller PAID is a fact, not listing copy — a refine must never
+    # rewrite or drop it (the model may not echo the field back).
+    if listing.purchase_price is not None:
+        updated.purchase_price = listing.purchase_price
     return updated
 
 

@@ -73,6 +73,35 @@ const LISTING_FORMATS = [
 // starting number in the box.
 const DEFAULT_AD_RATE = 10;
 
+// Per-card shipping service = an eBay fulfillment (shipping) policy, same as
+// the full editor's picker. Defaults to the account's policy; a change here
+// rides on the draft and is honored at publish. Hidden until eBay is
+// connected / policies load.
+function ShippingServiceSelect({ value, onChange }) {
+  const { ebay, policiesData, setPoliciesData } = useApp();
+  useEffect(() => {
+    if (!ebay.connected || policiesData) return;
+    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
+  }, [ebay.connected, policiesData, setPoliciesData]);
+  if (!ebay.connected) return null;
+  const policies = policiesData?.policies?.fulfillment || [];
+  if (!policies.length) return null;
+  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
+  return (
+    <Select
+      aria-label="Shipping service"
+      value={value || accountDefault}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      {policies.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}{p.summary ? ` · ${p.summary}` : ""}
+        </option>
+      ))}
+    </Select>
+  );
+}
+
 function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, publishing }) {
   const l = item.listing || {};
   const editable = item.status !== "error";
@@ -180,6 +209,11 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
               </Select>
             )}
           </div>
+
+          <ShippingServiceSelect
+            value={l.fulfillment_policy_id}
+            onChange={(id) => onChange({ ...l, fulfillment_policy_id: id })}
+          />
 
           <div className="flex items-center gap-2.5">
             <Toggle

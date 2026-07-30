@@ -28,6 +28,11 @@ class Listing(BaseModel):
     category_id: str = ""
     description: str = ""  # HTML-safe plain text / light HTML
     price: Optional[float] = None
+    # What the seller PAID for the item (Shop Mode "Buy", or typed in later).
+    # Auto-filled from a visible price sticker when the AI can read one;
+    # optional — profit reporting works only for items that have it.
+    # Profit (once sold) = sale price − purchase_price − fees.
+    purchase_price: Optional[float] = None
     currency: str = "USD"
     quantity: int = 1
     # Listing format: FIXED_PRICE (Buy It Now, default), AUCTION, or AUCTION_BIN

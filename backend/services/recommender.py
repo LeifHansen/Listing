@@ -66,7 +66,7 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     views = m.get("views")
     watchers = m.get("watchers")
     age = _age_days(item.get("created_at"))
-    images = listing.get("images") or []
+    images = listing.get("images") or listing.get("image_urls") or []
     # Promoted if our own flag says so OR eBay reports a live ad (covers ads
     # created straight in Seller Hub) — so we never nag an already-promoted item.
     promoted = bool(listing.get("promote")) or promoted

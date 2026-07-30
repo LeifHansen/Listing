@@ -281,9 +281,14 @@ function Workflow() {
           <Button variant="ghost" onClick={restart}>
             <RotateCcw aria-hidden /> Start over
           </Button>
-          <Button variant="ghost" onClick={remove} aria-label="Delete this listing">
-            <Trash2 aria-hidden /> Delete
-          </Button>
+          {/* No Delete while live: removing the record would strand the real
+              eBay listing with no way to manage it here. End it first (the
+              publish bar / card), then delete. */}
+          {!w.isLive && (
+            <Button variant="ghost" onClick={remove} aria-label="Delete this listing">
+              <Trash2 aria-hidden /> Delete
+            </Button>
+          )}
           <Button variant="ghost" onClick={exit} aria-label="Close this listing">
             <X aria-hidden /> Exit
           </Button>

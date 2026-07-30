@@ -65,6 +65,12 @@ def current_user(request: Request) -> Optional[dict]:
     Accepts either the session cookie (web) or an `Authorization: Bearer`
     header (native/mobile clients).
     """
+    # Memoized per request: handlers call this several times (uid checks,
+    # creds building, ownership asserts) and each call was a full DB
+    # round-trip to Neon — several serial cross-region queries per publish.
+    if hasattr(request.state, "auth_user"):
+        return request.state.auth_user
+    request.state.auth_user = None
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         authz = request.headers.get("Authorization", "")
@@ -74,7 +80,8 @@ def current_user(request: Request) -> Optional[dict]:
         return None
     try:
         payload = jwt.decode(token, config.SECRET_KEY, algorithms=["HS256"])
-        return db.get_user_by_id(payload.get("sub", ""))
+        request.state.auth_user = db.get_user_by_id(payload.get("sub", ""))
+        return request.state.auth_user
     except Exception:  # noqa: BLE001 - expired/invalid token -> treat as anonymous
         return None
 
@@ -117,4 +124,6 @@ def login(email: str, password: str) -> Optional[dict]:
     rec = db.get_user_by_email(email.strip().lower())
     if not rec or not verify_password(password, rec.get("password_hash", "")):
         return None
-    return {"id": rec["id"], "email": rec["email"], "created_at": rec.get("created_at")}
+    return {"id": rec["id"], "email": rec["email"],
+            "display_name": rec.get("display_name", ""),
+            "created_at": rec.get("created_at")}

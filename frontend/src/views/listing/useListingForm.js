@@ -9,7 +9,7 @@ import { once } from "@/lib/utils";
    both the free-form rows and the category-required aspect fields. */
 
 const EMPTY = {
-  title: "", subtitle: "", brand: "", price: "", quantity: 1,
+  title: "", subtitle: "", brand: "", price: "", purchase_price: "", quantity: 1,
   listing_format: "FIXED_PRICE", auction_start_price: "", auction_duration: "DAYS_7",
   package_weight_lb: "", package_weight_oz: "",
   package_length_in: "", package_width_in: "", package_height_in: "",
@@ -29,6 +29,7 @@ function fromListing(l) {
     ...EMPTY,
     ...l,
     price: l.price != null ? l.price : "",
+    purchase_price: l.purchase_price != null ? l.purchase_price : "",
     auction_start_price: l.auction_start_price != null ? l.auction_start_price : "",
     quantity: l.quantity || 1,
     package_weight_lb: l.package_weight_lb || "",
@@ -57,10 +58,13 @@ export function useListingForm() {
   const sessionId = session?.sessionId;
   // Live = this session is (still) a live eBay listing being revised, so the
   // publish actions become Update / End instead of Publish / Save Draft.
-  // An imported eBay listing is by definition already live, so it always gets
-  // the revise actions (Update / End) even before any status round-trip.
-  const isLive = session?.status === "published" || session?.status === "live"
-    || (session?.listing?.source || "") === "ebay";
+  // source==="ebay" alone is NOT enough: every Trading publish sets it, so an
+  // ENDED listing opened from the Inactive tab would wrongly show Update/End.
+  // Ended/sold records get the Publish action instead — the server relists
+  // them as a fresh listing (eBay can't revise an ended item).
+  const settled = session?.status === "ended" || session?.status === "sold";
+  const isLive = !settled && (session?.status === "published" || session?.status === "live"
+    || (session?.listing?.source || "") === "ebay");
   const ebayListingId = session?.listing?.ebay_listing_id
     || publishResult?.listing_id || "";
 
@@ -90,6 +94,7 @@ export function useListingForm() {
       ...(session?.listing || {}),
       ...form,
       price: form.price === "" ? null : parseFloat(form.price),
+      purchase_price: form.purchase_price === "" ? null : parseFloat(form.purchase_price),
       auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
       quantity: parseInt(form.quantity || "1", 10),
       package_weight_lb: num(form.package_weight_lb),

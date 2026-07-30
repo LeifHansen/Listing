@@ -156,8 +156,8 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
 
 def images_changed(record_id: str, names: list[str]) -> bool:
     """True when the listing's local photos differ from what eBay last got —
-    an edit, a re-order won't show here (order lives on the listing), an
-    added or removed photo, or no baseline at all. Drives publish sync:
+    an edit, a re-order (the gallery photo is the first one), an added or
+    removed photo, or no baseline at all. Drives publish sync:
     changed → send our /media URLs so eBay ingests fresh copies; unchanged →
     reuse the existing EPS URLs and skip the churn."""
     recorded = (_load_manifest(record_id).get("images") or {})
