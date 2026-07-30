@@ -24,8 +24,8 @@ from .config import log
 from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
                      SessionOnlyRequest)
 from .services import (claude_ai, ebay, ebay_trading, image_import, images,
-                       listing_sync, metrics, preflight, pricing, promotions,
-                       recommender, taxonomy)
+                       listing_sync, metrics, orient, preflight, pricing,
+                       promotions, recommender, taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -1008,7 +1008,9 @@ async def upload_more(
 
     orig = storage.original_dir(session_id)
     opt_dir = storage.optimized_dir(session_id)
-    new_names: list[str] = []
+    # Save every new file first, so the orientation pass can judge them all in
+    # one batched call rather than one call per photo.
+    staged: list[tuple[int, Path]] = []
     for j, f in enumerate(files):
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
@@ -1019,13 +1021,24 @@ async def upload_more(
         src = orig / f"add_{idx:03d}{suffix}"
         try:
             src.write_bytes(data)
-            await run_in_threadpool(images.optimize, src, opt_dir / f"img_{idx:03d}.jpg", strip_bg)
+        except OSError as exc:
+            raise HTTPException(
+                507, "The server is out of storage space — try again shortly.") from exc
+        staged.append((idx, src))
+    rotations = await run_in_threadpool(
+        orient.detect_rotations, [src for _idx, src in staged])
+    new_names: list[str] = []
+    for idx, src in staged:
+        try:
+            await run_in_threadpool(
+                images.optimize, src, opt_dir / f"img_{idx:03d}.jpg", strip_bg,
+                rotations.get(src.name, 0))
             new_names.append(f"img_{idx:03d}.jpg")
         except OSError as exc:
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         except Exception as exc:  # noqa: BLE001 - skip a bad file, keep the rest
-            log.warning("upload-more: couldn't process %s: %s", f.filename, exc)
+            log.warning("upload-more: couldn't process %s: %s", src.name, exc)
     if not new_names:
         raise HTTPException(400, "Could not process the uploaded image(s).")
     await run_in_threadpool(objstore.upload_optimized, session_id, opt_dir, new_names)
