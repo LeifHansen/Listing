@@ -131,6 +131,36 @@ def _tag_text_for(paths: list, aspects: list[dict]) -> str:
         return ""
 
 
+def _merge_filled_specifics(listing: Listing, filled: list,
+                            aspects: list[dict]) -> int:
+    """Merge AI-filled specifics into the listing without touching anything
+    the seller answered. Aspect-aware: an aspect the listing already has a
+    value for is left alone entirely; an unanswered SINGLE aspect takes the
+    AI's first value; an unanswered MULTI aspect (Season, Features, Theme...)
+    takes ALL the AI's values — eBay accepts a list and buyers filter on each.
+    Returns how many values were added."""
+    multi = {a["name"].strip().lower() for a in aspects
+             if (a.get("cardinality") or "SINGLE") == "MULTI"}
+    have = {s.name.strip().lower() for s in listing.item_specifics
+            if (s.value or "").strip()}
+    grouped: dict[str, list] = {}
+    order: list[str] = []
+    for f in filled:
+        k = f.name.strip().lower()
+        if k not in grouped:
+            grouped[k] = []
+            order.append(k)
+        grouped[k].append(f)
+    added = 0
+    for k in order:
+        if k in have:
+            continue
+        for f in (grouped[k] if k in multi else grouped[k][:1]):
+            listing.item_specifics.append(f)
+            added += 1
+    return added
+
+
 def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
     """Best-effort: fill eBay's category item specifics (required + recommended)
     from the photos and merge them in without overwriting anything already set.
@@ -155,13 +185,7 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> int:
     except Exception as exc:  # noqa: BLE001 - enrichment is optional
         log.info("specifics enrich skipped (cat=%s): %s", listing.category_id, exc)
         return 0
-    have = {s.name.strip().lower() for s in listing.item_specifics if s.value.strip()}
-    added = 0
-    for f in filled:
-        if f.name.strip().lower() not in have:
-            listing.item_specifics.append(f)
-            have.add(f.name.strip().lower())
-            added += 1
+    added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
     return added
@@ -1359,14 +1383,9 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
         code, message = claude_ai.ai_error_message(exc)
         log.warning("autofill-specifics failed (session=%s): %s", session_id, exc)
         raise HTTPException(code, message) from exc
-    # Merge: keep the seller's existing non-empty values; add the rest.
-    have = {s.name.strip().lower() for s in listing.item_specifics if s.value.strip()}
-    added = 0
-    for f in filled:
-        if f.name.strip().lower() not in have:
-            listing.item_specifics.append(f)
-            have.add(f.name.strip().lower())
-            added += 1
+    # Merge: keep the seller's existing non-empty values; add the rest
+    # (aspect-aware — MULTI aspects may take several values).
+    added = _merge_filled_specifics(listing, filled, aspects)
     storage.save_listing(session_id, listing)
     prev_status = (db.get_listing(session_id) or {}).get("status", "draft")
     db.upsert_listing(session_id, listing.model_dump(),

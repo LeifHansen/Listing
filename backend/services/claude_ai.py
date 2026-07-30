@@ -716,6 +716,16 @@ Rules:
   decimal at most, no words or units); "(4-digit year)" takes a year like
   "1985". If you can't tell, omit it — text there gets the listing rejected.
 - For "(free text)" aspects, give the single best concise value eBay expects.
+- DESCRIPTIVE aspects are inference-friendly — fill them, at "medium", from
+  what the item clearly shows. These are the ones eBay's own suggester fills
+  and buyers filter by: Accents (e.g. Logo), Character (a named character on
+  the item), Theme (e.g. 90s, Sports), Occasion, Season (from the garment's
+  weight/type), Style, Features, Performance/Activity, Garment Care (from
+  the care tag), Product Line (the brand's line, e.g. "Tommy Jeans"),
+  Pattern, Fit, Neckline, Closure. An honest inference here beats a blank.
+- An aspect shown as "(may repeat: several values allowed)" can appear more
+  than once with different values — e.g. Season as both "Winter" and
+  "Spring". Repeat the name; never comma-join values.
 - Never invent identifiers: a UPC/EAN/ISBN/MPN/serial you cannot actually
   read must be omitted, and never fill any aspect with "Not Specified"/
   "Does Not Apply"/"Unknown" just to have an answer.
@@ -745,15 +755,17 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
     for a in named:
         dtype = (a.get("data_type") or "STRING").upper()
         fmt = (a.get("format") or "").lower()
+        multi = " (may repeat: several values allowed)" \
+            if (a.get("cardinality") or "SINGLE") == "MULTI" else ""
         if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
             vals = ", ".join(a["values"][:40])
-            lines.append(f'- "{a["name"]}" (choose one of: {vals})')
+            lines.append(f'- "{a["name"]}" (choose one of: {vals}){multi}')
         elif dtype == "DATE" or "yyyy" in fmt:
             lines.append(f'- "{a["name"]}" (4-digit year)')
         elif dtype == "NUMBER":
             lines.append(f'- "{a["name"]}" (plain number)')
         else:
-            lines.append(f'- "{a["name"]}" (free text)')
+            lines.append(f'- "{a["name"]}" (free text){multi}')
     context = (f"Title: {listing.title}\nBrand: {listing.brand}\n"
                f"Category: {listing.category_suggestion}\n"
                f"Description: {(listing.description or '')[:500]}")
@@ -767,9 +779,12 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
         "possible.\n\nCONTEXT:\n" + context + "\n\nEBAY ITEM SPECIFICS TO FILL:\n"
         + "\n".join(lines) + "\n\n" + _ASPECTS_FILL_SCHEMA)})
 
+    # Big clothing categories run 30+ aspects; a tight cap used to cut the
+    # response off, which raised and silently skipped the WHOLE enrichment —
+    # the "eBay suggests way more specifics than we fill" gap.
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=1500,
+        max_tokens=4000,
         messages=[{"role": "user", "content": content}],
     )
     if resp.stop_reason == "max_tokens":
@@ -779,23 +794,31 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
 
     by_name = {a["name"].strip().lower(): a for a in named}
     out: list[ItemSpecific] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()   # (name, value) — exact repeats only
+    single_used: set[str] = set()
     for s in (data.get("specifics") or []):
         if not isinstance(s, dict):
             continue
         name = str(s.get("name", "")).strip()
         value = str(s.get("value", "")).strip()
         key = name.lower()
-        if not name or not value or key not in by_name or key in seen:
+        if not name or not value or key not in by_name:
             continue
         a = by_name[key]
+        # A SINGLE-cardinality aspect takes its first value only; MULTI ones
+        # (Season, Features, Theme...) may repeat — eBay accepts a value list
+        # and buyers filter on each. Exact duplicates are dropped either way.
+        if key in single_used:
+            continue
         # Coerce to the aspect's own constraints (fixed choices matched to
         # eBay's exact wording, numbers stripped to plain numbers, years to
         # YYYY) — an illegal value is dropped rather than rejected later.
         legal = taxonomy.coerce_aspect_value(value, a)
-        if legal is None:
+        if legal is None or (key, legal.lower()) in seen:
             continue
-        seen.add(key)
+        seen.add((key, legal.lower()))
+        if (a.get("cardinality") or "SINGLE") != "MULTI":
+            single_used.add(key)
         conf = str(s.get("confidence", "")).strip().lower()
         out.append(ItemSpecific(
             name=a["name"], value=legal,

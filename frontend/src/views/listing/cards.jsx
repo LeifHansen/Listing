@@ -356,6 +356,13 @@ export function SpecificsCard({ w }) {
 
   const renderAspect = (a) => {
     const row = w.getSpecificRow(a.name);
+    // MULTI-value aspects (Season, Features, Theme...) can hold several
+    // values; the field edits the first and the rest show as removable chips
+    // — without this they'd be invisible (hidden from freeRows by name).
+    const extras = w.form.item_specifics
+      .map((s, i) => ({ ...s, i }))
+      .filter((s) => s.name.trim().toLowerCase() === a.name.toLowerCase())
+      .slice(1);
     // An empty REQUIRED aspect blocks publishing — it must be unmissable in
     // the grid, not discovered via a failed publish. Amber ring + "Missing"
     // pill until it's filled.
@@ -390,6 +397,21 @@ export function SpecificsCard({ w }) {
             className={ringCls}
             onChange={(e) => w.upsertSpecific(a.name, e.target.value)}
           />
+        )}
+        {extras.length > 0 && (
+          <span className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            {extras.map((s) => (
+              <span key={s.i}
+                className="inline-flex items-center gap-1 rounded-full bg-bg-sunken border border-line px-2 py-0.5 text-[12px] font-semibold text-ink-secondary">
+                {s.value}
+                <button type="button" aria-label={`Remove ${a.name}: ${s.value}`}
+                  onClick={() => removeRow(s.i)}
+                  className="cursor-pointer text-ink-faint hover:text-error">
+                  <X size={11} aria-hidden />
+                </button>
+              </span>
+            ))}
+          </span>
         )}
       </Field>
     );
