@@ -30,7 +30,7 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..models import Listing
+from ..models import ItemSpecific, Listing
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -366,6 +366,15 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> li
         parts.append("<ConditionDescription>"
                      f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
     specifics = [s for s in listing.item_specifics if s.name.strip() and s.value.strip()]
+    # CRITICAL: identify, the maker double-check, and the editor's Brand field
+    # all write the brand to listing.brand — not to a specifics row. The old
+    # Inventory path seeded the Brand aspect from it (services/ebay.py); this
+    # Trading path must too, or every publish goes out brand-less: invisible
+    # to brand filters and rejected outright in Brand-required categories.
+    # First value only — Brand is a SINGLE-value aspect on eBay.
+    if listing.brand and not any(s.name.strip().lower() == "brand" for s in specifics):
+        specifics.insert(0, ItemSpecific(
+            name="Brand", value=listing.brand.split(",")[0].strip()[:65]))
     if specifics:
         rows = "".join(
             f"<NameValueList><Name>{_esc(s.name.strip()[:40])}</Name>"
