@@ -15,56 +15,96 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import {
   BoxIllustration, TagIllustration, ClipboardIllustration,
 } from "@/components/ui/illustrations";
+import { cn } from "@/lib/utils";
 
-/* One view powers Inventory / Drafts / Listings — same grid, different
-   filter + empty state. */
+/* The unified listings pipeline: ONE view of the seller's whole store, cut by
+   lifecycle tab — the way sellers actually think about their pile. Replaces
+   the old Inventory / Drafts / Listings triplet. */
 
-const CONFIGS = {
-  inventory: {
-    title: "Inventory",
-    sub: "Finds from Shop Mode waiting to be listed",
-    filter: (i) => i.status === "unlisted",
-    illustration: BoxIllustration,
-    emptyTitle: "No unlisted finds",
-    emptyMessage: "Scan items in Shop Mode while you're out hunting — tap Buy and they land here to finish later.",
-    emptyAction: { label: "Open Shop Mode", icon: Store, view: "shop" },
+const TABS = [
+  {
+    id: "active", label: "Active", statuses: ["published", "live"],
+    sub: "Everything currently live on eBay — created here or imported",
+    empty: {
+      illustration: TagIllustration, title: "Nothing live yet",
+      message: "Publish a draft (or create a listing from photos) and it shows up here the moment it's live.",
+      action: { label: "Create Listing", icon: PlusCircle, go: "new" },
+    },
   },
-  drafts: {
-    title: "Drafts",
-    sub: "Works in progress and ended listings — open one to finish, publish, or relist",
-    filter: (i) => i.status === "draft" || i.status === "dry_run" || i.status === "ended",
-    illustration: ClipboardIllustration,
-    emptyTitle: "No drafts",
-    emptyMessage: "Drafts save automatically while you build a listing, so you can pick up right where you left off.",
-    emptyAction: { label: "Create Listing", icon: PlusCircle, view: "new" },
+  {
+    id: "drafts", label: "Drafts", statuses: ["draft", "dry_run"],
+    sub: "Works in progress — open one to finish and publish",
+    selectable: true, draftTools: true,
+    empty: {
+      illustration: ClipboardIllustration, title: "No drafts",
+      message: "Drafts save automatically while you build a listing, so you can pick up right where you left off.",
+      action: { label: "Create Listing", icon: PlusCircle, go: "new" },
+    },
   },
-  listings: {
-    title: "Listings",
-    sub: "A live mirror of your whole eBay store — created here or already on eBay",
-    legend: true,
-    filter: () => true,
-    illustration: TagIllustration,
-    emptyTitle: "No listings yet",
-    emptyMessage: "Let's create your first listing — snap a few photos and the AI writes the rest.",
-    emptyAction: { label: "Create Listing", icon: PlusCircle, view: "new" },
+  {
+    id: "finds", label: "Finds", statuses: ["unlisted"],
+    sub: "Shop Mode finds waiting to become listings",
+    empty: {
+      illustration: BoxIllustration, title: "No unlisted finds",
+      message: "Scan items in Shop Mode while you're out hunting — tap Buy and they land here to finish later.",
+      action: { label: "Open Shop Mode", icon: Store, go: "shop" },
+    },
   },
-};
+  {
+    id: "unsold", label: "Unsold", statuses: ["ended"],
+    sub: "Ended without selling — open one to relist it fresh",
+    empty: {
+      illustration: TagIllustration, title: "Nothing unsold",
+      message: "Listings that end without a sale collect here so they're one tap from a fresh relist.",
+    },
+  },
+  {
+    id: "sold", label: "Sold", statuses: ["sold"],
+    sub: "Sold on eBay — nice work",
+    empty: {
+      illustration: TagIllustration, title: "No sales recorded yet",
+      message: "When something sells on eBay, the mirror moves it here automatically.",
+    },
+  },
+  {
+    id: "all", label: "All", statuses: null,
+    sub: "A live mirror of your whole eBay store — every status at once",
+    empty: {
+      illustration: TagIllustration, title: "No listings yet",
+      message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
+      action: { label: "Create Listing", icon: PlusCircle, go: "new" },
+    },
+  },
+];
 
-// Start over and Skip are draft-only actions: on a live listing they'd rewrite
-// or shelve something already published.
+// Active listings older than this get the amber "stale" clock: relisting
+// fresh mints a new item id and a search-placement boost.
+const STALE_DAYS = 60;
+const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
+
 const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 
-export function ListingsView({ kind, search = "" }) {
-  const cfg = CONFIGS[kind];
+export function ListingsView({ search = "", forceTab }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     bulkDeleteListings, ebay, loadListings, metricsById,
     skippedDraftIds, toggleSkipDraft, storeSync, syncStore,
+    listingsTab, setListingsTab,
   } = useApp();
   const { confirm, toast } = useToast();
 
+  const tabId = forceTab || listingsTab || "active";
+  const tab = TABS.find((t) => t.id === tabId) || TABS[0];
+  const pick = (t) => { setListingsTab(t); setView("listings"); };
+
+  const counts = Object.fromEntries(TABS.map((t) => [
+    t.id,
+    t.statuses
+      ? listingsState.items.filter((i) => t.statuses.includes(i.status)).length
+      : listingsState.items.length,
+  ]));
+
   // Select mode (Drafts): tap cards to select, then delete them all at once.
-  const canSelect = kind === "drafts";
   const [selecting, setSelecting] = useState(false);
   const [sel, setSel] = useState({});
   const selIds = Object.keys(sel).filter((id) => sel[id]);
@@ -80,8 +120,7 @@ export function ListingsView({ kind, search = "" }) {
     if (await bulkDeleteListings(selIds)) exitSelect();
   };
 
-  // The store-level mirror (store.jsx syncStore) imports the whole eBay store
-  // on app load, so this view just re-runs it on demand and narrates.
+  // Manual re-run of the store mirror (the mirror itself runs at app load).
   const importFromEbay = async () => {
     const r = await syncStore({ force: true });
     if (!r) return;
@@ -103,8 +142,7 @@ export function ListingsView({ kind, search = "" }) {
   };
 
   // Start over on a draft: throw away the drafted copy and re-run the AI over
-  // the listing's own photos. Drafts only — on a live listing this would
-  // replace real published copy with a fresh guess.
+  // the listing's own photos.
   const [startingOver, setStartingOver] = useState(null); // id, or null
   const startOver = async (item) => {
     const name = item.listing?.title || item.title || "this draft";
@@ -140,12 +178,14 @@ export function ListingsView({ kind, search = "" }) {
 
   const q = search.trim().toLowerCase();
   const items = listingsState.items
-    .filter(cfg.filter)
+    .filter((i) => (tab.statuses ? tab.statuses.includes(i.status) : true))
     .filter((i) => !q
       || (i.listing?.title || i.title || "").toLowerCase().includes(q)
-      || (i.listing?.brand || "").toLowerCase().includes(q));
+      || (i.listing?.brand || "").toLowerCase().includes(q)
+      || (i.listing?.description || "").toLowerCase().includes(q))
+    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
 
-  const go = () => (cfg.emptyAction.view === "new" ? startNew() : setView(cfg.emptyAction.view));
+  const go = () => (tab.empty.action?.go === "new" ? startNew() : setView(tab.empty.action.go));
 
   let body;
   if (listingsState.loading && !listingsState.loaded) {
@@ -166,7 +206,7 @@ export function ListingsView({ kind, search = "" }) {
     body = (
       <Card className="p-0">
         <EmptyState
-          illustration={cfg.illustration}
+          illustration={tab.empty.illustration}
           title="Log in to see your listings"
           message="Your listings, drafts, and Shop Mode finds are saved to your account."
           action={
@@ -181,12 +221,12 @@ export function ListingsView({ kind, search = "" }) {
     body = (
       <Card className="p-0">
         <EmptyState
-          illustration={cfg.illustration}
-          title={q ? "No matches" : cfg.emptyTitle}
-          message={q ? `Nothing matches "${search}" here.` : cfg.emptyMessage}
-          action={!q && (
+          illustration={tab.empty.illustration}
+          title={q ? "No matches" : tab.empty.title}
+          message={q ? `Nothing matches "${search}" here.` : tab.empty.message}
+          action={!q && tab.empty.action && (
             <Button variant="primary" size="lg" onClick={go}>
-              <cfg.emptyAction.icon aria-hidden /> {cfg.emptyAction.label}
+              <tab.empty.action.icon aria-hidden /> {tab.empty.action.label}
             </Button>
           )}
         />
@@ -203,10 +243,12 @@ export function ListingsView({ kind, search = "" }) {
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
             <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
-              onStartOver={isDraft(item) ? startOver : undefined}
+              onStartOver={tab.draftTools && isDraft(item) ? startOver : undefined}
               startingOver={startingOver === item.id}
-              onSkip={isDraft(item) ? () => toggleSkipDraft(item.id) : undefined}
+              onSkip={tab.draftTools && isDraft(item) ? () => toggleSkipDraft(item.id) : undefined}
               skipped={skippedDraftIds.has(item.id)}
+              stale={(item.status === "published" || item.status === "live")
+                && dayAge(item.created_at) >= STALE_DAYS}
               metrics={metricsById[item.id]}
               selectable={selecting}
               selected={!!sel[item.id]}
@@ -218,21 +260,22 @@ export function ListingsView({ kind, search = "" }) {
   }
 
   const hasItems = user && listingsState.dbConfigured && items.length > 0;
+  const showLegend = (tabId === "active" || tabId === "all") && hasItems;
 
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">{cfg.title}</h1>
-          <p className="text-sm text-ink-secondary mt-1">{cfg.sub}</p>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Listings</h1>
+          <p className="text-sm text-ink-secondary mt-1">{tab.sub}</p>
         </div>
         <div className="flex items-center gap-2">
-          {kind === "listings" && user && ebay.connected && (
+          {user && ebay.connected && (
             <Button variant="soft" onClick={importFromEbay} loading={storeSync.syncing}>
               <RefreshCw aria-hidden /> Sync with eBay
             </Button>
           )}
-          {canSelect && hasItems && (selecting ? (
+          {tab.selectable && hasItems && (selecting ? (
             <>
               <Button variant="danger" size="sm" onClick={deleteSelected}
                 disabled={!selIds.length}>
@@ -253,9 +296,38 @@ export function ListingsView({ kind, search = "" }) {
           ))}
         </div>
       </div>
+
+      {/* The pipeline: one tab per lifecycle stage, with live counts. "Finds"
+          only appears once Shop Mode has produced any. */}
+      <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1 pb-0.5">
+        {TABS.filter((t) => t.id !== "finds" || counts.finds > 0).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => { pick(t.id); exitSelect(); }}
+            aria-pressed={tabId === t.id}
+            className={cn(
+              "shrink-0 inline-flex items-center gap-1.5 h-9 px-3.5 rounded-full text-[13px]",
+              "font-semibold cursor-pointer transition-colors duration-150 border",
+              tabId === t.id
+                ? "bg-blue text-on-accent border-blue"
+                : "bg-card text-ink-secondary border-line hover:text-ink hover:border-line-strong",
+            )}
+          >
+            {t.label}
+            <span className={cn(
+              "tabular-nums text-[11px] font-bold rounded-full px-1.5 min-w-5 h-5 grid place-items-center",
+              tabId === t.id ? "bg-white/20" : "bg-bg-sunken",
+            )}>
+              {counts[t.id]}
+            </span>
+          </button>
+        ))}
+      </div>
+
       {/* Origin legend: which badges appear in this grid and what each one is
           allowed to do — hover (or long-press) a chip for the full rules. */}
-      {cfg.legend && user && items.length > 0 && (() => {
+      {showLegend && (() => {
         const present = [...new Set(items.map(originOf))];
         return (
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[12px] text-ink-faint -mt-1">

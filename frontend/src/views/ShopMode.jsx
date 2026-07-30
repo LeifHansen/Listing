@@ -15,7 +15,7 @@ import { useToast } from "@/components/ui/Toaster";
 // Shop Mode — scan items while thrifting: instant ID + typical resale price,
 // then one tap drops it into inventory to finish later.
 export function ShopMode() {
-  const { user, openAuth, health, setView, loadListings } = useApp();
+  const { user, openAuth, health, setView, openListings, loadListings } = useApp();
   const { toast } = useToast();
   const itemRef = useRef(null);
   const shelfRef = useRef(null);
@@ -95,7 +95,7 @@ export function ShopMode() {
       setResult(null);
       loadListings({ quiet: true });
       toast("Added to your inventory! Open Inventory to finish and publish it.", { kind: "success" });
-      setView("inventory");
+      openListings("finds");
     } catch (e) {
       toast(`Couldn't add to inventory: ${e.message}`, { kind: "error" });
     }

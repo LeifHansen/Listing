@@ -94,7 +94,7 @@ function MirrorStatus() {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, session, deleteListing, metricsById } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
 
@@ -258,17 +258,17 @@ export function Dashboard() {
           sub={revenue > 0
             ? `${formatMoney(revenue)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
             : "everything currently live"}
-          onClick={() => setView("listings")} />
+          onClick={() => openListings("active")} />
         <StatCard icon={FileText} tone="yellow" label="Drafts in progress"
           value={drafts.length}
           sub={inventory.length
             ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"} from Shop Mode`
             : "open one to finish & publish"}
-          onClick={() => setView("drafts")} />
+          onClick={() => openListings("drafts")} />
         <StatCard icon={Tag} tone="blue" label="Sold & ended"
           value={soldEnded.length}
           sub="relist ended items in one tap"
-          onClick={() => setView("listings")} />
+          onClick={() => openListings(soldEnded.some((i) => i.status === "sold") ? "sold" : "unsold")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
           value={todays.length}
           sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}

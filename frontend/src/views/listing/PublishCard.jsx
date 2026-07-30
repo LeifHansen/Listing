@@ -159,7 +159,7 @@ export function PublishCard({ w }) {
 // End listing (Save Draft disappears — on a published offer any eBay save
 // goes straight to the live listing, so a "draft" would mislead).
 export function PublishBar({ w }) {
-  const { canPublishLive, deleteListing, setSession, setView } = useApp();
+  const { canPublishLive, deleteListing, setSession, setView, openListings } = useApp();
   const { confirm } = useToast();
   const attention = Object.values(w.completion).filter((s) => s === "attention").length;
   const ready = attention === 0;
@@ -173,7 +173,7 @@ export function PublishBar({ w }) {
     })) {
       await deleteListing(w.sessionId);
       setSession(null);
-      setView("drafts");
+      openListings("drafts");
     }
   };
 

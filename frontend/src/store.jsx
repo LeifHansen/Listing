@@ -31,6 +31,13 @@ export function AppProvider({ children }) {
 
   // ---------- navigation ----------
   const [view, setView] = useState("dashboard");
+  // Which tab of the unified Listings pipeline is showing. Deep links (a
+  // dashboard tile, a task row) set it and jump: openListings("drafts").
+  const [listingsTab, setListingsTab] = useState("active");
+  const openListings = useCallback((tab) => {
+    if (tab) setListingsTab(tab);
+    setView("listings");
+  }, []);
 
   // ---------- server health ----------
   const [health, setHealth] = useState({
@@ -271,7 +278,7 @@ export function AppProvider({ children }) {
 
   const value = useMemo(() => ({
     dark, toggleDark,
-    view, setView,
+    view, setView, listingsTab, setListingsTab, openListings,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
@@ -282,7 +289,7 @@ export function AppProvider({ children }) {
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
-    dark, toggleDark, view, health, loadHealth, user, authOpen, openAuth,
+    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     listingsState, loadListings, metricsById, storeSync, syncStore,
     session, startNew, openListing,
