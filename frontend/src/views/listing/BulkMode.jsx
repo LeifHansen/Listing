@@ -313,7 +313,24 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
       }
     };
     poll();
-    return () => { stopped.current = true; clearTimeout(timer); };
+    // Browsers throttle timers hard in a hidden tab (down to about once a
+    // minute, and frozen entirely after a while), so a batch watched from a
+    // background tab looks stuck until a manual refresh. Poll immediately
+    // whenever the tab comes back to the foreground.
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || stopped.current) return;
+      clearTimeout(timer);
+      fails.current = 0;
+      poll();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      stopped.current = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
   }, [jobId, loadListings, toast, onSettled]);
 
   const updateItem = (sid, listing) => {

@@ -26,6 +26,7 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from .. import config
 from ..config import log
 from ..storage import natural_key
+from . import orient
 
 # iPhone/Mac photos are HEIC by default; register the decoder if available so
 # uploads don't fail. Falls back gracefully if the package isn't installed.
@@ -682,10 +683,31 @@ def _enhance(img: Image.Image) -> Image.Image:
     return img
 
 
-def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
-    """Optimize a single image. Returns metadata about what was done."""
+# Clockwise degrees -> the exact (lossless) Pillow transpose for it.
+_CW_TRANSPOSE = {
+    90: Image.Transpose.ROTATE_270,   # Pillow names rotations counter-clockwise
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_90,
+}
+
+
+def optimize(src: Path, dst: Path, remove_bg: bool = False,
+             rotate: int = 0) -> dict:
+    """Optimize a single image. Returns metadata about what was done.
+
+    `rotate` is clockwise degrees (0/90/180/270) applied right after the EXIF
+    fix — see services/orient. It has to happen BEFORE the cutout and square
+    crop so the subject detection and framing work on an upright photo.
+    """
+    # Ignore anything that isn't a clean quarter turn, so a bad value can't
+    # resample (and blur) the photo — or get reported as a rotation that
+    # didn't happen.
+    turn = rotate % 360 if rotate % 360 in _CW_TRANSPOSE else 0
     with Image.open(src) as raw:
         img = ImageOps.exif_transpose(raw)  # honor camera rotation
+        # ...then straighten the ITEM, which EXIF knows nothing about.
+        if turn:
+            img = img.transpose(_CW_TRANSPOSE[turn])
         original_size = img.size
 
         # Downscale oversized inputs before the memory-heavy passes below.
@@ -726,6 +748,8 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         "output_size": (TARGET_SIZE, TARGET_SIZE),
         "background_removed": bg_removed,
     }
+    if turn:
+        out["rotated"] = turn  # auto-straightened; the UI reports the count
     if studio_applied:
         out["studio"] = "lightroom"
     if studio_error:
@@ -777,6 +801,11 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
             in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
             if src.suffix.lower() in exts]
     total = len(jobs)
+    # One batched vision pass over the whole set decides which photos were shot
+    # with the ITEM lying sideways or upside-down — something EXIF can't tell
+    # us. Done up front so each photo is straightened before its cutout and
+    # square crop, not after.
+    rotations = orient.detect_rotations([src for _i, src in jobs])
     done = 0
     done_lock = threading.Lock()
 
@@ -794,7 +823,8 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     def _one(job: tuple[int, Path]) -> dict:
         i, src = job
         try:
-            result = optimize(src, dst_dir / f"img_{i:03d}.jpg", remove_bg)
+            result = optimize(src, dst_dir / f"img_{i:03d}.jpg", remove_bg,
+                              rotate=rotations.get(src.name, 0))
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         _tick()

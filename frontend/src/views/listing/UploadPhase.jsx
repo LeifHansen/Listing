@@ -117,6 +117,13 @@ export function UploadPhase({ onBulkStarted }) {
         const warning = bgFailureMessage(up.optimize_results, prepped.length);
         if (warning) toast(warning, { kind: "warning", ttl: 10000 });
       }
+      // Photos shot with the item lying sideways get straightened server-side
+      // (EXIF can't catch that) — say so, since it's a visible change.
+      const turned = (up.optimize_results || []).filter((r) => r && r.rotated).length;
+      if (turned) {
+        toast(`Straightened ${turned} sideways photo${turned === 1 ? "" : "s"} — rotate any of them in the editor if we got one wrong.`,
+          { kind: "success" });
+      }
 
       // Identify runs as a background job we poll, so a slow multi-photo vision
       // call can't outlive the browser/proxy timeout.
