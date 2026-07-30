@@ -363,10 +363,19 @@ export function SpecificsCard({ w }) {
       .map((s, i) => ({ ...s, i }))
       .filter((s) => s.name.trim().toLowerCase() === a.name.toLowerCase())
       .slice(1);
+    // Brand lives on the listing itself (Title card, AI identify, the maker
+    // double-check) — mirror it here so the Brand aspect never LOOKS empty
+    // when the listing has one, and edits flow back to the brand field.
+    const isBrand = a.name.trim().toLowerCase() === "brand";
+    const shown = row?.value || (isBrand ? (w.form.brand || "") : "");
+    const setValue = (v) => {
+      if (isBrand) w.set("brand", v);
+      w.upsertSpecific(a.name, v);
+    };
     // An empty REQUIRED aspect blocks publishing — it must be unmissable in
     // the grid, not discovered via a failed publish. Amber ring + "Missing"
     // pill until it's filled.
-    const missing = a.required && !(row?.value || "").trim();
+    const missing = a.required && !shown.trim();
     const ringCls = missing ? "ring-2 ring-warning/60" : undefined;
     const badge = (
       <span className="inline-flex items-center gap-1.5">
@@ -385,17 +394,20 @@ export function SpecificsCard({ w }) {
     return (
       <Field key={a.name} label={a.name} hint={badge}>
         {a.mode === "SELECTION_ONLY" && a.values?.length ? (
-          <Select value={row?.value || ""} className={ringCls}
-            onChange={(e) => w.upsertSpecific(a.name, e.target.value)}>
+          <Select value={shown} className={ringCls}
+            onChange={(e) => setValue(e.target.value)}>
             <option value="">— select —</option>
+            {shown && !a.values.includes(shown) && (
+              <option value={shown}>{shown}</option>
+            )}
             {a.values.map((v) => <option key={v} value={v}>{v}</option>)}
           </Select>
         ) : (
           <Input
-            value={row?.value || ""}
+            value={shown}
             placeholder={a.name}
             className={ringCls}
-            onChange={(e) => w.upsertSpecific(a.name, e.target.value)}
+            onChange={(e) => setValue(e.target.value)}
           />
         )}
         {extras.length > 0 && (
