@@ -114,14 +114,35 @@ export const ORIGIN_META = {
   },
 };
 
-// The origin chip on a listing card. Hover/long-press shows the rules.
-export function OriginBadge({ item, className }) {
-  const meta = ORIGIN_META[originOf(item)];
+// The eBay wordmark, per-letter brand colors — instantly readable as "this
+// lives on eBay" without spelling it out.
+export function EbayMark({ className }) {
   return (
-    <span title={meta.tip} className={cn("cursor-help", className)}>
-      <TagPill tone={meta.tone}>{meta.label}</TagPill>
+    <span aria-label="eBay"
+      className={cn("font-extrabold italic tracking-tight leading-none select-none", className)}>
+      <span style={{ color: "#E53238" }}>e</span>
+      <span style={{ color: "#0064D2" }}>b</span>
+      <span style={{ color: "#F5AF02" }}>a</span>
+      <span style={{ color: "#86B817" }}>y</span>
     </span>
   );
+}
+
+// One origin chip, used on cards and in the legend. Hover/long-press shows
+// the rules. Imported listings show the eBay mark instead of a text label.
+export function OriginChip({ kind, className }) {
+  const meta = ORIGIN_META[kind] || ORIGIN_META.app;
+  return (
+    <span title={meta.tip} className={cn("cursor-help", className)}>
+      <TagPill tone={meta.tone}>
+        {kind === "imported" ? <EbayMark className="text-[12px]" /> : meta.label}
+      </TagPill>
+    </span>
+  );
+}
+
+export function OriginBadge({ item, className }) {
+  return <OriginChip kind={originOf(item)} className={className} />;
 }
 
 export function ConfidenceBadge({ level, className }) {

@@ -276,8 +276,22 @@ NA_SENTINELS = {"does not apply", "not specified", "n/a", "na", "none",
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
+# Size tags print fractions and separators that eBay's canonical values spell
+# differently — "16½" vs "16.5", "32 x 34" vs "32x34". Translate before
+# normalizing so a correctly-read tag value doesn't get dropped as unmatched
+# (a dropped Size is a publish blocker in most clothing categories).
+_VALUE_SYNONYMS = {
+    "½": ".5", "¼": ".25", "¾": ".75", "⅓": ".33", "⅔": ".66",
+    " 1/2": ".5", " 1/4": ".25", " 3/4": ".75",
+    "-1/2": ".5", "-1/4": ".25", "-3/4": ".75",
+}
+
+
 def _norm_value(s: str) -> str:
-    return "".join(ch for ch in s.lower() if ch.isalnum())
+    s = s.lower()
+    for k, v in _VALUE_SYNONYMS.items():
+        s = s.replace(k, v)
+    return "".join(ch for ch in s if ch.isalnum() or ch == ".")
 
 
 def match_selection_value(value: str, allowed: list[str]) -> Optional[str]:

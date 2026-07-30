@@ -88,29 +88,54 @@ def _merge(existing: Optional[dict], fresh: dict) -> dict:
     return merged
 
 
-def import_active(token: str, user_id: str, limit: int = 300) -> dict:
-    """Import every active eBay listing for this user (up to `limit`).
+# How many ended/sold listings to mirror alongside the active ones. eBay only
+# retains ~90 days of these, so a modest cap covers the real backlog.
+_INACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_INACTIVE_LIMIT", "100") or "100")
 
-    Returns {"found", "imported", "updated", "failed"}.
-    """
-    ids = ebay_trading.active_listing_ids(token, limit=limit)
+
+def import_active(token: str, user_id: str, limit: int = 300) -> dict:
+    """Mirror the seller's eBay store into the app: every ACTIVE listing (up
+    to `limit`), plus recently ENDED (unsold → status 'ended', the Inactive
+    tab) and SOLD listings (status 'sold'), each capped at
+    EBAY_SYNC_INACTIVE_LIMIT. Returns {"found", "imported", "updated",
+    "failed"}."""
+    jobs: list[tuple[str, str]] = []  # (item_id, status) — first entry wins
+    seen: set[str] = set()
+
+    def _add(item_ids: list[str], status: str) -> None:
+        for i in item_ids:
+            if i not in seen:
+                seen.add(i)
+                jobs.append((i, status))
+
+    _add(ebay_trading.active_listing_ids(token, limit=limit), "published")
+    # Inactive/sold mirrors are additive — a failure there must not sink the
+    # main active-store sync.
+    for fetch, status in ((ebay_trading.sold_listing_ids, "sold"),
+                          (ebay_trading.unsold_listing_ids, "ended")):
+        try:
+            _add(fetch(token, limit=_INACTIVE_LIMIT), status)
+        except Exception as exc:  # noqa: BLE001
+            log.info("sync: couldn't list %s items: %s", status, exc)
+
     known = {r["id"]: r for r in db.list_listings(limit=1000, user_id=user_id)}
     imported = updated = failed = 0
 
-    def _fetch(item_id: str):
-        """(item_id, detail) — None detail when that one listing failed."""
+    def _fetch(job: tuple[str, str]):
+        """(item_id, status, detail) — None detail when that listing failed."""
+        item_id, status = job
         try:
-            return item_id, ebay_trading.get_listing(token, item_id)
+            return item_id, status, ebay_trading.get_listing(token, item_id)
         except Exception as exc:  # noqa: BLE001 - skip one bad listing
             log.info("sync: couldn't import eBay item %s: %s", item_id, exc)
-            return item_id, None
+            return item_id, status, None
 
     # Fetch in parallel, but write to the DB from this thread only, in eBay's
     # original order — so the import stays deterministic and needs no locking.
-    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(1, len(ids)))) as pool:
-        fetched = list(pool.map(_fetch, ids)) if ids else []
+    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(1, len(jobs)))) as pool:
+        fetched = list(pool.map(_fetch, jobs)) if jobs else []
 
-    for item_id, fresh in fetched:
+    for item_id, status, fresh in fetched:
         if fresh is None:
             failed += 1
             continue
@@ -125,14 +150,14 @@ def import_active(token: str, user_id: str, limit: int = 300) -> dict:
             log.info("sync: eBay item %s didn't validate: %s", item_id, exc)
             failed += 1
             continue
-        db.upsert_listing(rid, data, status="published", user_id=user_id)
+        db.upsert_listing(rid, data, status=status, user_id=user_id)
         if prior:
             updated += 1
         else:
             imported += 1
     log.info("sync: user=%s found=%d imported=%d updated=%d failed=%d",
-             user_id, len(ids), imported, updated, failed)
-    return {"found": len(ids), "imported": imported, "updated": updated,
+             user_id, len(jobs), imported, updated, failed)
+    return {"found": len(jobs), "imported": imported, "updated": updated,
             "failed": failed}
 
 

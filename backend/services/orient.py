@@ -38,27 +38,43 @@ _SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "photos": [ {"photo": <1-based number>, "rotate": 0|90|180|270} ] }
 
-"rotate" is how many degrees CLOCKWISE the photo must be turned so the item
-appears the right way up, as a buyer would expect to see it in a product
-listing. Include an entry for EVERY photo, using 0 when it's already upright.
+"rotate" is how many degrees CLOCKWISE the photo must be turned so it looks
+like a proper product photo on an e-commerce site (eBay / Amazon). Picture
+the reference image: a shirt laid flat, collar and shoulders at the TOP of
+the frame, hem at the bottom, sleeves out to the sides; printed graphics and
+text reading normally. Include an entry for EVERY photo, using 0 when it
+already looks like that.
 
 How to judge which way is up:
-- Clothing: collar/shoulders at the TOP, hem at the bottom. A shirt lying with
-  its collar pointing left needs 90; pointing right needs 270.
-- Shoes: sole down, toe pointing sideways.
-- Bottles/mugs/boxes/appliances: standing as they would sit on a table.
-- Books/boxes/labels/tags: printed text reading left-to-right, horizontal.
-- Flat-lay photos shot from directly above still have an intended up: use the
-  item's own top (collar, cap, spine, the way the print reads).
+- Clothing: collar/shoulders at the TOP, hem at the bottom. A shirt lying
+  with its collar pointing left needs 90; pointing right needs 270. Chest
+  graphics and brand text read normally when the photo is right.
+- Shoes: sole down. Bottles/mugs/boxes: standing as on a table.
+- Books/labels/tags: printed text reading left-to-right, horizontal.
 - People/mannequins: head at the top.
 
-Rules:
-- Use 0 whenever the photo is already upright or you genuinely can't tell —
-  never guess a rotation just to have one. A wrongly rotated photo is worse
-  than an untouched one.
+Rules — read carefully, mistakes here are worse than doing nothing:
+- DEFAULT IS 0. If the photo plausibly already matches the reference look,
+  answer 0. Only rotate when the evidence is unmistakable.
+- 180 is EXTREMELY RARE. Answer 180 only when the item is unambiguously
+  upside down — collar clearly at the BOTTOM with hem at the top, or text
+  clearly reading upside down. Never answer 180 because a graphic looks odd
+  or the lighting is confusing; when torn between 0 and 180, answer 0.
+- A close-up of a detail (fabric texture, a stitch, a tag, a logo without
+  clear context) is 0 unless readable text settles it.
 - Judge each photo independently; a set often mixes orientations.
-- A close-up of a detail (fabric texture, a stitch, a logo with no clear up)
-  is 0 unless text or a tag makes the direction obvious.
+"""
+
+_VERIFY_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{ "photos": [ {"photo": <1-based number>, "upright": true|false} ] }
+
+Each of these photos has ALREADY been auto-rotated. Confirm each one now
+looks correctly upright, like a product photo on an e-commerce site: clothing
+with the collar/shoulders at the top and hem at the bottom, text and graphics
+reading normally, items standing naturally. Answer upright=false if the photo
+looks sideways or upside down — false means the rotation was WRONG and will
+be cancelled, so when unsure answer false.
 """
 
 
@@ -113,21 +129,80 @@ def _b64(data: bytes) -> str:
     return base64.standard_b64encode(data).decode("ascii")
 
 
+def _verify_batch(proposals: list[tuple[Path, int]]) -> dict[str, int]:
+    """Second, independent look: each proposed rotation is APPLIED to the
+    thumbnail and the model must confirm the result looks upright. Only
+    confirmed turns survive — an unconfirmed one is cancelled, never applied.
+    {} on any failure (= apply nothing from this batch)."""
+    from PIL import Image, ImageOps
+    from . import images as _images
+
+    try:
+        content: list[dict] = []
+        for path, deg in proposals:
+            with Image.open(path) as im:
+                im = ImageOps.exif_transpose(im).convert("RGB")
+                im.thumbnail((_THUMB, _THUMB), Image.LANCZOS)
+                content.append(_pil_content_block(
+                    im.transpose(_images._CW_TRANSPOSE[deg])))
+        content.append({"type": "text", "text": (
+            f"These are photos 1 to {len(proposals)} of secondhand items, "
+            "after auto-rotation.\n" + _VERIFY_SCHEMA)})
+        resp = claude_ai._client().messages.create(
+            model=_model(), max_tokens=300,
+            messages=[{"role": "user", "content": content}])
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        answers = claude_ai._extract_json(text).get("photos") or []
+    except Exception as exc:  # noqa: BLE001 - no confirmation = no rotation
+        log.info("auto-orient: verify pass failed (%s) — applying nothing", exc)
+        return {}
+    upright = {}
+    for entry in answers:
+        if isinstance(entry, dict):
+            try:
+                upright[int(entry.get("photo", 0)) - 1] = bool(entry.get("upright"))
+            except (TypeError, ValueError):
+                continue
+    return {path.name: deg for i, (path, deg) in enumerate(proposals)
+            if upright.get(i)}
+
+
+def _pil_content_block(img) -> dict:
+    from io import BytesIO
+    import base64
+    buf = BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    return {"type": "image", "source": {
+        "type": "base64", "media_type": "image/jpeg",
+        "data": base64.standard_b64encode(buf.getvalue()).decode("ascii")}}
+
+
 def detect_rotations(paths: list[Path]) -> dict[str, int]:
     """{filename: clockwise degrees needed} for the photos that need turning.
 
-    Files already upright are simply absent. Never raises: a failed batch
-    contributes nothing, leaving those photos as they were shot.
-    """
+    Two-step for safety: a detect pass proposes turns, then a verify pass
+    looks at the ROTATED image and must confirm it's upright before anything
+    is applied — a wrong rotation (the upside-down-listing failure) is worse
+    than leaving a photo as shot, so unconfirmed proposals are cancelled.
+    Files already upright are simply absent. Never raises."""
     files = [p for p in paths if p.is_file()]
     if not files or not _enabled():
         return {}
     batches = [files[i:i + _BATCH] for i in range(0, len(files), _BATCH)]
-    rotations: dict[str, int] = {}
+    proposed: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(batches))) as pool:
         for part in pool.map(_detect_batch, batches):
+            proposed.update(part)
+    if not proposed:
+        return {}
+    by_name = {p.name: p for p in files}
+    items = [(by_name[n], deg) for n, deg in proposed.items() if n in by_name]
+    chunks = [items[i:i + _BATCH] for i in range(0, len(items), _BATCH)]
+    rotations: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=min(_WORKERS, len(chunks))) as pool:
+        for part in pool.map(_verify_batch, chunks):
             rotations.update(part)
-    if rotations:
-        log.info("auto-orient: straightening %d of %d photo(s)",
-                 len(rotations), len(files))
+    dropped = len(proposed) - len(rotations)
+    log.info("auto-orient: %d proposed, %d confirmed, %d cancelled by verify "
+             "(of %d photos)", len(proposed), len(rotations), dropped, len(files))
     return rotations

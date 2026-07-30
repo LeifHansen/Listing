@@ -72,9 +72,7 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     promoted = bool(listing.get("promote")) or promoted
 
     # Data-driven (real eBay traffic) beats the age heuristics below.
-    if watchers and watchers >= 3:
-        add("sale", "Add a sale",
-            f"{watchers} watchers but no sale yet — a small markdown often closes it.", 95)
+    # (No "Add a sale" nudge — removed on request: it read as noise.)
     if views is not None and views >= 30 and not watchers:
         add("lower_price", "Lower the price",
             f"{views} views but no watchers — buyers are looking; the price may be high.", 92)
@@ -89,8 +87,8 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             "Not promoted yet — promoted listings show up far more often.", 70,
             rate_=rate)
     if age is not None and age >= STALE_DAYS:
-        add("lower_price", "Lower price or add a sale",
-            f"Live {age} days — a price drop or a sale can restart interest.", 68)
+        add("lower_price", "Lower the price",
+            f"Live {age} days — a price drop can restart interest.", 68)
     if len(images) < FEW_PHOTOS:
         n = len(images)
         add("photos", "Add more photos",

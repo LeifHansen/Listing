@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, Megaphone, TrendingDown, Tag, RotateCcw,
-  ListChecks, Loader2, RefreshCw, CheckCircle2,
+  ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -19,12 +19,12 @@ import { cn, formatMoney } from "@/lib/utils";
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
-  promote: Megaphone, lower_price: TrendingDown, sale: Tag,
+  promote: Megaphone, lower_price: TrendingDown,
   finish: PlusCircle, relist: RotateCcw, photos: Camera, specifics: ListChecks,
 };
 const REC_TONE = {
   promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
-  sale: "bg-green-soft text-green", finish: "bg-blue-soft text-blue",
+  finish: "bg-blue-soft text-blue",
   relist: "bg-red-soft text-error", photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
 };
@@ -268,12 +268,54 @@ export function Dashboard() {
         <StatCard icon={Tag} tone="blue" label="Sold & ended"
           value={soldEnded.length}
           sub="relist ended items in one tap"
-          onClick={() => openListings(soldEnded.some((i) => i.status === "sold") ? "sold" : "unsold")} />
+          onClick={() => openListings(soldEnded.some((i) => i.status === "sold") ? "sold" : "inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
           value={todays.length}
           sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}
           onClick={startNew} />
       </motion.div>
+
+      {/* Traffic — real eBay numbers for the live listings (Sell Analytics
+          views/impressions over 30 days + watchers), with the top performer. */}
+      {(() => {
+        const withMetrics = live.filter((i) => metricsById[i.id]);
+        if (!withMetrics.length) return null;
+        const views = withMetrics.reduce((s, i) => s + (metricsById[i.id].views || 0), 0);
+        const impressions = withMetrics.reduce((s, i) => s + (metricsById[i.id].impressions || 0), 0);
+        const top = [...withMetrics].sort((a, b) =>
+          (metricsById[b.id].views || 0) - (metricsById[a.id].views || 0))[0];
+        const topViews = metricsById[top.id].views || 0;
+        return (
+          <motion.div variants={rise}>
+            <Card className="py-3.5 px-5 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[13px] text-ink-secondary">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-ink">
+                <BarChart3 size={15} className="text-blue" aria-hidden /> Traffic · 30 days
+              </span>
+              <span className="inline-flex items-center gap-1 tabular-nums">
+                <Eye size={14} aria-hidden /> {views.toLocaleString()} views
+              </span>
+              {impressions > 0 && (
+                <span className="tabular-nums">{impressions.toLocaleString()} search impressions</span>
+              )}
+              <span className="inline-flex items-center gap-1 tabular-nums">
+                <Heart size={14} aria-hidden /> {watcherTotal.toLocaleString()} watchers
+              </span>
+              {topViews > 0 && (
+                <button
+                  type="button"
+                  onClick={() => openListing(top.id)}
+                  className="inline-flex items-center gap-1 min-w-0 max-w-full text-blue font-semibold cursor-pointer hover:underline"
+                >
+                  <span className="truncate">
+                    Top: “{top.listing?.title || top.title || "Untitled"}”
+                  </span>
+                  <span className="shrink-0 tabular-nums">({topViews.toLocaleString()})</span>
+                </button>
+              )}
+            </Card>
+          </motion.div>
+        );
+      })()}
 
       {/* Suggested actions — the recommendation engine's picks */}
       {insights.length > 0 && (

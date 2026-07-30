@@ -447,7 +447,10 @@ export function useListingForm() {
             : Number(form.price) > 0
       ) ? "complete" : "attention",
       shipping: weight > 0 ? "complete" : "attention",
-      description: form.description.trim() ? "complete" : "attention",
+      // eBay doesn't require a description (we fall back to the title), so an
+      // empty one is "todo" (grey), never "attention" — it must not count
+      // toward the publish bar's "N fields left to finish".
+      description: form.description.trim() ? "complete" : "todo",
     };
   }, [form, categoryMeta.aspects, getSpecific]);
 
