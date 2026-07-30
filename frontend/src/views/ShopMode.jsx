@@ -187,6 +187,32 @@ export function ShopMode() {
               ) : (
                 <p className="text-sm text-ink-secondary">No price estimate yet — you can set one later.</p>
               )}
+              {/* What you'd pay — auto-read from a visible price sticker when
+                  possible, editable, optional. Saved on the Buy so profit can
+                  be worked out when the item sells. */}
+              <label className="flex items-center gap-2 text-sm text-ink-secondary">
+                <span className="font-medium text-ink">You paid</span>
+                <span aria-hidden>$</span>
+                <input
+                  type="number" step="0.01" min="0" inputMode="decimal"
+                  aria-label="Purchase price (what you paid)"
+                  placeholder={l.purchase_price != null ? undefined : "0.00 (optional)"}
+                  value={l.purchase_price != null ? l.purchase_price : ""}
+                  onChange={(e) => setResult((r) => r && ({
+                    ...r,
+                    listing: {
+                      ...r.listing,
+                      purchase_price: e.target.value === "" ? null : parseFloat(e.target.value),
+                    },
+                  }))}
+                  className="w-24 rounded-lg border border-line bg-card px-2.5 py-1.5 text-sm text-ink"
+                />
+                {l.purchase_price != null && result.price?.price > l.purchase_price && (
+                  <span className="text-xs font-semibold text-success">
+                    ≈ ${(result.price.price - l.purchase_price).toFixed(0)} potential profit
+                  </span>
+                )}
+              </label>
               <div className="mt-auto pt-3 flex flex-wrap gap-2.5">
                 <Button variant="primary" size="lg" onClick={buy}>
                   <Plus aria-hidden /> Buy — add to inventory

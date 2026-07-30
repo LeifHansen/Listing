@@ -120,6 +120,17 @@ export function ListingCard({
               )}
             </div>
           )}
+          {/* Profit framework: a sold item with a recorded cost basis shows
+              what it made (sale price − what you paid, before fees). */}
+          {item.status === "sold" && l.purchase_price != null && Number(l.price) > 0 && (
+            <p className="text-[12px] font-semibold"
+              title={`Sold ~$${Number(l.price).toFixed(2)} − paid $${Number(l.purchase_price).toFixed(2)}, before fees & shipping`}>
+              <span className={Number(l.price) - Number(l.purchase_price) >= 0 ? "text-success" : "text-warning"}>
+                {Number(l.price) - Number(l.purchase_price) >= 0 ? "+" : "−"}$
+                {Math.abs(Number(l.price) - Number(l.purchase_price)).toFixed(2)} profit
+              </span>
+            </p>
+          )}
           <div className="mt-auto flex items-center justify-between gap-2">
             <PriceBadge value={l.price} currency={l.currency} approx={inventory} />
             {inventory && (

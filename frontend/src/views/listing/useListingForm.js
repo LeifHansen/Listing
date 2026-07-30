@@ -9,7 +9,7 @@ import { once } from "@/lib/utils";
    both the free-form rows and the category-required aspect fields. */
 
 const EMPTY = {
-  title: "", subtitle: "", brand: "", price: "", quantity: 1,
+  title: "", subtitle: "", brand: "", price: "", purchase_price: "", quantity: 1,
   listing_format: "FIXED_PRICE", auction_start_price: "", auction_duration: "DAYS_7",
   package_weight_lb: "", package_weight_oz: "",
   package_length_in: "", package_width_in: "", package_height_in: "",
@@ -29,6 +29,7 @@ function fromListing(l) {
     ...EMPTY,
     ...l,
     price: l.price != null ? l.price : "",
+    purchase_price: l.purchase_price != null ? l.purchase_price : "",
     auction_start_price: l.auction_start_price != null ? l.auction_start_price : "",
     quantity: l.quantity || 1,
     package_weight_lb: l.package_weight_lb || "",
@@ -93,6 +94,7 @@ export function useListingForm() {
       ...(session?.listing || {}),
       ...form,
       price: form.price === "" ? null : parseFloat(form.price),
+      purchase_price: form.purchase_price === "" ? null : parseFloat(form.purchase_price),
       auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
       quantity: parseInt(form.quantity || "1", 10),
       package_weight_lb: num(form.package_weight_lb),

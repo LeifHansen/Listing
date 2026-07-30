@@ -603,7 +603,30 @@ export function PricingCard({ w }) {
               />
             </Field>
           )}
+          {/* Optional cost basis — auto-read from a price sticker when Shop
+              Mode could see one. Never required; powers profit once sold. */}
+          <Field
+            label={`You paid (${currency})`}
+            help="What it cost you — used to show your profit when it sells."
+          >
+            <Input
+              type="number" step="0.01" min="0" inputMode="decimal"
+              placeholder="optional"
+              value={w.form.purchase_price}
+              onChange={(e) => w.set("purchase_price", e.target.value)}
+            />
+          </Field>
         </div>
+        {w.form.purchase_price !== "" && Number(w.form.price) > 0 && (
+          <p className="text-[13px] text-ink-secondary -mt-1">
+            Potential profit at this price:{" "}
+            <strong className={Number(w.form.price) - Number(w.form.purchase_price) >= 0
+              ? "text-success" : "text-warning"}>
+              ${(Number(w.form.price) - Number(w.form.purchase_price)).toFixed(2)}
+            </strong>{" "}
+            before fees & shipping.
+          </p>
+        )}
 
         {/* Condition gets its own labeled row (not the last cell of the price
             grid, where it was easy to miss) paired with its description. */}

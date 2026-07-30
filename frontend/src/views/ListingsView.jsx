@@ -351,6 +351,26 @@ export function ListingsView({ search = "", forceTab }) {
         ))}
       </div>
 
+      {/* Profit framework: on the Sold tab, total up what the items with a
+          recorded cost basis made (sale − purchase price, before fees). */}
+      {tabId === "sold" && hasItems && (() => {
+        const withCost = items.filter(
+          (i) => i.listing?.purchase_price != null && Number(i.listing?.price) > 0);
+        if (!withCost.length) return null;
+        const profit = withCost.reduce(
+          (sum, i) => sum + (Number(i.listing.price) - Number(i.listing.purchase_price)), 0);
+        return (
+          <p className="text-[13px] text-ink-secondary -mt-1">
+            <strong className={profit >= 0 ? "text-success" : "text-warning"}>
+              {profit >= 0 ? "+" : "−"}${Math.abs(profit).toFixed(2)} profit
+            </strong>{" "}
+            across {withCost.length} sold item{withCost.length === 1 ? "" : "s"} with a
+            recorded purchase price (before fees &amp; shipping). Add what you paid in
+            the editor's Pricing card to track the rest.
+          </p>
+        );
+      })()}
+
       {/* Origin legend: which badges appear in this grid and what each one is
           allowed to do — hover (or long-press) a chip for the full rules. */}
       {showLegend && (() => {
