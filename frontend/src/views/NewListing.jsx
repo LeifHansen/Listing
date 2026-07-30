@@ -201,7 +201,7 @@ function MoreDetails({ w, children }) {
 
 function Workflow() {
   const {
-    session, startNew, setSession, setView, deleteListing, activeBulk,
+    session, startNew, setSession, setView, openListings, deleteListing, activeBulk,
   } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
@@ -275,7 +275,7 @@ function Workflow() {
               <ArrowLeft aria-hidden /> Back to batch
             </Button>
           )}
-          <Button variant="ghost" onClick={() => setView("drafts")}>
+          <Button variant="ghost" onClick={() => openListings("drafts")}>
             <ArrowLeft aria-hidden /> My drafts
           </Button>
           <Button variant="ghost" onClick={restart}>

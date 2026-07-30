@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
-  SkipForward, Undo2,
+  SkipForward, Undo2, Clock, AlertTriangle,
 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
@@ -15,9 +15,15 @@ import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 // instead of opening — powers mass actions like delete-selected in Drafts.
 export function ListingCard({
   item, onOpen, onDelete, onStartOver, startingOver, onSkip, skipped,
-  metrics, selectable, selected, onSelect, className,
+  stale, metrics, selectable, selected, onSelect, className,
 }) {
   const l = item.listing || {};
+  // Drafts with AI-inferred specifics awaiting a glance get a ⚠ count chip —
+  // review those fields and the draft is publish-ready.
+  const reviewCount = (item.status === "draft" || item.status === "dry_run")
+    ? (l.item_specifics || []).filter(
+      (s) => (s.value || "").trim() && s.confidence === "medium").length
+    : 0;
   const isLive = item.status === "published" || item.status === "live";
   const hasMetrics = isLive && metrics
     && (metrics.views != null || metrics.watchers != null);
@@ -70,6 +76,24 @@ export function ListingCard({
             </div>
           )}
           <StatusBadge status={item.status} className="absolute top-3 left-3 shadow-card" />
+          {/* Stale: live for 60+ days — relisting fresh gets a new item id and
+              a search-placement boost. */}
+          {stale && (
+            <span
+              className="absolute bottom-3 left-3 inline-flex items-center gap-1 rounded-full bg-yellow-soft border border-warning/30 shadow-card px-2 py-0.5 text-[11px] font-bold text-warning"
+              title="Live for 60+ days — old listings sink in eBay search. Open it and relist fresh for a placement boost."
+            >
+              <Clock size={11} aria-hidden /> stale
+            </span>
+          )}
+          {reviewCount > 0 && (
+            <span
+              className="absolute bottom-3 left-3 inline-flex items-center gap-1 rounded-full bg-yellow-soft border border-warning/30 shadow-card px-2 py-0.5 text-[11px] font-bold text-warning"
+              title="AI-inferred item specifics worth a glance before publishing"
+            >
+              <AlertTriangle size={11} aria-hidden /> {reviewCount} to review
+            </span>
+          )}
           {/* Origin chip — created here vs. imported from eBay — only where
               the distinction matters (the listing exists on eBay). Hover for
               exactly what each kind allows. */}

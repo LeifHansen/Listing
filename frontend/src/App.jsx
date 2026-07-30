@@ -58,9 +58,11 @@ function Main() {
             {view === "dashboard" && <Dashboard />}
             {view === "new" && <NewListing />}
             {view === "shop" && <ShopMode />}
-            {view === "inventory" && <ListingsView kind="inventory" search={search} />}
-            {view === "drafts" && <ListingsView kind="drafts" search={search} />}
-            {view === "listings" && <ListingsView kind="listings" search={search} />}
+            {/* Inventory/Drafts/Listings are ONE pipeline now; the legacy view
+                ids land on the matching tab so old links keep working. */}
+            {view === "inventory" && <ListingsView forceTab="finds" search={search} />}
+            {view === "drafts" && <ListingsView forceTab="drafts" search={search} />}
+            {view === "listings" && <ListingsView search={search} />}
             {/* "ebay" was a separate account mirror; it's part of Settings now,
                 so old links/bookmarks land there instead of a blank page. */}
             {(view === "settings" || view === "ebay") && <SettingsView />}

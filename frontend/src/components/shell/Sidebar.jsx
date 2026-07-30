@@ -1,19 +1,20 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Package, FileText, Tags, Settings,
+  LayoutDashboard, PlusCircle, Store, Tags, Settings,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 
+// Inventory / Drafts / Listings collapsed into ONE pipeline (Listings, with
+// lifecycle tabs) — sellers think in statuses, not separate pages. The badge
+// on Listings is the drafts-waiting count.
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "new", label: "New Listing", icon: PlusCircle },
+  { id: "dashboard", label: "Home", icon: LayoutDashboard },
+  { id: "new", label: "Sell", icon: PlusCircle },
   { id: "shop", label: "Shop Mode", icon: Store },
-  { id: "inventory", label: "Inventory", icon: Package },
-  { id: "drafts", label: "Drafts", icon: FileText },
   { id: "listings", label: "Listings", icon: Tags },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -90,8 +91,8 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
 
   const counts = {
-    inventory: listingsState.items.filter((i) => i.status === "unlisted").length,
-    drafts: listingsState.items.filter((i) => i.status === "draft" || i.status === "dry_run").length,
+    listings: listingsState.items.filter(
+      (i) => i.status === "draft" || i.status === "dry_run").length,
   };
 
   return (
