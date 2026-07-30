@@ -178,7 +178,8 @@ export function PublishBar({ w }) {
     .filter(([, s]) => s === "attention")
     .map(([k]) => GAP_META[k])
     .filter(Boolean);
-  const ready = gaps.length === 0;
+  const attention = gaps.length;
+  const ready = attention === 0;
   // Never say "N fields left" without SAYING WHICH — these chips name each
   // gap and clicking one scrolls straight to the field that needs finishing.
   const jumpTo = (target) => {

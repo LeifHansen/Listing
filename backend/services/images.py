@@ -549,7 +549,7 @@ def warm() -> None:
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
 
-def _autocrop_borders(img: Image.Image, tolerance: int = 18) -> Image.Image:
+def _autocrop_borders(img: Image.Image) -> Image.Image:
     """Trim near-uniform borders (e.g. plain background) around the subject."""
     rgb = _flatten(img)
     # Compare against the top-left corner color as the assumed background.
@@ -597,23 +597,52 @@ def _subject_box(img_rgb: Image.Image) -> Optional[tuple[int, int, int, int]]:
     return box
 
 
-def _fill_square(img: Image.Image) -> Image.Image:
-    """Crop to a square that FILLS the frame — never pad with white bars.
+def _border_color(rgb: Image.Image) -> tuple:
+    """The image's own backdrop color, averaged from its four corners — pure
+    white on a cleaned photo, approximately the table/backdrop otherwise."""
+    corners = [rgb.getpixel((x, y)) for x, y in
+               ((0, 0), (rgb.width - 1, 0), (0, rgb.height - 1),
+                (rgb.width - 1, rgb.height - 1))]
+    return tuple(sum(c[i] for c in corners) // 4 for i in range(3))
 
-    When a subject is detectable, crop a square that tightly frames it (plus
-    margin) so the item fills the photo. Otherwise take the largest centered
-    square. The result is always square (eBay's recommended shape) with no
-    letterbox/pillarbox padding.
-    """
+
+def _pad_square(crop: Image.Image, pad_color: tuple) -> Image.Image:
+    """Center `crop` on a square canvas of its longest side."""
+    side = max(crop.size)
+    canvas = Image.new("RGB", (side, side), pad_color)
+    canvas.paste(crop, ((side - crop.width) // 2, (side - crop.height) // 2))
+    return canvas
+
+
+# A subject longer than this ratio (long side / short side) cannot fit a
+# square window without getting chopped — think train-set boxes, skis, bats.
+_ELONGATED = 1.35
+
+
+def _fill_square(img: Image.Image) -> Image.Image:
+    """Square-frame the photo around its subject (eBay's recommended shape).
+
+    Normal subjects get a square crop that tightly frames them (plus margin)
+    so the item fills the photo — no letterbox bars. ELONGATED subjects are
+    the exception: a square window can't contain a long flat box without
+    cutting it off (the 'cropping way too much' bug), so those are cropped as
+    a rectangle around the whole subject and padded to square with the
+    photo's own backdrop color. Whole item beats full frame."""
     rgb = _flatten(img)
     w, h = rgb.size
     box = _subject_box(rgb)
     if box:
         left, top, right, bottom = box
+        bw, bh = right - left, bottom - top
+        if max(bw, bh) / max(1, min(bw, bh)) > _ELONGATED:
+            mx, my = max(6, int(bw * 0.05)), max(6, int(bh * 0.05))
+            crop = rgb.crop((max(0, left - mx), max(0, top - my),
+                             min(w, right + mx), min(h, bottom + my)))
+            return _pad_square(crop, _border_color(rgb))
         cx, cy = (left + right) // 2, (top + bottom) // 2
         # A square big enough for the subject + ~30% breathing room, but never
         # larger than the frame nor a tiny over-zoom.
-        want = int(max(right - left, bottom - top) * 1.3)
+        want = int(max(bw, bh) * 1.3)
         side = max(min(w, h) // 2, min(want, w, h))
     else:
         cx, cy = w // 2, h // 2
@@ -936,12 +965,7 @@ def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
     crop = rgb.crop((left, top, right, bottom))
     # Pad back to a square using the image's own border color (pure white on a
     # cleaned photo; approximates the backdrop otherwise).
-    corners = [rgb.getpixel((x, y)) for x, y in
-               ((0, 0), (rgb.width - 1, 0), (0, rgb.height - 1), (rgb.width - 1, rgb.height - 1))]
-    pad_color = tuple(sum(c[i] for c in corners) // 4 for i in range(3))
-    side = max(crop.size)
-    canvas = Image.new("RGB", (side, side), pad_color)
-    canvas.paste(crop, ((side - crop.width) // 2, (side - crop.height) // 2))
-    if side != TARGET_SIZE:
+    canvas = _pad_square(crop, _border_color(rgb))
+    if canvas.width != TARGET_SIZE:
         canvas = canvas.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
     return canvas

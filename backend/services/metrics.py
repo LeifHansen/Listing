@@ -133,7 +133,7 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str]) -> dict[str, 
     listing ids. Best-effort per source; returns {} if nothing was fetched.
     Cached for a short window keyed by the token + id set."""
     token = (creds or {}).get("access_token")
-    ids = sorted(set(str(i) for i in listing_ids if i))
+    ids = sorted({str(i) for i in listing_ids if i})
     if not token or not ids:
         return {}
     cache_key = f"{token[-12:]}:{','.join(ids)}"
