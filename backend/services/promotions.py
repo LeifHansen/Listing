@@ -29,8 +29,9 @@ log = logging.getLogger("thryft.promotions")
 CAMPAIGN_NAME = "Thryft Shop Promoted Listings"
 _MARKETING = "/sell/marketing/v1"
 # Fallback ad rate when eBay has no recommended rate for a listing (or the
-# Recommendation API isn't reachable / the scope isn't granted yet).
-DEFAULT_AD_RATE = 5.0
+# Recommendation API isn't reachable / the scope isn't granted yet). eBay's
+# own per-listing recommendation wins whenever we can get one.
+DEFAULT_AD_RATE = 10.0
 
 # Resolve the campaign id once per (marketplace, token) instead of listing
 # campaigns on every publish. Keyed by a short, non-sensitive token suffix.
@@ -192,17 +193,48 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
                        + (res.get("detail") or "unknown error")}
 
 
-def _extract_bid(rec: dict):
-    """Pull eBay's suggested ad-rate % out of a listing recommendation."""
-    mr = rec.get("marketingRecommendations") or {}
-    ad = mr.get("ad") or {}
-    bp = ad.get("bidPercentages") or {}
-    val = bp.get("basic") or bp.get("suggested")
+def _num(val):
     try:
         r = round(float(val), 1)
         return r if r > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _extract_bid(rec: dict):
+    """Pull eBay's suggested ad-rate % out of one listing recommendation.
+
+    eBay's shape (Recommendation API, findListingRecommendations):
+        {"listingId": "...",
+         "marketing": {"ad": {"bidPercentages": [{"basis": "TRENDING",
+                                                  "value": "10.5"}], ...}}}
+    Two bases can come back:
+      ITEM     - tailored to this item (attributes, seasonality, competition)
+      TRENDING - the category-level average: what recently-sold listings in
+                 this item's category were paying
+    Prefer the tailored one, fall back to the category average.
+
+    (The old code read `marketingRecommendations.ad.bidPercentages` as a dict
+    of basic/suggested — a shape eBay never returns — so every lookup came
+    back empty and every listing silently got the flat default rate.)
+    """
+    ad = ((rec.get("marketing") or rec.get("marketingRecommendations") or {})
+          .get("ad") or {})
+    bids = ad.get("bidPercentages")
+    if isinstance(bids, list):
+        by_basis = {str(b.get("basis", "")).upper(): b.get("value")
+                    for b in bids if isinstance(b, dict)}
+        for key in ("ITEM", "TRENDING"):
+            got = _num(by_basis.get(key))
+            if got:
+                return got
+        # An unexpected basis label still carries a usable number.
+        return next((v for v in (_num(b.get("value")) for b in bids
+                                 if isinstance(b, dict)) if v), None)
+    if isinstance(bids, dict):  # defensive: older/other shapes
+        return next((v for v in (_num(bids.get(k)) for k in
+                                 ("item", "trending", "basic", "suggested")) if v), None)
+    return None
 
 
 def suggested_ad_rates(creds: dict | None, listing_ids: list[str]) -> dict[str, float]:
