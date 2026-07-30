@@ -718,6 +718,7 @@ _CW_TRANSPOSE = {
     180: Image.Transpose.ROTATE_180,
     270: Image.Transpose.ROTATE_90,
 }
+CW_TRANSPOSE = _CW_TRANSPOSE  # public alias (used by orient.py's verify pass)
 
 
 def optimize(src: Path, dst: Path, remove_bg: bool = False,

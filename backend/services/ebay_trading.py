@@ -189,6 +189,11 @@ _CONDITION_BY_ID = {
 _CONDITION_TO_ID = {
     "NEW": "1000", "NEW_OTHER": "1500", "NEW_WITH_DEFECTS": "1750",
     "CERTIFIED_REFURBISHED": "2000", "SELLER_REFURBISHED": "2500",
+    # 2750 (Like New) exists in some categories (media, trading cards): the
+    # taxonomy layer can offer LIKE_NEW, so the publish map must speak it too
+    # — a missing key silently dropped <ConditionID>, and eBay then rejected
+    # with "condition is required" (architect finding #5).
+    "LIKE_NEW": "2750",
     "USED_EXCELLENT": "3000", "USED_VERY_GOOD": "4000", "USED_GOOD": "5000",
     "USED_ACCEPTABLE": "6000", "FOR_PARTS_OR_NOT_WORKING": "7000",
 }
@@ -262,7 +267,6 @@ def _item_to_listing(item: ET.Element) -> dict:
         "watch_count": _int(item, "WatchCount"),
         "sold_quantity": (_int(selling, "QuantitySold") if selling is not None else 0),
         "view_url": _text(item, "ListingDetails/ViewItemURL"),
-        "end_time": _text(item, "ListingDetails/EndTime"),
     }
 
 
@@ -333,6 +337,36 @@ def sold_listing_ids(token: str, limit: Optional[int] = None,
                      max_pages: int = _MAX_PAGES) -> list[str]:
     """Listings SOLD in the recent period (~90 days) per GetMyeBaySelling."""
     return _my_ebay_ids(token, "SoldList", "", limit, max_pages)
+
+
+def watch_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, int]:
+    """{item_id: watch count} for every active listing on the account. Backs
+    the metrics overlay — the Sell APIs don't expose watchers, and routing the
+    call through here keeps the endpoint env-aware (sandbox vs production)
+    with the shared error handling."""
+    out: dict[str, int] = {}
+    page = 1
+    while page <= max_pages:
+        body = (
+            "<ActiveList><Include>true</Include>"
+            f"<Pagination><EntriesPerPage>{_PAGE_SIZE}</EntriesPerPage>"
+            f"<PageNumber>{page}</PageNumber></Pagination></ActiveList>"
+            "<DetailLevel>ReturnAll</DetailLevel>"
+        )
+        root = _call("GetMyeBaySelling", token, body)
+        cont = _find(root, "ActiveList")
+        if cont is None:
+            break
+        items = _findall(cont, "ItemArray/Item")
+        for item in items:
+            iid = _text(item, "ItemID")
+            if iid:
+                out[iid] = _int(item, "WatchCount")
+        total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
+        if page >= max(1, total_pages) or not items:
+            break
+        page += 1
+    return out
 
 
 def get_listing(token: str, item_id: str) -> dict:
@@ -505,6 +539,12 @@ def revise_listing(token: str, item_id: str, listing: Listing,
         parts.append(f"<{tag}>{listing.price:.2f}</{tag}>")
     if listing.quantity and listing.quantity > 0:
         parts.append(f"<Quantity>{int(listing.quantity)}</Quantity>")
+    if listing.fulfillment_policy_id:
+        # The seller picked a shipping service for THIS listing — send the
+        # matching business-policy profile so the revise actually changes it.
+        parts.append("<SellerProfiles><SellerShippingProfile><ShippingProfileID>"
+                     f"{_esc(listing.fulfillment_policy_id)}</ShippingProfileID>"
+                     "</SellerShippingProfile></SellerProfiles>")
 
     call = _revise_call_name(listing)
     root = _call(call, token, f"<Item>{''.join(parts)}</Item>")

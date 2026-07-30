@@ -146,6 +146,12 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
+# Public aliases for other services (orient.py) — cross-module callers
+# shouldn't have to reach for underscored internals.
+client = _client
+extract_json = _extract_json
+
+
 # Things the ACCOUNT settles once, not the seller per listing: where it ships
 # from, which policies apply, how fast it goes out. The model likes to add
 # these to missing_info because a listing does carry them, but asking the

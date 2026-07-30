@@ -45,6 +45,14 @@ def optimized_dir(session_id: str) -> Path:
     return ensure_session(session_id) / "optimized"
 
 
+def optimized_path(session_id: str) -> Path:
+    """The optimized dir WITHOUT creating anything — for read-only callers
+    (the public /media route, studio loads, listings): a GET must never be a
+    disk write, and re-creating empty dirs for purged sessions kept undoing
+    the orphan sweep."""
+    return session_dir(session_id) / "optimized"
+
+
 def history_dir(session_id: str) -> Path:
     d = session_dir(session_id) / "history"
     d.mkdir(parents=True, exist_ok=True)
@@ -86,7 +94,9 @@ def natural_key(name: str) -> list:
 
 
 def list_optimized(session_id: str) -> list[str]:
-    d = optimized_dir(session_id)
+    d = optimized_path(session_id)  # read-only — never mkdir on a lookup
+    if not d.is_dir():
+        return []
     return sorted((p.name for p in d.glob("*") if p.is_file()), key=natural_key)
 
 

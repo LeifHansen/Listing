@@ -57,10 +57,13 @@ export function useListingForm() {
   const sessionId = session?.sessionId;
   // Live = this session is (still) a live eBay listing being revised, so the
   // publish actions become Update / End instead of Publish / Save Draft.
-  // An imported eBay listing is by definition already live, so it always gets
-  // the revise actions (Update / End) even before any status round-trip.
-  const isLive = session?.status === "published" || session?.status === "live"
-    || (session?.listing?.source || "") === "ebay";
+  // source==="ebay" alone is NOT enough: every Trading publish sets it, so an
+  // ENDED listing opened from the Inactive tab would wrongly show Update/End.
+  // Ended/sold records get the Publish action instead — the server relists
+  // them as a fresh listing (eBay can't revise an ended item).
+  const settled = session?.status === "ended" || session?.status === "sold";
+  const isLive = !settled && (session?.status === "published" || session?.status === "live"
+    || (session?.listing?.source || "") === "ebay");
   const ebayListingId = session?.listing?.ebay_listing_id
     || publishResult?.listing_id || "";
 

@@ -10,10 +10,6 @@ import { useToast } from "@/components/ui/Toaster";
 
 const AppContext = createContext(null);
 
-export const VIEWS = [
-  "dashboard", "new", "shop", "inventory", "drafts", "listings", "settings",
-];
-
 export function AppProvider({ children }) {
   const { toast } = useToast();
 

@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import logging
 import time
-import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 
 from .. import config
+from . import ebay_trading
 
 log = logging.getLogger("thryft.metrics")
 
@@ -78,54 +78,12 @@ def _traffic(token: str, listing_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]  # strip the XML namespace
-
-
 def _watchers(token: str) -> dict[str, int]:
-    """watch count per active listing, via Trading GetMyeBaySelling (one call).
-    {item_id: watchers}. The Sell APIs don't expose watchers, so this uses the
-    legacy Trading API with the OAuth token (IAF header)."""
-    body = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-        '<ActiveList><Include>true</Include>'
-        '<Pagination><EntriesPerPage>200</EntriesPerPage><PageNumber>1</PageNumber></Pagination>'
-        '</ActiveList><DetailLevel>ReturnAll</DetailLevel>'
-        '</GetMyeBaySellingRequest>'
-    )
-    r = httpx.post(
-        "https://api.ebay.com/ws/api.dll",
-        headers={
-            "X-EBAY-API-CALL-NAME": "GetMyeBaySelling",
-            "X-EBAY-API-SITEID": "0",
-            "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
-            "X-EBAY-API-IAF-TOKEN": token,
-            "Content-Type": "text/xml",
-        },
-        content=body.encode("utf-8"),
-        timeout=30,
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"GetMyeBaySelling {r.status_code}")
-    out: dict[str, int] = {}
-    root = ET.fromstring(r.text)
-    for item in root.iter():
-        if _local(item.tag) != "Item":
-            continue
-        iid, watch = "", 0
-        for child in item:
-            lt = _local(child.tag)
-            if lt == "ItemID":
-                iid = (child.text or "").strip()
-            elif lt == "WatchCount":
-                try:
-                    watch = int(child.text or 0)
-                except (TypeError, ValueError):
-                    watch = 0
-        if iid:
-            out[iid] = watch
-    return out
+    """watch count per active listing ({item_id: watchers}). The Sell APIs
+    don't expose watchers, so this goes through the Trading API — via
+    ebay_trading so the endpoint honors EBAY_ENV (the old inline call
+    hardcoded production) and errors surface with the shared handling."""
+    return ebay_trading.watch_counts(token)
 
 
 def listing_metrics(creds: Optional[dict], listing_ids: list[str]) -> dict[str, dict]:
