@@ -114,6 +114,21 @@ def presigned_put(key: str, expires: int = 3600) -> str:
         ExpiresIn=expires)
 
 
+def exists(key: str) -> bool:
+    """True when the object is really in the bucket. Used before freeing a
+    local copy — the upload path is best-effort, so "we tried to upload it"
+    is NOT proof, and deleting an un-uploaded photo would break a live
+    listing's images. False on any doubt (including a client error)."""
+    try:
+        client = _get_client()
+        if client is None:
+            return False
+        client.head_object(Bucket=config.R2_BUCKET, Key=key)
+        return True
+    except Exception:  # noqa: BLE001 - missing object or transient error
+        return False
+
+
 def delete(key: str) -> None:
     """Best-effort delete of an object from R2. Never raises."""
     try:
