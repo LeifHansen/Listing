@@ -62,13 +62,27 @@ def upload(local_path: Path, key: str) -> Optional[str]:
 
 
 def upload_optimized(session_id: str, local_dir: Path, names: list[str]) -> None:
-    """Best-effort upload of a session's optimized images to R2."""
+    """Best-effort upload of a session's optimized images to R2.
+
+    Uploads run concurrently: these are network round trips, and a pile of 40
+    photos done one at a time added tens of seconds to whatever was waiting on
+    it. boto3 clients are thread-safe for this, and the per-file upload already
+    swallows its own failures, so a slow or failing photo can't hold up the
+    rest."""
     if not enabled():
         return
-    for name in names:
-        path = local_dir / name
-        if path.is_file():
-            upload(path, key_for(session_id, name))
+    paths = [(local_dir / name, name) for name in names]
+    paths = [(p, n) for p, n in paths if p.is_file()]
+    if not paths:
+        return
+    if len(paths) == 1:
+        upload(paths[0][0], key_for(session_id, paths[0][1]))
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        for path, name in paths:
+            pool.submit(upload, path, key_for(session_id, name))
 
 
 # --- Adobe hand-off helpers --------------------------------------------------

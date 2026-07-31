@@ -1127,9 +1127,15 @@ async def upload(
             "Could not process the uploaded image(s)"
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
-    # Push optimized images to durable object storage (R2) when configured.
-    await run_in_threadpool(
-        objstore.upload_optimized, session_id, storage.optimized_dir(session_id), optimized)
+    # Mirror the optimized images to R2, but don't make the user wait for it:
+    # the photos are already on the volume and /media serves the local copy,
+    # so nothing on screen or on the way to eBay needs the bucket to have them
+    # yet. Anything this misses (a restart mid-push) gets picked up by the
+    # reclaim pass, which uploads what the bucket is missing before it frees
+    # anything.
+    _in_background(objstore.upload_optimized, session_id,
+                   storage.optimized_dir(session_id), optimized,
+                   what="R2 push (upload)")
     return {
         "session_id": session_id,
         "optimized": optimized,
@@ -1197,7 +1203,8 @@ async def upload_more(
             log.warning("upload-more: couldn't process %s: %s", src.name, exc)
     if not new_names:
         raise HTTPException(400, "Could not process the uploaded image(s).")
-    await run_in_threadpool(objstore.upload_optimized, session_id, opt_dir, new_names)
+    _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
+                   what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
     return {"added": new_names, "optimized": storage.list_optimized(session_id)}
 
