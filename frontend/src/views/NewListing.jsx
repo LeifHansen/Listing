@@ -259,9 +259,11 @@ function Workflow() {
           <div className="flex items-center gap-2 mt-1">
             {session.confidence && <ConfidenceBadge level={session.confidence} />}
             {w.isLive && (
-              <TagPill tone="green">
-                <CheckCircle2 size={12} aria-hidden /> Live on eBay — editing updates the real listing
-              </TagPill>
+              <span title="Editing updates the real listing on eBay">
+                <TagPill tone="green">
+                  <CheckCircle2 size={12} aria-hidden /> Live on eBay
+                </TagPill>
+              </span>
             )}
             {session.status === "ended" && <TagPill tone="neutral">Ended on eBay</TagPill>}
           </div>

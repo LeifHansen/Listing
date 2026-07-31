@@ -244,8 +244,9 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
         </p>
       )}
       {item.status === "draft" && missing.length > 0 && (
-        <p className="text-xs text-warning font-medium">
-          Missing required: {missing.join(", ")}
+        <p className="text-xs text-warning font-medium"
+          title="eBay requires these before this item can publish">
+          Missing: {missing.join(", ")}
         </p>
       )}
       {item.status === "draft" && item.error && (
@@ -464,6 +465,20 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
 
   const busy = job && !job.done;
   const phase = job?.phase || "uploading";
+  // Experimental UX: while the job runs, show ONE loading screen with a real
+  // progress bar instead of streaming cards in as they're drafted — the queue
+  // appears all at once when the batch is done. (Easy revert: drop the
+  // `job?.done &&` gates below and this % math.)
+  const pct = Math.round((() => {
+    const frac = (cur, tot) => (tot ? Math.min(1, (cur || 0) / tot) : 0);
+    if (!job) return 3;
+    if (job.done) return 100;
+    if (phase === "uploading") return 5;
+    if (phase === "optimizing") return 10 + 35 * frac(job.current, job.total_photos);
+    if (phase === "grouping") return 50;
+    if (phase === "identifying") return 55 + 44 * frac(job.current, job.total_items);
+    return 95;
+  })());
   const drafts = items.filter((it) => it.status === "draft");
   const needInfo = drafts.filter((it) => missingRequired(it.listing).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
@@ -481,7 +496,19 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   return (
     <div className="flex flex-col gap-4">
       {busy && (
-        <AIStatusCard messages={(PHASE_MESSAGES[phase] || ["Working…"]).map((m) => m + progressDetail)} />
+        <div className="flex flex-col gap-3">
+          <AIStatusCard messages={(PHASE_MESSAGES[phase] || ["Working…"]).map((m) => m + progressDetail)} />
+          <div className="px-1">
+            <div className="h-2.5 rounded-full bg-bg-sunken border border-line overflow-hidden"
+              role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+              <div className="h-full rounded-full bg-blue transition-all duration-700"
+                style={{ width: `${Math.max(pct, 3)}%` }} />
+            </div>
+            <p className="mt-1.5 text-xs text-ink-secondary tabular-nums text-center">
+              {pct}%{items.length ? ` · ${items.length} item${items.length === 1 ? "" : "s"} drafted so far` : ""}
+            </p>
+          </div>
+        </div>
       )}
       {job?.done && (
         <Card className={cn("py-4", job.error ? "border-warning/40" : "border-success/30")}>
@@ -490,7 +517,9 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
               ? <><AlertTriangle size={17} className="text-warning" aria-hidden /> {job.error}</>
               : <>
                   <CheckCircle2 size={17} className="text-success" aria-hidden />
-                  {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}. Review below — they're also saved in Drafts.
+                  <span title="Also saved in Drafts — review below or come back anytime.">
+                    {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}
+                  </span>
                 </>}
           </p>
         </Card>
@@ -503,10 +532,9 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         <Card className="py-3.5 border-warning/40 bg-warning-soft">
           <p className="text-sm text-ink flex items-start gap-2">
             <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-            <span>
+            <span title="The photos were saved unchanged.">
               <strong>Backgrounds weren't removed</strong> on {job.bg_failed || "some"}{" "}
-              photo{job.bg_failed === 1 ? "" : "s"} — {job.bg_error}{" "}
-              The photos were saved unchanged.
+              photo{job.bg_failed === 1 ? "" : "s"} — {job.bg_error}
             </span>
           </p>
         </Card>
@@ -519,12 +547,12 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
           <Card className="py-3.5 border-warning/40 bg-warning-soft">
             <p className="text-sm text-ink flex items-start gap-2">
               <Combine size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-              <span>
+              <span title="If they're the same item, tick just those drafts and hit Merge into one before publishing.">
                 <strong>Possible duplicate{dupes.length > 1 ? "s" : ""}:</strong>{" "}
-                "{(a.listing?.title || a.title || "").slice(0, 40)}…" and{" "}
-                "{(b.listing?.title || b.title || "").slice(0, 40)}…" look like the same item
-                {dupes.length > 1 ? ` (+${dupes.length - 1} more pair${dupes.length > 2 ? "s" : ""})` : ""}.
-                If so, tick just those drafts and hit <strong>Merge into one</strong> before publishing.
+                "{(a.listing?.title || a.title || "").slice(0, 40)}…" &amp;{" "}
+                "{(b.listing?.title || b.title || "").slice(0, 40)}…"
+                {dupes.length > 1 ? ` (+${dupes.length - 1} more)` : ""} — select them
+                and <strong>Merge into one</strong>.
               </span>
             </p>
           </Card>
@@ -535,17 +563,15 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         <Card className="py-3.5 border-warning/40 bg-warning-soft">
           <p className="text-sm text-ink flex items-start gap-2">
             <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-            <span>
+            <span title="eBay requires title, price, weight, and category. Fill them in on the card or in the full editor before publishing.">
               <strong>{needInfo.length}</strong> of {drafts.length} draft{drafts.length === 1 ? "" : "s"}{" "}
-              {needInfo.length === 1 ? "is" : "are"} missing info eBay requires (title, price, weight,
-              or category) — flagged <strong className="text-warning">Needs info</strong> below. Fill
-              those in (here or in the full editor) before publishing.
+              missing required info — flagged <strong className="text-warning">Needs info</strong> below.
             </span>
           </p>
         </Card>
       )}
 
-      {drafts.length > 0 && (
+      {job?.done && drafts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2.5">
           <Button variant="primary" onClick={publishSelected}>
             <Rocket aria-hidden /> Publish selected ({drafts.filter((d) => checked[d.session_id]).length})
@@ -562,9 +588,11 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         </div>
       )}
 
+      {/* Cards render only once the whole batch settles (see the progress
+          screen above) — not streamed in one by one. */}
       <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
         <AnimatePresence>
-          {items.map((it) => (
+          {(job?.done ? items : []).map((it) => (
             <BulkItemCard
               key={it.session_id}
               item={it}

@@ -1,14 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw, CheckSquare, Trash2, X,
+  PlusCircle, Store, LogIn, RefreshCw, CheckSquare, Trash2, X, Truck,
 } from "lucide-react";
-import { pollJob, postJson } from "@/lib/api";
+import { api, pollJob, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { OriginChip, originOf } from "@/components/ui/badges";
+import { InfoTip, Select } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -84,6 +85,50 @@ const STALE_DAYS = 60;
 const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
 
 const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
+
+// Shipping service picker right on a draft's card — the same eBay fulfillment
+// policies the editor and bulk queue offer, account default preselected.
+// Saves the moment it's changed.
+function DraftShipping({ item }) {
+  const { ebay, policiesData, setPoliciesData } = useApp();
+  const { toast } = useToast();
+  const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
+  useEffect(() => {
+    if (!ebay.connected || policiesData) return;
+    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
+  }, [ebay.connected, policiesData, setPoliciesData]);
+  if (!ebay.connected) return null;
+  const policies = policiesData?.policies?.fulfillment || [];
+  if (!policies.length) return null;
+  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
+  const save = async (id) => {
+    setValue(id);
+    try {
+      await postJson(`/api/save/${item.id}`, {
+        ...(item.listing || {}), fulfillment_policy_id: id,
+      });
+    } catch (e) {
+      toast(`Couldn't save the shipping service: ${e.message}`, { kind: "error" });
+    }
+  };
+  return (
+    <div className="mt-1.5 flex items-center gap-1.5" title="Shipping service for this draft">
+      <Truck size={14} className="shrink-0 text-ink-faint" aria-hidden />
+      <Select
+        aria-label="Shipping service"
+        className="h-9 text-[13px]"
+        value={value || accountDefault}
+        onChange={(e) => save(e.target.value)}
+      >
+        {policies.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}{p.summary ? ` · ${p.summary}` : ""}
+          </option>
+        ))}
+      </Select>
+    </div>
+  );
+}
 
 export function ListingsView({ search = "", forceTab }) {
   const {
@@ -279,6 +324,7 @@ export function ListingsView({ search = "", forceTab }) {
               selectable={selecting}
               selected={!!sel[item.id]}
               onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
+            {tab.draftTools && isDraft(item) && !selecting && <DraftShipping item={item} />}
           </motion.div>
         ))}
       </div>
@@ -291,9 +337,9 @@ export function ListingsView({ search = "", forceTab }) {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
+        <div className="min-w-0 flex items-center gap-2">
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Listings</h1>
-          <p className="text-sm text-ink-secondary mt-1">{tab.sub}</p>
+          <InfoTip text={tab.sub} />
         </div>
         <div className="flex items-center gap-2">
           {user && ebay.connected && (
@@ -360,13 +406,12 @@ export function ListingsView({ search = "", forceTab }) {
         const profit = withCost.reduce(
           (sum, i) => sum + (Number(i.listing.price) - Number(i.listing.purchase_price)), 0);
         return (
-          <p className="text-[13px] text-ink-secondary -mt-1">
+          <p className="text-[13px] text-ink-secondary -mt-1 flex items-center gap-1.5">
             <strong className={profit >= 0 ? "text-success" : "text-warning"}>
               {profit >= 0 ? "+" : "−"}${Math.abs(profit).toFixed(2)} profit
-            </strong>{" "}
-            across {withCost.length} sold item{withCost.length === 1 ? "" : "s"} with a
-            recorded purchase price (before fees &amp; shipping). Add what you paid in
-            the editor's Pricing card to track the rest.
+            </strong>
+            <span>· {withCost.length} item{withCost.length === 1 ? "" : "s"}</span>
+            <InfoTip text="Sale price minus recorded purchase price, before fees & shipping — only items with a 'You paid' amount count. Add what you paid in the editor's Pricing card to track the rest." />
           </p>
         );
       })()}
@@ -378,7 +423,7 @@ export function ListingsView({ search = "", forceTab }) {
         return (
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[12px] text-ink-faint -mt-1">
             {present.map((k) => <OriginChip key={k} kind={k} />)}
-            <span>— hover a badge to see what it can and can’t do</span>
+            <InfoTip text="Hover a badge to see what that kind of listing can and can't do here." />
           </div>
         );
       })()}
