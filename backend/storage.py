@@ -118,6 +118,76 @@ def purge_session(session_id: str) -> None:
         log.warning(f"storage: purge_session failed for {session_id}: {exc}")
 
 
+def disk_free_bytes() -> int:
+    """Free bytes on the volume holding the session store (0 if unknown)."""
+    try:
+        config.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        st = shutil.disk_usage(config.SESSIONS_DIR)
+        return int(st.free)
+    except Exception as exc:  # noqa: BLE001 - a stat failure must not break a request
+        log.warning(f"storage: disk_usage failed: {exc}")
+        return 0
+
+
+def prune_originals(max_age_seconds: int) -> int:
+    """Delete source uploads (session original/ dirs) older than the cutoff.
+
+    Nothing reads these after the optimize pass — the optimized JPEGs are what
+    the app, the browser, and eBay use — but they're the BIGGEST thing on the
+    volume: a phone photo is several MB against a few hundred KB optimized. A
+    full volume takes the whole app down ("No space left on device" on every
+    upload), so old originals are reclaimed on a timer. Returns bytes freed.
+    Never raises."""
+    freed = 0
+    try:
+        base = config.SESSIONS_DIR
+        if not base.exists():
+            return 0
+        cutoff = time.time() - max_age_seconds
+        for d in base.iterdir():
+            orig = d / "original"
+            try:
+                if not orig.is_dir():
+                    continue
+                for p in orig.iterdir():
+                    if p.is_file() and p.stat().st_mtime <= cutoff:
+                        size = p.stat().st_size
+                        p.unlink(missing_ok=True)
+                        freed += size
+            except Exception:  # noqa: BLE001 - keep pruning the rest
+                continue
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"storage: prune_originals failed: {exc}")
+    return freed
+
+
+def prune_history(max_age_seconds: int) -> int:
+    """Delete edit snapshots (session history/) older than the cutoff. Recent
+    versions stay; ancient ones aren't worth a full volume. Returns bytes
+    freed. Never raises."""
+    freed = 0
+    try:
+        base = config.SESSIONS_DIR
+        if not base.exists():
+            return 0
+        cutoff = time.time() - max_age_seconds
+        for d in base.iterdir():
+            hist = d / "history"
+            try:
+                if not hist.is_dir():
+                    continue
+                for p in hist.iterdir():
+                    if p.is_file() and p.stat().st_mtime <= cutoff:
+                        size = p.stat().st_size
+                        p.unlink(missing_ok=True)
+                        freed += size
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"storage: prune_history failed: {exc}")
+    return freed
+
+
 def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> int:
     """Delete session dirs that aren't a known listing and haven't been touched
     in `max_age_seconds` — i.e. leftover bulk staging and abandoned uploads that

@@ -6,8 +6,10 @@ Pipeline:
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import shutil
 import threading
 import time
@@ -68,17 +70,96 @@ def _sweep_orphans() -> None:
     dir_names = {storage.session_dir(i).name for i in ids if i}
     removed = storage.sweep_orphan_sessions(dir_names, max_age_seconds=3 * 3600)
     if removed:
-        log.info("startup: swept %d orphaned session dir(s) to reclaim space", removed)
+        log.info("sweep: removed %d orphaned session dir(s) to reclaim space", removed)
+
+
+# How long a source upload / edit snapshot survives before it's reclaimed.
+# Nothing reads originals after the optimize pass, and they're the bulk of the
+# volume, so they go first and soonest.
+_ORIGINALS_TTL = int(os.getenv("ORIGINALS_TTL_HOURS", "12") or "12") * 3600
+_HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
+# Below this much free space the volume is one batch away from breaking every
+# upload ("No space left on device"), so reclaim aggressively.
+_LOW_DISK_BYTES = 1024 * 1024 * 1024  # 1 GB
+
+
+def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
+    """Free local copies of optimized photos that are safely in R2.
+
+    With object storage configured, R2 is where eBay and the browser actually
+    read photos from (/media redirects there when the local file is gone), so
+    the volume only needs them while a listing is being worked on. Each file
+    is verified present in the bucket before its local copy goes — the upload
+    path is best-effort, and deleting a photo that never landed would break a
+    live listing. Returns bytes freed."""
+    if not objstore.enabled():
+        return 0
+    freed = checked = 0
+    try:
+        base = config.SESSIONS_DIR
+        if not base.exists():
+            return 0
+        cutoff = time.time() - max_age_seconds
+        for d in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime):
+            opt = d / "optimized"
+            if not opt.is_dir():
+                continue
+            for p in opt.iterdir():
+                if checked >= budget:  # bounded work per pass
+                    return freed
+                try:
+                    if not p.is_file() or p.stat().st_mtime > cutoff:
+                        continue
+                    checked += 1
+                    if objstore.exists(objstore.key_for(d.name, p.name)):
+                        size = p.stat().st_size
+                        p.unlink(missing_ok=True)
+                        freed += size
+                except Exception:  # noqa: BLE001 - keep going
+                    continue
+    except Exception as exc:  # noqa: BLE001
+        log.warning("reclaim: R2 offload failed: %s", exc)
+    return freed
+
+
+def reclaim_space(aggressive: bool = False) -> int:
+    """Free volume space and return the bytes reclaimed. Runs the orphan sweep,
+    prunes source uploads and old edit snapshots, and (when R2 is configured)
+    drops local photo copies that the bucket already holds. `aggressive` (used
+    when the disk is nearly full, or right after an ENOSPC) shortens the TTLs
+    so a wedged volume can recover without a human."""
+    _sweep_orphans()
+    orig_ttl = 900 if aggressive else _ORIGINALS_TTL      # 15 min when desperate
+    hist_ttl = 86400 if aggressive else _HISTORY_TTL      # 1 day when desperate
+    freed = storage.prune_originals(orig_ttl) + storage.prune_history(hist_ttl)
+    freed += _offload_to_r2(3600 if aggressive else 7 * 86400)
+    if freed:
+        log.info("reclaim: freed %.1f MB from the volume (aggressive=%s)",
+                 freed / 1e6, aggressive)
+    return freed
+
+
+def _reclaim_loop() -> None:
+    """Housekeeping daemon: reclaim space every few hours, and sooner when the
+    volume is running low. Without this the volume only ever got swept at
+    startup, so a busy day of bulk batches could fill it mid-flight."""
+    while True:
+        try:
+            free = storage.disk_free_bytes()
+            reclaim_space(aggressive=bool(free) and free < _LOW_DISK_BYTES)
+        except Exception as exc:  # noqa: BLE001 - housekeeping never dies
+            log.warning("reclaim loop: %s", exc)
+        time.sleep(3 * 3600)
 
 
 @app.on_event("startup")
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
-    background-removal model, and sweep orphaned session dirs off the volume."""
+    background-removal model, and keep the volume from filling up."""
     import threading
 
     threading.Thread(target=images.warm, daemon=True).start()
-    threading.Thread(target=_sweep_orphans, daemon=True).start()
+    threading.Thread(target=_reclaim_loop, daemon=True).start()
 
 
 def _base_url(request: Request) -> str:
@@ -101,6 +182,10 @@ def health() -> dict:
         "adobe_configured": config.adobe_configured(),
         "adobe_ready": config.adobe_ready(),
         "photoroom_configured": config.photoroom_ready(),
+        # Photo storage: is the R2 bucket wired up, and how much room is
+        # left on the volume (a full one breaks every upload).
+        "objstore_configured": objstore.enabled(),
+        "disk_free_mb": round(storage.disk_free_bytes() / 1e6),
         "pixian_configured": config.pixian_ready(),
         # The background-removal engines that will actually run, in order.
         "bg_engines": config.bg_engine_chain(),
@@ -1726,6 +1811,17 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
 
         _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
         log.info("bulk %s: %d photos -> %d items (%s)", job_id, len(names), len(items), mode)
+    except OSError as exc:  # disk-level failure — reclaim, then say so plainly
+        if exc.errno == errno.ENOSPC:
+            freed = reclaim_space(aggressive=True)
+            log.warning("bulk %s hit a full volume; reclaimed %.1f MB",
+                        job_id, freed / 1e6)
+            _bulk_set(job_id, done=True, error=(
+                "The server ran out of photo storage mid-batch. Space has been "
+                "reclaimed automatically — please run this batch again."))
+        else:
+            log.warning("bulk %s failed: %s", job_id, exc)
+            _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
     except Exception as exc:  # noqa: BLE001 - job-level failure
         log.warning("bulk %s failed: %s", job_id, exc)
         _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
