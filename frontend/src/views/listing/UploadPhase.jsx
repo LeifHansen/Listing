@@ -22,7 +22,10 @@ function bgFailureMessage(results, total) {
   const scope = failed.length === total
     ? "Backgrounds weren't removed"
     : `${failed.length} of ${total} photos kept their background`;
-  return `${scope} — ${failed[0].bg_error} Your photos were saved unchanged.`;
+  // The server's reason is free text and usually has no trailing period, so
+  // it ran straight into the next sentence ("cutout failed Your photos…").
+  const reason = String(failed[0].bg_error).trim().replace(/[.!?]*$/, "");
+  return `${scope} — ${reason}. Your photos were saved unchanged.`;
 }
 
 // Server-side caps (backend/main.py): one listing takes up to 40 photos; a
