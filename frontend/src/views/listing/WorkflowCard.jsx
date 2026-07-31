@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ProgressChip } from "@/components/ui/badges";
+import { InfoTip } from "@/components/ui/fields";
 
 // WorkflowCard — one collapsible step of the listing workflow. Shows a
 // ✔ Complete / Needs attention chip and expands itself when eBay flags it.
@@ -39,9 +40,11 @@ export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, chil
         )}>
           <Icon size={19} strokeWidth={2} aria-hidden />
         </span>
-        <span className="flex-1 min-w-0">
-          <span className="block font-bold text-[16px] text-ink">{title}</span>
-          {hint && <span className="block text-[13px] text-ink-secondary mt-0.5">{hint}</span>}
+        {/* The explainer line lives behind a hover ⓘ, not a visible subtitle —
+            the editor reads as a clean checklist. */}
+        <span className="flex-1 min-w-0 flex items-center gap-1.5">
+          <span className="font-bold text-[16px] text-ink truncate">{title}</span>
+          {hint && <InfoTip text={String(hint)} />}
         </span>
         <ProgressChip state={state} className="shrink-0 hidden sm:inline-flex" />
         <motion.span

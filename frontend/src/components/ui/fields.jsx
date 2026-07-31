@@ -1,5 +1,27 @@
 import { forwardRef, useId } from "react";
+import { Info } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+// InfoTip — a small ⓘ that reveals its text on hover/focus (native tooltip).
+// The app-wide home for helper prose: keep the UI quiet, keep the help one
+// hover away. Focusable so keyboard users get the tooltip too.
+export function InfoTip({ text, className }) {
+  if (!text) return null;
+  return (
+    <span
+      title={text}
+      tabIndex={0}
+      aria-label={text}
+      className={cn(
+        "inline-grid place-items-center shrink-0 cursor-help align-middle",
+        "text-ink-faint hover:text-ink-secondary focus:text-ink-secondary outline-none",
+        className,
+      )}
+    >
+      <Info size={13} aria-hidden />
+    </span>
+  );
+}
 
 const controlClasses = cn(
   "w-full bg-card text-ink border border-line rounded-input px-4",
@@ -9,19 +31,22 @@ const controlClasses = cn(
   "data-[fix=true]:border-error data-[fix=true]:ring-2 data-[fix=true]:ring-error/25",
 );
 
-// Field — label above control, inline help below. Never cram controls.
+// Field — label above control. Helper prose (`help`) hides behind a hover ⓘ
+// next to the label instead of a visible line of text, keeping forms quiet.
 export function Field({ label, hint, help, error, required, children, className }) {
   return (
     <label className={cn("flex flex-col gap-1.5 min-w-0", className)}>
       {label && (
-        <span className="text-[13px] font-semibold text-ink flex items-baseline gap-1.5">
+        <span className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
           {label}
           {required && <span className="text-error" aria-hidden>*</span>}
           {hint && <span className="font-normal text-ink-faint">{hint}</span>}
+          {help && <InfoTip text={help} />}
         </span>
       )}
       {children}
-      {help && <span className="text-xs text-ink-secondary">{help}</span>}
+      {/* No label to hang the ⓘ on — fall back to the old inline line. */}
+      {!label && help && <span className="text-xs text-ink-secondary">{help}</span>}
       {error && <span className="text-xs font-medium text-error">{error}</span>}
     </label>
   );
@@ -91,9 +116,9 @@ export function Toggle({ checked, onChange, label, help, className }) {
           )}
         />
       </span>
-      <span className="min-w-0">
-        <span className="text-sm font-semibold text-ink block">{label}</span>
-        {help && <span className="text-xs text-ink-secondary block mt-0.5">{help}</span>}
+      <span className="min-w-0 flex items-center gap-1.5">
+        <span className="text-sm font-semibold text-ink">{label}</span>
+        {help && <InfoTip text={help} />}
       </span>
     </label>
   );

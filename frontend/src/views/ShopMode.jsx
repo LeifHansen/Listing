@@ -5,6 +5,7 @@ import { once, mediaUrl } from "@/lib/utils";
 import { api, postJson, downscaleForUpload, extractFrames } from "@/lib/api";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
+import { InfoTip } from "@/components/ui/fields";
 import { Button } from "@/components/ui/Button";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { ConfidenceBadge, TagPill, PriceBadge } from "@/components/ui/badges";
@@ -106,13 +107,9 @@ export function ShopMode() {
 
   return (
     <div className="flex flex-col gap-5">
-      <div>
+      <div className="flex items-center gap-2">
         <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Shop Mode</h1>
-        <p className="text-sm text-ink-secondary mt-1 max-w-xl">
-          Out hunting for deals? Snap an item to identify it and see what it typically
-          sells for on eBay. Like it? Tap <strong>Buy</strong> to drop it into your
-          inventory and finish the listing later.
-        </p>
+        <InfoTip text="Snap an item to identify it and see what it typically sells for on eBay. Tap Buy to drop it into your inventory and finish the listing later." />
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">

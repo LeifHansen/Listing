@@ -49,12 +49,11 @@ export function PublishCard({ w }) {
     >
       <div className="flex flex-col gap-5">
         {ebay.connected && policiesData && (
-          <p className="text-[13px] text-ink-secondary">
-            Applies to this listing — <strong className="text-ink">Shipping:</strong>{" "}
+          <p className="text-[13px] text-ink-secondary"
+            title={`Business policies applied to this listing — Shipping: ${nameFor(policiesData, "fulfillment", "fulfillment_policy_id")} · Payment: ${nameFor(policiesData, "payment", "payment_policy_id")} · Returns: ${nameFor(policiesData, "return", "return_policy_id")}`}>
+            <strong className="text-ink">Policies:</strong>{" "}
             {nameFor(policiesData, "fulfillment", "fulfillment_policy_id")} ·{" "}
-            <strong className="text-ink">Payment:</strong>{" "}
             {nameFor(policiesData, "payment", "payment_policy_id")} ·{" "}
-            <strong className="text-ink">Returns:</strong>{" "}
             {nameFor(policiesData, "return", "return_policy_id")}{" "}
             <button
               type="button"
@@ -63,14 +62,6 @@ export function PublishCard({ w }) {
             >
               change
             </button>
-          </p>
-        )}
-
-        {!publishedOk && !r?.error && (
-          <p className="text-[13px] text-ink-secondary">
-            Use the pinned <strong className="text-ink">Publish bar</strong> below to{" "}
-            <strong className="text-ink">Save as Draft</strong> or{" "}
-            <strong className="text-ink">Publish Live</strong> — it stays in reach as you scroll.
           </p>
         )}
 

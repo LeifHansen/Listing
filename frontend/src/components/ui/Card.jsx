@@ -1,6 +1,7 @@
 import { forwardRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { InfoTip } from "@/components/ui/fields";
 
 // AppCard — the floating white surface everything sits on.
 export const Card = forwardRef(function Card(
@@ -38,9 +39,10 @@ export function SectionHeader({ icon: Icon, title, hint, action, className }) {
             <Icon size={18} strokeWidth={2} aria-hidden />
           </span>
         )}
-        <div className="min-w-0">
+        {/* Section explainers hide behind a hover ⓘ — headers stay one line. */}
+        <div className="min-w-0 flex items-center gap-1.5">
           <h2 className="text-[17px] font-bold leading-tight text-ink">{title}</h2>
-          {hint && <p className="text-[13px] text-ink-secondary mt-0.5">{hint}</p>}
+          {hint && <InfoTip text={String(hint)} />}
         </div>
       </div>
       {action}
