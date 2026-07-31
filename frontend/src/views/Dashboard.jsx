@@ -150,7 +150,12 @@ export function Dashboard() {
     })) deleteListing(item.id);
   };
 
-  const todays = items.filter((i) => isToday(i.created_at));
+  // Only listings actually made IN the app count as "created today".
+  // Imported rows (id "ebay-...") get their created_at at sync time — and
+  // eBay auto-relists mint new item ids, so every sync would otherwise
+  // claim the user "created" a pile of listings they never touched.
+  const todays = items.filter(
+    (i) => isToday(i.created_at) && !String(i.id).startsWith("ebay-"));
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");

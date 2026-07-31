@@ -1,21 +1,23 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Tags, Settings,
+  LayoutDashboard, PlusCircle, Store, Tags, Settings, FilePen,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 
-// Inventory / Drafts / Listings collapsed into ONE pipeline (Listings, with
-// lifecycle tabs) — sellers think in statuses, not separate pages. The badge
-// on Listings is the drafts-waiting count.
+// The Listing Manager is the whole-store pipeline (lifecycle tabs); Drafts is
+// a first-class nav shortcut straight to its drafts tab — works in progress
+// are where sellers spend their time, and the badge is the drafts-waiting
+// count. `short` is the label the mobile bottom bar shows.
 const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
   { id: "shop", label: "Shop Mode", icon: Store },
-  { id: "listings", label: "Listings", icon: Tags },
+  { id: "drafts", label: "Drafts", icon: FilePen },
+  { id: "listings", label: "Listing Manager", short: "Manager", icon: Tags },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -91,7 +93,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
 
   const counts = {
-    listings: listingsState.items.filter(
+    drafts: listingsState.items.filter(
       (i) => i.status === "draft" || i.status === "dry_run").length,
   };
 
@@ -189,7 +191,7 @@ export function Sidebar() {
 export function BottomNav() {
   const { view, setView, startNew } = useApp();
   // Reference by id (not index) so reordering NAV never scrambles the bar.
-  const items = ["dashboard", "shop", "new", "listings", "settings"].map(byId);
+  const items = ["dashboard", "shop", "new", "drafts", "listings", "settings"].map(byId);
   return (
     <nav
       aria-label="Main"
@@ -211,7 +213,7 @@ export function BottomNav() {
             aria-current={active ? "page" : undefined}
             onClick={() => (isNew ? startNew() : setView(item.id))}
             className={cn(
-              "flex flex-col items-center justify-center gap-0.5 min-w-14 min-h-11 rounded-button",
+              "flex flex-col items-center justify-center gap-0.5 min-w-12 min-h-11 rounded-button",
               "text-[10px] font-semibold transition-colors duration-150 cursor-pointer",
               isNew
                 ? "text-on-accent bg-blue rounded-full size-12 -mt-5 shadow-float shrink-0"
@@ -219,7 +221,7 @@ export function BottomNav() {
             )}
           >
             <Icon size={isNew ? 22 : 19} strokeWidth={2.2} aria-hidden />
-            {!isNew && item.label.split(" ")[0]}
+            {!isNew && (item.short || item.label.split(" ")[0])}
           </button>
         );
       })}

@@ -21,7 +21,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from PIL import Image, ImageEnhance, ImageFile, ImageOps, ImageFilter
+
+# Phone uploads over flaky connections arrive missing their last few bytes
+# surprisingly often ("image file is truncated (N bytes not processed)").
+# Decode what's there instead of raising — a photo missing a sliver beats a
+# failed batch, and unreadable files are still skipped by their callers.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from .. import config
 from ..config import log
