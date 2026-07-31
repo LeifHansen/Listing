@@ -83,7 +83,8 @@ _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 _LOW_DISK_BYTES = 1024 * 1024 * 1024  # 1 GB
 
 
-def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
+def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
+                   upload_budget: int = 300) -> int:
     """Free local copies of optimized photos that are safely in R2.
 
     With object storage configured, R2 is where eBay and the browser actually
@@ -91,10 +92,17 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
     the volume only needs them while a listing is being worked on. Each file
     is verified present in the bucket before its local copy goes — the upload
     path is best-effort, and deleting a photo that never landed would break a
-    live listing. Returns bytes freed."""
+    live listing.
+
+    Photos older than the bucket itself (everything shot before R2 was
+    configured) were never uploaded by the request path, so nothing would ever
+    make them eligible to be freed. Backfill them here: a file that isn't in
+    the bucket is uploaded, re-verified, and then freed on this same pass.
+    Uploads carry their own smaller budget — they are far slower than a HEAD,
+    and a pass should not run for many minutes. Returns bytes freed."""
     if not objstore.enabled():
         return 0
-    freed = checked = 0
+    freed = checked = uploaded = 0
     try:
         base = config.SESSIONS_DIR
         if not base.exists():
@@ -111,12 +119,25 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
                     if not p.is_file() or p.stat().st_mtime > cutoff:
                         continue
                     checked += 1
-                    if objstore.exists(objstore.key_for(d.name, p.name)):
-                        size = p.stat().st_size
-                        p.unlink(missing_ok=True)
-                        freed += size
+                    key = objstore.key_for(d.name, p.name)
+                    if not objstore.exists(key):
+                        if uploaded >= upload_budget:
+                            continue
+                        uploaded += 1
+                        # Backfill, then re-verify: upload() swallows its own
+                        # failures, so a non-None return is not proof enough
+                        # to delete the only copy of a live listing's photo.
+                        if objstore.upload(p, key) is None:
+                            continue
+                        if not objstore.exists(key):
+                            continue
+                    size = p.stat().st_size
+                    p.unlink(missing_ok=True)
+                    freed += size
                 except Exception:  # noqa: BLE001 - keep going
                     continue
+        if uploaded:
+            log.info("reclaim: backfilled %d photo(s) into R2", uploaded)
     except Exception as exc:  # noqa: BLE001
         log.warning("reclaim: R2 offload failed: %s", exc)
     return freed
