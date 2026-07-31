@@ -301,8 +301,12 @@ def _my_ebay_ids(token: str, container: str, sort: str,
         cont = _find(root, container)
         if cont is None:
             break
+        # EXACT tag match: a suffix test also catches <OrderLineItemID>, whose
+        # value is "<itemId>-<transactionId>". Those aren't item ids, and eBay
+        # rejected every one of them ("Input data for tag <ItemID> is invalid")
+        # — 50 bogus GetItem calls per sold-list sync.
         page_ids = [el.text.strip() for el in cont.iter()
-                    if el.tag.endswith("ItemID") and el.text and el.text.strip()]
+                    if _name(el) == "ItemID" and el.text and el.text.strip()]
         for i in page_ids:  # dedupe as we go — a multi-qty sale repeats its id
             if i not in seen:
                 seen.add(i)
