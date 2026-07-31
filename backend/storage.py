@@ -188,6 +188,30 @@ def prune_history(max_age_seconds: int) -> int:
     return freed
 
 
+def prune_exports(max_age_seconds: int) -> int:
+    """Delete dry-run/export payloads older than the cutoff. These are debug
+    artifacts written on every dry-run publish and never read again, but they
+    accumulated into the second-largest thing on the volume. Returns bytes
+    freed. Never raises."""
+    freed = 0
+    try:
+        base = config.EXPORTS_DIR
+        if not base.exists():
+            return 0
+        cutoff = time.time() - max_age_seconds
+        for p in base.iterdir():
+            try:
+                if p.is_file() and p.stat().st_mtime <= cutoff:
+                    size = p.stat().st_size
+                    p.unlink(missing_ok=True)
+                    freed += size
+            except Exception:  # noqa: BLE001 - keep pruning the rest
+                continue
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"storage: prune_exports failed: {exc}")
+    return freed
+
+
 def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> int:
     """Delete session dirs that aren't a known listing and haven't been touched
     in `max_age_seconds` — i.e. leftover bulk staging and abandoned uploads that
