@@ -39,6 +39,15 @@ jobs:
         run: flyctl secrets list -a listing-lfwjrg || true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Volume size + disk usage (the /data volume)
+        run: |
+          flyctl volumes list -a listing-lfwjrg || true
+          echo "--- df on the machine ---"
+          flyctl ssh console -a listing-lfwjrg -C "df -h /data" || true
+          echo "--- biggest consumers under /data ---"
+          flyctl ssh console -a listing-lfwjrg -C "du -sh /data/sessions /data/exports" || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: Live site check (hits the public URL from the runner)
         run: |
           for i in 1 2 3 4; do
