@@ -19,7 +19,10 @@ function Main() {
   return (
     <div className="mx-auto flex max-w-[1600px] min-h-dvh">
       <Sidebar />
-      <div className="flex-1 min-w-0 px-4 sm:px-6 pb-28 md:pb-10">
+      {/* Native shell (Capacitor, contentInset "never") draws under the iPhone
+          status bar/notch — the safe-area inset keeps the TopBar clear of it.
+          On the plain web it's 0 and changes nothing. */}
+      <div className="flex-1 min-w-0 px-4 sm:px-6 pb-28 md:pb-10 pt-[env(safe-area-inset-top)]">
         <TopBar onSearch={setSearch} onManageEbay={() => setView("settings")} />
 
         {activeBulk && view !== "new" && (
