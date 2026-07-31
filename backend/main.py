@@ -2090,11 +2090,14 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     return {"ok": True, "id": req.session_id}
 
 
-# One cap for "the whole store, mirrored": the import brings in up to 300
-# active + 100 sold + 100 ended listings, so every consumer of the list (the
-# grid, sync reconciliation, insights, promote-all) must see at least that
-# many — a 50-row default silently hid most of a big store (architect #6).
-LIST_CAP = 600
+# One cap for "the whole store, mirrored": every consumer of the list (the
+# grid, sync reconciliation, insights, promote-all) has to see at least what
+# the import brought in, or it silently hides part of the store.
+#
+# It has to stay ahead of the import, not match it: at 600 — with the active
+# import capped at 300 + 100 sold + 100 ended — a seller with 616 active
+# listings lost the overflow twice over, once on import and again on read.
+LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
 
 
 @app.get("/api/listings")
@@ -2728,7 +2731,7 @@ def sync_listings(request: Request) -> dict:
 
 # Bounds one import run. A store bigger than this imports across repeated
 # syncs rather than tying up a single request indefinitely.
-IMPORT_LIMIT = 300
+IMPORT_LIMIT = listing_sync._ACTIVE_LIMIT
 
 
 @app.post("/api/ebay/import-listings")

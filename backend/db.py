@@ -127,9 +127,16 @@ def _record_to_dict(rec: ListingRecord) -> dict:
 
 
 def upsert_listing(
-    listing_id: str, listing: dict, status: str = "draft", user_id: Optional[str] = None
+    listing_id: str, listing: dict, status: str = "draft", user_id: Optional[str] = None,
+    when: Optional[_dt.datetime] = None,
 ) -> None:
-    """Create or update a listing row. Never raises."""
+    """Create or update a listing row. Never raises.
+
+    `when` overrides the row's updated_at. The store sync passes each eBay
+    listing's own start time, because stamping every row with "now" on every
+    sync made 600 listings share one timestamp and destroyed the ordering the
+    dashboard reads — recency has to come from the listing, not the sync.
+    A sync that changes nothing doesn't touch the row at all."""
     try:
         eng = _get_engine()
         if eng is None:
@@ -138,8 +145,10 @@ def upsert_listing(
             rec = s.get(ListingRecord, listing_id)
             now = _now()
             if rec is None:
-                rec = ListingRecord(id=listing_id, created_at=now)
+                rec = ListingRecord(id=listing_id, created_at=when or now)
                 s.add(rec)
+            elif rec.status == status and rec.data == listing:
+                return  # nothing changed — leave updated_at where it was
             # Claim ownership only if unowned; never reassign a listing to
             # whoever happens to save it (session ids can leak in URLs).
             if user_id is not None and rec.user_id in (None, user_id):
@@ -147,7 +156,7 @@ def upsert_listing(
             rec.status = status
             rec.title = (listing.get("title") or "")[:255]
             rec.data = listing
-            rec.updated_at = now
+            rec.updated_at = when or now
             s.commit()
     except Exception as exc:  # noqa: BLE001 - DB must never break a request
         log.warning(f"db: upsert_listing failed: {exc}")

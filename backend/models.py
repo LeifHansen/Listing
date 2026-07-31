@@ -75,6 +75,9 @@ class Listing(BaseModel):
     source: str = ""
     # eBay's SKU for an imported listing, when it has one.
     sku: str = ""
+    # ISO-8601 UTC timestamp of when the listing went live on eBay, carried
+    # over on import so "most recent first" can mean what the seller expects.
+    ebay_start_time: str = ""
     # Live eBay counters carried along on import/sync (display only).
     watch_count: int = 0
     sold_quantity: int = 0
