@@ -100,7 +100,8 @@ export function Sidebar() {
       animate={{ width: collapsed ? 76 : 248 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
       className={cn(
-        "hidden md:flex flex-col sticky top-4 self-start m-4 mr-0 shrink-0",
+        "hidden md:flex flex-col sticky self-start m-4 mr-0 shrink-0",
+        "top-[max(1rem,env(safe-area-inset-top))]",  // clear the notch in the native shell (iPad)
         "max-h-[calc(100dvh-2rem)] bg-card border border-line rounded-card shadow-float p-3",
       )}
     >
