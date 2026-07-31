@@ -132,6 +132,8 @@ def reclaim_space(aggressive: bool = False) -> int:
     orig_ttl = 900 if aggressive else _ORIGINALS_TTL      # 15 min when desperate
     hist_ttl = 86400 if aggressive else _HISTORY_TTL      # 1 day when desperate
     freed = storage.prune_originals(orig_ttl) + storage.prune_history(hist_ttl)
+    # Dry-run export payloads: debug artifacts, never read back.
+    freed += storage.prune_exports(3600 if aggressive else 2 * 86400)
     freed += _offload_to_r2(3600 if aggressive else 7 * 86400)
     if freed:
         log.info("reclaim: freed %.1f MB from the volume (aggressive=%s)",
