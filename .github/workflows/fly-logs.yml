@@ -62,3 +62,18 @@ jobs:
         run: flyctl logs -a listing-lfwjrg --no-tail | tail -120
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Compact, machine-readable tail so a reader only needs the LAST few
+      # lines of this job: storage config, disk headroom, app health.
+      - name: SUMMARY
+        run: |
+          echo "===== SUMMARY ====="
+          flyctl secrets list -a listing-lfwjrg 2>/dev/null | awk '{print $1}' | grep -E '^(R2_|PIXIAN|PHOTOROOM|ADOBE)' | tr '
+' ' ' || true
+          echo ""
+          flyctl ssh console -a listing-lfwjrg -C "df -h /data" 2>/dev/null | tail -1 || true
+          flyctl ssh console -a listing-lfwjrg -C "du -sh /data/sessions" 2>/dev/null | tail -1 || true
+          curl -sS https://listing-lfwjrg.fly.dev/api/health | tr ',' '
+' | grep -E 'objstore|disk_free' || true
+          echo "===== END ====="
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
