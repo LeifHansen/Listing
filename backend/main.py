@@ -1619,7 +1619,21 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
         opt_dir = storage.optimized_dir(staging_id)
 
         _bulk_set(job_id, phase="grouping", total_photos=len(names), current=0)
-        thumbs = [images.thumb_jpeg(opt_dir / n) for n in names]
+        # One unreadable photo must not sink the whole batch (it did: a
+        # truncated upload failed the job right here) — drop it and group
+        # the rest.
+        thumbs, readable = [], []
+        for n in names:
+            try:
+                thumbs.append(images.thumb_jpeg(opt_dir / n))
+                readable.append(n)
+            except Exception as exc:  # noqa: BLE001 - skip one bad photo
+                log.warning("bulk %s: skipping unreadable photo %s: %s",
+                            job_id, n, exc)
+        names = readable
+        if not names:
+            _bulk_set(job_id, done=True, error="No usable photos in the upload.")
+            return
         # Group in API-sized chunks. Resellers shoot item-by-item, so photos of
         # the same item land in the same chunk except right at a boundary —
         # worst case a boundary item shows up as two entries to merge by hand.
