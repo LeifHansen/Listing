@@ -79,8 +79,16 @@ def _sweep_orphans() -> None:
 _ORIGINALS_TTL = int(os.getenv("ORIGINALS_TTL_HOURS", "12") or "12") * 3600
 _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # Below this much free space the volume is one batch away from breaking every
-# upload ("No space left on device"), so reclaim aggressively.
-_LOW_DISK_BYTES = 1024 * 1024 * 1024  # 1 GB
+# upload ("No space left on device"), so reclaim aggressively — 15-minute
+# originals, 1-day history, 1-hour R2 offload.
+#
+# This has to stay well under the size of the volume itself. At 1 GB it was
+# never *below* the threshold on a 1 GB volume: aggressive mode was simply
+# always on, so photos were freed off the volume an hour after upload and
+# every edit on a slightly-older listing had to go back to R2 for the bytes.
+# 250 MB is roughly one full bulk batch of headroom, which is the amount that
+# actually predicts an ENOSPC.
+_LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
 
 
 def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
@@ -382,6 +390,37 @@ def _in_background(fn, *args, what: str = "") -> None:
             log.warning("background %s failed: %s",
                         what or getattr(fn, "__name__", "task"), exc)
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _ensure_local(session_id: str, name: str, path: Path) -> bool:
+    """Make sure the optimized photo exists on the volume, pulling it back from
+    R2 if the reclaim pass already freed the local copy.
+
+    Viewing a photo survives the local copy being gone — /media just redirects
+    to the bucket — but every edit (crop, rotate, straighten) opens the file on
+    disk, so those started 404ing with "that photo isn't on the server anymore"
+    on listings that were merely a little old. The bytes still exist; fetch
+    them back instead of telling the user to re-upload."""
+    if path.is_file():
+        return True
+    if not objstore.enabled():
+        return False
+    try:
+        data = objstore.get_bytes(objstore.key_for(session_id, name))
+    except Exception as exc:  # noqa: BLE001 - genuinely gone, or R2 is down
+        log.warning("rehydrate: %s/%s not available from R2: %s",
+                    session_id, name, exc)
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".r2tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)  # atomic: never leave a half-written photo in place
+    except OSError as exc:
+        log.warning("rehydrate: couldn't write %s: %s", path, exc)
+        return False
+    log.info("rehydrate: pulled %s/%s back from R2", session_id, name)
+    return True
 
 
 def _purge_session_images(session_id: str) -> None:
@@ -1232,7 +1271,7 @@ async def edit_image(
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
         log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
@@ -1295,7 +1334,7 @@ def _studio_load(session_id: str, name: str, data: Optional[bytes]):
         raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     return Image.open(path)
 
@@ -1326,7 +1365,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
