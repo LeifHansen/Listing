@@ -70,7 +70,8 @@ jobs:
           echo -n 'storage secrets: '
           flyctl secrets list -a listing-lfwjrg 2>/dev/null | awk 'NR>1 {printf "%s ", $1}' | tr ' ' '\n' | grep -E '^(R2_|PIXIAN|PHOTOROOM|ADOBE)' | paste -sd' ' - || echo none
           flyctl ssh console -a listing-lfwjrg -C "df -h /data" 2>/dev/null | tail -1 || true
-          flyctl ssh console -a listing-lfwjrg -C "du -sh /data/sessions" 2>/dev/null | tail -1 || true
+          flyctl ssh console -a listing-lfwjrg -C "du -sh /data/sessions /data/exports" 2>/dev/null | tail -2 || true
+          flyctl ssh console -a listing-lfwjrg -C "du -sh /data/* 2>/dev/null | sort -h | tail -5" 2>/dev/null | tail -5 || true
           curl -sS https://listing-lfwjrg.fly.dev/api/health | tr ',' '\n' | grep -E 'objstore|disk_free' || true
           echo "===== END ====="
         env:
