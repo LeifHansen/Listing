@@ -62,6 +62,16 @@ jobs:
         run: flyctl logs -a listing-lfwjrg --no-tail | tail -120
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # The raw tail above is dominated by eBay's account-deletion pings; this
+      # pass surfaces the actual problems across the whole retained window.
+      - name: Errors and warnings only (full retained window)
+        run: |
+          flyctl logs -a listing-lfwjrg --no-tail \
+            | grep -viE 'account-deletion|GET (/|/api/health|/assets|/media|/favicon)|\.php|New SSH session' \
+            | grep -iE 'error|warn|exception|traceback|critical|" 5[0-9][0-9] |ENOSPC|No space' \
+            | tail -150 || echo "(no error/warning lines in the retained window)"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       # Compact tail so a reader only needs the LAST few lines of this job:
       # storage config, disk headroom, app health.
       - name: SUMMARY
