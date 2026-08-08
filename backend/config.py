@@ -96,21 +96,40 @@ def _load_secret_key() -> str:
 SECRET_KEY = _load_secret_key()
 
 # --- Object storage (Cloudflare R2 / any S3, optional) ---------------------
-# Store optimized images in R2 so they survive restarts and are publicly
-# fetchable by eBay. Leave blank to serve images off local disk.
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "").strip()
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
-R2_BUCKET = os.getenv("R2_BUCKET", "").strip()
+# Store optimized images in R2 so they survive restarts and are reliably
+# fetchable by eBay. Only the three credentials are required: the bucket
+# defaults to the canonical name (auto-created on first use), and without a
+# public base URL images are served via short-lived presigned URLs instead.
+# Requiring all five keys is exactly how R2 sat dormant in production for a
+# week while the volume filled — the operator had added the credentials and
+# reasonably expected that to be enough.
+R2_ACCOUNT_ID = _env("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = _env("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = _env("R2_SECRET_ACCESS_KEY")
+R2_BUCKET = _env("R2_BUCKET") or "thryft-images"
 # The bucket's public base URL (r2.dev URL or a custom domain), no trailing /.
-R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/")
+# Optional: set it to serve photos straight from Cloudflare; unset means the
+# app hands out presigned GETs when a local copy is gone.
+R2_PUBLIC_BASE_URL = _env("R2_PUBLIC_BASE_URL").rstrip("/")
 
 
-def r2_ready() -> bool:
-    return bool(
-        R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY
-        and R2_BUCKET and R2_PUBLIC_BASE_URL
-    )
+def r2_missing() -> list[str]:
+    """R2 env vars still needed before object storage can run ([] = ready)."""
+    required = {
+        "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
+        "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
+        "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
+    }
+    return [name for name, value in required.items() if not value]
+
+
+def r2_configured() -> bool:
+    return not r2_missing()
+
+
+def r2_public_urls() -> bool:
+    """Serve photos from the bucket's own public URL (vs presigned GETs)."""
+    return bool(R2_PUBLIC_BASE_URL)
 
 # --- Anthropic / Claude ----------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -149,10 +168,10 @@ def adobe_configured() -> bool:
 
 def adobe_ready() -> bool:
     """The Adobe pipeline can actually run: credentials AND R2 hand-off."""
-    return adobe_configured() and r2_ready()
+    return adobe_configured() and r2_configured()
 
 
-if adobe_configured() and not r2_ready():
+if adobe_configured() and not r2_configured():
     log.warning(
         "Adobe credentials are set but R2 is not configured — the Lightroom/"
         "Photoshop pipeline needs R2 as hand-off storage (Adobe's APIs only "

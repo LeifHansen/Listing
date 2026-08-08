@@ -1,0 +1,25 @@
+name: CI
+
+# Pre-merge signal for a solo operator who merges from a phone: lint + the
+# pure-unit test suite (config/storage/objstore naming — the modules whose
+# misconfiguration has actually bitten production). Deliberately does NOT
+# install the heavy image stack; these tests never import main/images.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install ruff pytest python-dotenv pydantic boto3
+      - name: Ruff
+        run: ruff check backend
+      - name: Tests
+        run: pytest backend/tests -q

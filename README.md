@@ -162,9 +162,12 @@ errors on a DB problem. Tables are auto-created on first use.
    `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET`/`EBAY_RUNAME` and users click
    "Connect eBay"; publishing then uses their token, no manual secrets.
 6. **Object storage for images** ✅ — optimized photos upload to Cloudflare R2
-   (S3-compatible) and are served via the bucket's public URL, so they survive
-   restarts and are reliably fetched by eBay. Set the `R2_*` env vars; falls
-   back to local disk when unset.
+   (S3-compatible) so they survive restarts and are reliably fetched by eBay.
+   Only `R2_ACCOUNT_ID` + `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` are
+   needed — the bucket is auto-created (override with `R2_BUCKET`) and photos
+   are served via presigned URLs, or straight from the bucket if you set
+   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset; `/api/health`
+   shows `objstore_missing` when partially configured.
 7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
    reuses every `/api/*` endpoint.
 8. **Item Identifier (mobile-only)** — double-layer identification: Claude's

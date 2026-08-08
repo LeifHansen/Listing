@@ -23,16 +23,16 @@ from typing import Optional
 
 from PIL import Image, ImageEnhance, ImageFile, ImageOps, ImageFilter
 
+from .. import config
+from ..config import log
+from ..storage import natural_key
+from . import orient
+
 # Phone uploads over flaky connections arrive missing their last few bytes
 # surprisingly often ("image file is truncated (N bytes not processed)").
 # Decode what's there instead of raising — a photo missing a sliver beats a
 # failed batch, and unreadable files are still skipped by their callers.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-from .. import config
-from ..config import log
-from ..storage import natural_key
-from . import orient
 
 # iPhone/Mac photos are HEIC by default; register the decoder if available so
 # uploads don't fail. Falls back gracefully if the package isn't installed.
@@ -548,8 +548,11 @@ def warm() -> None:
         # Warm the LOCAL model directly (the default engine, and it powers the
         # highlight/subject masks either way) — never via _studio_and_cutout,
         # which would burn a paid API credit on every boot when a remote
-        # engine is configured.
-        _cutout_on_white(Image.new("RGB", (32, 32), (200, 100, 50)))
+        # engine is configured. Warm the mask pipeline only, not the full
+        # cutout: a synthetic solid-color square has no subject to keep, and
+        # the cutout's failure guard rightly cried "subject nearly erased
+        # (0.0% kept)" on it every single boot.
+        _refine_alpha(_alpha_mask(Image.new("RGB", (32, 32), (200, 100, 50))))
         log.info("images: background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
