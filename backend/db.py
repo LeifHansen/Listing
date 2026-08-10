@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import time as _time
+import uuid as _uuid
 from typing import Optional
 
 from sqlalchemy import DateTime, JSON, String, create_engine, select, text
@@ -67,6 +68,46 @@ class ListingRecord(Base):
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TokenAccount(Base):
+    """Per-user AI-token balance (the monetization engine's one mutable row).
+
+    `purchased` never expires; the monthly free allowance is tracked as
+    `free_used` within `free_period` ("YYYY-MM", UTC) and lazily resets the
+    first time the account is touched in a new month — no cron needed, and a
+    user who never comes back costs nothing to reset."""
+
+    __tablename__ = "token_accounts"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    purchased: Mapped[int] = mapped_column(default=0)
+    free_used: Mapped[int] = mapped_column(default=0)
+    free_period: Mapped[str] = mapped_column(String(7), default="")
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TokenLedger(Base):
+    """Append-only audit trail of every token movement. `ref` is unique so a
+    purchase (Stripe session id) or a refund (spend entry id) can never be
+    applied twice — the webhook and the client-side confirm race for the same
+    credit, and the DB, not the request order, settles it."""
+
+    __tablename__ = "token_ledger"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # spend | refund | purchase | grant
+    feature: Mapped[str] = mapped_column(String(48), default="")
+    tokens: Mapped[int] = mapped_column(default=0)  # signed: spends are negative
+    free_part: Mapped[int] = mapped_column(default=0)
+    paid_part: Mapped[int] = mapped_column(default=0)
+    # The free_period the spend happened in — a refund only restores the free
+    # part if the month hasn't rolled over (free tokens expire monthly).
+    period: Mapped[str] = mapped_column(String(7), default="")
+    ref: Mapped[Optional[str]] = mapped_column(String(128), unique=True, nullable=True)
+    note: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
 def enabled() -> bool:
@@ -427,6 +468,182 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: delete_listing failed: {exc}")
         return False
+
+
+# --- AI tokens (monetization) ----------------------------------------------
+# The billing invariant lives here: every balance change happens inside one
+# transaction holding a row lock on the account, paired with a ledger entry.
+# Unlike the rest of this module these functions return None on DB error
+# (rather than pretending success) so the caller can decide fail-open vs
+# fail-closed — see services/tokens.py.
+
+def _token_account(s: Session, user_id: str,
+                   period: Optional[str] = None) -> TokenAccount:
+    """Fetch-or-create the account row, locked. Only spends pass `period`,
+    lazily rolling the monthly free allowance forward; credits and refunds
+    pass None and must NOT touch the period — crediting a pack (or refunding
+    an old spend) is not permission to reset this month's free usage."""
+    acct = s.get(TokenAccount, user_id, with_for_update=True)
+    if acct is None:
+        acct = TokenAccount(user_id=user_id, purchased=0, free_used=0,
+                            free_period=period or "", updated_at=_now())
+        s.add(acct)
+        s.flush()
+    if period is not None and acct.free_period != period:
+        acct.free_period = period
+        acct.free_used = 0
+    return acct
+
+
+def token_status(user_id: str, period: str, free_quota: int) -> Optional[dict]:
+    """Read-only balance snapshot (does not write the period rollover)."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            acct = s.get(TokenAccount, user_id)
+            if acct is None:
+                return {"free_used": 0, "free_remaining": free_quota, "purchased": 0}
+            free_used = acct.free_used if acct.free_period == period else 0
+            return {"free_used": free_used,
+                    "free_remaining": max(0, free_quota - free_used),
+                    "purchased": acct.purchased}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: token_status failed: {exc}")
+        return None
+
+
+def token_spend(user_id: str, cost: int, free_quota: int, period: str,
+                feature: str = "") -> Optional[dict]:
+    """Atomically debit `cost` tokens (free allowance first, then purchased).
+
+    Returns {"ok": True, "entry_id", "free_part", "paid_part", ...} on
+    success, {"ok": False, "reason": "insufficient", ...} when the balance
+    can't cover it, or None on DB error (caller chooses the failure policy).
+    """
+    if cost <= 0:
+        return {"ok": True, "entry_id": None, "free_part": 0, "paid_part": 0}
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            acct = _token_account(s, user_id, period)
+            free_remaining = max(0, free_quota - acct.free_used)
+            if free_remaining + acct.purchased < cost:
+                s.commit()  # keep the period rollover even when declining
+                return {"ok": False, "reason": "insufficient",
+                        "free_remaining": free_remaining, "purchased": acct.purchased}
+            free_part = min(cost, free_remaining)
+            paid_part = cost - free_part
+            acct.free_used += free_part
+            acct.purchased -= paid_part
+            acct.updated_at = _now()
+            entry = TokenLedger(id=_uuid.uuid4().hex, user_id=user_id, kind="spend",
+                                feature=feature, tokens=-cost, free_part=free_part,
+                                paid_part=paid_part, period=period, created_at=_now())
+            s.add(entry)
+            s.commit()
+            return {"ok": True, "entry_id": entry.id, "free_part": free_part,
+                    "paid_part": paid_part,
+                    "free_remaining": free_remaining - free_part,
+                    "purchased": acct.purchased}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: token_spend failed: {exc}")
+        return None
+
+
+def token_refund(user_id: str, entry_id: str, units: Optional[int] = None) -> bool:
+    """Reverse a spend (fully, or `units` tokens of it) — "only pay for AI
+    that worked". Paid tokens come back first (they never expire, so they're
+    worth more to the user); the free part is only restored while the spend's
+    month is still current. Idempotent per (entry, units) via the unique ref.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            entry = s.get(TokenLedger, entry_id)
+            if entry is None or entry.kind != "spend" or entry.user_id != user_id:
+                return False
+            total = entry.free_part + entry.paid_part
+            amount = total if units is None else max(0, min(int(units), total))
+            if amount == 0:
+                return False
+            paid_back = min(amount, entry.paid_part)
+            free_back = amount - paid_back
+            acct = _token_account(s, user_id)
+            acct.purchased += paid_back
+            if free_back and acct.free_period == entry.period:
+                acct.free_used = max(0, acct.free_used - free_back)
+            acct.updated_at = _now()
+            ref = entry_id if units is None else f"{entry_id}:{amount}"
+            s.add(TokenLedger(id=_uuid.uuid4().hex, user_id=user_id, kind="refund",
+                              feature=entry.feature, tokens=amount,
+                              free_part=free_back, paid_part=paid_back,
+                              period=entry.period, ref=ref, created_at=_now()))
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001 - duplicate ref lands here too
+        log.info(f"db: token_refund skipped ({entry_id}): {exc}")
+        return False
+
+
+def token_credit(user_id: str, tokens: int, ref: Optional[str], kind: str = "purchase",
+                 note: str = "") -> Optional[dict]:
+    """Add purchased/granted tokens. Idempotent by `ref` (unique column):
+    crediting the same Stripe session twice returns already=True instead of
+    double-paying. Returns None on DB error."""
+    if tokens <= 0:
+        return None
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            if ref:
+                existing = s.execute(
+                    select(TokenLedger).where(TokenLedger.ref == ref)
+                ).scalar_one_or_none()
+                if existing is not None:
+                    return {"ok": True, "already": True}
+            acct = _token_account(s, user_id)
+            acct.purchased += tokens
+            acct.updated_at = _now()
+            s.add(TokenLedger(id=_uuid.uuid4().hex, user_id=user_id, kind=kind,
+                              tokens=tokens, paid_part=tokens, ref=ref, note=note[:255],
+                              created_at=_now()))
+            try:
+                s.commit()
+            except Exception:  # noqa: BLE001 - lost the idempotency race
+                s.rollback()
+                return {"ok": True, "already": True}
+            return {"ok": True, "already": False, "purchased": acct.purchased}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: token_credit failed: {exc}")
+        return None
+
+
+def token_history(user_id: str, limit: int = 50) -> list[dict]:
+    """Recent ledger entries, newest first. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(TokenLedger).where(TokenLedger.user_id == user_id)
+                .order_by(TokenLedger.created_at.desc()).limit(limit)
+            ).scalars().all()
+            return [{"kind": r.kind, "feature": r.feature, "tokens": r.tokens,
+                     "note": r.note,
+                     "created_at": r.created_at.isoformat() if r.created_at else None}
+                    for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: token_history failed: {exc}")
+        return []
 
 
 # db_status() round-trips to the DB, and several hot paths call it per

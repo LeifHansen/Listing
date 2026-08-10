@@ -1,9 +1,11 @@
 name: CI
 
 # Pre-merge signal for a solo operator who merges from a phone: lint + the
-# pure-unit test suite (config/storage/objstore naming — the modules whose
-# misconfiguration has actually bitten production). Deliberately does NOT
-# install the heavy image stack; these tests never import main/images.
+# pure-unit test suite (config/storage/objstore naming, and the token billing
+# engine — the modules whose misconfiguration has actually bitten production
+# or would bite revenue). Deliberately does NOT install the heavy image
+# stack; these tests never import main/images. SQLAlchemy + httpx are here
+# for the token tests (billing invariants run against SQLite).
 on:
   pull_request:
   workflow_dispatch:
@@ -18,7 +20,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy httpx
       - name: Ruff
         run: ruff check backend
       - name: Tests

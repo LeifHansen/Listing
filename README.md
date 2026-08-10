@@ -142,6 +142,58 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
+| `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |
+| `POST` | `/api/tokens/checkout` | Start a Stripe Checkout for a token pack |
+| `GET`  | `/api/tokens/confirm` | Post-redirect purchase credit (idempotent) |
+| `POST` | `/api/tokens/webhook` | Stripe `checkout.session.completed` webhook |
+| `GET`  | `/api/tokens/history` | Recent token ledger entries |
+
+## Monetization: AI tokens
+
+The app is **free**; AI features spend **tokens**. Every account gets
+`FREE_TOKENS_PER_MONTH` (default **50**) each calendar month — the allowance
+resets on the 1st (UTC) and does **not** roll over. When it runs out, users
+buy a token pack via Stripe Checkout; **purchased tokens never expire** and
+are spent only after the free ones. Failed AI calls are refunded
+automatically ("only pay for AI that worked"). Billing is entirely opt-in:
+with `TOKENS_ENABLED` unset (or no `DATABASE_URL`), every AI feature stays
+free — the right default for local dev and self-hosters.
+
+**What features cost** (defaults; override per deployment with
+`TOKENS_COST_*` env vars):
+
+| Feature | Tokens | Notes |
+|---------|-------:|-------|
+| AI listing draft | 5 | identify + category + item specifics + tag read + maker check; same per item in a bulk batch (photo grouping bundled) |
+| AI refine instruction | 1 | free-form "make it..." edits |
+| Autofill item specifics | 2 | the standalone button (bundled free inside a draft) |
+| Shop Mode shelf scan | 2 | one video's frames |
+| AI photo tool | 1 / photo | background removal, auto-clean, smart crop |
+
+**Packs** (edit `PACKS` in `backend/services/tokens.py`): Starter 50/$5.99 ·
+Plus 120/$11.99 · Pro 300/$24.99 · Power 1000/$69.99 — $0.12 down to
+$0.07/token as packs grow.
+
+**Why these numbers are profitable.** A full draft runs 4–6 vision calls over
+up to 8 photos; on the default Opus-tier vision model ($5/M input, $25/M
+output) that's ~$0.25 of API spend for a typical 3-photo listing and ~$0.80
+worst-case at 8 photos. At 5 tokens, a draft brings in $0.35–$0.60 → roughly
+40–60% gross margin in the typical case, still positive at worst case on the
+mid packs. The lighter features cost cents against 1–2 tokens. The free
+allowance caps the operator's giveaway at ~$2.50/user/month. Pointing
+`VISION_MODEL` at a cheaper tier widens every margin; re-tune the
+`TOKENS_COST_*` numbers if you do.
+
+**Mechanics.** Balances live in Postgres (`token_accounts` +
+an append-only `token_ledger` audit trail). Spends are atomic (row-locked)
+and split free-first; the monthly reset is lazy (no cron). Purchases credit
+idempotently by Stripe session id, so the webhook and the post-redirect
+confirm can race safely — configure the webhook
+(`checkout.session.completed` → `/api/tokens/webhook`) so credits land even
+when the buyer closes the tab. When billing is on, AI endpoints require a
+login (balances are per-account) and return **402** with an "out of tokens"
+message the UI turns into the buy dialog; a bulk batch that runs dry saves
+the remaining items as photo-only stub drafts so nothing is lost.
 
 ## Database (Neon / Postgres)
 
