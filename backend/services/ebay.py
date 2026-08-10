@@ -39,7 +39,7 @@ def _prune(value):
     return value
 
 
-def _sku(session_id: str) -> str:
+def sku_for(session_id: str) -> str:
     # Must be STABLE for the life of the listing: republishing the same session
     # reuses the SKU so we update the existing offer instead of creating a
     # duplicate. Deriving it from mutable fields (e.g. brand) would mint a new
@@ -216,7 +216,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
 
     return _prune({
         **_package_weight_and_size(listing),
-        "sku": _sku(session_id),
+        "sku": sku_for(session_id),
         "availability": {
             "shipToLocationAvailability": {
                 "quantity": 1 if _is_auction(listing) else max(1, listing.quantity)
@@ -271,7 +271,7 @@ def build_offer(session_id: str, listing: Listing, creds: Optional[dict] = None)
         qty = max(1, listing.quantity)
 
     return _prune({
-        "sku": _sku(session_id),
+        "sku": sku_for(session_id),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
         "format": offer_format,
         "availableQuantity": qty,
@@ -386,14 +386,14 @@ def _live_inventory_images(session_id: str, listing: Listing,
         return None
     try:
         r = httpx.get(
-            f"{config.EBAY_API_BASE}/sell/inventory/v1/inventory_item/{_sku(session_id)}",
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/inventory_item/{sku_for(session_id)}",
             headers=_headers(token), timeout=30)
         if r.status_code == 200:
             urls = ((r.json().get("product") or {}).get("imageUrls")) or []
             return [u for u in urls if u] or None
     except Exception as exc:  # noqa: BLE001 - treat as "no reusable images"
         log.info("getInventoryItem images failed (sku=%s): %s",
-                 _sku(session_id), exc)
+                 sku_for(session_id), exc)
     return None
 
 
@@ -401,7 +401,7 @@ def _push_live(session_id: str, listing: Listing, mode: str, base_url: str,
                creds: Optional[dict] = None, do_publish: bool = True,
                image_urls: Optional[list[str]] = None) -> dict:
     token = (creds or {}).get("access_token") or _access_token()
-    sku = _sku(session_id)
+    sku = sku_for(session_id)
     item = build_inventory_item(session_id, listing, base_url, image_urls=image_urls)
     offer = build_offer(session_id, listing, creds)
     base = config.EBAY_API_BASE
@@ -562,7 +562,7 @@ def withdraw(session_id: str, listing: Listing, creds: Optional[dict] = None) ->
     {ended | not_live, message}; raises ValueError with a clear reason when
     eBay refuses."""
     token = (creds or {}).get("access_token") or _access_token()
-    sku = _sku(session_id)
+    sku = sku_for(session_id)
     base = config.EBAY_API_BASE
     with httpx.Client(timeout=30) as client:
         # Definitive lookup only: _existing_offer treats an API blip as "no
@@ -608,7 +608,7 @@ def live_status(session_id: str, listing: Listing,
         r = httpx.get(
             f"{config.EBAY_API_BASE}/sell/inventory/v1/offer",
             headers=_headers(token),
-            params={"sku": _sku(session_id)},
+            params={"sku": sku_for(session_id)},
             timeout=30,
         )
     except Exception:  # noqa: BLE001 - unknown, not "ended"
