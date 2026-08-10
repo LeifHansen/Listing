@@ -15,13 +15,15 @@ run only when BG_ENGINE explicitly selects them.
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageEnhance, ImageFile, ImageOps, ImageFilter
+from PIL import (Image, ImageEnhance, ImageFile, ImageFilter, ImageOps,
+                 ImageStat)
 
 from .. import config
 from ..config import log
@@ -692,31 +694,83 @@ def _auto_tone(img: Image.Image) -> Image.Image:
                 luts.extend(min(255, round(v * g)) for v in range(256))
             out = out.point(luts)
 
-    # --- white-point lift only: brighten dull/dingy photos so the backdrop
-    # reads white. Deliberately NO black-point move — on a backdrop-dominated
-    # product shot the dark percentile lands on the ITEM itself, and stretching
-    # from there crushes its colors. A capped uniform gain can't do that.
+    # --- tone: white point, midtones, and a capped black point, in one LUT ---
     hist = out.convert("L").histogram()
     total = max(1, sum(hist))
-    clip = total * 0.005
-    hi, acc = 255, 0
-    for v in range(255, -1, -1):
-        acc += hist[v]
-        if acc > clip:
-            hi = v
-            break
-    if 120 < hi < 235:
-        gain = min(1.25, 255 / hi)
-        lut = [min(255, round(v * gain)) for v in range(256)]
+
+    # White point. The clip used to be 0.5%, which on a real photo is often
+    # just a specular glint or a sliver of window — one blown highlight put
+    # `hi` at 255 and the whole lift switched itself off, which is why auto
+    # tone looked like it did nothing on most photos. 1.5% steps past that.
+    hi = _percentile(hist, total, 0.985)
+    gain = min(1.4, 255 / hi) if 60 < hi < 250 else 1.0
+
+    # Midtones, measured on the SUBJECT rather than the frame: a white
+    # backdrop (or a background-removal cutout, which is pure white by
+    # construction) dominates the histogram and would otherwise drag the
+    # median up and make us darken the very item being sold.
+    median = _subject_median(hist, total)
+    gamma = 1.0
+    if not 104 <= median <= 150:
+        gamma = math.log(124 / 255) / math.log(max(2, median) / 255)
+        gamma = min(1.30, max(0.72, gamma))
+
+    # Black point, but only for photos that are actually hazy — a lifted floor
+    # (nothing anywhere near black) means flat light, not a dark item. The
+    # shift stays small and the gate stays high, because on a product shot the
+    # dark end IS the item and stretching from there crushes its colors.
+    lo = _percentile(hist, total, 0.005)
+    black = min(12, lo - 6) if lo > 20 else 0
+
+    if black or gain != 1.0 or gamma != 1.0:
+        lut = []
+        denom = max(1, 255 - black)
+        for v in range(256):
+            x = max(0.0, (v - black) / denom)
+            if gamma != 1.0:
+                x = x ** gamma
+            lut.append(min(255, max(0, round(x * gain * 255))))
         out = out.point(lut * 3)
     return out
 
 
+def _percentile(hist: list[int], total: int, frac: float) -> int:
+    """Luminance level with `frac` of the histogram's mass at or below it."""
+    want = total * frac
+    acc = 0
+    for v in range(256):
+        acc += hist[v]
+        if acc >= want:
+            return v
+    return 255
+
+
+def _subject_median(hist: list[int], total: int) -> int:
+    """Median luminance ignoring near-white and near-black pixels, so backdrop
+    and cutout white don't decide the exposure of the item."""
+    lo, hi = 6, 249
+    sub = sum(hist[lo:hi + 1])
+    if sub < total * 0.10:  # item fills the frame edge to edge — use it all
+        lo, hi, sub = 0, 255, total
+    acc, half = 0, max(1, sub) / 2
+    for v in range(lo, hi + 1):
+        acc += hist[v]
+        if acc >= half:
+            return v
+    return 128
+
+
 def _enhance(img: Image.Image) -> Image.Image:
     img = _auto_tone(img)
-    img = ImageEnhance.Brightness(img).enhance(1.04)
-    img = ImageEnhance.Contrast(img).enhance(1.08)
-    img = ImageEnhance.Color(img).enhance(1.05)
+    # Scale the finishing nudges to how flat the photo actually is. These used
+    # to be fixed at 4-8% for every photo, which is invisible on a dull one and
+    # unnecessary on a punchy one — the other half of "auto levels does very
+    # little". stddev ~58 is a contrasty photo, ~25 is flat and dingy.
+    spread = ImageStat.Stat(img.convert("L")).stddev[0] or 0.0
+    t = min(1.0, max(0.0, (58 - spread) / 33))
+    img = ImageEnhance.Brightness(img).enhance(1.02 + 0.04 * t)
+    img = ImageEnhance.Contrast(img).enhance(1.06 + 0.16 * t)
+    img = ImageEnhance.Color(img).enhance(1.04 + 0.12 * t)
     img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=3))
     return img
 

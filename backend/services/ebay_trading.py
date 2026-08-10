@@ -267,6 +267,10 @@ def _item_to_listing(item: ET.Element) -> dict:
         "watch_count": _int(item, "WatchCount"),
         "sold_quantity": (_int(selling, "QuantitySold") if selling is not None else 0),
         "view_url": _text(item, "ListingDetails/ViewItemURL"),
+        # When the listing actually went live on eBay. The only true recency
+        # signal an imported listing has — without it every listing looks as
+        # new as the sync that pulled it in.
+        "ebay_start_time": _text(item, "ListingDetails/StartTime"),
     }
 
 

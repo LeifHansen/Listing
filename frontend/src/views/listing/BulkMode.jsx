@@ -534,7 +534,9 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
             <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
             <span title="The photos were saved unchanged.">
               <strong>Backgrounds weren't removed</strong> on {job.bg_failed || "some"}{" "}
-              photo{job.bg_failed === 1 ? "" : "s"} — {job.bg_error}
+              photo{job.bg_failed === 1 ? "" : "s"} —{" "}
+              {String(job.bg_error).trim().replace(/[.!?]*$/, "")}. Your photos
+              were saved unchanged.
             </span>
           </p>
         </Card>

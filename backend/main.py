@@ -100,11 +100,20 @@ def _sweep_orphans() -> None:
 _ORIGINALS_TTL = int(os.getenv("ORIGINALS_TTL_HOURS", "12") or "12") * 3600
 _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # Below this much free space the volume is one batch away from breaking every
-# upload ("No space left on device"), so reclaim aggressively.
-_LOW_DISK_BYTES = 1024 * 1024 * 1024  # 1 GB
+# upload ("No space left on device"), so reclaim aggressively — 15-minute
+# originals, 1-day history, 1-hour R2 offload.
+#
+# This has to stay well under the size of the volume itself. At 1 GB it was
+# never *below* the threshold on a 1 GB volume: aggressive mode was simply
+# always on, so photos were freed off the volume an hour after upload and
+# every edit on a slightly-older listing had to go back to R2 for the bytes.
+# 250 MB is roughly one full bulk batch of headroom, which is the amount that
+# actually predicts an ENOSPC.
+_LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
 
 
-def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
+def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
+                   upload_budget: int = 300) -> int:
     """Free local copies of optimized photos that are safely in R2.
 
     With object storage configured, R2 is where eBay and the browser actually
@@ -112,10 +121,17 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
     the volume only needs them while a listing is being worked on. Each file
     is verified present in the bucket before its local copy goes — the upload
     path is best-effort, and deleting a photo that never landed would break a
-    live listing. Returns bytes freed."""
+    live listing.
+
+    Photos older than the bucket itself (everything shot before R2 was
+    configured) were never uploaded by the request path, so nothing would ever
+    make them eligible to be freed. Backfill them here: a file that isn't in
+    the bucket is uploaded, re-verified, and then freed on this same pass.
+    Uploads carry their own smaller budget — they are far slower than a HEAD,
+    and a pass should not run for many minutes. Returns bytes freed."""
     if not objstore.enabled():
         return 0
-    freed = checked = 0
+    freed = checked = uploaded = 0
     try:
         base = config.SESSIONS_DIR
         if not base.exists():
@@ -132,12 +148,25 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000) -> int:
                     if not p.is_file() or p.stat().st_mtime > cutoff:
                         continue
                     checked += 1
-                    if objstore.exists(objstore.key_for(d.name, p.name)):
-                        size = p.stat().st_size
-                        p.unlink(missing_ok=True)
-                        freed += size
+                    key = objstore.key_for(d.name, p.name)
+                    if not objstore.exists(key):
+                        if uploaded >= upload_budget:
+                            continue
+                        uploaded += 1
+                        # Backfill, then re-verify: upload() swallows its own
+                        # failures, so a non-None return is not proof enough
+                        # to delete the only copy of a live listing's photo.
+                        if objstore.upload(p, key) is None:
+                            continue
+                        if not objstore.exists(key):
+                            continue
+                    size = p.stat().st_size
+                    p.unlink(missing_ok=True)
+                    freed += size
                 except Exception:  # noqa: BLE001 - keep going
                     continue
+        if uploaded:
+            log.info("reclaim: backfilled %d photo(s) into R2", uploaded)
     except Exception as exc:  # noqa: BLE001
         log.warning("reclaim: R2 offload failed: %s", exc)
     return freed
@@ -389,6 +418,37 @@ def _in_background(fn, *args, what: str = "") -> None:
             log.warning("background %s failed: %s",
                         what or getattr(fn, "__name__", "task"), exc)
     threading.Thread(target=_run, daemon=True).start()
+
+
+def _ensure_local(session_id: str, name: str, path: Path) -> bool:
+    """Make sure the optimized photo exists on the volume, pulling it back from
+    R2 if the reclaim pass already freed the local copy.
+
+    Viewing a photo survives the local copy being gone — /media just redirects
+    to the bucket — but every edit (crop, rotate, straighten) opens the file on
+    disk, so those started 404ing with "that photo isn't on the server anymore"
+    on listings that were merely a little old. The bytes still exist; fetch
+    them back instead of telling the user to re-upload."""
+    if path.is_file():
+        return True
+    if not objstore.enabled():
+        return False
+    try:
+        data = objstore.get_bytes(objstore.key_for(session_id, name))
+    except Exception as exc:  # noqa: BLE001 - genuinely gone, or R2 is down
+        log.warning("rehydrate: %s/%s not available from R2: %s",
+                    session_id, name, exc)
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".r2tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)  # atomic: never leave a half-written photo in place
+    except OSError as exc:
+        log.warning("rehydrate: couldn't write %s: %s", path, exc)
+        return False
+    log.info("rehydrate: pulled %s/%s back from R2", session_id, name)
+    return True
 
 
 def _purge_session_images(session_id: str) -> None:
@@ -1135,9 +1195,15 @@ async def upload(
             "Could not process the uploaded image(s)"
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
-    # Push optimized images to durable object storage (R2) when configured.
-    await run_in_threadpool(
-        objstore.upload_optimized, session_id, storage.optimized_dir(session_id), optimized)
+    # Mirror the optimized images to R2, but don't make the user wait for it:
+    # the photos are already on the volume and /media serves the local copy,
+    # so nothing on screen or on the way to eBay needs the bucket to have them
+    # yet. Anything this misses (a restart mid-push) gets picked up by the
+    # reclaim pass, which uploads what the bucket is missing before it frees
+    # anything.
+    _in_background(objstore.upload_optimized, session_id,
+                   storage.optimized_dir(session_id), optimized,
+                   what="R2 push (upload)")
     return {
         "session_id": session_id,
         "optimized": optimized,
@@ -1200,7 +1266,8 @@ async def upload_more(
             log.warning("upload-more: couldn't process %s: %s", src.name, exc)
     if not new_names:
         raise HTTPException(400, "Could not process the uploaded image(s).")
-    await run_in_threadpool(objstore.upload_optimized, session_id, opt_dir, new_names)
+    _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
+                   what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
     return {"added": new_names, "optimized": storage.list_optimized(session_id)}
 
@@ -1228,7 +1295,7 @@ async def edit_image(
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
         log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
@@ -1291,7 +1358,7 @@ def _studio_load(session_id: str, name: str, data: Optional[bytes]):
         raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     return Image.open(path)
 
@@ -1322,7 +1389,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not path.is_file():
+    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
@@ -2047,11 +2114,14 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     return {"ok": True, "id": req.session_id}
 
 
-# One cap for "the whole store, mirrored": the import brings in up to 300
-# active + 100 sold + 100 ended listings, so every consumer of the list (the
-# grid, sync reconciliation, insights, promote-all) must see at least that
-# many — a 50-row default silently hid most of a big store (architect #6).
-LIST_CAP = 600
+# One cap for "the whole store, mirrored": every consumer of the list (the
+# grid, sync reconciliation, insights, promote-all) has to see at least what
+# the import brought in, or it silently hides part of the store.
+#
+# It has to stay ahead of the import, not match it: at 600 — with the active
+# import capped at 300 + 100 sold + 100 ended — a seller with 616 active
+# listings lost the overflow twice over, once on import and again on read.
+LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
 
 
 @app.get("/api/listings")
@@ -2684,7 +2754,7 @@ def sync_listings(request: Request) -> dict:
 
 # Bounds one import run. A store bigger than this imports across repeated
 # syncs rather than tying up a single request indefinitely.
-IMPORT_LIMIT = 300
+IMPORT_LIMIT = listing_sync._ACTIVE_LIMIT
 
 
 @app.post("/api/ebay/import-listings")

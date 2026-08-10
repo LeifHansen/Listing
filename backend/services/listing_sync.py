@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Optional
 
 from .. import db, ebay_auth, storage
@@ -92,8 +93,28 @@ def _merge(existing: Optional[dict], fresh: dict) -> dict:
 # retains ~90 days of these, so a modest cap covers the real backlog.
 _INACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_INACTIVE_LIMIT", "100") or "100")
 
+# How many ACTIVE listings to mirror. This was 300, which silently truncated
+# any store bigger than that — a 616-listing account simply never saw half its
+# inventory, and it read as "the sync is missing auctions". The ceiling that
+# matters is eBay's own paging (_MAX_PAGES * _PAGE_SIZE).
+_ACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_ACTIVE_LIMIT", "2500") or "2500")
 
-def import_active(token: str, user_id: str, limit: int = 300) -> dict:
+
+def _started_at(data: dict) -> Optional[datetime]:
+    """An imported listing's eBay start time, as an aware datetime.
+
+    This is what the row's updated_at becomes, so "most recent first" means
+    most recently listed rather than most recently touched by a sync."""
+    raw = str(data.get("ebay_start_time") or "").strip()
+    if not raw:
+        return None
+    try:  # eBay sends "2026-07-30T18:04:11.000Z"
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def import_active(token: str, user_id: str, limit: int = _ACTIVE_LIMIT) -> dict:
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently ENDED (unsold → status 'ended', the Inactive
     tab) and SOLD listings (status 'sold'), each capped at
@@ -118,7 +139,11 @@ def import_active(token: str, user_id: str, limit: int = 300) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.info("sync: couldn't list %s items: %s", status, exc)
 
-    known = {r["id"]: r for r in db.list_listings(limit=1000, user_id=user_id)}
+    # Has to cover everything we're about to write, or listings past the cut
+    # look new every sync and get re-imported instead of updated.
+    known = {r["id"]: r
+             for r in db.list_listings(limit=max(1000, len(jobs) * 2),
+                                       user_id=user_id)}
     imported = updated = failed = 0
 
     def _fetch(job: tuple[str, str]):
@@ -150,7 +175,8 @@ def import_active(token: str, user_id: str, limit: int = 300) -> dict:
             log.info("sync: eBay item %s didn't validate: %s", item_id, exc)
             failed += 1
             continue
-        db.upsert_listing(rid, data, status=status, user_id=user_id)
+        db.upsert_listing(rid, data, status=status, user_id=user_id,
+                          when=_started_at(data))
         if prior:
             updated += 1
         else:
