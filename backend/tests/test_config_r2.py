@@ -22,7 +22,7 @@ def test_credentials_alone_are_enough(fresh_config):
     cfg = fresh_config(**_CREDS)
     assert cfg.r2_missing() == []
     assert cfg.r2_configured()
-    assert cfg.R2_BUCKET == "thryft-images"  # the .env.example canonical name
+    assert cfg.R2_BUCKET == "thryftshop2"  # the .env.example canonical name
     assert not cfg.r2_public_urls()          # presigned mode until a URL is set
 
 

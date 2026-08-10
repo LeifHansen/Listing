@@ -106,7 +106,7 @@ SECRET_KEY = _load_secret_key()
 R2_ACCOUNT_ID = _env("R2_ACCOUNT_ID")
 R2_ACCESS_KEY_ID = _env("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = _env("R2_SECRET_ACCESS_KEY")
-R2_BUCKET = _env("R2_BUCKET") or "thryft-images"
+R2_BUCKET = _env("R2_BUCKET") or "thryftshop2"
 # The bucket's public base URL (r2.dev URL or a custom domain), no trailing /.
 # Optional: set it to serve photos straight from Cloudflare; unset means the
 # app hands out presigned GETs when a local copy is gone.
