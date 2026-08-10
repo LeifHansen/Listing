@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import shutil
 import threading
@@ -32,6 +33,26 @@ from .services import (claude_ai, ebay, ebay_trading, image_import, images,
                        promotions, recommender, taxonomy)
 
 app = FastAPI(title="eBay Listing Generator")
+
+
+class _DropDeletionAcks(logging.Filter):
+    """Drop the access-log lines for successfully acked eBay account-deletion
+    notifications. eBay sends them 1-2 times a MINUTE, around the clock, and
+    they were the bulk of the retained Fly log window — burying the lines that
+    matter. Failures (non-2xx) still log. uvicorn's access record args are
+    (client_addr, method, full_path, http_version, status_code)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            _client, method, path, _version, status = record.args
+            return not (method == "POST"
+                        and str(path).startswith("/api/ebay/account-deletion")
+                        and 200 <= int(status) < 300)
+        except Exception:  # noqa: BLE001 - never eat a line we can't parse
+            return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_DropDeletionAcks())
 
 # The frontend is a Vite/React app; serve its build output. (The Dockerfile
 # builds it in a node stage; run.sh builds it for local dev.)
@@ -157,10 +178,10 @@ def _reclaim_loop() -> None:
 @app.on_event("startup")
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
-    background-removal model, and keep the volume from filling up."""
-    import threading
-
+    background-removal model, resolve the R2 bucket check so /api/health tells
+    the truth from the first request, and keep the volume from filling up."""
     threading.Thread(target=images.warm, daemon=True).start()
+    threading.Thread(target=objstore.probe, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
 
 
@@ -184,9 +205,16 @@ def health() -> dict:
         "adobe_configured": config.adobe_configured(),
         "adobe_ready": config.adobe_ready(),
         "photoroom_configured": config.photoroom_ready(),
-        # Photo storage: is the R2 bucket wired up, and how much room is
-        # left on the volume (a full one breaks every upload).
+        # Photo storage: is the R2 bucket wired up — and if not, exactly which
+        # pieces are missing (four credentials sat deployed for a week while a
+        # bare `false` here hid that two more vars were expected) — plus how
+        # much room is left on the volume (a full one breaks every upload).
         "objstore_configured": objstore.enabled(),
+        "objstore_missing": config.r2_missing(),
+        "objstore_bucket": config.R2_BUCKET if objstore.enabled() else None,
+        "objstore_url_mode": (("public" if config.r2_public_urls() else "presigned")
+                              if objstore.enabled() else None),
+        "objstore_error": objstore.last_error(),
         "disk_free_mb": round(storage.disk_free_bytes() / 1e6),
         "pixian_configured": config.pixian_ready(),
         # The background-removal engines that will actually run, in order.
@@ -1039,11 +1067,16 @@ def ebay_account_deletion_challenge(request: Request, challenge_code: str = "") 
 
 @app.post("/api/ebay/account-deletion")
 async def ebay_account_deletion_notice(request: Request) -> Response:
-    """Acknowledge an account-deletion notification (and keep an audit copy).
+    """Acknowledge an account-deletion notification.
 
     We key stored eBay connections by *our* user ids, not eBay usernames, so
-    there is no per-user data to purge here — but the notification is recorded
-    under data/exports/ so there's an audit trail of every notice received.
+    there is no per-user data to purge here, so an ack is the whole job.
+    These arrive 1-2 times a MINUTE around the clock: the old approach wrote
+    a JSON file per notice (thousands a day churning through a 1GB volume,
+    deleted unread by prune_exports two days later) and let every ack spam the
+    access log. Now they're only visible at LOG_LEVEL=DEBUG — a failing
+    endpoint still surfaces via non-2xx access-log lines and eBay's own
+    delivery alerts.
     """
     try:
         payload = await request.json()
@@ -1051,11 +1084,7 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
         payload = {}
     notif_id = ((payload.get("notification") or {}).get("notificationId")
                 or "unknown")
-    try:
-        storage.write_export(f"account-deletion-{notif_id}",
-                             "ebay_notification", payload)
-    except Exception as exc:  # noqa: BLE001 - never fail the ack
-        log.warning(f"ebay: failed to record deletion notice: {exc}")
+    log.debug("ebay: account-deletion notice acked (notificationId=%s)", notif_id)
     return Response(status_code=200)
 
 
@@ -1134,12 +1163,7 @@ async def upload_more(
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
 
-    def _idx(n: str) -> int:
-        try:
-            return int(n.replace("img_", "").replace(".jpg", ""))
-        except ValueError:
-            return -1
-    start = max((_idx(n) for n in existing), default=-1) + 1
+    start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
     orig = storage.original_dir(session_id)
     opt_dir = storage.optimized_dir(session_id)
@@ -2245,6 +2269,11 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> None:
         or image_import.import_listing_images(listing_id, listing["image_urls"])
     if not names:
         return
+    # Mirror to R2 like uploads do — otherwise imported listings are the one
+    # kind of session the offload sweep can never free from the volume.
+    _in_background(objstore.upload_optimized, listing_id,
+                   storage.optimized_dir(listing_id), names,
+                   what="adopted-import R2 push")
     listing["images"] = names
     rec["listing"] = listing
     try:
@@ -2314,15 +2343,9 @@ def merge_listings(payload: dict, request: Request) -> dict:
     tdir = storage.optimized_dir(target_id)
     tdir.mkdir(parents=True, exist_ok=True)
 
-    def _idx(n: str) -> int:
-        try:
-            return int(n.replace("img_", "").replace(".jpg", ""))
-        except ValueError:
-            return -1
-
     base = list(listing.images) or storage.list_optimized(target_id)
-    nxt = max([_idx(n) for n in base]
-              + [_idx(n) for n in storage.list_optimized(target_id)], default=-1) + 1
+    nxt = max((storage.image_index(n)
+               for n in base + storage.list_optimized(target_id)), default=-1) + 1
     added: list[str] = []
     for sid in source_ids:
         srec = db.get_listing(sid) or {}
@@ -2702,15 +2725,26 @@ def media(session_id: str, name: str, v: str = ""):
         raise HTTPException(404, "Not found")
     if path.is_file():
         return FileResponse(path)
-    # Local file gone (e.g. after a restart) — fall back to R2 if available.
-    # Carry the client's cache-bust version onto the R2 URL, otherwise the CDN
-    # can keep serving a pre-edit copy (e.g. a photo rotated after upload).
+    # Local file gone (e.g. freed by the R2 offload) — fall back to R2.
     if objstore.enabled():
-        url = objstore.public_url(objstore.key_for(session_id, name))
-        safe_v = "".join(c for c in v if c.isalnum())[:24]
-        if safe_v:
-            url += ("&" if "?" in url else "?") + "v=" + safe_v
-        return RedirectResponse(url)
+        key = objstore.key_for(session_id, name)
+        if config.r2_public_urls():
+            # Carry the client's cache-bust version onto the public URL,
+            # otherwise the CDN can keep serving a pre-edit copy (e.g. a
+            # photo rotated after upload).
+            url = objstore.public_url(key)
+            safe_v = "".join(c for c in v if c.isalnum())[:24]
+            if safe_v:
+                url += ("&" if "?" in url else "?") + "v=" + safe_v
+            return RedirectResponse(url)
+        # Presigned mode: never bolt extra params onto the URL (they'd break
+        # the signature), and cap how long browsers may cache the redirect —
+        # the default /media policy (1h) could outlive the signature and
+        # strand clients on an expired URL.
+        url = objstore.url_for(key, expires=3600)
+        if url:
+            return RedirectResponse(
+                url, headers={"Cache-Control": "private, max-age=300"})
     raise HTTPException(404, "Not found")
 
 

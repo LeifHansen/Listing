@@ -51,11 +51,14 @@ def _sku(session_id: str) -> str:
 def _image_urls(session_id: str, names: list[str], base_url: str) -> list[str]:
     """eBay requires publicly reachable image URLs.
 
-    Prefer durable R2 public URLs when object storage is configured; otherwise
-    fall back to serving via the app (needs a public deployment).
+    With a public R2 base URL configured, hand eBay durable bucket URLs.
+    Otherwise serve via the app's /media route — those URLs are public and
+    stable, and (with R2 in presigned mode) survive restarts by redirecting
+    to the bucket; a presigned URL itself would be a poor fit here, since it
+    expires and eBay may re-fetch.
     """
     names = names or storage.list_optimized(session_id)
-    if objstore.enabled():
+    if objstore.enabled() and config.r2_public_urls():
         return [objstore.public_url(objstore.key_for(session_id, n)) for n in names]
     return [f"{base_url}/media/{session_id}/optimized/{n}" for n in names]
 
@@ -682,21 +685,35 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
             "payload": payload,
         }
 
-    # eBay fetches every image URL when the inventory item is created; if the
-    # local files are gone (session predates a restart/deploy) it fails with
-    # an opaque 25001 'system error'. Applies to drafts too (both create the
-    # inventory item). Fail clearly instead — unless eBay already hosts the
-    # images (a revise), in which case we reuse those and don't need the files.
-    if not objstore.enabled() and not image_urls_override:
+    # eBay fetches every image URL when the inventory item is created; if a
+    # photo is reachable neither on disk nor in R2 it fails with an opaque
+    # 25001 'system error'. Applies to drafts too (both create the inventory
+    # item). Fail clearly instead — unless eBay already hosts the images (a
+    # revise), in which case we reuse those and don't need the files.
+    if not image_urls_override:
         names = listing.images or storage.list_optimized(session_id)
         opt_dir = storage.optimized_dir(session_id)
-        if not names or any(not (opt_dir / n).is_file() for n in names):
+
+        def _fetchable(n: str) -> bool:
+            """Will eBay's fetch of this photo's URL succeed? Checks the copy
+            the URL actually resolves to, and heals the fixable gaps: a local
+            file whose best-effort R2 upload was dropped is re-pushed (public
+            mode sends bucket URLs), and an offloaded file is restored to disk
+            (/media URLs must serve bytes, not lean on eBay following a
+            redirect to a short-lived signed URL)."""
+            path, key = opt_dir / n, objstore.key_for(session_id, n)
+            if objstore.enabled() and config.r2_public_urls():
+                return (objstore.exists(key)
+                        or (path.is_file() and objstore.upload(path, key) is not None))
+            return path.is_file() or objstore.restore(key, path)
+
+        unfetchable = not names or any(not _fetchable(n) for n in names)
+        if unfetchable:
             # Last resort before erroring: if eBay already hosts images for this
             # SKU, reuse them so the edit still goes through.
             image_urls_override = (_live_inventory_images(session_id, listing, creds)
                                    if creds else None)
-        if not image_urls_override and (
-                not names or any(not (opt_dir / n).is_file() for n in names)):
+        if unfetchable and not image_urls_override:
             log.warning("publish blocked: photos missing for session %s", session_id)
             return {
                 "dry_run": False,

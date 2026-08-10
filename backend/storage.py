@@ -23,11 +23,31 @@ def new_session_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def session_dir(session_id: str) -> Path:
+def safe_session_name(session_id: str) -> str:
+    """The canonical name for a session id: alphanumerics only.
+
+    This is THE naming rule for everything keyed by session — the on-disk
+    directory and the R2 object key alike. Imported listings carry ids like
+    "ebay-123", so any keyer that skips this rule ends up with split-brain
+    names (dir "ebay123" vs key ".../ebay-123/...") that no lookup ever
+    reunites. Raises ValueError when nothing usable remains."""
     safe = "".join(c for c in session_id if c.isalnum())
     if not safe:
         raise ValueError("invalid session id")
-    return config.SESSIONS_DIR / safe
+    return safe
+
+
+def session_dir(session_id: str) -> Path:
+    return config.SESSIONS_DIR / safe_session_name(session_id)
+
+
+def image_index(name: str) -> int:
+    """The N in "img_NNN.jpg", or -1 for anything else. Used to mint the next
+    non-colliding filename when photos are added to an existing session."""
+    try:
+        return int(name.replace("img_", "").replace(".jpg", ""))
+    except ValueError:
+        return -1
 
 
 def ensure_session(session_id: str) -> Path:
