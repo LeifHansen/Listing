@@ -15,7 +15,8 @@ import datetime as _dt
 import time as _time
 from typing import Optional
 
-from sqlalchemy import DateTime, JSON, String, create_engine, select, text
+from sqlalchemy import (DateTime, JSON, String, create_engine, delete, select,
+                        text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from . import config
@@ -307,6 +308,64 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
             return _user_to_dict(u) if u else None
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_user_by_id failed: {exc}")
+        return None
+
+
+def get_password_hash(user_id: str) -> Optional[str]:
+    """The stored bcrypt hash for a user (None if absent). Kept separate from
+    get_user_by_id so the hash never rides along in a dict that gets returned
+    to a client by accident."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            return u.password_hash if u else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_password_hash failed: {exc}")
+        return None
+
+
+def delete_user(user_id: str) -> Optional[list[str]]:
+    """Erase a user and everything keyed to them, in one transaction.
+
+    Returns the ids of the deleted listings so the caller can purge their
+    photos from disk and R2; returns None if nothing was deleted (no such
+    user, no DB, or the delete failed).
+
+    This is the one function in this module that must NOT fail quietly. The
+    module-wide rule is "a database problem never breaks a request", but a
+    delete that silently does nothing while telling the user their account is
+    gone is exactly the trap this feature exists to avoid — so failure is
+    reported and the caller surfaces it.
+
+    The listings table has no foreign key to users (see ListingRecord), so
+    nothing cascades on its own; every table is cleared explicitly here.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                return None
+            # Select only the ids, then delete set-wise. Loading whole rows to
+            # collect ids would pull every listing's JSON blob across the wire
+            # (a synced store is thousands of them) just to throw it away, and
+            # ORM-deleting them one at a time would issue a statement each.
+            listing_ids = list(s.execute(
+                select(ListingRecord.id).where(ListingRecord.user_id == user_id)
+            ).scalars().all())
+            s.execute(
+                delete(ListingRecord).where(ListingRecord.user_id == user_id))
+            s.execute(delete(EbayAccount).where(EbayAccount.user_id == user_id))
+            s.execute(delete(User).where(User.id == user_id))  # prefs ride along
+            s.commit()
+            return listing_ids
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        log.warning(f"db: delete_user failed: {exc}")
         return None
 
 

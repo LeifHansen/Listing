@@ -520,6 +520,84 @@ def auth_me(request: Request) -> dict:
     return {"user": auth.current_user(request)}
 
 
+@app.get("/api/account/summary")
+def account_summary(request: Request) -> dict:
+    """What deleting this account would destroy — shown in the confirm dialog
+    so nobody deletes blind. Counting live listings separately matters: those
+    stay up on eBay after deletion, and a seller must know that before they
+    lose the tools to manage them.
+
+    `counted` says whether the numbers can be trusted. list_listings() returns
+    [] on a DB error like every read in db.py, and silently showing "0 live
+    listings" would suppress exactly the warning this endpoint exists to give
+    — so an unreachable DB is reported as unknown, not as zero.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    counted = db.db_status().get("connected", False)
+    rows = db.list_listings(limit=1000, user_id=user["id"]) if counted else []
+    live = sum(1 for r in rows
+               if (r.get("status") or "") in ("published", "live"))
+    return {
+        "email": user.get("email", ""),
+        "counted": counted,
+        "listings": len(rows),
+        "live_listings": live,
+        "ebay_connected": bool((db.get_ebay_account(user["id"]) or {}).get("refresh_token")),
+    }
+
+
+@app.post("/api/account/delete")
+def account_delete(request: Request, response: Response, payload: dict) -> dict:
+    """Permanently delete the signed-in account and everything keyed to it.
+
+    Deliberately a POST (not DELETE): some mobile webviews and corporate
+    proxies drop DELETE bodies, and this one carries the password.
+
+    Deleting means deleting — the account row, the eBay connection (our stored
+    refresh token goes with it), every listing, and every photo on disk and in
+    R2. What we cannot delete is anything on eBay's side: listings published
+    there stay live under the seller's own eBay account, and the authorization
+    grant is theirs to revoke in eBay's settings. Both facts are stated in the
+    confirm dialog and the privacy policy rather than quietly assumed.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    uid = user["id"]
+
+    # Re-authenticate: a leaked session token must not be enough to erase an
+    # account. (A password is always set — signup is the only way in.)
+    password = str(payload.get("password", ""))
+    stored = db.get_password_hash(uid)
+    if not stored:
+        raise HTTPException(
+            503, "Account service is temporarily unavailable. Please try again shortly.")
+    if not auth.verify_password(password, stored):
+        raise HTTPException(401, "That password doesn't match. Try again.")
+
+    listing_ids = db.delete_user(uid)
+    if listing_ids is None:
+        raise HTTPException(
+            503, "Couldn't delete your account just now — nothing was changed. "
+                 "Please try again in a moment.")
+
+    # Photos last, and only after the rows are really gone: one background
+    # sweep for the whole account (a thread per listing would spawn thousands
+    # on a synced store and exhaust the 1GB machine), so a slow R2 delete never
+    # holds the response or fails a deletion that already happened.
+    def _purge_all() -> None:
+        for lid in listing_ids:
+            _purge_session_images(lid)
+
+    _in_background(_purge_all, what="account-delete cleanup")
+
+    auth.clear_session_cookie(response)
+    log.info("account deleted: user=%s listings=%d", uid, len(listing_ids))
+    return {"ok": True, "deleted_listings": len(listing_ids)}
+
+
 # --- eBay connect (Sign in with eBay) --------------------------------------
 
 # Access tokens live ~2 hours; refreshing one per request added a serial
@@ -2818,11 +2896,18 @@ def media(session_id: str, name: str, v: str = ""):
     raise HTTPException(404, "Not found")
 
 
-# Clean URLs for the static pages eBay's app settings link to (StaticFiles
-# only serves them under their exact .html filenames).
+# Clean URLs for the static policy pages (StaticFiles only serves them under
+# their exact .html filenames). These are linked from eBay's app settings, the
+# App Store listing, and — since a native app has no address bar — from inside
+# the app's own Settings screen.
 @app.get("/privacy-policy")
 def privacy_policy():
     return FileResponse(FRONTEND_DIR / "privacy-policy.html")
+
+
+@app.get("/terms")
+def terms():
+    return FileResponse(FRONTEND_DIR / "terms.html")
 
 
 @app.get("/about")
