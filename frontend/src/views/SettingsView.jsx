@@ -391,7 +391,188 @@ export function SettingsView() {
           </div>
         )}
       </Card>
+
+      <MarketplaceConnections />
     </SettingsShell>
+  );
+}
+
+// Cross-posting marketplaces — every registered marketplace except eBay
+// (which keeps its own card above). One section per marketplace: connected →
+// account + Disconnect; configured but not connected → Connect button; not
+// configured on the server → the same missing-env explainer the eBay card
+// uses. Renders nothing while eBay is the only marketplace registered.
+function MarketplaceConnections() {
+  const { marketplaces, loadMarketplaces } = useApp();
+  const { toast, confirm } = useToast();
+  const others = marketplaces.filter((m) => m.key !== "ebay");
+  if (!others.length) return null;
+
+  const disconnect = async (m) => {
+    if (!(await confirm({
+      title: `Disconnect ${m.label}?`,
+      message: "Cross-posting there stops until you reconnect. Your saved defaults are kept.",
+      confirmLabel: "Disconnect",
+      danger: true,
+    }))) return;
+    try {
+      await postJson(`/api/${m.key}/disconnect`, {});
+      await loadMarketplaces();
+      toast(`${m.label} disconnected.`, { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't disconnect: ${e.message}`, { kind: "error" });
+    }
+  };
+
+  return (
+    <Card>
+      <SectionHeader
+        icon={Link2}
+        title="Cross-posting marketplaces"
+        hint="Connect more marketplaces to post a listing to several of them at once"
+      />
+      <div className="flex flex-col">
+        {others.map((m, i) => (
+          <div key={m.key} className={i > 0 ? "mt-6 pt-6 border-t border-line" : ""}>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-ink">{m.label}</p>
+                {m.connected ? (
+                  <p className="text-sm text-ink-secondary">
+                    Connected{m.username ? (
+                      <> as <strong className="text-ink">{m.username}</strong></>
+                    ) : null}.
+                  </p>
+                ) : m.oauth_ready ? (
+                  <p className="text-sm text-ink-secondary">
+                    Not connected yet — link your {m.label} account to cross-post listings.
+                  </p>
+                ) : (
+                  <p className="text-sm text-ink-secondary">
+                    Not set up on the server yet.
+                  </p>
+                )}
+              </div>
+              {m.connected ? (
+                <Button variant="danger" onClick={() => disconnect(m)}>
+                  <Unlink aria-hidden /> Disconnect
+                </Button>
+              ) : m.oauth_ready ? (
+                <Button
+                  variant="primary"
+                  onClick={() => { window.location.href = `/api/${m.key}/connect`; }}
+                >
+                  <Link2 aria-hidden /> Connect {m.label}
+                </Button>
+              ) : null}
+            </div>
+            {!m.connected && !m.oauth_ready && (
+              <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 flex gap-3 mt-3">
+                <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
+                <div className="text-sm min-w-0">
+                  <p className="font-bold text-ink">
+                    “Sign in with {m.label}” isn’t set up on the server
+                  </p>
+                  <p className="text-ink-secondary mt-0.5">
+                    The Connect button can’t do anything until{" "}
+                    {(m.oauth_missing || []).length === 1 ? "this variable is" : "these variables are"} set
+                    on the deployment:{" "}
+                    {(m.oauth_missing || []).map((name, j) => (
+                      <span key={name}>
+                        {j > 0 && ", "}
+                        <code className="text-ink font-semibold">{name}</code>
+                      </span>
+                    ))}
+                    {" "}(e.g. <code className="text-ink font-semibold">fly secrets set …</code>).
+                  </p>
+                </div>
+              </div>
+            )}
+            {m.key === "etsy" && m.connected && <EtsyDefaults />}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// Etsy publish defaults: which shipping profile + return policy new Etsy
+// listings use (Etsy requires both for physical items). Loaded from the
+// seller's shop; saved into the account's marketplace settings.
+function EtsyDefaults() {
+  const { toast } = useToast();
+  const [data, setData] = useState(null);   // {shipping_profiles, return_policies, selected}
+  const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState({});
+
+  useEffect(() => {
+    api("/api/etsy/settings-options")
+      .then((d) => { setData(d); setSelected(d.selected || {}); })
+      .catch(() => setData({ error: true }));
+  }, []);
+
+  if (!data) return <div className="ai-shimmer h-16 rounded-tile mt-4" aria-hidden />;
+  if (data.error) {
+    return (
+      <p className="text-[13px] text-ink-secondary mt-3">
+        Couldn’t load your Etsy shipping profiles — retry from Settings after
+        reconnecting Etsy.
+      </p>
+    );
+  }
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await postJson("/api/etsy/settings-options", selected);
+      toast("Etsy defaults saved — new Etsy listings will use them.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't save: ${e.message}`, { kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4 max-w-lg mt-4">
+      <Field
+        label="Shipping profile"
+        help={(data.shipping_profiles || []).length
+          ? "Etsy requires a shipping profile on every physical listing."
+          : "No shipping profiles on your Etsy shop yet — create one on Etsy, then reopen Settings."}
+      >
+        <Select
+          value={selected.shipping_profile_id || ""}
+          onChange={(e) => setSelected((s) => ({ ...s, shipping_profile_id: e.target.value }))}
+        >
+          <option value="">— none —</option>
+          {(data.shipping_profiles || []).map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </Select>
+      </Field>
+      <Field
+        label="Return policy"
+        help={(data.return_policies || []).length
+          ? undefined
+          : "No return policies on your Etsy shop yet — Etsy adds one the first time you set returns up in Shop Manager."}
+      >
+        <Select
+          value={selected.return_policy_id || ""}
+          onChange={(e) => setSelected((s) => ({ ...s, return_policy_id: e.target.value }))}
+        >
+          <option value="">— none —</option>
+          {(data.return_policies || []).map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </Select>
+      </Field>
+      <div>
+        <Button variant="secondary" onClick={save} loading={saving}>
+          Save Etsy defaults
+        </Button>
+      </div>
+    </div>
   );
 }
 

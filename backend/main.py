@@ -2514,5 +2514,113 @@ def about():
     return FileResponse(FRONTEND_DIR / "about.html")
 
 
+# --- marketplaces (generic connect/status plumbing) ------------------------
+# Registered AFTER every literal /api/ebay/* route on purpose: FastAPI matches
+# in registration order, so eBay keeps its original handlers (with their
+# account-preserving policy logic) and the {marketplace} patterns serve
+# everything registered later (Etsy, Depop, ...).
+
+
+@app.get("/api/marketplaces")
+def marketplace_roster(request: Request) -> dict:
+    """Every registered marketplace + this user's connection state — drives
+    the Settings connection cards and the publish-target chips in one call."""
+    uid = _uid(request)
+    out = []
+    for p in marketplaces.all_providers():
+        status = p.account_status(uid)
+        out.append({
+            "key": p.key,
+            "label": p.label,
+            "oauth_ready": p.oauth_ready(),
+            "oauth_missing": p.oauth_missing(),
+            "connected": bool(status.get("connected")),
+            "username": status.get("username", ""),
+            "env": status.get("env", "production"),
+            "supports": p.supports(),
+        })
+    return {"marketplaces": out}
+
+
+def _flow_cookie(marketplace: str) -> str:
+    return f"{marketplace}_oauth_flow"
+
+
+def _marketplace_or_404(marketplace: str):
+    provider = marketplaces.get(marketplace)
+    if provider is None:
+        raise HTTPException(404, "Unknown marketplace")
+    return provider
+
+
+@app.get("/api/{marketplace}/connect")
+def marketplace_connect(marketplace: str, request: Request):
+    provider = _marketplace_or_404(marketplace)
+    if not provider.oauth_ready():
+        raise HTTPException(400, f"{provider.label} OAuth not configured "
+                                 f"(set {', '.join(provider.oauth_missing())}).")
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, f"Log in before connecting {provider.label}.")
+    import secrets as _secrets
+    nonce = _secrets.token_urlsafe(24)
+    url, flow = provider.authorize_url(auth.make_state(uid, nonce))
+    resp = RedirectResponse(url)
+    # Bind the flow to this browser, exactly like the eBay nonce cookie: the
+    # callback requires the nonce here to match the one in the signed state
+    # (CSRF protection). Flow secrets (e.g. Etsy's PKCE code_verifier) ride
+    # along — httponly, 10 minutes, this browser only.
+    resp.set_cookie(_flow_cookie(marketplace),
+                    json.dumps({"nonce": nonce, **flow}),
+                    max_age=600, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https")
+    return resp
+
+
+@app.get("/api/{marketplace}/callback")
+def marketplace_callback(marketplace: str, request: Request,
+                         code: str = "", state: str = ""):
+    provider = _marketplace_or_404(marketplace)
+    verified = auth.verify_state(state)
+    if not code or not verified:
+        return RedirectResponse(f"/?connect_error={marketplace}")
+    uid, nonce = verified
+    try:
+        flow = json.loads(request.cookies.get(_flow_cookie(marketplace), "") or "{}")
+    except ValueError:
+        flow = {}
+    # The nonce in the signed state must match the cookie set at connect time,
+    # so a callback can only bind an account to the browser that started the
+    # flow (blocks CSRF authorization-code injection).
+    if not flow.get("nonce") or flow.get("nonce") != nonce:
+        log.warning("%s callback: nonce mismatch (uid=%s)", marketplace, uid)
+        return RedirectResponse(f"/?connect_error={marketplace}")
+    try:
+        fields = provider.exchange_code(code, flow)
+    except Exception as exc:  # noqa: BLE001 - the redirect is the error surface
+        log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
+        return RedirectResponse(f"/?connect_error={marketplace}")
+    db.save_marketplace_account(uid, marketplace, **fields)
+    resp = RedirectResponse(f"/?connected={marketplace}")
+    resp.delete_cookie(_flow_cookie(marketplace))
+    return resp
+
+
+@app.get("/api/{marketplace}/status")
+def marketplace_status(marketplace: str, request: Request) -> dict:
+    provider = _marketplace_or_404(marketplace)
+    return provider.account_status(_uid(request))
+
+
+@app.post("/api/{marketplace}/disconnect")
+def marketplace_disconnect(marketplace: str, request: Request) -> dict:
+    provider = _marketplace_or_404(marketplace)
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    provider.disconnect(uid)
+    return {"ok": True}
+
+
 # Serve the frontend (index.html + assets) at the root.
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
