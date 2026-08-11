@@ -16,6 +16,20 @@ class ItemSpecific(BaseModel):
     confidence: str = ""
 
 
+class MarketplaceState(BaseModel):
+    """One marketplace's live state for a listing (kept under
+    Listing.marketplaces, keyed by marketplace: "ebay", "etsy", ...). The
+    server owns this map — publish outcomes write it; client-sent copies are
+    replaced with the stored record's before merging, so a stale browser tab
+    can never wipe another marketplace's listing id."""
+
+    listing_id: str = ""
+    url: str = ""                # public view URL on that marketplace
+    status: str = ""             # "" | "draft" | "published" | "ended"
+    published_at: str = ""       # ISO-8601 UTC of the first live publish
+    error: str = ""              # last failed attempt's message ("" when ok)
+
+
 class Listing(BaseModel):
     """A full eBay listing draft, editable by the user before publishing."""
 
@@ -83,6 +97,10 @@ class Listing(BaseModel):
     sold_quantity: int = 0
     # eBay's own view URL for an imported listing (avoids guessing the domain).
     view_url: str = ""
+    # Per-marketplace publish state, keyed by marketplace ("ebay", "etsy",
+    # ...). `ebay_listing_id` above remains the authoritative legacy slot for
+    # eBay — the two are mirrored on every publish (marketplaces/state.py).
+    marketplaces: dict[str, MarketplaceState] = Field(default_factory=dict)
 
 
 class IdentifyResult(BaseModel):
