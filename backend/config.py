@@ -347,11 +347,12 @@ DEPOP_CLIENT_SECRET = _env("DEPOP_CLIENT_SECRET")
 DEPOP_API_BASE = os.getenv("DEPOP_API_BASE", "https://partnerapi.depop.com").strip()
 DEPOP_AUTH_URL = os.getenv("DEPOP_AUTH_URL", "").strip()
 DEPOP_TOKEN_URL = os.getenv("DEPOP_TOKEN_URL", "").strip()
+DEPOP_REDIRECT_URI = os.getenv("DEPOP_REDIRECT_URI", "").strip()
 DEPOP_SCOPES = os.getenv("DEPOP_SCOPES", "products_read products_write").strip()
 
 
 def depop_oauth_ready() -> bool:
     """Enough config to run the 'Sign in with Depop' flow (partner creds +
-    the OAuth endpoints from the partner docs)."""
+    the OAuth endpoints and redirect URI from the partner setup)."""
     return bool(DEPOP_CLIENT_ID and DEPOP_CLIENT_SECRET
-                and DEPOP_AUTH_URL and DEPOP_TOKEN_URL)
+                and DEPOP_AUTH_URL and DEPOP_TOKEN_URL and DEPOP_REDIRECT_URI)

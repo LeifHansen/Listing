@@ -19,10 +19,11 @@
 <body>
   <main class="page">
     <h1>Privacy Policy</h1>
-    <p class="updated">Thryft Shop (listing-lfwjrg.fly.dev) · Last updated July 8, 2026</p>
+    <p class="updated">Thryft Shop (listing-lfwjrg.fly.dev) · Last updated August 11, 2026</p>
 
-    <p>Thryft Shop helps sellers create eBay listings from photos. This page explains
-    what information the service handles and how it is used.</p>
+    <p>Thryft Shop helps sellers create marketplace listings (eBay, Etsy, Depop)
+    from photos. This page explains what information the service handles and how
+    it is used.</p>
 
     <h2>Information we collect</h2>
     <ul>
@@ -33,18 +34,21 @@
         listings.</li>
       <li><strong>Listing drafts:</strong> titles, descriptions, prices, and
         other listing details generated or edited in the app.</li>
-      <li><strong>eBay connection:</strong> if you connect your eBay account,
-        we store the OAuth refresh token eBay issues and the identifiers of
-        your business policies and merchant location. We never see your eBay
-        password.</li>
+      <li><strong>Marketplace connections:</strong> if you connect a
+        marketplace account (eBay, Etsy, or Depop), we store the OAuth refresh
+        token that marketplace issues and — for eBay — the identifiers of your
+        business policies and merchant location, and — for Etsy — your shop id
+        and chosen shipping/return defaults. We never see your marketplace
+        passwords.</li>
     </ul>
 
     <h2>How we use it</h2>
     <ul>
       <li>Uploaded photos are sent to Anthropic's Claude API to identify the
         item and draft the listing text.</li>
-      <li>Listing details are sent to eBay's APIs when you ask us to suggest
-        categories or publish a listing.</li>
+      <li>Listing details and photos are sent to the marketplaces you choose
+        (eBay, Etsy, Depop) when you ask us to suggest categories or publish a
+        listing there.</li>
       <li>Account and listing data are stored in our database (hosted on Neon)
         so your listing history is available when you log in.</li>
     </ul>
@@ -52,8 +56,8 @@
     <h2>What we don't do</h2>
     <ul>
       <li>We do not sell your data or share it with anyone beyond the service
-        providers named above (Anthropic, eBay, our hosting providers Fly.io
-        and Neon).</li>
+        providers named above (Anthropic, the marketplaces you connect —
+        eBay, Etsy, Depop — and our hosting providers Fly.io and Neon).</li>
       <li>We do not use your photos or listings for advertising.</li>
     </ul>
 
@@ -64,9 +68,10 @@
     usernames.</p>
 
     <h2>Your choices</h2>
-    <p>You can disconnect your eBay account at any time by revoking access in
-    your eBay account settings. To delete your Thryft Shop account and its data,
-    email us and we'll remove it.</p>
+    <p>You can disconnect any marketplace account at any time from the app's
+    Settings page, or by revoking access in that marketplace's own account
+    settings. To delete your Thryft Shop account and its data, email us and
+    we'll remove it.</p>
 
     <h2>Contact</h2>
     <p>Questions or deletion requests:

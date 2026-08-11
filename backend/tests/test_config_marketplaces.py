@@ -27,13 +27,19 @@ def test_etsy_placeholder_value_treated_unset(fresh_config):
     assert not cfg.etsy_oauth_ready()
 
 
-def test_depop_requires_all_four_vars(fresh_config):
+def test_depop_requires_every_partner_var(fresh_config):
     partial = fresh_config(DEPOP_CLIENT_ID="id", DEPOP_CLIENT_SECRET="secret")
     assert not partial.depop_oauth_ready()
-    full = fresh_config(
+    almost = fresh_config(
         DEPOP_CLIENT_ID="id", DEPOP_CLIENT_SECRET="secret",
         DEPOP_AUTH_URL="https://partnerapi.depop.com/oauth/authorize",
         DEPOP_TOKEN_URL="https://partnerapi.depop.com/oauth/token")
+    assert not almost.depop_oauth_ready()   # redirect URI still missing
+    full = fresh_config(
+        DEPOP_CLIENT_ID="id", DEPOP_CLIENT_SECRET="secret",
+        DEPOP_AUTH_URL="https://partnerapi.depop.com/oauth/authorize",
+        DEPOP_TOKEN_URL="https://partnerapi.depop.com/oauth/token",
+        DEPOP_REDIRECT_URI="https://app.example/api/depop/callback")
     assert full.depop_oauth_ready()
 
 

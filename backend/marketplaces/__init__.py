@@ -37,6 +37,7 @@ def _ensure_loaded() -> None:
     # flagship and the default target for legacy single-marketplace publishes.
     from . import ebay_provider  # noqa: F401
     from . import etsy_provider  # noqa: F401
+    from . import depop_provider  # noqa: F401
 
 
 def get(key: str) -> Optional[MarketplaceProvider]:
