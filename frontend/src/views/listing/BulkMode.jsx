@@ -271,8 +271,31 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
 }
 
 export function BulkQueue({ jobId, mode, onExit, onSettled }) {
-  const { setSession, loadListings } = useApp();
+  const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
+
+  // Bulk publish targets — same remembered selection as the single-listing
+  // publish bar; only shown once a non-eBay marketplace is connected.
+  const [bulkTargets, setBulkTargets] = useState(() => {
+    try {
+      const raw = localStorage.getItem("quickflip-publish-marketplaces");
+      const arr = raw ? JSON.parse(raw) : null;
+      return Array.isArray(arr) && arr.length ? arr : ["ebay"];
+    } catch (e) { return ["ebay"]; }
+  });
+  const toggleBulkTarget = (key) => setBulkTargets((cur) => {
+    const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
+    if (!next.length) return cur;
+    try { localStorage.setItem("quickflip-publish-marketplaces", JSON.stringify(next)); } catch (e) {}
+    return next;
+  });
+  const otherConnected = connectedMarketplaces.filter((m) => m.key !== "ebay");
+  const effectiveTargets = (() => {
+    if (!otherConnected.length) return null;   // legacy single-eBay path
+    const allowed = new Set(["ebay", ...otherConnected.map((m) => m.key)]);
+    const sel = bulkTargets.filter((k) => allowed.has(k));
+    return sel.length ? sel : ["ebay"];
+  })();
   const [job, setJob] = useState(null);
   const [items, setItems] = useState([]);
   const [checked, setChecked] = useState({});
@@ -381,17 +404,30 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const publishOne = useCallback(async (it) => {
     setPublishing((p) => ({ ...p, [it.session_id]: true }));
     try {
-      // Persist inline edits first, then publish.
+      // Persist inline edits first, then publish. One request per item —
+      // the backend fans out to every selected marketplace.
       await postJson(`/api/save/${it.session_id}`, it.listing);
-      const res = await postJson("/api/publish", {
-        session_id: it.session_id, listing: it.listing, mode: "live",
-      });
+      const body = { session_id: it.session_id, listing: it.listing, mode: "live" };
+      if (effectiveTargets
+          && !(effectiveTargets.length === 1 && effectiveTargets[0] === "ebay")) {
+        body.marketplaces = effectiveTargets;
+      }
+      const res = await postJson("/api/publish", body);
+      // Multi responses summarize per marketplace: "eBay ✓ · Etsy ✗".
+      const summary = res.multi
+        ? Object.entries(res.results || {})
+            .map(([key, r]) => `${key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
+            .join(" · ")
+        : null;
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
         ? {
             ...x,
             status: res.published ? "published" : "draft",
-            listing_id: res.listing_id || null,
-            error: res.published ? null
+            listing_id: (res.multi
+              ? res.results?.ebay?.listing_id : res.listing_id) || null,
+            error: res.published
+              ? (res.multi && Object.values(res.results || {}).some((r) => !r.ok)
+                  ? `${summary} — open the full editor to fix the rest.` : null)
               : (res.message || "Publish blocked — open the full editor to fix."),
           }
         : x));
@@ -403,7 +439,7 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
-  }, []);
+  }, [effectiveTargets]);
 
   // Merge duplicate drafts of the SAME item into one listing: photos combine
   // under the first selected item; the other drafts are deleted.
@@ -448,9 +484,14 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const publishSelected = async () => {
     const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
     if (!targets.length) { toast("Nothing selected to publish.", { kind: "warning" }); return; }
+    const targetNames = effectiveTargets && effectiveTargets.length > 1
+      ? effectiveTargets
+          .map((k) => (connectedMarketplaces.find((m) => m.key === k) || {}).label || k)
+          .join(" and ")
+      : "your eBay store";
     if (!(await confirm({
       title: `Publish ${targets.length} listing${targets.length === 1 ? "" : "s"} live?`,
-      message: "Each goes straight to your eBay store.",
+      message: `Each goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0;
@@ -571,6 +612,30 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
             </span>
           </p>
         </Card>
+      )}
+
+      {job?.done && drafts.length > 0 && otherConnected.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[12px] font-semibold text-ink-faint mr-1">Post to</span>
+          {[{ key: "ebay", label: "eBay" },
+            ...otherConnected.map((m) => ({ key: m.key, label: m.label }))].map((m) => {
+            const on = bulkTargets.includes(m.key);
+            return (
+              <button
+                key={m.key} type="button" onClick={() => toggleBulkTarget(m.key)}
+                aria-pressed={on}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-bold cursor-pointer transition-colors",
+                  on ? "bg-blue-soft border-blue/45 text-blue"
+                    : "bg-transparent border-line text-ink-faint hover:border-ink-faint",
+                )}
+              >
+                {on && <CheckCircle2 size={11} aria-hidden />}
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
       )}
 
       {job?.done && drafts.length > 0 && (

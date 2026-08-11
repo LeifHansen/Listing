@@ -15,6 +15,81 @@ function nameFor(data, key, field) {
   return ((data.policies[key] || []).find((p) => p.id === data.selected[field]) || {}).name || "not set";
 }
 
+// One row per marketplace after a multi-marketplace publish: ok/fail icon,
+// the marketplace's own message, a "View on X" link when it's live, and each
+// marketplace's fix-it issues with the same jump buttons the eBay panel has.
+function MultiResultPanel({ r, onFix }) {
+  const { marketplaces } = useApp();
+  const labelFor = (key) =>
+    (marketplaces.find((m) => m.key === key) || {}).label || key;
+  const entries = Object.entries(r.results || {});
+  const anyFail = entries.some(([, res]) => !res.ok);
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={cn(
+        "rounded-tile border p-4",
+        anyFail ? "bg-warning-soft border-warning/30"
+          : "bg-success-soft border-success/25",
+      )}
+    >
+      <p className="font-bold text-sm text-ink flex items-center gap-2">
+        {anyFail
+          ? <AlertTriangle size={17} className="text-warning" aria-hidden />
+          : <CheckCircle2 size={17} className="text-success" aria-hidden />}
+        {r.message || "Done!"}
+      </p>
+      <ul className="mt-3 flex flex-col gap-3.5">
+        {entries.map(([key, res]) => (
+          <li key={key} className="text-sm">
+            <p className="font-semibold text-ink flex items-center gap-1.5">
+              {res.ok
+                ? <CheckCircle2 size={15} className="text-success" aria-hidden />
+                : <AlertTriangle size={15} className="text-warning" aria-hidden />}
+              {labelFor(key)}
+              {res.dry_run && (
+                <span className="text-xs font-medium text-ink-faint">dry run</span>
+              )}
+            </p>
+            {res.message && (
+              <p className="text-ink-secondary mt-0.5">{res.message}</p>
+            )}
+            {res.ok && res.url && (
+              <a
+                href={res.url} target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 mt-1 text-[13px] font-semibold text-blue hover:underline"
+              >
+                View on {labelFor(key)} <ExternalLink size={12} aria-hidden />
+              </a>
+            )}
+            {(res.issues || []).length > 0 && (
+              <ul className="mt-2 flex flex-col gap-2.5">
+                {res.issues.map((it, i) => (
+                  <li key={i} className="text-sm">
+                    <p className="font-semibold text-ink">
+                      {it.title}
+                      {it.level === "warn" && (
+                        <span className="ml-2 text-xs font-medium text-ink-faint">nice to have</span>
+                      )}
+                    </p>
+                    {it.fix && <p className="text-ink-secondary mt-0.5">{it.fix}</p>}
+                    {it.target && it.target !== "generic" && (
+                      <Button variant="soft" size="sm" className="mt-2" onClick={() => onFix(it.target)}>
+                        Fix this <ArrowRight aria-hidden />
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    </motion.div>
+  );
+}
+
 // Publish — the last card: what will apply, the two big buttons, and a
 // friendly "what to fix" panel when eBay pushes back.
 export function PublishCard({ w }) {
@@ -34,7 +109,8 @@ export function PublishCard({ w }) {
     requestAnimationFrame(() => w.setFixTarget(target));
   };
 
-  const publishedOk = r && !r.error
+  const multiOk = r?.multi && Object.values(r.results || {}).every((res) => res.ok);
+  const publishedOk = r && !r.error && !r.multi
     && (r.published || r.draft || r.ebay_draft || r.dry_run || r.preflight);
 
   return (
@@ -45,9 +121,10 @@ export function PublishCard({ w }) {
         : canPublishLive
           ? "Save as Draft saves it here and stages it on your connected eBay account (as an unpublished offer); Publish Live makes it a live listing"
           : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
-      state={publishedOk ? "complete" : "todo"}
+      state={publishedOk || multiOk ? "complete" : "todo"}
     >
       <div className="flex flex-col gap-5">
+        {r?.multi && <MultiResultPanel r={r} onFix={onFix} />}
         {ebay.connected && policiesData && (
           <p className="text-[13px] text-ink-secondary"
             title={`Business policies applied to this listing — Shipping: ${nameFor(policiesData, "fulfillment", "fulfillment_policy_id")} · Payment: ${nameFor(policiesData, "payment", "payment_policy_id")} · Returns: ${nameFor(policiesData, "return", "return_policy_id")}`}>
@@ -162,6 +239,40 @@ const GAP_META = {
   description: { label: "Description", target: "description" },
 };
 
+// Where this publish goes: one toggle chip per connected marketplace. Hidden
+// until a non-eBay marketplace is connected, so today's eBay-only sellers see
+// zero change. Selection is remembered (localStorage) across listings.
+function MarketplaceChips({ w }) {
+  const { marketplaces } = useApp();
+  if (!w.chipTargets) return null;
+  const options = marketplaces.filter((m) => m.connected || m.key === "ebay");
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-[12px] font-semibold text-ink-faint mr-1">Post to</span>
+      {options.map((m) => {
+        const on = w.marketTargets.includes(m.key);
+        return (
+          <button
+            key={m.key}
+            type="button"
+            onClick={() => w.toggleMarketTarget(m.key)}
+            aria-pressed={on}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-bold cursor-pointer transition-colors",
+              on
+                ? "bg-blue-soft border-blue/45 text-blue"
+                : "bg-transparent border-line text-ink-faint hover:border-ink-faint",
+            )}
+          >
+            {on && <CheckCircle2 size={11} aria-hidden />}
+            {m.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function PublishBar({ w }) {
   const { canPublishLive, deleteListing, setSession, setView, openListings } = useApp();
   const { confirm } = useToast();
@@ -225,13 +336,20 @@ export function PublishBar({ w }) {
           : "Finish the flagged fields — or save a draft for now.",
       };
 
+  const targetCount = (w.chipTargets || []).length;
+  const liveLabel = targetCount > 1
+    ? `Publish to ${targetCount} marketplaces`
+    : canPublishLive ? "Publish Live" : "Publish";
+
   return (
     <div className="sticky bottom-20 md:bottom-4 z-30 pt-1">
       <div className={cn(
         "rounded-card border-2 backdrop-blur shadow-float p-3.5 sm:p-4 bg-card/95",
-        "flex flex-col gap-3 sm:flex-row sm:items-center",
+        "flex flex-col gap-3",
         ready ? "border-success/45" : "border-warning/50",
       )}>
+        <MarketplaceChips w={w} />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <span className="flex items-center gap-3 min-w-0 flex-1">
           <span className={cn(
             "grid place-items-center size-10 rounded-full shrink-0",
@@ -303,11 +421,12 @@ export function PublishBar({ w }) {
                 <Save aria-hidden /> Save Draft
               </Button>
               <Button variant="primary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("live")}>
-                <Rocket aria-hidden /> {canPublishLive ? "Publish Live" : "Publish"}
+                <Rocket aria-hidden /> {liveLabel}
               </Button>
             </>
           )}
         </span>
+        </div>
       </div>
     </div>
   );

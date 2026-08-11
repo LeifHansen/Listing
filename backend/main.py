@@ -27,10 +27,11 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore, storage
 from .config import log
 from .marketplaces import ebay_provider
-from .marketplaces.base import PublishContext
+from .marketplaces import state as marketplace_state
+from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
-from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
-                     SessionOnlyRequest)
+from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
+                     RefineRequest, SessionOnlyRequest)
 from .services import (claude_ai, ebay, ebay_trading, image_import, images,
                        listing_sync, metrics, orient, preflight, pricing,
                        promotions, recommender, taxonomy)
@@ -688,10 +689,29 @@ def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dic
 
 @app.post("/api/publish-preflight")
 async def publish_preflight(req: PublishRequest, request: Request) -> dict:
-    """The full 'ready to publish?' checklist, without touching the listing."""
+    """The full 'ready to publish?' checklist, without touching the listing.
+    The legacy shape ({ok, issues}) is always the eBay checklist; when the
+    request targets more marketplaces, their checklists ride along under
+    by_marketplace so the editor can jump to marketplace-specific fixes."""
     issues = await run_in_threadpool(
         _preflight_issues, request, req.listing, req.mode or "live")
-    return {"ok": not preflight.errors_only(issues), "issues": issues}
+    out = {"ok": not preflight.errors_only(issues), "issues": issues}
+    others = [k for k in dict.fromkeys(
+        (key or "").strip().lower() for key in req.marketplaces)
+        if k and k != "ebay"]
+    if others:
+        uid = _uid(request)
+        by: dict = {}
+        for key in others:
+            provider = marketplaces.get(key)
+            if provider is None:
+                continue
+            by[key] = await run_in_threadpool(
+                provider.preflight, uid, req.listing, req.mode or "live")
+        out["by_marketplace"] = by
+        out["ok"] = out["ok"] and not any(
+            preflight.errors_only(v) for v in by.values())
+    return out
 
 
 @app.get("/api/ebay/account-overview")
@@ -2319,24 +2339,125 @@ def merge_listings(payload: dict, request: Request) -> dict:
 
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
-    """Publish orchestrator. The eBay pipeline itself (Trading-vs-Inventory
-    routing, imported revise/relist, preflight, promotion) lives in
-    marketplaces/ebay_provider.py and returns its legacy JSON body verbatim,
-    so this route's responses are unchanged."""
+    """Publish orchestrator.
+
+    No `marketplaces` in the request (every pre-multi client) → the legacy
+    single-eBay path: the eBay provider (Trading-vs-Inventory routing,
+    imported revise/relist, preflight, promotion — moved verbatim to
+    marketplaces/ebay_provider.py) returns its legacy JSON body, returned
+    here untouched.
+
+    With `marketplaces` → fan out to each named provider independently: one
+    marketplace failing never blocks or rolls back the others, and the
+    response carries a per-marketplace result map.
+    """
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
-    provider = marketplaces.get("ebay")
-    ctx = PublishContext(
-        session_id=req.session_id, listing=req.listing, mode=req.mode,
-        base_url=_base_url(request), uid=_uid(request),
-        prev_record=db.get_listing(req.session_id) or {})
-    outcome = provider.publish(ctx, provider.creds_for(ctx.uid))
-    # The provider already persisted the record exactly as the old inline code
-    # did (including racing rules around the background EPS refresh) — no
-    # second upsert here.
-    return JSONResponse(outcome.raw)
+    uid = _uid(request)
+    prev_rec = db.get_listing(req.session_id) or {}
+
+    # The server owns per-marketplace state: whatever map the client sent is
+    # replaced with the stored record's before anything reads it, so a stale
+    # browser tab can never wipe another marketplace's listing id.
+    stored_states = ((prev_rec.get("listing") or {}).get("marketplaces") or {})
+    req.listing.marketplaces = {
+        k: MarketplaceState(**(v or {})) for k, v in stored_states.items()}
+
+    targets: list[str] = []
+    for key in req.marketplaces:
+        key = (key or "").strip().lower()
+        if key and key not in targets:
+            targets.append(key)
+
+    def _ctx() -> PublishContext:
+        return PublishContext(
+            session_id=req.session_id, listing=req.listing, mode=req.mode,
+            base_url=_base_url(request), uid=uid, prev_record=prev_rec)
+
+    if not targets or targets == ["ebay"]:
+        # Legacy path — byte-identical responses; the provider already
+        # persisted the record exactly as the old inline code did (including
+        # racing rules around the background EPS refresh), so no second
+        # upsert here.
+        provider = marketplaces.get("ebay")
+        outcome = provider.publish(_ctx(), provider.creds_for(uid))
+        return JSONResponse(outcome.raw)
+
+    outcomes: dict = {}
+    for key in targets:
+        provider = marketplaces.get(key)
+        if provider is None:
+            outcomes[key] = PublishOutcome(
+                ok=False, message=f"Unknown marketplace '{key}'.")
+            continue
+        try:
+            outcomes[key] = provider.publish(_ctx(), provider.creds_for(uid))
+        except HTTPException as exc:
+            outcomes[key] = PublishOutcome(ok=False, message=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 - isolate marketplace failures
+            log.warning("%s publish crashed: session=%s: %s",
+                        key, req.session_id, exc)
+            outcomes[key] = PublishOutcome(
+                ok=False, message=f"{provider.label} publish failed: {exc}")
+
+    # Fold every outcome into the record. Re-read first: providers (eBay
+    # especially) upsert internally, and their writes must not be lost.
+    fresh = db.get_listing(req.session_id) or {}
+    data = fresh.get("listing") or req.listing.model_dump()
+    for key, outcome in outcomes.items():
+        marketplace_state.merge_state(data, key, outcome)
+    top = marketplace_state.derive_top_status(
+        prev_rec.get("status") or "", outcomes, req.mode)
+    db.upsert_listing(req.session_id, data, status=top, user_id=uid)
+
+    live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
+    failed = [k for k, o in outcomes.items() if not o.ok]
+    dry = [k for k, o in outcomes.items() if o.dry_run]
+
+    def _label(key: str) -> str:
+        p = marketplaces.get(key)
+        return p.label if p else key
+
+    def _names(keys: list[str]) -> str:
+        labels = [_label(k) for k in keys]
+        return " and ".join(part for part in
+                            [", ".join(labels[:-1]), labels[-1]] if part)
+
+    if live:
+        message = f"Live on {_names(live)}."
+        if failed:
+            message += f" {_names(failed)} didn't make it — details below."
+    elif failed:
+        message = (f"{_names(failed)} rejected the listing — "
+                   "fix the issues below and try again.")
+    elif req.mode == "draft":
+        message = "Draft saved."
+    elif dry:
+        message = f"Dry run only — connect {_names(dry)} to post for real."
+    else:
+        message = "Nothing was published."
+
+    return JSONResponse({
+        "multi": True,
+        "mode": req.mode,
+        "published": bool(live),
+        "message": message,
+        "results": {
+            key: {
+                "ok": o.ok,
+                "published": o.ok and o.status == "published",
+                "dry_run": o.dry_run,
+                "listing_id": o.listing_id,
+                "url": o.url,
+                "message": o.message,
+                "issues": o.issues,
+                **({"promote_status": o.raw["promote_status"]}
+                   if o.raw.get("promote_status") else {}),
+            } for key, o in outcomes.items()
+        },
+    })
 
 
 @app.post("/api/ebay/end-listing")
@@ -2676,6 +2797,57 @@ def marketplace_disconnect(marketplace: str, request: Request) -> dict:
         raise HTTPException(401, "Log in first.")
     provider.disconnect(uid)
     return {"ok": True}
+
+
+@app.post("/api/{marketplace}/end-listing")
+def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
+                            request: Request) -> dict:
+    """End this session's live listing on ONE marketplace. eBay keeps its
+    original /api/ebay/end-listing route (registered earlier, so it wins);
+    this generic one serves every other provider. The record's top-level
+    status only becomes 'ended' when nothing is live anywhere anymore."""
+    provider = _marketplace_or_404(marketplace)
+    rec = db.get_listing(req.session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    uid = _uid(request)
+    creds = provider.creds_for(uid)
+    if not creds:
+        raise HTTPException(400, f"Connect {provider.label} first.")
+    data = rec.get("listing") or {}
+    ctx = PublishContext(
+        session_id=req.session_id,
+        listing=Listing(**{k: v for k, v in data.items()
+                           if k in Listing.model_fields}),
+        mode="live", base_url=_base_url(request), uid=uid, prev_record=rec)
+    try:
+        res = provider.end(ctx, creds)
+    except NotImplementedError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    states = data.setdefault("marketplaces", {})
+    entry = dict(states.get(marketplace) or {})
+    entry["status"] = "ended"
+    entry["error"] = ""
+    states[marketplace] = entry
+    still_live = any((v or {}).get("status") == "published"
+                     for v in states.values())
+    # A pre-multi eBay listing may be live without an entry in the map.
+    if (not still_live and data.get("ebay_listing_id")
+            and not states.get("ebay")
+            and rec.get("status") in ("published", "live")):
+        still_live = True
+    prev_status = rec.get("status") or ""
+    if prev_status in ("published", "live"):
+        new_status = prev_status if still_live else "ended"
+    else:
+        new_status = prev_status or "draft"
+    db.upsert_listing(req.session_id, data, status=new_status,
+                      user_id=uid or rec.get("user_id"))
+    return {"ok": True, **res}
 
 
 # Serve the frontend (index.html + assets) at the root.

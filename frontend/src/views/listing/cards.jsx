@@ -3,10 +3,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2, Ruler, Check,
+  Sparkles, Megaphone, Loader2, Ruler, Check, Store, ShoppingBag,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
-import { api } from "@/lib/api";
+import { api, postJson } from "@/lib/api";
+import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
@@ -964,6 +965,232 @@ export function PromoteCard({ w }) {
             )}
           </motion.div>
         )}
+      </div>
+    </WorkflowCard>
+  );
+}
+
+// --- marketplace-specific cards ---------------------------------------------
+// Rendered only while that marketplace is among the publish targets (the
+// chips in the publish bar), so eBay-only sellers never see them.
+
+const WHO_MADE_OPTIONS = [
+  ["i_did", "I made it"],
+  ["someone_else", "Someone else made it (vintage / resale)"],
+  ["collective", "A member of my shop made it"],
+];
+
+const WHEN_MADE_OPTIONS = [
+  ["made_to_order", "Made to order"],
+  ["2020_2026", "2020–2026"],
+  ["2010_2019", "2010–2019"],
+  ["2007_2009", "2007–2009"],
+  ["2000_2006", "2000–2006"],
+  ["1990s", "1990s"],
+  ["1980s", "1980s"],
+  ["1970s", "1970s"],
+  ["1960s", "1960s"],
+  ["1950s", "1950s"],
+  ["1940s", "1940s"],
+  ["1930s", "1930s"],
+  ["1920s", "1920s"],
+  ["1910s", "1910s"],
+  ["1900s", "1900s"],
+  ["1800s", "1800s"],
+  ["1700s", "1700s"],
+  ["before_1700", "Before 1700"],
+];
+
+// Etsy — the fields Etsy requires beyond the shared ones: its own category
+// (taxonomy), the handmade/vintage/supplies attribution, and an optional
+// shipping-profile override. Tags and materials are auto-derived from the
+// brand + item specifics at publish time; the inputs here override that.
+export function EtsyCard({ w }) {
+  const { toast } = useToast();
+  const show = (w.chipTargets || []).includes("etsy");
+  const [suggesting, setSuggesting] = useState(false);
+  const [catPath, setCatPath] = useState("");
+  const [options, setOptions] = useState(null); // shipping profiles for override
+
+  useEffect(() => {
+    if (!show || options) return;
+    api("/api/etsy/settings-options")
+      .then(setOptions)
+      .catch(() => setOptions({ shipping_profiles: [] }));
+  }, [show, options]);
+
+  if (!show) return null;
+  const e = w.form.etsy || {};
+  const setEtsy = (key, value) => w.set("etsy", { ...e, [key]: value });
+  const complete = !!(e.taxonomy_id && e.who_made && e.when_made);
+  const flagged = typeof w.fixTarget === "string" && w.fixTarget.startsWith("etsy_");
+
+  const suggest = async () => {
+    setSuggesting(true);
+    try {
+      const res = await postJson(`/api/etsy/suggest-taxonomy/${w.sessionId}`,
+        { listing: w.collect() });
+      if (res.taxonomy_id) {
+        setEtsy("taxonomy_id", res.taxonomy_id);
+        setCatPath(res.path || "");
+        toast(`Etsy category: ${res.path}`, { kind: "success" });
+      } else {
+        toast("Couldn't find a matching Etsy category — try refining the title.",
+          { kind: "warning" });
+      }
+    } catch (err) {
+      toast(`Suggestion failed: ${err.message}`, { kind: "error" });
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  return (
+    <WorkflowCard
+      id="etsy" icon={Store} title="Etsy"
+      hint="What Etsy needs beyond the shared fields — category, who/when made, shipping profile"
+      state={complete ? "complete" : "todo"} flagged={flagged}
+    >
+      <div className="flex flex-col gap-5">
+        <Field
+          label="Etsy category"
+          help={catPath
+            || (e.taxonomy_id ? `Set (taxonomy #${e.taxonomy_id})` : "Etsy has its own category tree — tap Suggest to pick one from your item details.")}
+        >
+          <div className="flex gap-2">
+            <Input
+              type="number" min="0" inputMode="numeric" className="max-w-44"
+              placeholder="taxonomy id"
+              value={e.taxonomy_id || ""}
+              needsFix={w.fixTarget === "etsy_taxonomy"}
+              onChange={(ev) => { setCatPath(""); setEtsy("taxonomy_id", parseInt(ev.target.value, 10) || 0); }}
+            />
+            <Button variant="secondary" onClick={suggest} loading={suggesting}>
+              <Sparkles aria-hidden /> Suggest
+            </Button>
+          </div>
+        </Field>
+
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field
+            label="Who made it?"
+            help="Etsy only allows handmade, vintage (20+ years), and craft supplies."
+          >
+            <Select
+              value={e.who_made || ""}
+              needsFix={w.fixTarget === "etsy_attribution"}
+              onChange={(ev) => setEtsy("who_made", ev.target.value)}
+            >
+              <option value="">— choose —</option>
+              {WHO_MADE_OPTIONS.map(([v, label]) => (
+                <option key={v} value={v}>{label}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="When was it made?">
+            <Select
+              value={e.when_made || ""}
+              needsFix={w.fixTarget === "etsy_attribution"}
+              onChange={(ev) => setEtsy("when_made", ev.target.value)}
+            >
+              <option value="">— choose —</option>
+              {WHEN_MADE_OPTIONS.map(([v, label]) => (
+                <option key={v} value={v}>{label}</option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+
+        <label className="flex items-center gap-2.5 text-sm text-ink cursor-pointer">
+          <input
+            type="checkbox"
+            checked={!!e.is_supply}
+            onChange={(ev) => setEtsy("is_supply", ev.target.checked)}
+            className="size-4 accent-blue"
+          />
+          This is a craft supply (not a finished item)
+        </label>
+
+        <Field
+          label="Shipping profile (this listing)"
+          help="Leave on the account default from Settings unless this item ships differently."
+        >
+          <Select
+            value={e.shipping_profile_id || ""}
+            needsFix={w.fixTarget === "etsy_shipping_profile"}
+            onChange={(ev) => setEtsy("shipping_profile_id", ev.target.value)}
+          >
+            <option value="">Account default</option>
+            {((options && options.shipping_profiles) || []).map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </Select>
+        </Field>
+
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field
+            label="Tags (optional)"
+            help="Comma-separated, up to 13. Left empty, we build them from your brand + item details."
+          >
+            <Input
+              value={(e.tags || []).join(", ")}
+              onChange={(ev) => setEtsy("tags",
+                ev.target.value.split(",").map((t) => t.trim()).filter(Boolean))}
+            />
+          </Field>
+          <Field
+            label="Materials (optional)"
+            help='Comma-separated. Left empty, we use any "Material" item specifics.'
+          >
+            <Input
+              value={(e.materials || []).join(", ")}
+              onChange={(ev) => setEtsy("materials",
+                ev.target.value.split(",").map((t) => t.trim()).filter(Boolean))}
+            />
+          </Field>
+        </div>
+      </div>
+    </WorkflowCard>
+  );
+}
+
+// Depop — minimal extras: size and category. Everything else maps from the
+// shared fields (title truncated to Depop's limit, condition translated,
+// first four photos).
+export function DepopCard({ w }) {
+  const show = (w.chipTargets || []).includes("depop");
+  if (!show) return null;
+  const d = w.form.depop || {};
+  const setDepop = (key, value) => w.set("depop", { ...d, [key]: value });
+  const flagged = typeof w.fixTarget === "string" && w.fixTarget.startsWith("depop_");
+
+  return (
+    <WorkflowCard
+      id="depop" icon={ShoppingBag} title="Depop"
+      hint="Depop extras — size and category; title, price, condition and the first 4 photos map automatically"
+      state="todo" flagged={flagged}
+    >
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Field
+          label="Size"
+          help='Leave empty to use the "Size" item specific when there is one.'
+        >
+          <Input
+            value={d.size || ""}
+            placeholder="e.g. M, W 32, US 9"
+            onChange={(ev) => setDepop("size", ev.target.value)}
+          />
+        </Field>
+        <Field
+          label="Depop category"
+          help="Optional — Depop can infer it; set one to be exact."
+        >
+          <Input
+            value={d.category || ""}
+            needsFix={w.fixTarget === "depop_category"}
+            onChange={(ev) => setDepop("category", ev.target.value)}
+          />
+        </Field>
       </div>
     </WorkflowCard>
   );

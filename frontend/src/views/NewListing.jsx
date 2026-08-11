@@ -18,7 +18,7 @@ import { ImageEditor } from "./listing/ImageEditor";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
-  ShippingCard, DescriptionCard, PromoteCard,
+  ShippingCard, DescriptionCard, PromoteCard, EtsyCard, DepopCard,
 } from "./listing/cards";
 
 const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.04 } } };
@@ -56,8 +56,17 @@ function RefineBar({ w }) {
 // publish so the user isn't left staring at the listing they just posted;
 // offers the next queued draft to keep the assembly line moving.
 function PublishedScreen({ w }) {
-  const { listingsState, openListing, startNew, setView, skippedDraftIds } = useApp();
+  const {
+    listingsState, openListing, startNew, setView, skippedDraftIds, marketplaces,
+  } = useApp();
   const r = w.publishResult;
+  const labelFor = (key) =>
+    (marketplaces.find((m) => m.key === key) || {}).label || key;
+  // Multi-marketplace publishes: where it went live, with one link each.
+  const liveResults = r?.multi
+    ? Object.entries(r.results || {}).filter(([, res]) => res.published)
+    : [];
+  const liveLabels = liveResults.map(([key]) => labelFor(key)).join(" and ");
   // Drafts set aside with Skip (on the draft's own card) never come back as
   // "next" — not even after publishing more drafts.
   const draftsLeft = (listingsState.items || [])
@@ -78,12 +87,26 @@ function PublishedScreen({ w }) {
           <BrandMark className="size-16 rounded-[20px]" />
         </span>
         <p className="inline-flex items-center gap-2 text-success font-bold text-sm">
-          <CheckCircle2 size={17} aria-hidden /> Live on eBay
+          <CheckCircle2 size={17} aria-hidden />{" "}
+          {r?.multi ? `Live on ${liveLabels || "your marketplaces"}` : "Live on eBay"}
         </p>
         <h1 className="text-2xl font-bold tracking-tight text-ink">
           {r?.revised ? "Listing updated! ✅" : "Listing published! 🎉"}
         </h1>
-        {(r?.listing_id || w.ebayListingId) && (
+        {r?.multi ? (
+          <span className="flex flex-wrap justify-center gap-x-4 gap-y-1">
+            {liveResults.filter(([, res]) => res.url).map(([key, res]) => (
+              <a
+                key={key}
+                href={res.url}
+                target="_blank" rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-sm font-semibold text-blue hover:underline"
+              >
+                View on {labelFor(key)} <ExternalLink size={14} aria-hidden />
+              </a>
+            ))}
+          </span>
+        ) : (r?.listing_id || w.ebayListingId) && (
           <a
             href={`https://www.ebay.com/itm/${r?.listing_id || w.ebayListingId}`}
             target="_blank" rel="noopener noreferrer"
@@ -92,16 +115,30 @@ function PublishedScreen({ w }) {
             View it on eBay <ExternalLink size={14} aria-hidden />
           </a>
         )}
-
-        {r?.promote_status && (
-          <p className={`text-[13px] max-w-sm ${r.promote_status.promoted ? "text-success font-semibold" : "text-ink-secondary"}`}>
-            {r.promote_status.promoted
-              ? `📣 ${r.promote_status.message}`
-              : r.promote_status.needs_reconnect
-                ? "Reconnect eBay in Settings to grant ad permissions, then republish to start the promotion."
-                : r.promote_status.message}
+        {r?.multi && Object.entries(r.results || {}).some(([, res]) => !res.ok) && (
+          <p className="text-[13px] text-warning font-semibold max-w-sm">
+            {Object.entries(r.results)
+              .filter(([, res]) => !res.ok)
+              .map(([key]) => labelFor(key)).join(" and ")}{" "}
+            didn't make it — open the listing to see what to fix.
           </p>
         )}
+
+        {(() => {
+          // Promoted Listings status: top-level on single-eBay publishes,
+          // under the eBay result on multi-marketplace ones.
+          const promote = r?.multi
+            ? r.results?.ebay?.promote_status : r?.promote_status;
+          return promote && (
+            <p className={`text-[13px] max-w-sm ${promote.promoted ? "text-success font-semibold" : "text-ink-secondary"}`}>
+              {promote.promoted
+                ? `📣 ${promote.message}`
+                : promote.needs_reconnect
+                  ? "Reconnect eBay in Settings to grant ad permissions, then republish to start the promotion."
+                  : promote.message}
+            </p>
+          );
+        })()}
 
         {next && (
           <p className="text-[13px] text-ink-secondary -mb-1">
@@ -332,6 +369,10 @@ function Workflow() {
         <TitleCard w={w} />
         <PricingCard w={w} />
         <CategoryCard w={w} />
+        {/* Marketplace extras — each renders only while its marketplace is
+            among the publish targets picked in the publish bar. */}
+        <EtsyCard w={w} />
+        <DepopCard w={w} />
         <MoreDetails w={w}>
           <SpecificsCard w={w} />
           <DescriptionCard w={w} />

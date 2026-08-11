@@ -146,6 +146,11 @@ class PublishRequest(BaseModel):
     session_id: str
     listing: Listing
     mode: str = "draft"  # "draft" or "live"
+    # Which marketplaces to publish to. Empty (every pre-multi client) means
+    # the legacy behavior: eBay only, byte-identical response shape. With
+    # entries, the response is the {multi: true, results: {...}} shape and
+    # each marketplace succeeds or fails independently.
+    marketplaces: list[str] = Field(default_factory=list)
 
 
 class SessionOnlyRequest(BaseModel):
