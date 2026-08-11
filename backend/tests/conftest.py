@@ -9,12 +9,21 @@ process-wide client/latch state.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# Point DATA_DIR somewhere disposable BEFORE backend.config is first imported:
+# importing it creates the data tree and persists a generated SECRET_KEY, and
+# without this a bare `pytest` litters the repo (and CI's checkout) with a
+# data/ directory and a warning on every run.
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="thryft-tests-"))
+os.environ.setdefault("SECRET_KEY", "test-secret")
 
 from backend import config, objstore  # noqa: E402
 

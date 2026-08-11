@@ -18,9 +18,10 @@ jobs:
         with:
           python-version: '3.11'
       # Just what the unit tests import — deliberately not the heavy image
-      # stack (rembg/onnxruntime), which these tests never touch.
+      # stack (rembg/onnxruntime/Pillow), which these tests never touch.
+      # fastapi is here because backend/auth.py imports it for Request/Response.
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi
       - name: Ruff
         run: ruff check backend
       - name: Tests
