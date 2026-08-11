@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, db, ebay_auth, marketplaces, objstore, storage
+from . import auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore, storage
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces.base import PublishContext
@@ -34,6 +34,7 @@ from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
 from .services import (claude_ai, ebay, ebay_trading, image_import, images,
                        listing_sync, metrics, orient, preflight, pricing,
                        promotions, recommender, taxonomy)
+from .services import etsy as etsy_service
 from .services.background import run_in_background
 
 app = FastAPI(title="eBay Listing Generator")
@@ -2540,6 +2541,61 @@ def marketplace_roster(request: Request) -> dict:
             "supports": p.supports(),
         })
     return {"marketplaces": out}
+
+
+# Etsy-specific: the Settings pickers for the shop's shipping profiles and
+# return policies (Etsy's analog of /api/ebay/policies), and the AI category
+# suggestion. Literal paths, so they must sit above the {marketplace} routes.
+@app.get("/api/etsy/settings-options")
+def etsy_settings_options(request: Request) -> dict:
+    provider = marketplaces.get("etsy")
+    creds = provider.creds_for(_uid(request))
+    if not creds:
+        raise HTTPException(400, "Connect Etsy first.")
+    try:
+        profiles = etsy_auth.list_shipping_profiles(
+            creds["access_token"], creds["shop_id"])
+        policies = etsy_auth.list_return_policies(
+            creds["access_token"], creds["shop_id"])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Etsy couldn't list your shop's options: {exc}") from exc
+    settings = creds.get("settings") or {}
+    return {
+        "shipping_profiles": profiles,
+        "return_policies": policies,
+        "selected": {
+            "shipping_profile_id": str(settings.get("shipping_profile_id") or ""),
+            "return_policy_id": str(settings.get("return_policy_id") or ""),
+        },
+    }
+
+
+@app.post("/api/etsy/settings-options")
+def save_etsy_settings_options(request: Request, payload: dict) -> dict:
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    fields = {k: str(payload.get(k) or "")
+              for k in ("shipping_profile_id", "return_policy_id")
+              if k in payload}
+    if not fields:
+        raise HTTPException(400, "No settings provided.")
+    db.save_marketplace_account(uid, "etsy", settings=fields)
+    return {"ok": True, "selected": fields}
+
+
+@app.post("/api/etsy/suggest-taxonomy/{session_id}")
+def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> dict:
+    """Best Etsy category for this listing: cheap keyword shortlist over the
+    cached seller taxonomy, then one small Claude pick."""
+    if not config.etsy_oauth_ready():
+        raise HTTPException(400, "Etsy isn't configured on the server.")
+    _assert_session_owner(session_id, request)
+    listing = Listing(**(payload.get("listing") or {}))
+    try:
+        return etsy_service.suggest_taxonomy(listing)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Etsy category suggestion failed: {exc}") from exc
 
 
 def _flow_cookie(marketplace: str) -> str:

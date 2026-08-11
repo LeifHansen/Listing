@@ -400,8 +400,8 @@ _MARKETPLACE_FIELDS = ("refresh_token", "external_username", "external_id",
 
 def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
     """Create/update a user's connection to one marketplace. Never raises.
-    `settings` replaces the stored JSON wholesale when provided — callers
-    read-modify-write for partial updates."""
+    `settings` keys MERGE into the stored JSON (a reconnect refreshing the
+    shop id must not wipe the user's saved shipping/return defaults)."""
     try:
         eng = _get_engine()
         if eng is None:
@@ -413,7 +413,10 @@ def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
                 s.add(acct)
             for key in _MARKETPLACE_FIELDS:
                 if key in fields and fields[key] is not None:
-                    setattr(acct, key, fields[key])
+                    if key == "settings":
+                        acct.settings = {**(acct.settings or {}), **fields[key]}
+                    else:
+                        setattr(acct, key, fields[key])
             acct.updated_at = _now()
             s.commit()
     except Exception as exc:  # noqa: BLE001

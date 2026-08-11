@@ -36,6 +36,7 @@ def _ensure_loaded() -> None:
     # Each provider module self-registers at import. eBay first: it's the
     # flagship and the default target for legacy single-marketplace publishes.
     from . import ebay_provider  # noqa: F401
+    from . import etsy_provider  # noqa: F401
 
 
 def get(key: str) -> Optional[MarketplaceProvider]:
