@@ -86,11 +86,19 @@ _rembg_session = None
 
 # Harden the soft matte into a near-binary mask so the background is fully
 # gone, not faintly visible. Alpha below _ALPHA_LOW is forced to background,
-# above _ALPHA_HIGH to solid subject; the thin band between keeps a 1-2px
-# anti-aliased edge. A soft matte (mid-alpha everywhere) is what leaves a
-# "ghost" of the old background compositing through as gray fuzz.
-_ALPHA_LOW = 90
-_ALPHA_HIGH = 170
+# above _ALPHA_HIGH to solid subject; the band between ramps up so edges stay
+# anti-aliased. A soft matte (mid-alpha everywhere) is what leaves a "ghost"
+# of the old background compositing through as gray fuzz.
+#
+# These are a sensitivity dial, and the old 90/170 was deaf in one ear: any
+# pixel the model was less than ~35% sure about was erased outright, and even
+# 50%-sure pixels came out mostly transparent — which is how fine fabric,
+# glossy highlights, and low-contrast parts of the ITEM kept vanishing along
+# with the background. 60/160 still zeroes the faint background ghost (that
+# lives well below 60) but keeps uncertain subject pixels visible. Tunable
+# via REMBG_ALPHA_LOW / REMBG_ALPHA_HIGH without a deploy.
+_ALPHA_LOW = int(os.getenv("REMBG_ALPHA_LOW", "60") or "60")
+_ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "160") or "160")
 # If the cutout keeps less than this fraction of the frame as opaque subject,
 # the model ate the item (dark denim, close-up textures, low contrast) — keep
 # the original photo rather than saving a destroyed one.
@@ -168,7 +176,11 @@ def _refine_alpha(alpha: Image.Image) -> Image.Image:
     # Erode 1px to cut the residual background fringe, then a sub-pixel feather
     # so the composited edge is smooth rather than jagged.
     refined = hardened.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.6))
-    band = 3
+    # The matte was inferred at ~640px and upscaled, so the model's soft fade
+    # where a subject runs off the frame spans several FULL-RES pixels — a
+    # fixed 3px band left the rest to be eroded, notching a white gutter into
+    # frame-filling items. Scale the restored band with resolution instead.
+    band = max(3, round(min(w, h) * 0.004))
     if w > 2 * band and h > 2 * band:
         refined.paste(hardened.crop((0, 0, w, band)), (0, 0))               # top
         refined.paste(hardened.crop((0, h - band, w, h)), (0, h - band))    # bottom
@@ -177,12 +189,92 @@ def _refine_alpha(alpha: Image.Image) -> Image.Image:
     return refined
 
 
-def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
-                      shadow: bool = True) -> Image.Image:
+# How different (0-255, luminance-weighted) a hole's pixel must be from the
+# photo's backdrop color before we call it part of the item. Below this the
+# pixel matches the backdrop — a genuine see-through gap (mug handle, bag
+# strap loop) where the background shows and SHOULD stay removed.
+_HOLE_BACKDROP_DIST = 26
+# Cap for the working copy hole-filling runs on: connectivity is geometry, it
+# doesn't need full resolution, and the flood loop below is O(perimeter) in
+# passes.
+_HOLE_WORK_SIDE = 512
+
+
+def _fill_enclosed_holes(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
+    """Restore regions the model wrongly punched out of the middle of the item.
+
+    Segmentation models learn "white = backdrop", so a white or bright region
+    INSIDE the subject — a printed graphic, a care label, a glossy highlight —
+    often comes back as background and the cutout puts a hole straight through
+    the product ("it removes all white, even on the item"). But real background
+    is connected to the frame border; a background region that isn't reachable
+    from the border is enclosed by subject. Those pixels are kept — unless they
+    actually look like the backdrop (sampled from what the model DID remove),
+    which means a genuine see-through gap where the background peeks through
+    (mug handles, strap loops) and removing it was correct.
+
+    White-on-white stays removed by design: a white patch on a white backdrop
+    composites to white either way, so guessing wrong there is invisible.
+    """
+    from PIL import ImageChops
+
+    w, h = alpha.size
+    scale = min(1.0, _HOLE_WORK_SIDE / max(w, h))
+    size = (max(3, round(w * scale)), max(3, round(h * scale)))
+    small_a = alpha.resize(size, Image.BILINEAR) if size != (w, h) else alpha
+    small_rgb = rgb.resize(size, Image.BILINEAR) if size != (w, h) else rgb
+    bg = small_a.point(lambda a: 255 if a < 128 else 0)
+
+    # Flood the background inward from the frame border (1px dilation per pass,
+    # so it can't leap across thin subject lines); whatever it never reaches is
+    # enclosed by the subject.
+    ring = Image.new("L", size, 255)
+    ring.paste(0, (1, 1, size[0] - 1, size[1] - 1))
+    reach = ImageChops.multiply(ring, bg)
+    prev = None
+    for _ in range(size[0] + size[1]):
+        reach = ImageChops.multiply(reach.filter(ImageFilter.MaxFilter(3)), bg)
+        data = reach.tobytes()
+        if data == prev:
+            break
+        prev = data
+    holes = ImageChops.subtract(bg, reach)
+    if holes.getbbox() is None:
+        return alpha
+
+    # The backdrop reference is the mean of what the model actually removed —
+    # far steadier than a corner pixel.
+    stat = ImageStat.Stat(small_rgb, mask=reach)
+    if not stat.count[0]:
+        return alpha  # nothing border-connected was removed; no reference
+    backdrop = tuple(round(m) for m in stat.mean)
+    dist = ImageChops.difference(
+        small_rgb, Image.new("RGB", size, backdrop)).convert("L")
+    keep = ImageChops.multiply(
+        holes, dist.point(lambda d: 255 if d > _HOLE_BACKDROP_DIST else 0))
+    # Open (erode+dilate) to drop speckle: backdrop texture inside a genuine
+    # gap — wood grain through a mug handle — shouldn't survive as crumbs.
+    keep = keep.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+    if keep.getbbox() is None:
+        return alpha
+    if keep.size != (w, h):
+        keep = keep.resize((w, h), Image.BILINEAR)
+    return ImageChops.lighter(alpha, keep.filter(ImageFilter.GaussianBlur(1.0)))
+
+
+def _compose_on_white(
+        rgb: Image.Image, alpha: Image.Image, shadow: bool = True,
+) -> tuple[Image.Image, Optional[tuple[int, int, int, int]]]:
     """Composite the subject (given by `alpha`) onto pure white, optionally
-    with a soft drop shadow drawn from the subject silhouette."""
+    with a soft drop shadow drawn from the subject silhouette.
+
+    Returns (canvas, frame_box): frame_box bounds the subject plus its shadow
+    — what the square framing downstream must keep. It comes from the ALPHA,
+    not from re-detecting color against white later, because a white part of
+    the item is invisible to a color diff and used to get cropped away."""
     w, h = rgb.size
     canvas = Image.new("RGB", (w, h), WHITE)
+    box = alpha.getbbox()
     if shadow:
         # Shadow = the silhouette, blurred, nudged down/right, at low opacity —
         # a subtle contact shadow that grounds the item on the white backdrop.
@@ -193,16 +285,27 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
         shifted = Image.new("L", (w, h), 0)
         shifted.paste(shadow_a, (off, off))
         canvas.paste(Image.new("RGB", (w, h), (55, 55, 55)), (0, 0), shifted)
+        if box:
+            # Grow the box so the shadow's blurred tail isn't cropped off.
+            pad = 2 * blur
+            box = (max(0, box[0] - pad), max(0, box[1] - pad),
+                   min(w, box[2] + pad + off), min(h, box[3] + pad + off))
     canvas.paste(rgb, (0, 0), alpha)
-    return canvas
+    return canvas, box
+
+
+# What every engine's cutout function yields: the white-composited image and
+# the frame box (subject + shadow) the square crop must keep intact.
+_Cutout = tuple[Image.Image, Optional[tuple[int, int, int, int]]]
 
 
 def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
-                     dark_guard: bool = True) -> Optional[Image.Image]:
+                     dark_guard: bool = True) -> Optional[_Cutout]:
     """In-house rembg cutout composited on pure white (with a soft drop shadow
-    unless BG_SHADOW=off) — or None when the result is clearly a failure
-    (subject erased), so callers keep the original photo instead of saving a
-    destroyed one. `max_side` caps the matte resolution (higher = crisper).
+    unless BG_SHADOW=off), as (image, frame_box) — or None when the result is
+    clearly a failure (subject erased), so callers keep the original photo
+    instead of saving a destroyed one. `max_side` caps the matte resolution
+    (higher = crisper).
 
     `dark_guard` catches the classic 'item bleeds off frame' failure (see below)
     by bailing to None — right for the automatic path, which would otherwise
@@ -213,6 +316,7 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
 
     rgb = img.convert("RGB")
     alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side))
+    alpha = _fill_enclosed_holes(rgb, alpha)
     total = max(1, alpha.width * alpha.height)
     opaque = sum(alpha.histogram()[128:])
     if opaque / total < _MIN_FG_COVERAGE:
@@ -235,6 +339,15 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW)
 
 
+def _remote_compose(cut: Image.Image, err_cls: type, engine: str) -> _Cutout:
+    """Composite a remote engine's RGBA cutout on white; raises the engine's
+    error when it kept nothing (no subject found)."""
+    alpha = cut.split()[3]
+    if alpha.getbbox() is None:
+        raise err_cls(f"{engine} couldn't find a subject in this photo.")
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+
+
 def _apply_studio(img: Image.Image) -> tuple[Image.Image, bool, Optional[str]]:
     """Lightroom "studio" develop preset via the Adobe API.
 
@@ -254,7 +367,7 @@ def _apply_studio(img: Image.Image) -> tuple[Image.Image, bool, Optional[str]]:
         return img, False, f"Studio preset failed: {exc}"
 
 
-def _adobe_cutout(img: Image.Image) -> Optional[Image.Image]:
+def _adobe_cutout(img: Image.Image) -> Optional[_Cutout]:
     """Photoshop Remove Background cutout composited on white (with our soft
     shadow). Returns None only when Adobe isn't ready; when it is, a failure
     raises AdobeError with the actual reason — same loud-failure contract as
@@ -263,10 +376,7 @@ def _adobe_cutout(img: Image.Image) -> Optional[Image.Image]:
         return None
     from . import adobe
     cut = adobe.remove_background(img)
-    alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — no subject found
-        raise adobe.AdobeError("Adobe couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+    return _remote_compose(cut, adobe.AdobeError, "Adobe")
 
 
 class PhotoroomError(ValueError):
@@ -343,7 +453,7 @@ def _jpeg_payload(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def _pixian_cutout(img: Image.Image) -> Optional[Image.Image]:
+def _pixian_cutout(img: Image.Image) -> Optional[_Cutout]:
     """Cut out the subject via Pixian.ai — the budget engine, around a tenth
     of Photoroom's per-image price — and composite it on white with our soft
     shadow. Returns None only when no credentials are configured; a real
@@ -377,13 +487,10 @@ def _pixian_cutout(img: Image.Image) -> Optional[Image.Image]:
         cut = Image.open(BytesIO(resp.content)).convert("RGBA")
     except Exception as exc:  # noqa: BLE001
         raise PixianError("Pixian returned an unreadable image.") from exc
-    alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — no subject found
-        raise PixianError("Pixian couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+    return _remote_compose(cut, PixianError, "Pixian")
 
 
-def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
+def _photoroom_cutout(img: Image.Image) -> Optional[_Cutout]:
     """Cut out the subject via Photoroom's API and composite it on white (with
     our soft shadow). Returns None only when no key is configured; when a key
     IS set, a failure raises PhotoroomError with the actual reason — silent
@@ -419,10 +526,7 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         cut = Image.open(BytesIO(resp.content)).convert("RGBA")
     except Exception as exc:  # noqa: BLE001
         raise PhotoroomError("Photoroom returned an unreadable image.") from exc
-    alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — no subject found
-        raise PhotoroomError("Photoroom couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+    return _remote_compose(cut, PhotoroomError, "Photoroom")
 
 
 # The remote engines a chain entry can name (adobe and local are special-cased
@@ -432,11 +536,14 @@ _REMOTE_CUTOUTS = {"pixian": _pixian_cutout, "photoroom": _photoroom_cutout}
 
 
 def _studio_and_cutout(
-        img: Image.Image) -> tuple[Image.Image, str, Optional[str], bool, Optional[str]]:
+        img: Image.Image,
+) -> tuple[Image.Image, str, Optional[str], bool, Optional[str],
+           Optional[tuple[int, int, int, int]]]:
     """Background removal + studio treatment for the automatic upload path.
-    Returns (image, engine, error, studio_applied, studio_error) where engine
-    is the chain member that produced the cutout ('pixian', 'photoroom',
-    'adobe', 'local') or 'none' (kept the original).
+    Returns (image, engine, error, studio_applied, studio_error, frame_box)
+    where engine is the chain member that produced the cutout ('pixian',
+    'photoroom', 'adobe', 'local') or 'none' (kept the original), and
+    frame_box bounds the subject + shadow for the square crop.
 
     The engines and their order come from config.bg_engine_chain() (BG_ENGINE):
     by default the budget Pixian API when configured (with the local model
@@ -457,7 +564,7 @@ def _studio_and_cutout(
                 log.warning("bg-removal: local cutout failed (%s)", exc)
                 out = None
             if out is not None:
-                return out, "local", None, studio_applied, studio_error
+                return out[0], "local", None, studio_applied, studio_error, out[1]
             last_err = last_err or "cutout failed"
         elif engine == "adobe":
             if not config.adobe_ready():
@@ -468,7 +575,8 @@ def _studio_and_cutout(
             try:
                 out = _adobe_cutout(img)
                 if out is not None:
-                    return out, "adobe", None, studio_applied, studio_error
+                    return (out[0], "adobe", None, studio_applied, studio_error,
+                            out[1])
             except ValueError as exc:  # AdobeError
                 log.warning("adobe bg-removal: %s", exc)
                 last_err = str(exc)
@@ -479,7 +587,7 @@ def _studio_and_cutout(
             try:
                 out = _REMOTE_CUTOUTS[engine](img)
                 if out is not None:
-                    return out, engine, None, False, None
+                    return out[0], engine, None, False, None, out[1]
             except ValueError as exc:  # PixianError/PhotoroomError — mapped reason
                 log.warning("%s: %s", engine, exc)
                 last_err = str(exc)
@@ -491,7 +599,7 @@ def _studio_and_cutout(
     log.warning("bg-removal: keeping the original photo (%s)",
                 last_err or "no engine produced a cutout")
     return (_flatten(img), "none", last_err or "background removal failed",
-            studio_applied, studio_error)
+            studio_applied, studio_error, None)
 
 
 def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
@@ -521,14 +629,14 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
                                 side, exc)
                     continue
                 if out is not None:
-                    return out, "local"
+                    return out[0], "local"
                 break  # a clean run that erased the subject won't improve when smaller
             break  # nothing worked — fall through to the raise below
         try:
             out = (_adobe_cutout(img) if engine == "adobe"
                    else _REMOTE_CUTOUTS[engine](img))
             if out is not None:
-                return out, engine
+                return out[0], engine
         except ValueError as exc:  # engine's own user-facing reason
             if final:
                 raise
@@ -630,22 +738,30 @@ def _pad_square(crop: Image.Image, pad_color: tuple) -> Image.Image:
 _ELONGATED = 1.35
 
 
-def _fill_square(img: Image.Image) -> Image.Image:
+def _fill_square(img: Image.Image,
+                 box: Optional[tuple[int, int, int, int]] = None) -> Image.Image:
     """Square-frame the photo around its subject (eBay's recommended shape).
 
+    `box` is the subject's true bounds when the caller knows them (the cutout
+    alpha from background removal — exact even for white-on-white items);
+    otherwise a cheap color-diff guess is used.
+
     Normal subjects get a square crop that tightly frames them (plus margin)
-    so the item fills the photo — no letterbox bars. ELONGATED subjects are
-    the exception: a square window can't contain a long flat box without
-    cutting it off (the 'cropping way too much' bug), so those are cropped as
-    a rectangle around the whole subject and padded to square with the
-    photo's own backdrop color. Whole item beats full frame."""
+    so the item fills the photo — no letterbox bars. The exception is a
+    subject a square window CANNOT contain without cutting it off: elongated
+    items (long flat boxes, skis, bats) and items that fill the frame of a
+    non-square photo (the 'subject gets cut off' bug — the old center square
+    crop chopped whatever stuck out). Those are cropped as a rectangle around
+    the whole subject and padded to square with the photo's own backdrop
+    color. Whole item beats full frame."""
     rgb = _flatten(img)
     w, h = rgb.size
-    box = _subject_box(rgb)
+    box = box or _subject_box(rgb)
     if box:
         left, top, right, bottom = box
         bw, bh = right - left, bottom - top
-        if max(bw, bh) / max(1, min(bw, bh)) > _ELONGATED:
+        if (max(bw, bh) / max(1, min(bw, bh)) > _ELONGATED
+                or max(bw, bh) > min(w, h)):
             mx, my = max(6, int(bw * 0.05)), max(6, int(bh * 0.05))
             crop = rgb.crop((max(0, left - mx), max(0, top - my),
                              min(w, right + mx), min(h, bottom + my)))
@@ -810,16 +926,19 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         studio_applied, studio_error = False, None
         bg_removed = False
         bg_engine, bg_error = None, None
+        subject_box = None
         if remove_bg:
             # Engine order comes from BG_ENGINE — see _studio_and_cutout.
-            img, bg_engine, bg_error, studio_applied, studio_error = \
+            img, bg_engine, bg_error, studio_applied, studio_error, subject_box = \
                 _studio_and_cutout(img)
             bg_removed = bg_engine not in (None, "none")
         else:
             img = _autocrop_borders(img)
         # Fill the square frame by cropping to the subject instead of padding
-        # with white bars (which looked terrible on portrait photos).
-        img = _fill_square(img)
+        # with white bars (which looked terrible on portrait photos). After a
+        # cutout, frame around the KNOWN subject bounds — re-guessing them by
+        # color is blind to white parts of the item.
+        img = _fill_square(img, box=subject_box)
 
         if img.size[0] != TARGET_SIZE:
             img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
@@ -967,6 +1086,9 @@ def analyze_cleanup(img: Image.Image) -> dict:
     rgb = _flatten(img)
     mask = _subject_mask(rgb)
     subject = mask.point(lambda a: 255 if a >= 96 else 0)
+    # Regions enclosed by the item (a bright label, a printed graphic) belong
+    # to the item — without this they'd be flagged as residue to paint away.
+    subject = _fill_enclosed_holes(rgb, subject)
     bbox = subject.getbbox()
 
     # Grow the subject so its soft edge isn't counted as residue.
@@ -997,6 +1119,9 @@ def auto_clean(img: Image.Image) -> Image.Image:
     rgb = _flatten(img)
     mask = _subject_mask(rgb)
     mask = mask.point(lambda a: 255 if a >= 96 else 0)
+    # Never whiten enclosed parts of the item itself (labels, prints,
+    # highlights the model mistook for background).
+    mask = _fill_enclosed_holes(rgb, mask)
     mask = mask.filter(ImageFilter.MaxFilter(7))
     mask = mask.filter(ImageFilter.GaussianBlur(2))
     white = Image.new("RGB", rgb.size, WHITE)
