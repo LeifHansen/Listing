@@ -6,6 +6,7 @@ import { ToastProvider } from "@/components/ui/Toaster";
 import { Sidebar, BottomNav } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { AuthDialog } from "@/components/AuthDialog";
+import { TokensDialog } from "@/components/TokensDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
@@ -74,6 +75,7 @@ function Main() {
       </div>
       <BottomNav />
       <AuthDialog />
+      <TokensDialog />
     </div>
   );
 }
