@@ -2127,9 +2127,11 @@ def insights(request: Request) -> dict:
         metrics_by_id = _metrics_by_record_id(creds, items)
         rates_by_id = _rates_by_record_id(creds, items)
         promoted_ids = _promoted_record_ids(creds, items)
+        # limit=50: the dashboard groups these by category now, so each group
+        # should show its full membership — the old flat list capped at 8.
         return {"recommendations": recommender.recommendations(
             items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
-            promoted_ids=promoted_ids)}
+            promoted_ids=promoted_ids, limit=50)}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": []}
