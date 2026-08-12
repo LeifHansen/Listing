@@ -97,7 +97,7 @@ _INACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_INACTIVE_LIMIT", "100") or "100")
 # any store bigger than that — a 616-listing account simply never saw half its
 # inventory, and it read as "the sync is missing auctions". The ceiling that
 # matters is eBay's own paging (_MAX_PAGES * _PAGE_SIZE).
-_ACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_ACTIVE_LIMIT", "2500") or "2500")
+ACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_ACTIVE_LIMIT", "2500") or "2500")
 
 
 def _started_at(data: dict) -> Optional[datetime]:
@@ -114,7 +114,7 @@ def _started_at(data: dict) -> Optional[datetime]:
         return None
 
 
-def import_active(token: str, user_id: str, limit: int = _ACTIVE_LIMIT) -> dict:
+def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently ENDED (unsold → status 'ended', the Inactive
     tab) and SOLD listings (status 'sold'), each capped at

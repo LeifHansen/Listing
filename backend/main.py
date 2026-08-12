@@ -258,6 +258,22 @@ def _category_query(listing) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _resolve_category(listing: Listing) -> None:
+    """Auto-resolve a numeric eBay category id for a fresh AI draft (single,
+    async, and bulk identify all need this). Best-effort — identify must never
+    fail on a taxonomy problem."""
+    if not config.taxonomy_ready() or listing.category_id:
+        return
+    try:
+        best = taxonomy.best_category_id(_category_query(listing))
+        if best.get("category_id"):
+            listing.category_id = best["category_id"]
+            if best.get("path"):
+                listing.category_suggestion = best["path"]
+    except Exception:  # noqa: BLE001 - never block identify on taxonomy
+        pass
+
+
 def _tag_text_for(paths: list, aspects: list[dict]) -> str:
     """Zoom-and-transcribe the item's tags when the category is one where the
     facts live ON a tag (any Size-style aspect = clothing/shoes). Sizes are
@@ -460,22 +476,10 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
         return True
     if not objstore.enabled():
         return False
-    try:
-        data = objstore.get_bytes(objstore.key_for(session_id, name))
-    except Exception as exc:  # noqa: BLE001 - genuinely gone, or R2 is down
-        log.warning("rehydrate: %s/%s not available from R2: %s",
-                    session_id, name, exc)
-        return False
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".r2tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)  # atomic: never leave a half-written photo in place
-    except OSError as exc:
-        log.warning("rehydrate: couldn't write %s: %s", path, exc)
-        return False
-    log.info("rehydrate: pulled %s/%s back from R2", session_id, name)
-    return True
+    if objstore.restore(objstore.key_for(session_id, name), path):
+        log.info("rehydrate: pulled %s/%s back from R2", session_id, name)
+        return True
+    return False
 
 
 def _purge_session_images(session_id: str) -> None:
@@ -1276,14 +1280,24 @@ async def upload(
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
-    for i, f in enumerate(files):
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            tokens.refund(spent)
-            raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
-        suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-        (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+    try:
+        for i, f in enumerate(files):
+            data = await f.read()
+            if len(data) > MAX_UPLOAD_BYTES:
+                tokens.refund(spent)
+                raise HTTPException(
+                    400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+            suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
+            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+    except OSError as exc:
+        # Disk full / write failure — same friendly answer as the bulk path,
+        # not a raw 500; drop the partial session rather than leaving an orphan.
+        # No cutout ever ran, so the background-removal charge goes back too.
+        tokens.refund(spent)
+        storage.purge_session(session_id)
+        log.error("upload: disk write failed (%s)", exc)
+        raise HTTPException(
+            507, "The server is out of storage space — try again shortly.") from exc
 
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
@@ -1414,7 +1428,6 @@ async def edit_image(
 
     def _save() -> None:
         from io import BytesIO
-        import os
         from PIL import Image
         img = Image.open(BytesIO(data)).convert("RGB")
         # Every edit is a new version — the outgoing working copy is snapshot
@@ -1503,7 +1516,6 @@ async def rotate_image(payload: dict, request: Request) -> dict:
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
-        import os
         from PIL import Image
         storage.snapshot_image(session_id, name)  # rotations version too
         with Image.open(path) as img:
@@ -1656,6 +1668,7 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(
             400, "ANTHROPIC_API_KEY not configured; cannot identify images."
         )
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id)
     names = storage.list_optimized(session_id)
     if not names:
@@ -1671,18 +1684,7 @@ def identify(session_id: str, request: Request) -> dict:
         log.warning("identify failed (session=%s): %s", session_id, exc)
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
-
-    # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
-    if config.taxonomy_ready() and not result.listing.category_id:
-        try:
-            best = taxonomy.best_category_id(_category_query(result.listing))
-            if best.get("category_id"):
-                result.listing.category_id = best["category_id"]
-                if best.get("path"):
-                    result.listing.category_suggestion = best["path"]
-        except Exception:  # noqa: BLE001 - never block identify on taxonomy
-            pass
-
+    _resolve_category(result.listing)
     storage.save_listing(session_id, result.listing)
     db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
     return result.model_dump()
@@ -1797,6 +1799,8 @@ def _preserved_status(session_id: str, default: str = "draft") -> str:
 def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    # Authorize before billing: never charge for a request we're about to 404.
+    _assert_session_owner(req.session_id, request)
     spent = _charge_ai(request, "refine")
     try:
         updated = claude_ai.refine(req.listing, req.prompt)
@@ -2021,15 +2025,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 # the queue card shows what will actually happen at publish
                 # rather than an unchecked box that promotes anyway.
                 listing.promote = listing.promote or auto_promote
-                if config.taxonomy_ready() and not listing.category_id:
-                    try:
-                        best = taxonomy.best_category_id(_category_query(listing))
-                        if best.get("category_id"):
-                            listing.category_id = best["category_id"]
-                            if best.get("path"):
-                                listing.category_suggestion = best["path"]
-                    except Exception:  # noqa: BLE001
-                        pass
+                _resolve_category(listing)
                 # Fill item specifics BEFORE publishing — bulk 'live' mode goes
                 # straight to eBay here, so without this the listing lands with
                 # only the generic first-pass specifics.
@@ -2189,16 +2185,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         result = claude_ai.identify([opt_dir / n for n in names], names,
                                     strategy=_pricing_strategy(uid))
         _apply_listing_defaults(result.listing, uid)
-        # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
-        if config.taxonomy_ready() and not result.listing.category_id:
-            try:
-                best = taxonomy.best_category_id(_category_query(result.listing))
-                if best.get("category_id"):
-                    result.listing.category_id = best["category_id"]
-                    if best.get("path"):
-                        result.listing.category_suggestion = best["path"]
-            except Exception:  # noqa: BLE001 - never block identify on taxonomy
-                pass
+        _resolve_category(result.listing)
         # Fill the category's item specifics now so the draft is SEO-ready.
         _fill_category_specifics(result.listing, [opt_dir / n for n in names])
         # Second-layer maker ID — only runs when Brand/Maker/Manufacturer are
@@ -2240,6 +2227,7 @@ def identify_async(session_id: str, request: Request) -> dict:
     synchronous request open, so slow vision calls can't time out the browser."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    _assert_session_owner(session_id, request)
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")
     uid = _uid(request)
@@ -2293,6 +2281,7 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")
+    _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     db.upsert_listing(req.session_id, req.listing.model_dump(),
                       status="unlisted", user_id=uid)
@@ -2372,7 +2361,7 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
             continue
         listing = it.get("listing") or {}
         eid = str(listing.get("ebay_listing_id") or "")
-        sku = ebay._sku(it["id"])
+        sku = ebay.sku_for(it["id"])
         if (eid and eid in ads) or (sku and sku in ads):
             promoted.add(it["id"])
     return promoted
@@ -2940,7 +2929,7 @@ def sync_listings(request: Request) -> dict:
 
 # Bounds one import run. A store bigger than this imports across repeated
 # syncs rather than tying up a single request indefinitely.
-IMPORT_LIMIT = listing_sync._ACTIVE_LIMIT
+IMPORT_LIMIT = listing_sync.ACTIVE_LIMIT
 
 
 @app.post("/api/ebay/import-listings")
