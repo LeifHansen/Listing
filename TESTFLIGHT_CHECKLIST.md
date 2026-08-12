@@ -23,24 +23,23 @@ Run in Terminal, one block at a time:
 cd ~/Listing && git checkout claude/ebay-listing-generator-se7lao && git pull
 cd frontend
 npm install
-npm run build
-npx cap sync ios
+./scripts/ios-prepare.sh
 ```
 
-- [ ] Repo pulled on the deploy branch, `npm run build` + `npx cap sync ios` clean
+- [ ] Script finished clean and printed all five Info.plist keys
 
-If `ios/` doesn't exist yet on this Mac (fresh clone / after the crash):
+`ios-prepare.sh` builds the web bundle, creates `ios/` if it's missing, runs
+`cap sync`, and writes every required plist key — including
+`NSMicrophoneUsageDescription` (without it, tapping **Scan a shelf** kills the
+app) and `ITSAppUsesNonExemptEncryption`, which stops App Store Connect asking
+the export-compliance question on every upload. It's idempotent; run it before
+every build and never hand-edit `Info.plist`.
+
+Only if the app icon changed:
 
 ```bash
-npx cap add ios
 npx capacitor-assets generate --assetPath assets --iconBackgroundColor '#ffffff' --splashBackgroundColor '#ffffff'
-npx cap sync ios
 ```
-
-- [ ] **Permission strings added** (required — App Store upload rejects without
-      them). Open `frontend/ios/App/App/Info.plist` and confirm/add:
-      `NSCameraUsageDescription`, `NSPhotoLibraryUsageDescription`,
-      `NSPhotoLibraryAddUsageDescription` (exact strings are in `MOBILE.md` §3)
 
 ## C. Xcode: sign, archive, upload
 
@@ -59,8 +58,9 @@ npx cap open ios
 
 - [ ] App Store Connect → Thryft Shop → **TestFlight** tab → wait for the build
       to finish "Processing" (5–30 min; you'll get an email)
-- [ ] If asked about **export compliance**: the app uses only standard HTTPS →
-      answer "standard encryption / exempt"
+- [ ] Export compliance shouldn't be asked at all any more (the prepare script
+      sets `ITSAppUsesNonExemptEncryption=false`). If it is: standard HTTPS →
+      "standard encryption / exempt"
 - [ ] **Internal Testing** → create a group → add yourself
       (leifhansen1990@gmail.com) — no Apple review needed, available instantly
 - [ ] On your iPhone: install **TestFlight** from the App Store → accept the
@@ -72,8 +72,18 @@ npx cap open ios
 - [ ] Nothing hidden under the notch/status bar; bottom nav clear of the home bar
 - [ ] Log in works and **stays** logged in after killing + reopening the app
 - [ ] Camera opens from New Listing (photo capture) and Shop Mode scan
+- [ ] **Scan a shelf** records video without the app dying (this is the
+      microphone permission — if the app vanishes, `Info.plist` is missing
+      `NSMicrophoneUsageDescription`; re-run `./scripts/ios-prepare.sh`)
 - [ ] Photo upload → AI identify → draft appears
-- [ ] eBay connect (Settings) completes and returns to the app
+- [ ] **Connect eBay stays INSIDE the app** — if it opens Safari and strands
+      you there, add `"allowNavigation": ["auth.ebay.com", "*.ebay.com"]` to
+      the `server` block in `capacitor.config.json`
+- [ ] **View on eBay** (after publishing) actually opens — `window.open` is
+      silently a no-op in some webview configs
+- [ ] Settings → **Delete account** shows the confirm dialog, and the privacy
+      policy / terms links open
+- [ ] Airplane mode: launching shows *something* — not an endless spinner
 - [ ] Publish a test listing / end it — full loop
 
 ## Iterating

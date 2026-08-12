@@ -59,18 +59,27 @@ npx capacitor-assets generate --assetPath assets \
 npx cap sync
 ```
 
-## 3. iOS permission strings (required — the app uses the camera)
+## 3. iOS permission strings — handled by the prepare script
 
-Open `frontend/ios/App/App/Info.plist` and add:
+**Don't hand-edit `Info.plist`.** `frontend/ios/` is generated and gitignored,
+so anything typed into Xcode is lost on the next regeneration — and a missing
+permission string doesn't warn, it **terminates the app** the moment the
+feature is tapped. Run this instead (it does steps 1–3 in one go: build,
+`cap add`/`cap sync`, and every plist key):
 
-```xml
-<key>NSCameraUsageDescription</key>
-<string>Thryft Shop uses your camera to photograph items for your listings.</string>
-<key>NSPhotoLibraryUsageDescription</key>
-<string>Thryft Shop uses your photos to create listings.</string>
-<key>NSPhotoLibraryAddUsageDescription</key>
-<string>Thryft Shop saves processed photos you choose to export.</string>
+```bash
+cd frontend && ./scripts/ios-prepare.sh
 ```
+
+It writes:
+
+| Key | Why |
+|---|---|
+| `NSCameraUsageDescription` | photographing items |
+| `NSPhotoLibraryUsageDescription` | picking existing photos |
+| `NSPhotoLibraryAddUsageDescription` | saving processed photos |
+| `NSMicrophoneUsageDescription` | **"Scan a shelf" records video, and iOS routes any video capture through the mic — without this the app is killed on tap** |
+| `ITSAppUsesNonExemptEncryption=false` | permanently answers the export-compliance question asked on every upload |
 
 ## 4. Open in Xcode, sign, and archive
 
