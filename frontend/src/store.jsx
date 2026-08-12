@@ -27,12 +27,18 @@ export function AppProvider({ children }) {
 
   // ---------- navigation ----------
   const [view, setView] = useState("dashboard");
-  // Which tab of the unified Listings pipeline is showing. Deep links (a
-  // dashboard tile, a task row) set it and jump: openListings("drafts").
+  // Which tab of the listings pipeline is showing. Deep links (a dashboard
+  // tile, a task row) set it and jump: openListings("drafts"). The pipeline
+  // lives on the merged Sell screen now, so opening it clears any open
+  // editor session (same as the Sell nav's startNew always did) and records
+  // the requested tab so the screen can scroll to the right section.
   const [listingsTab, setListingsTab] = useState("active");
+  const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     if (tab) setListingsTab(tab);
-    setView("listings");
+    listingsJumpRef.current = tab || "active";
+    setSession(null);
+    setView("new");
   }, []);
 
   // ---------- server health ----------
@@ -303,7 +309,7 @@ export function AppProvider({ children }) {
 
   const value = useMemo(() => ({
     dark, toggleDark,
-    view, setView, listingsTab, setListingsTab, openListings,
+    view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,

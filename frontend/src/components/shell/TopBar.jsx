@@ -7,7 +7,7 @@ import { useToast } from "@/components/ui/Toaster";
 
 // TopBar — search, eBay connection state, Quick Add. No clutter.
 export function TopBar({ onSearch, onManageEbay }) {
-  const { user, openAuth, ebay, startNew, setView } = useApp();
+  const { user, openAuth, ebay, startNew, setView, session } = useApp();
   const { toast } = useToast();
   const [q, setQ] = useState("");
 
@@ -35,7 +35,10 @@ export function TopBar({ onSearch, onManageEbay }) {
           placeholder="Search your listings…"
           aria-label="Search your listings"
           onChange={(e) => { setQ(e.target.value); onSearch(e.target.value); }}
-          onFocus={() => setView("listings")}
+          // Searching filters the merged Sell screen — but never close an
+          // open editor out from under the user; the filter applies once
+          // they close it themselves.
+          onFocus={() => { if (!session) setView("new"); }}
           className={cn(
             "w-full h-11 pl-11 pr-4 bg-card border border-line rounded-full text-[15px]",
             "placeholder:text-ink-faint shadow-card transition-all duration-150",

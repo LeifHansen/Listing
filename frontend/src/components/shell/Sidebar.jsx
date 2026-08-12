@@ -1,23 +1,21 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Tags, Settings, FilePen,
+  LayoutDashboard, PlusCircle, Store, Settings,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 
-// The Listing Manager is the whole-store pipeline (lifecycle tabs); Drafts is
-// a first-class nav shortcut straight to its drafts tab — works in progress
-// are where sellers spend their time, and the badge is the drafts-waiting
-// count. `short` is the label the mobile bottom bar shows.
+// Sell IS the pipeline: the upload box, the drafts strip, and the listings
+// manager share one screen, so the old Drafts / Listing Manager entries are
+// gone and the drafts-waiting badge rides the Sell tab instead. `short` is
+// the label the mobile bottom bar shows.
 const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
   { id: "shop", label: "Shop Mode", icon: Store },
-  { id: "drafts", label: "Drafts", icon: FilePen },
-  { id: "listings", label: "Listing Manager", short: "Manager", icon: Tags },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -92,8 +90,10 @@ export function Sidebar() {
   const { view, setView, startNew, dark, toggleDark, user, openAuth, logout, listingsState } = useApp();
   const [collapsed, setCollapsed] = useState(false);
 
+  // Drafts live at the top of the Sell screen, so its badge is the
+  // drafts-waiting count.
   const counts = {
-    drafts: listingsState.items.filter(
+    new: listingsState.items.filter(
       (i) => i.status === "draft" || i.status === "dry_run").length,
   };
 
@@ -187,11 +187,11 @@ export function Sidebar() {
   );
 }
 
-// BottomNav — the sidebar's mobile form: five thumb-sized targets.
+// BottomNav — the sidebar's mobile form: thumb-sized targets around the FAB.
 export function BottomNav() {
   const { view, setView, startNew } = useApp();
   // Reference by id (not index) so reordering NAV never scrambles the bar.
-  const items = ["dashboard", "shop", "new", "drafts", "listings", "settings"].map(byId);
+  const items = ["dashboard", "shop", "new", "settings"].map(byId);
   return (
     <nav
       aria-label="Main"

@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown,
+  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown, Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -11,9 +11,11 @@ import { Button } from "@/components/ui/Button";
 import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
+import { ListingsView } from "./ListingsView";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
 import { BulkQueue } from "./listing/BulkMode";
+import { DraftsStrip } from "./listing/DraftsStrip";
 import { ImageEditor } from "./listing/ImageEditor";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
@@ -280,6 +282,16 @@ function Workflow() {
     }
   };
 
+  // My drafts — the drafts strip lives on this same screen now, so getting
+  // there means closing the editor; confirm since unsaved edits are dropped.
+  const toDrafts = async () => {
+    if (await confirm({
+      title: "Close this listing?",
+      message: "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
+      confirmLabel: "Close",
+    })) openListings("drafts");
+  };
+
   // A live publish replaces the workflow with the success screen — staying on
   // the just-posted listing was confusing.
   if (w.publishResult?.published) {
@@ -314,7 +326,7 @@ function Workflow() {
               <ArrowLeft aria-hidden /> Back to batch
             </Button>
           )}
-          <Button variant="ghost" onClick={() => openListings("drafts")}>
+          <Button variant="ghost" onClick={toDrafts}>
             <ArrowLeft aria-hidden /> My drafts
           </Button>
           <Button variant="ghost" onClick={restart}>
@@ -397,12 +409,58 @@ function Workflow() {
   );
 }
 
-export function NewListing() {
+// The merged Sell screen: upload box on top, then the drafts strip (one
+// click from Publish or Preview & Edit), then the rest of the store below.
+function SellHome({ search }) {
+  const { startBulk, listingsJumpRef } = useApp();
+  const managerRef = useRef(null);
+
+  // A deep link (dashboard tile, "View all") asked for a listings tab:
+  // drafts live right under the upload box, everything else scrolls down to
+  // the manager section, whose tab is already set via listingsTab.
+  useEffect(() => {
+    const tab = listingsJumpRef.current;
+    listingsJumpRef.current = null;
+    if (tab && tab !== "drafts") {
+      requestAnimationFrame(() =>
+        managerRef.current?.scrollIntoView({ behavior: "smooth" }));
+    }
+  }, [listingsJumpRef]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-4">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Sell</h1>
+          <p className="text-sm text-ink-secondary mt-1">
+            Start with photos — the AI handles the boring parts.
+          </p>
+        </div>
+        <UploadPhase onBulkStarted={startBulk} />
+      </div>
+      <DraftsStrip search={search} />
+      <div ref={managerRef} className="scroll-mt-4">
+        <ListingsView search={search} />
+      </div>
+    </div>
+  );
+}
+
+export function NewListing({ search = "" }) {
   // activeBulk lives in the store + localStorage, so a running batch survives
   // navigating away and page reloads (see store startBulk/clearBulk).
-  const { session, activeBulk, startBulk, clearBulk, bulkSettled } = useApp();
+  const {
+    session, activeBulk, clearBulk, bulkSettled, listingsJumpRef,
+  } = useApp();
+  // A deep link that lands while a batch is processing shouldn't dead-end on
+  // the queue — show the lists with a compact way back to the batch.
+  const [showBulk, setShowBulk] = useState(true);
+  useEffect(() => {
+    if (activeBulk && listingsJumpRef.current) setShowBulk(false);
+    if (!activeBulk) setShowBulk(true);
+  }, [activeBulk, listingsJumpRef]);
 
-  if (!session && activeBulk) {
+  if (!session && activeBulk && showBulk) {
     return (
       <div className="flex flex-col gap-4">
         <div>
@@ -423,15 +481,23 @@ export function NewListing() {
 
   if (!session) {
     return (
-      <div className="flex flex-col gap-4">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">New listing</h1>
-          <p className="text-sm text-ink-secondary mt-1">
-            Start with photos — the AI handles the boring parts.
-          </p>
-        </div>
-        <UploadPhase onBulkStarted={startBulk} />
-      </div>
+      <>
+        {activeBulk && (
+          <button
+            type="button"
+            onClick={() => setShowBulk(true)}
+            className="mb-4 w-full flex items-center gap-3 rounded-card bg-blue-soft border border-blue/30 p-4 text-left text-sm text-ink hover:border-blue/50 transition-colors cursor-pointer"
+          >
+            <Loader2 size={17} className="text-blue shrink-0 animate-spin" aria-hidden />
+            <span className="flex-1 min-w-0">
+              <strong className="font-semibold">A bulk batch is processing.</strong>{" "}
+              Finished items save to Drafts automatically — tap to watch or review it.
+            </span>
+            <span className="font-semibold text-blue shrink-0">Review →</span>
+          </button>
+        )}
+        <SellHome search={search} />
+      </>
     );
   }
   return <Workflow />;

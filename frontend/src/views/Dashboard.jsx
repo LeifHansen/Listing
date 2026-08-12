@@ -466,7 +466,7 @@ export function Dashboard() {
           icon={Tags}
           title="Recent listings"
           action={items.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={() => setView("listings")}>
+            <Button variant="ghost" size="sm" onClick={() => openListings("all")}>
               View all <ArrowRight aria-hidden />
             </Button>
           )}

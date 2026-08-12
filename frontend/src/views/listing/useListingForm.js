@@ -3,6 +3,7 @@ import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
+import { usePublishTargets } from "./publishShared";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -55,9 +56,7 @@ function fromListing(l) {
 }
 
 export function useListingForm() {
-  const {
-    session, setSession, health, loadListings, connectedMarketplaces,
-  } = useApp();
+  const { session, setSession, health, loadListings } = useApp();
   const { toast } = useToast();
 
   const [form, setForm] = useState(() => fromListing(session?.listing));
@@ -69,34 +68,14 @@ export function useListingForm() {
   const [categoryMeta, setCategoryMeta] = useState({ conditions: [], aspects: [] });
 
   // ---------- marketplace targets ----------
-  // Which marketplaces the Publish buttons hit. Remembered across listings;
-  // intersected with what's actually connected at publish time. The selector
-  // only appears once a non-eBay marketplace is connected, so eBay-only
-  // sellers never see it (and stay on the legacy single-eBay publish path).
-  const [marketTargets, setMarketTargets] = useState(() => {
-    try {
-      const raw = localStorage.getItem("quickflip-publish-marketplaces");
-      const arr = raw ? JSON.parse(raw) : null;
-      return Array.isArray(arr) && arr.length ? arr : ["ebay"];
-    } catch (e) { return ["ebay"]; }
-  });
-  const toggleMarketTarget = useCallback((key) => {
-    setMarketTargets((cur) => {
-      const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
-      if (!next.length) return cur; // always at least one target
-      try { localStorage.setItem("quickflip-publish-marketplaces", JSON.stringify(next)); } catch (e) {}
-      return next;
-    });
-  }, []);
-  // The effective target list: null = selector hidden -> legacy eBay path.
-  const chipTargets = useMemo(() => {
-    const others = connectedMarketplaces
-      .filter((m) => m.key !== "ebay").map((m) => m.key);
-    if (!others.length) return null;
-    const allowed = new Set(["ebay", ...others]);
-    const sel = marketTargets.filter((k) => allowed.has(k));
-    return sel.length ? sel : ["ebay"];
-  }, [connectedMarketplaces, marketTargets]);
+  // Which marketplaces the Publish buttons hit — the shared remembered
+  // selection (publishShared) also used by the drafts strip and bulk queue.
+  // chipTargets: the effective list; null = selector hidden -> legacy eBay
+  // publish path.
+  const {
+    selected: marketTargets, toggle: toggleMarketTarget,
+    effectiveTargets: chipTargets,
+  } = usePublishTargets();
 
   const sessionId = session?.sessionId;
   // Live = this session is (still) a live eBay listing being revised, so the

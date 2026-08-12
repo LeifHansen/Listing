@@ -10,6 +10,9 @@ import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
+import {
+  MarketTargetChips, missingRequired, publishListing, usePublishTargets,
+} from "./publishShared";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
    identifies each item, and (optionally) publishes them; this component polls
@@ -49,18 +52,6 @@ function duplicateSuspects(drafts) {
     }
   }
   return pairs;
-}
-
-// The fields eBay requires to publish — surfaced per auto-created draft so the
-// seller sees at a glance which items still need a value before going live.
-function missingRequired(l = {}) {
-  const miss = [];
-  if (!(l.title || "").trim()) miss.push("title");
-  if (!(Number(l.price) > 0)) miss.push("price");
-  const oz = (parseFloat(l.package_weight_lb) || 0) * 16 + (parseFloat(l.package_weight_oz) || 0);
-  if (!(oz > 0)) miss.push("weight");
-  if (!(l.category_id || "").toString().trim()) miss.push("category");
-  return miss;
 }
 
 // Selling formats, mirroring the full editor's Pricing card.
@@ -256,7 +247,7 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
       <div className="flex items-center gap-2 mt-auto">
         {editable && (
           <Button variant="ghost" size="sm" onClick={onOpen}>
-            <ExternalLink aria-hidden /> Full editor
+            <ExternalLink aria-hidden /> Preview &amp; Edit
           </Button>
         )}
         {item.status === "draft" && (
@@ -274,28 +265,12 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
 
-  // Bulk publish targets — same remembered selection as the single-listing
-  // publish bar; only shown once a non-eBay marketplace is connected.
-  const [bulkTargets, setBulkTargets] = useState(() => {
-    try {
-      const raw = localStorage.getItem("quickflip-publish-marketplaces");
-      const arr = raw ? JSON.parse(raw) : null;
-      return Array.isArray(arr) && arr.length ? arr : ["ebay"];
-    } catch (e) { return ["ebay"]; }
-  });
-  const toggleBulkTarget = (key) => setBulkTargets((cur) => {
-    const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
-    if (!next.length) return cur;
-    try { localStorage.setItem("quickflip-publish-marketplaces", JSON.stringify(next)); } catch (e) {}
-    return next;
-  });
-  const otherConnected = connectedMarketplaces.filter((m) => m.key !== "ebay");
-  const effectiveTargets = (() => {
-    if (!otherConnected.length) return null;   // legacy single-eBay path
-    const allowed = new Set(["ebay", ...otherConnected.map((m) => m.key)]);
-    const sel = bulkTargets.filter((k) => allowed.has(k));
-    return sel.length ? sel : ["ebay"];
-  })();
+  // Bulk publish targets — the same remembered selection as the single-item
+  // publish bar and the drafts strip (see publishShared).
+  const {
+    selected: bulkTargets, toggle: toggleBulkTarget, otherConnected,
+    effectiveTargets,
+  } = usePublishTargets();
   const [job, setJob] = useState(null);
   const [items, setItems] = useState([]);
   const [checked, setChecked] = useState({});
@@ -404,15 +379,9 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const publishOne = useCallback(async (it) => {
     setPublishing((p) => ({ ...p, [it.session_id]: true }));
     try {
-      // Persist inline edits first, then publish. One request per item —
-      // the backend fans out to every selected marketplace.
-      await postJson(`/api/save/${it.session_id}`, it.listing);
-      const body = { session_id: it.session_id, listing: it.listing, mode: "live" };
-      if (effectiveTargets
-          && !(effectiveTargets.length === 1 && effectiveTargets[0] === "ebay")) {
-        body.marketplaces = effectiveTargets;
-      }
-      const res = await postJson("/api/publish", body);
+      // Persist inline edits first, then publish (one request per item — the
+      // backend fans out to every selected marketplace); see publishShared.
+      const res = await publishListing(it.session_id, it.listing, effectiveTargets);
       // Multi responses summarize per marketplace: "eBay ✓ · Etsy ✗".
       const summary = res.multi
         ? Object.entries(res.results || {})
@@ -614,28 +583,9 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         </Card>
       )}
 
-      {job?.done && drafts.length > 0 && otherConnected.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[12px] font-semibold text-ink-faint mr-1">Post to</span>
-          {[{ key: "ebay", label: "eBay" },
-            ...otherConnected.map((m) => ({ key: m.key, label: m.label }))].map((m) => {
-            const on = bulkTargets.includes(m.key);
-            return (
-              <button
-                key={m.key} type="button" onClick={() => toggleBulkTarget(m.key)}
-                aria-pressed={on}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-bold cursor-pointer transition-colors",
-                  on ? "bg-blue-soft border-blue/45 text-blue"
-                    : "bg-transparent border-line text-ink-faint hover:border-ink-faint",
-                )}
-              >
-                {on && <CheckCircle2 size={11} aria-hidden />}
-                {m.label}
-              </button>
-            );
-          })}
-        </div>
+      {job?.done && drafts.length > 0 && (
+        <MarketTargetChips selected={bulkTargets} toggle={toggleBulkTarget}
+          otherConnected={otherConnected} />
       )}
 
       {job?.done && drafts.length > 0 && (
