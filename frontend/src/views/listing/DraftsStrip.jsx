@@ -241,7 +241,9 @@ export function DraftsStrip({ search = "" }) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
             >
-              <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
+              {/* Delete lives in the labeled row below, not as another tiny
+                  icon in the card's corner cluster. */}
+              <ListingCard item={item} onOpen={openListing}
                 onStartOver={startOver}
                 startingOver={startingOver === item.id}
                 onSkip={() => toggleSkipDraft(item.id)}
@@ -252,7 +254,7 @@ export function DraftsStrip({ search = "" }) {
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
               {!selecting && (
                 <>
-                  <div className="mt-1.5 flex items-center gap-2">
+                  <div className="mt-1.5 flex items-center gap-1.5">
                     <Button variant="secondary" size="sm" className="flex-1"
                       onClick={() => publishOne(item)}
                       loading={!!publishing[item.id]}
@@ -265,6 +267,11 @@ export function DraftsStrip({ search = "" }) {
                     <Button variant="ghost" size="sm" className="flex-1"
                       onClick={() => openListing(item.id)}>
                       <PenLine aria-hidden /> Preview &amp; Edit
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => askDelete(item)}
+                      aria-label="Delete this draft" title="Delete this draft"
+                      className="shrink-0 text-ink-faint hover:text-error">
+                      <Trash2 aria-hidden />
                     </Button>
                   </div>
                   <DraftShipping item={item} />

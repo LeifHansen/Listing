@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine } from "lucide-react";
+import {
+  Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
+} from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -93,7 +95,10 @@ function ShippingServiceSelect({ value, onChange }) {
   );
 }
 
-function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, publishing }) {
+function BulkItemCard({
+  item, checked, onCheck, onChange, onOpen, onPublish, publishing,
+  onDelete, deleting,
+}) {
   const l = item.listing || {};
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
@@ -250,6 +255,14 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
             <ExternalLink aria-hidden /> Preview &amp; Edit
           </Button>
         )}
+        {/* Not every auto-created draft is worth keeping — a duplicate you
+            don't want to merge, or something the AI shouldn't have drafted.
+            Deleting it here beats hunting for its card later. */}
+        <Button variant="ghost" size="sm" onClick={onDelete} loading={deleting}
+          aria-label="Delete this draft"
+          className="text-ink-faint hover:text-error">
+          <Trash2 aria-hidden /> Delete
+        </Button>
         {item.status === "draft" && (
           <Button variant="secondary" size="sm" className="ml-auto"
             onClick={onPublish} loading={publishing}>
@@ -275,6 +288,7 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const [items, setItems] = useState([]);
   const [checked, setChecked] = useState({});
   const [publishing, setPublishing] = useState({});
+  const [deleting, setDeleting] = useState({});
   const [merging, setMerging] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
@@ -409,6 +423,61 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
   }, [effectiveTargets]);
+
+  // Delete a draft straight from the queue — the counterpart to Merge for
+  // duplicates you don't want to keep at all, and the way out for anything
+  // the AI shouldn't have drafted.
+  const deleteOne = async (it) => {
+    const name = it.listing?.title || it.title || "this draft";
+    if (!(await confirm({
+      title: "Delete this draft?",
+      message: `"${name}" will be permanently removed, photos included. This can't be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    }))) return;
+    setDeleting((d) => ({ ...d, [it.session_id]: true }));
+    try {
+      await api(`/api/listings/${it.session_id}`, { method: "DELETE" });
+    } catch (e) {
+      // An item that never produced a record (a failed identify) has nothing
+      // to delete server-side — dropping it from the queue is the whole job.
+      if (!(e.message || "").includes("(404)")) {
+        toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+        setDeleting((d) => ({ ...d, [it.session_id]: false }));
+        return;
+      }
+    }
+    removed.current.add(it.session_id);
+    setItems((cur) => cur.filter((x) => x.session_id !== it.session_id));
+    setChecked((c) => { const n = { ...c }; delete n[it.session_id]; return n; });
+    setDeleting((d) => ({ ...d, [it.session_id]: false }));
+    loadListings({ quiet: true });
+  };
+
+  const deleteSelected = async () => {
+    const targets = items.filter((it) => checked[it.session_id]);
+    if (!targets.length) { toast("Nothing selected to delete.", { kind: "warning" }); return; }
+    if (!(await confirm({
+      title: `Delete ${targets.length} draft${targets.length === 1 ? "" : "s"}?`,
+      message: "They'll be permanently removed, photos included. This can't be undone.",
+      confirmLabel: "Delete all selected",
+      danger: true,
+    }))) return;
+    const ids = targets.map((t) => t.session_id);
+    try {
+      const res = await postJson("/api/listings/bulk-delete", { ids });
+      const gone = new Set(res.deleted || []);
+      gone.forEach((id) => removed.current.add(id));
+      setItems((cur) => cur.filter((x) => !gone.has(x.session_id)));
+      setChecked({});
+      loadListings({ quiet: true });
+      toast(`Deleted ${gone.size} draft${gone.size === 1 ? "" : "s"}.`
+        + (res.skipped?.length ? ` ${res.skipped.length} couldn't be removed.` : ""),
+        { kind: res.skipped?.length ? "warning" : "success" });
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+    }
+  };
 
   // Merge duplicate drafts of the SAME item into one listing: photos combine
   // under the first selected item; the other drafts are deleted.
@@ -599,6 +668,14 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
               <Combine aria-hidden /> Merge into one
             </Button>
           )}
+          {/* Duplicates you'd rather drop than merge, and anything the batch
+              shouldn't have drafted. */}
+          {items.some((it) => checked[it.session_id]) && (
+            <Button variant="danger" onClick={deleteSelected}
+              title="Permanently delete the selected drafts.">
+              <Trash2 aria-hidden /> Delete selected ({items.filter((it) => checked[it.session_id]).length})
+            </Button>
+          )}
           <Button variant="ghost" onClick={onExit}>
             <PenLine aria-hidden /> Start another batch
           </Button>
@@ -619,6 +696,8 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
               onOpen={() => openItem(it)}
               onPublish={() => publishOne(it).then((ok) => ok && loadListings({ quiet: true }))}
               publishing={!!publishing[it.session_id]}
+              onDelete={() => deleteOne(it)}
+              deleting={!!deleting[it.session_id]}
             />
           ))}
         </AnimatePresence>
