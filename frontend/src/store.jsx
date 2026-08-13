@@ -27,12 +27,18 @@ export function AppProvider({ children }) {
 
   // ---------- navigation ----------
   const [view, setView] = useState("dashboard");
-  // Which tab of the unified Listings pipeline is showing. Deep links (a
-  // dashboard tile, a task row) set it and jump: openListings("drafts").
+  // Which tab of the listings pipeline is showing. Deep links (a dashboard
+  // tile, a task row) set it and jump: openListings("drafts"). The pipeline
+  // lives on the merged Sell screen now, so opening it clears any open
+  // editor session (same as the Sell nav's startNew always did) and records
+  // the requested tab so the screen can scroll to the right section.
   const [listingsTab, setListingsTab] = useState("active");
+  const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     if (tab) setListingsTab(tab);
-    setView("listings");
+    listingsJumpRef.current = tab || "active";
+    setSession(null);
+    setView("new");
   }, []);
 
   // ---------- server health ----------
@@ -104,6 +110,22 @@ export function AppProvider({ children }) {
   // Publishing is live if EITHER the user connected their eBay account or the
   // server has env-level credentials.
   const canPublishLive = ebay.connected || health.ebay_configured;
+
+  // ---------- marketplace roster (eBay + Etsy + Depop + ...) ----------
+  // Every registered marketplace with this user's connection state, from
+  // GET /api/marketplaces. The `ebay` object above stays the eBay fast-path
+  // every existing consumer uses; this roster powers the generic Settings
+  // cards and the publish-target chips.
+  const [marketplaces, setMarketplaces] = useState([]);
+  const loadMarketplaces = useCallback(async () => {
+    try {
+      const res = await api("/api/marketplaces");
+      setMarketplaces(res.marketplaces || []);
+    } catch (e) { /* keep previous */ }
+  }, []);
+  const connectedMarketplaces = useMemo(
+    () => marketplaces.filter((m) => m.connected),
+    [marketplaces]);
 
   // ---------- saved listings cache ----------
   const [listingsState, setListingsState] = useState({
@@ -251,14 +273,24 @@ export function AppProvider({ children }) {
     try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
   }, []);
 
-  // ---------- eBay OAuth redirect landing ----------
+  // ---------- OAuth redirect landing (eBay + generic marketplaces) ----------
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const e = params.get("ebay");
     if (e === "connected") toast("eBay connected! You can now publish real listings.", { kind: "success" });
     else if (e === "error") toast("eBay connection failed. Please try again.", { kind: "error" });
-    if (e) history.replaceState({}, "", window.location.pathname);
-  }, [toast]);
+    // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy.
+    const ok = params.get("connected");
+    const bad = params.get("connect_error");
+    const label = (k) => k ? k.charAt(0).toUpperCase() + k.slice(1) : "";
+    if (ok) {
+      toast(`${label(ok)} connected! You can now cross-post listings there.`, { kind: "success" });
+      loadMarketplaces();
+    } else if (bad) {
+      toast(`${label(bad)} connection failed. Please try again.`, { kind: "error" });
+    }
+    if (e || ok || bad) history.replaceState({}, "", window.location.pathname);
+  }, [toast, loadMarketplaces]);
 
   // ---------- token purchase redirect landing ----------
   // Stripe Checkout sends the buyer back with ?tokens=success&session_id=…;
@@ -297,12 +329,15 @@ export function AppProvider({ children }) {
     loadHealth();
     loadAuth();
     loadEbayStatus();
-  }, [loadHealth, loadAuth, loadEbayStatus]);
+    loadMarketplaces();
+  }, [loadHealth, loadAuth, loadEbayStatus, loadMarketplaces]);
 
-  // Refresh the listings cache when auth changes (login/logout).
+  // Refresh the listings cache (and per-user marketplace connections) when
+  // auth changes (login/logout).
   useEffect(() => {
     loadListings({ quiet: true });
-  }, [user, loadListings]);
+    loadMarketplaces();
+  }, [user, loadListings, loadMarketplaces]);
 
   // eBay views/watchers for live listings (best-effort; empty until eBay is
   // connected and the analytics scope granted). Refreshes as the set changes.
@@ -317,10 +352,11 @@ export function AppProvider({ children }) {
 
   const value = useMemo(() => ({
     dark, toggleDark,
-    view, setView, listingsTab, setListingsTab, openListings,
+    view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
+    marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
@@ -331,6 +367,7 @@ export function AppProvider({ children }) {
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
+    marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
     listingsState, loadListings, metricsById, storeSync, syncStore,
     session, startNew, openListing,

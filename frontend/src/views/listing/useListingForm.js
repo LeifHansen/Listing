@@ -3,6 +3,7 @@ import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
+import { usePublishTargets } from "./publishShared";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -21,6 +22,14 @@ const EMPTY = {
   // "ebay" for a listing imported from the seller's store (edits go back via
   // the Trading API); "" for one created here.
   source: "", sku: "", ebay_listing_id: "", view_url: "",
+  // Marketplace-specific fields (their own editor cards) + per-marketplace
+  // publish state (server-owned; carried through saves untouched).
+  etsy: {
+    taxonomy_id: 0, who_made: "", when_made: "", is_supply: false,
+    materials: [], tags: [], shipping_profile_id: "", return_policy_id: "",
+  },
+  depop: { category: "", size: "" },
+  marketplaces: {},
 };
 
 function fromListing(l) {
@@ -28,6 +37,9 @@ function fromListing(l) {
   return {
     ...EMPTY,
     ...l,
+    etsy: { ...EMPTY.etsy, ...(l.etsy || {}) },
+    depop: { ...EMPTY.depop, ...(l.depop || {}) },
+    marketplaces: l.marketplaces || {},
     price: l.price != null ? l.price : "",
     purchase_price: l.purchase_price != null ? l.purchase_price : "",
     auction_start_price: l.auction_start_price != null ? l.auction_start_price : "",
@@ -54,6 +66,16 @@ export function useListingForm() {
   const [catSuggestions, setCatSuggestions] = useState(null);
   const [priceData, setPriceData] = useState(null);
   const [categoryMeta, setCategoryMeta] = useState({ conditions: [], aspects: [] });
+
+  // ---------- marketplace targets ----------
+  // Which marketplaces the Publish buttons hit — the shared remembered
+  // selection (publishShared) also used by the drafts strip and bulk queue.
+  // chipTargets: the effective list; null = selector hidden -> legacy eBay
+  // publish path.
+  const {
+    selected: marketTargets, toggle: toggleMarketTarget,
+    effectiveTargets: chipTargets,
+  } = usePublishTargets();
 
   const sessionId = session?.sessionId;
   // Live = this session is (still) a live eBay listing being revised, so the
@@ -315,18 +337,24 @@ export function useListingForm() {
 
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
-    setAiBusy(["Checking everything eBay requires…"]);
+    setAiBusy(["Checking everything the marketplaces require…"]);
     try {
-      const res = await postJson("/api/publish-preflight", {
-        session_id: sessionId, listing: collect(), mode: "live",
-      });
-      const errors = (res.issues || []).filter((i) => i.level !== "warn");
+      const body = { session_id: sessionId, listing: collect(), mode: "live" };
+      if (chipTargets) body.marketplaces = chipTargets;
+      const res = await postJson("/api/publish-preflight", body);
+      // Marketplace-specific checklists ride along under by_marketplace —
+      // fold them into one list so the fix-it panel covers everything.
+      const issues = [
+        ...(res.issues || []),
+        ...Object.values(res.by_marketplace || {}).flat(),
+      ];
+      const errors = issues.filter((i) => i.level !== "warn");
       setPublishResult({
         preflight: true,
         error: errors.length > 0,
-        issues: res.issues || [],
+        issues,
         message: errors.length
-          ? `Not quite ready — ${errors.length} thing${errors.length === 1 ? "" : "s"} to fix before eBay will accept it:`
+          ? `Not quite ready — ${errors.length} thing${errors.length === 1 ? "" : "s"} to fix before publishing:`
           : "All checks passed — this listing is ready to publish. 🎉",
       });
       const first = errors.find((x) => x.target && x.target !== "generic");
@@ -336,32 +364,52 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }, [collect, sessionId, toast]);
+  }, [collect, sessionId, toast, chipTargets]);
 
   // ---------- publish ----------
   const publish = useMemo(() => once("publish", async (mode) => {
     setFixTarget(null);
     setPublishResult(null);
+    const multi = chipTargets && chipTargets.length > 1;
     setAiBusy(mode === "live"
-      ? ["Publishing to eBay…", "Uploading photos…", "Crossing the t's…"]
+      ? [multi ? "Publishing to your marketplaces…" : "Publishing to eBay…",
+         "Uploading photos…", "Crossing the t's…"]
       : ["Saving your draft…"]);
     try {
       const listing = collect();
       setSession((s) => ({ ...s, listing }));
-      const result = await postJson("/api/publish", {
-        session_id: sessionId, listing, mode,
-      });
-      setPublishResult(result);
-      // Live success swaps in the PublishedScreen; draft saves get a toast so
-      // there's clear feedback even if the result banner is below the fold.
-      if (!result.error && !result.published && mode === "draft") {
-        toast(result.ebay_draft
-          ? "Draft saved here and staged on your eBay account — publish it live when you're ready."
-          : "Draft saved — find it anytime under Drafts.", { kind: "success" });
+      const body = { session_id: sessionId, listing, mode };
+      // Only send `marketplaces` when the selector is visible and picked
+      // something beyond bare eBay — everyone else stays on the legacy
+      // single-eBay path with its byte-identical responses.
+      if (chipTargets && !(chipTargets.length === 1 && chipTargets[0] === "ebay")) {
+        body.marketplaces = chipTargets;
       }
-      if (result.error && result.issues && result.issues.length) {
-        const first = result.issues.find((x) => x.target && x.target !== "generic");
-        if (first) setFixTarget(first.target);
+      const result = await postJson("/api/publish", body);
+      setPublishResult(result);
+      if (result.multi) {
+        if (!result.published && mode === "draft") {
+          toast(result.message || "Draft saved — find it anytime under Drafts.",
+            { kind: "success" });
+        }
+        const issues = Object.values(result.results || {})
+          .flatMap((res) => res.issues || []);
+        if (!result.published && issues.length) {
+          const first = issues.find((x) => x.target && x.target !== "generic");
+          if (first) setFixTarget(first.target);
+        }
+      } else {
+        // Live success swaps in the PublishedScreen; draft saves get a toast
+        // so there's clear feedback even if the result banner is below the fold.
+        if (!result.error && !result.published && mode === "draft") {
+          toast(result.ebay_draft
+            ? "Draft saved here and staged on your eBay account — publish it live when you're ready."
+            : "Draft saved — find it anytime under Drafts.", { kind: "success" });
+        }
+        if (result.error && result.issues && result.issues.length) {
+          const first = result.issues.find((x) => x.target && x.target !== "generic");
+          if (first) setFixTarget(first.target);
+        }
       }
       loadListings({ quiet: true });
     } catch (e) {
@@ -369,15 +417,36 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, loadListings, toast]);
+  }), [collect, sessionId, setSession, loadListings, toast, chipTargets]);
 
-  // End (withdraw) the live eBay listing; it stays here as an editable
-  // 'ended' record so it can be relisted later.
+  // End (withdraw) the live listing everywhere it's live; it stays here as an
+  // editable 'ended' record so it can be relisted later. eBay keeps its
+  // original endpoint; other marketplaces go through the generic one.
   const endListing = useMemo(() => once("end-listing", async () => {
-    setAiBusy(["Ending the listing on eBay…"]);
+    setAiBusy(["Ending the listing…"]);
     try {
-      const res = await postJson("/api/ebay/end-listing", { session_id: sessionId });
-      toast(res.message || "Listing ended.", { kind: "success" });
+      const states = session?.listing?.marketplaces || {};
+      const others = Object.entries(states)
+        .filter(([key, st]) => key !== "ebay" && st?.status === "published")
+        .map(([key]) => key);
+      // A pre-multi live listing has an eBay id but no marketplaces entry.
+      const ebayLive = states.ebay
+        ? states.ebay.status === "published"
+        : !!session?.listing?.ebay_listing_id;
+      let message = "";
+      for (const key of others) {
+        try {
+          const res = await postJson(`/api/${key}/end-listing`, { session_id: sessionId });
+          message = res.message || message;
+        } catch (e) {
+          toast(`Couldn't end it on ${key}: ${e.message}`, { kind: "error" });
+        }
+      }
+      if (ebayLive || !others.length) {
+        const res = await postJson("/api/ebay/end-listing", { session_id: sessionId });
+        message = res.message || message;
+      }
+      toast(message || "Listing ended.", { kind: "success" });
       setSession((s) => (s ? { ...s, status: "ended" } : s));
       setPublishResult(null);
       loadListings({ quiet: true });
@@ -386,7 +455,7 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }), [sessionId, setSession, loadListings, toast]);
+  }), [sessionId, session, setSession, loadListings, toast]);
 
   // Auto-fill eBay's category item specifics from the photos (fixed-value
   // aspects picked from eBay's allowed values), merged without clobbering
@@ -463,6 +532,7 @@ export function useListingForm() {
     sessionId, form, set, setForm, collect,
     isLive, ebayListingId, endListing,
     aiBusy, setAiBusy,
+    marketTargets, toggleMarketTarget, chipTargets,
     publish, publishResult, setPublishResult, runPreflight,
     fixTarget, setFixTarget,
     refine,

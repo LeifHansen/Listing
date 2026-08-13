@@ -1,8 +1,9 @@
 # QuickFlip
 
-**Snap it · AI writes it · list it on eBay.**
+**Snap it · AI writes it · list it everywhere.**
 
-Turn product photos into a complete, ready-to-publish eBay listing.
+Turn product photos into a complete, ready-to-publish listing — on eBay,
+Etsy, and Depop, individually or all at once.
 
 Upload one or more images → the app **optimizes** them for eBay, uses Claude's
 vision **"lens"** to identify the item, **generates** a full listing (title,
@@ -15,7 +16,7 @@ payload when you don't have eBay credentials yet).
 
 ```
  Upload images ──▶ Optimize (Pillow) ──▶ Identify (Claude vision) ──▶
- Editable preview (manual edits + prompt refine) ──▶ Publish (eBay API / dry-run)
+ Editable preview (manual edits + prompt refine) ──▶ Publish (eBay / Etsy / Depop, or dry-run)
 ```
 
 | Stage | What happens | Tech |
@@ -24,7 +25,7 @@ payload when you don't have eBay credentials yet).
 | Identify | Photos sent to Claude vision; returns structured listing draft + confidence + "missing info" to verify | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
-| Publish | Builds eBay Inventory API payloads and (if configured) creates an offer / publishes it | eBay Sell API |
+| Publish | Fans out to every selected marketplace — eBay (Trading/Inventory), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
 
 ## Quick start
 
@@ -137,7 +138,11 @@ Without them, you can still type a category ID manually in the preview.
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
-| `POST` | `/api/publish` | Push to eBay (draft/live) or dry-run |
+| `POST` | `/api/publish` | Publish (draft/live). Add `marketplaces: ["ebay","etsy","depop"]` to fan out; omit for the legacy eBay-only behavior |
+| `GET`  | `/api/marketplaces` | Every marketplace + connection state (drives Settings & publish chips) |
+| `GET`  | `/api/{marketplace}/connect` · `/callback` | OAuth connect flow (eBay, Etsy, Depop) |
+| `POST` | `/api/{marketplace}/end-listing` | End one marketplace's live listing |
+| `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
@@ -194,6 +199,33 @@ when the buyer closes the tab. When billing is on, AI endpoints require a
 login (balances are per-account) and return **402** with an "out of tokens"
 message the UI turns into the buy dialog; a bulk batch that runs dry saves
 the remaining items as photo-only stub drafts so nothing is lost.
+
+## Marketplaces (eBay · Etsy · Depop)
+
+Every marketplace is a provider behind one interface (`backend/marketplaces/`):
+OAuth connect, per-user credentials, preflight, publish, and end. `POST
+/api/publish` without a `marketplaces` field keeps the original eBay-only
+behavior byte-for-byte; with one, each marketplace publishes independently —
+one failing never rolls back the others — and per-marketplace state
+(listing id, URL, status, last error) lives on the listing record.
+
+- **eBay** — unchanged: Trading API for new live listings, Inventory for
+  drafts/dry-runs, imported-listing revise/relist, Promoted Listings.
+- **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
+  `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
+  then activated on a live publish. Etsy requires a category (AI Suggest
+  built in), who-made/when-made attribution, and a shipping profile
+  (defaults per account under Settings). Note: Etsy allows only handmade,
+  vintage (20+ years), and craft supplies, and rotates refresh tokens —
+  both are handled.
+- **Depop** — official Selling API, which is **partner-gated**: apply via
+  Depop partnerships, then set the five `DEPOP_*` vars from onboarding
+  (`.env.example`). Until then Depop simply stays hidden. No drafts or
+  auctions on Depop; titles are word-boundary-truncated to its limit and
+  conditions translated.
+
+Adding marketplace N+1 = one provider module + one import in
+`backend/marketplaces/__init__.py`.
 
 ## Database (Neon / Postgres)
 

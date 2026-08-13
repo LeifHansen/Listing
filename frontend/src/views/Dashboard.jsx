@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, Megaphone, TrendingDown, Tag, RotateCcw,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
+  ChevronDown,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -28,6 +29,115 @@ const REC_TONE = {
   relist: "bg-red-soft text-error", photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
 };
+// Category headings for the grouped view — the per-rec `label` is an
+// imperative for one listing ("Lower the price"); groups need the noun form.
+const REC_GROUP_LABEL = {
+  promote: "Promote listings",
+  lower_price: "Lower prices",
+  finish: "Finish & list",
+  relist: "Relist ended items",
+  photos: "Add more photos",
+  specifics: "Fill in details",
+};
+
+// One suggestion row — the pre-grouping list item, unchanged.
+function RecRow({ rec, promoting, promoteOne, openListing }) {
+  const Icon = REC_ICON[rec.type] || Lightbulb;
+  const isPromote = rec.type === "promote";
+  return (
+    <div className="flex items-center gap-3.5 p-4">
+      <span className={cn(
+        "grid place-items-center size-10 rounded-[13px] shrink-0",
+        REC_TONE[rec.type] || "bg-blue-soft text-blue",
+      )}>
+        <Icon size={19} strokeWidth={2} aria-hidden />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
+        <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
+      </div>
+      {isPromote ? (
+        <Button variant="soft" size="sm" className="shrink-0"
+          loading={promoting === rec.listing_id} disabled={!!promoting}
+          onClick={() => promoteOne(rec)}>
+          {rec.rate ? `Promote ${rec.rate}%` : "Promote"}
+        </Button>
+      ) : (
+        <Button variant="soft" size="sm" className="shrink-0"
+          onClick={() => openListing(rec.listing_id)}>
+          {rec.label} <ArrowRight aria-hidden />
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// One suggestion category: a collapsed header (icon, label, count) that
+// expands to the full row list. Collapsed by default — eight "Lower the
+// price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
+function RecGroup({ group, promoting, promoteAll, promoteOne, openListing }) {
+  const [open, setOpen] = useState(false);
+  const Icon = REC_ICON[group.type] || Lightbulb;
+  return (
+    <div>
+      <div className="flex items-center gap-2 pr-4">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="flex-1 min-w-0 flex items-center gap-3.5 p-4 text-left cursor-pointer"
+        >
+          <span className={cn(
+            "grid place-items-center size-10 rounded-[13px] shrink-0",
+            REC_TONE[group.type] || "bg-blue-soft text-blue",
+          )}>
+            <Icon size={19} strokeWidth={2} aria-hidden />
+          </span>
+          <span className="font-semibold text-sm text-ink truncate">
+            {REC_GROUP_LABEL[group.type] || group.recs[0].label}
+          </span>
+          <span className="grid place-items-center tabular-nums text-[11px] font-bold rounded-full bg-bg-sunken px-1.5 min-w-5 h-5 text-ink-secondary">
+            {group.recs.length}
+          </span>
+          <motion.span
+            animate={{ rotate: open ? 180 : 0 }}
+            transition={{ duration: 0.18 }}
+            className="ml-auto text-ink-faint shrink-0"
+          >
+            <ChevronDown size={17} aria-hidden />
+          </motion.span>
+        </button>
+        {/* Sibling of the toggle, never nested inside it (invalid HTML). */}
+        {group.type === "promote" && (
+          <Button variant="soft" size="sm" className="shrink-0"
+            loading={promoting === "all"} disabled={!!promoting}
+            onClick={promoteAll}>
+            <Megaphone aria-hidden /> Promote all
+          </Button>
+        )}
+      </div>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+            className="overflow-hidden"
+          >
+            <div className="divide-y divide-line border-t border-line">
+              {group.recs.map((rec) => (
+                <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
+                  promoting={promoting} promoteOne={promoteOne}
+                  openListing={openListing} />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
 function greeting() {
   const h = new Date().getHours();
@@ -322,50 +432,30 @@ export function Dashboard() {
         );
       })()}
 
-      {/* Suggested actions — the recommendation engine's picks */}
+      {/* Suggested actions — the recommendation engine's picks, one collapsed
+          group per category (expand for the per-listing rows). */}
       {insights.length > 0 && (
         <motion.div variants={rise}>
-          <SectionHeader
-            icon={Lightbulb}
-            title="Suggested actions"
-            action={insights.some((r) => r.type === "promote") && (
-              <Button variant="soft" size="sm" loading={promoting === "all"}
-                disabled={!!promoting} onClick={promoteAll}>
-                <Megaphone aria-hidden /> Promote all
-              </Button>
-            )}
-          />
+          <SectionHeader icon={Lightbulb} title="Suggested actions" />
           <Card className="p-0 divide-y divide-line overflow-hidden">
-            {insights.map((rec) => {
-              const Icon = REC_ICON[rec.type] || Lightbulb;
-              const isPromote = rec.type === "promote";
-              return (
-                <div key={`${rec.listing_id}-${rec.type}`} className="flex items-center gap-3.5 p-4">
-                  <span className={cn(
-                    "grid place-items-center size-10 rounded-[13px] shrink-0",
-                    REC_TONE[rec.type] || "bg-blue-soft text-blue",
-                  )}>
-                    <Icon size={19} strokeWidth={2} aria-hidden />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
-                    <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
-                  </div>
-                  {isPromote ? (
-                    <Button variant="soft" size="sm" className="shrink-0"
-                      loading={promoting === rec.listing_id} disabled={!!promoting}
-                      onClick={() => promoteOne(rec)}>
-                      {rec.rate ? `Promote ${rec.rate}%` : "Promote"}
-                    </Button>
-                  ) : (
-                    <Button variant="soft" size="sm" className="shrink-0"
-                      onClick={() => openListing(rec.listing_id)}>
-                      {rec.label} <ArrowRight aria-hidden />
-                    </Button>
-                  )}
-                </div>
-              );
-            })}
+            {(() => {
+              // Group by type, preserving arrival order: the API sorts by
+              // priority desc, so groups order by their strongest rec.
+              const groups = [];
+              const byType = {};
+              for (const rec of insights) {
+                if (!byType[rec.type]) {
+                  byType[rec.type] = { type: rec.type, recs: [] };
+                  groups.push(byType[rec.type]);
+                }
+                byType[rec.type].recs.push(rec);
+              }
+              return groups.map((g) => (
+                <RecGroup key={g.type} group={g} promoting={promoting}
+                  promoteAll={promoteAll} promoteOne={promoteOne}
+                  openListing={openListing} />
+              ));
+            })()}
           </Card>
         </motion.div>
       )}
@@ -376,7 +466,7 @@ export function Dashboard() {
           icon={Tags}
           title="Recent listings"
           action={items.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={() => setView("listings")}>
+            <Button variant="ghost" size="sm" onClick={() => openListings("all")}>
               View all <ArrowRight aria-hidden />
             </Button>
           )}

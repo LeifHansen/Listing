@@ -59,6 +59,24 @@ class EbayAccount(Base):
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class MarketplaceAccount(Base):
+    """One row per (user, marketplace) connection for every marketplace other
+    than eBay — eBay predates this table and stays on ebay_accounts; the
+    provider layer hides the split. Marketplace-specific settings (Etsy's
+    shop id / shipping profile / return policy defaults, etc.) ride the JSON
+    column so future fields need no migration."""
+
+    __tablename__ = "marketplace_accounts"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    marketplace: Mapped[str] = mapped_column(String(32), primary_key=True)
+    refresh_token: Mapped[str] = mapped_column(String(4096), default="")
+    external_username: Mapped[str] = mapped_column(String(128), default="")
+    external_id: Mapped[str] = mapped_column(String(64), default="")
+    settings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ListingRecord(Base):
     __tablename__ = "listings"
 
@@ -472,6 +490,71 @@ def disconnect_ebay_account(user_id: str) -> None:
                 s.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: disconnect_ebay_account failed: {exc}")
+
+
+# --- marketplace accounts (everything except eBay) -------------------------
+
+_MARKETPLACE_FIELDS = ("refresh_token", "external_username", "external_id",
+                       "settings")
+
+
+def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
+    """Create/update a user's connection to one marketplace. Never raises.
+    `settings` keys MERGE into the stored JSON (a reconnect refreshing the
+    shop id must not wipe the user's saved shipping/return defaults)."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            acct = s.get(MarketplaceAccount, (user_id, marketplace))
+            if acct is None:
+                acct = MarketplaceAccount(user_id=user_id, marketplace=marketplace)
+                s.add(acct)
+            for key in _MARKETPLACE_FIELDS:
+                if key in fields and fields[key] is not None:
+                    if key == "settings":
+                        acct.settings = {**(acct.settings or {}), **fields[key]}
+                    else:
+                        setattr(acct, key, fields[key])
+            acct.updated_at = _now()
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: save_marketplace_account failed: {exc}")
+
+
+def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            a = s.get(MarketplaceAccount, (user_id, marketplace))
+            if not a:
+                return None
+            out = {f: getattr(a, f) for f in _MARKETPLACE_FIELDS}
+            out["settings"] = out.get("settings") or {}
+            return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_marketplace_account failed: {exc}")
+        return None
+
+
+def disconnect_marketplace_account(user_id: str, marketplace: str) -> None:
+    """Clear the live link but keep settings, mirroring the eBay behavior:
+    reconnecting the same account restores its saved defaults. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            acct = s.get(MarketplaceAccount, (user_id, marketplace))
+            if acct is not None:
+                acct.refresh_token = ""  # 'connected' checks this; settings stay
+                acct.updated_at = _now()
+                s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: disconnect_marketplace_account failed: {exc}")
 
 
 def get_listing(listing_id: str) -> Optional[dict]:

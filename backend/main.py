@@ -24,13 +24,19 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, db, ebay_auth, ebay_errors, objstore, storage
+from . import auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore, storage
 from .config import log
-from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
-                     SessionOnlyRequest)
+from .marketplaces import ebay_provider
+from .marketplaces import state as marketplace_state
+from .marketplaces.base import PublishContext, PublishOutcome
+from .marketplaces.state import STICKY_STATUSES
+from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
+                     RefineRequest, SessionOnlyRequest)
 from .services import (claude_ai, ebay, ebay_trading, image_import, images,
                        listing_sync, metrics, orient, preflight, pricing,
                        promotions, recommender, taxonomy, tokens)
+from .services import etsy as etsy_service
+from .services.background import run_in_background
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -449,18 +455,9 @@ def _assert_session_owner(session_id: str, request: Request) -> None:
         raise HTTPException(404, "Listing not found")
 
 
-def _in_background(fn, *args, what: str = "") -> None:
-    """Run fn(*args) on a daemon thread — for mirror/bookkeeping work (R2
-    pushes/deletes, updated_at bumps, directory cleanup) that shouldn't hold
-    up the response. The user-visible change is already done locally by the
-    time this runs; failures are logged, never surfaced."""
-    def _run() -> None:
-        try:
-            fn(*args)
-        except Exception as exc:  # noqa: BLE001 - background work is best-effort
-            log.warning("background %s failed: %s",
-                        what or getattr(fn, "__name__", "task"), exc)
-    threading.Thread(target=_run, daemon=True).start()
+# Moved to services/background.py so marketplace providers share it; the
+# local name keeps every existing call site unchanged.
+_in_background = run_in_background
 
 
 def _ensure_local(session_id: str, name: str, path: Path) -> bool:
@@ -698,52 +695,14 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
 
 # --- eBay connect (Sign in with eBay) --------------------------------------
 
-# Access tokens live ~2 hours; refreshing one per request added a serial
-# ~300-600ms eBay round-trip to every creds-needing call (a dashboard load
-# fires several). Keyed by the refresh token itself, so a reconnect (new
-# refresh token) naturally misses the cache.
-_TOKEN_CACHE: dict[str, tuple[float, str]] = {}
-
-
-def _access_token_for(refresh_token: str) -> str:
-    hit = _TOKEN_CACHE.get(refresh_token)
-    if hit and time.time() < hit[0]:
-        return hit[1]
-    fresh = ebay_auth.refresh_access_token(refresh_token)
-    # Drop the cached token 90s before eBay's expiry so an in-flight request
-    # never carries one that dies mid-call.
-    expires = float(fresh.get("expires_at") or (time.time() + 1800))
-    if len(_TOKEN_CACHE) > 50:
-        _TOKEN_CACHE.clear()
-    _TOKEN_CACHE[refresh_token] = (max(time.time() + 60, expires - 90),
-                                   fresh["access_token"])
-    return fresh["access_token"]
+# The token cache, per-user creds bundle, promotion helpers and the whole
+# publish pipeline moved to marketplaces/ebay_provider.py; these same-named
+# wrappers keep every existing /api/ebay/* route below unchanged.
 
 
 def _ebay_creds_for(request: Request):
     """Build live eBay creds for the logged-in user, or None if not connected."""
-    uid = _uid(request)
-    if not uid:
-        return None
-    acct = db.get_ebay_account(uid)
-    if not acct or not acct.get("refresh_token"):
-        return None
-    try:
-        access_token = _access_token_for(acct["refresh_token"])
-    except Exception as exc:  # noqa: BLE001 - fall back to dry-run, but log it
-        # A token-refresh outage otherwise looks identical to "not connected"
-        # and silently dry-runs a live publish; log so it's debuggable.
-        log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
-        return None
-    return {
-        "access_token": access_token,
-        "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
-        "payment_policy_id": acct.get("payment_policy_id", ""),
-        "return_policy_id": acct.get("return_policy_id", ""),
-        "merchant_location_key": acct.get("merchant_location_key", ""),
-        "ship_from_postal": acct.get("ship_from_postal", ""),
-        "_uid": uid,
-    }
+    return ebay_provider.creds_for(_uid(request))
 
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
@@ -901,50 +860,34 @@ def ensure_policy(request: Request, payload: dict) -> dict:
 
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
-    creds = _ebay_creds_for(request)
-    connected = bool(creds) or config.ebay_ready()
-    if creds:
-        fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
-        has_payment = bool(creds.get("payment_policy_id"))
-        has_return = bool(creds.get("return_policy_id"))
-        # A saved ship-from ZIP is enough: the Trading publish path sends the
-        # postal code directly, and the Inventory path re-creates the eBay
-        # location from that ZIP just before publishing. Demanding a
-        # merchantLocationKey here blocked publishes that would have worked.
-        has_location = bool(creds.get("merchant_location_key")
-                            or creds.get("ship_from_postal"))
-    else:
-        fulfillment = listing.fulfillment_policy_id or config.EBAY_FULFILLMENT_POLICY_ID or ""
-        has_payment = bool(config.EBAY_PAYMENT_POLICY_ID)
-        has_return = bool(config.EBAY_RETURN_POLICY_ID)
-        has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
-
-    # What the chosen shipping policy actually ships with (per-service weight
-    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz).
-    services = (ebay_auth.fulfillment_policy_services(creds["access_token"], fulfillment)
-                if creds and fulfillment else [])
-
-    required = None
-    if config.taxonomy_ready() and (listing.category_id or "").strip().isdigit():
-        try:
-            asp = taxonomy.item_aspects(listing.category_id)
-            required = [a["name"] for a in asp.get("aspects", []) if a.get("required")]
-        except Exception:  # noqa: BLE001 - aspects are a best-effort check
-            required = None
-
-    return preflight.validate(
-        listing, mode,
-        has_fulfillment=bool(fulfillment), has_payment=has_payment,
-        has_return=has_return, has_location=has_location, connected=connected,
-        policy_services=services, required_aspects=required)
+    return ebay_provider.preflight_issues(_uid(request), listing, mode)
 
 
 @app.post("/api/publish-preflight")
 async def publish_preflight(req: PublishRequest, request: Request) -> dict:
-    """The full 'ready to publish?' checklist, without touching the listing."""
+    """The full 'ready to publish?' checklist, without touching the listing.
+    The legacy shape ({ok, issues}) is always the eBay checklist; when the
+    request targets more marketplaces, their checklists ride along under
+    by_marketplace so the editor can jump to marketplace-specific fixes."""
     issues = await run_in_threadpool(
         _preflight_issues, request, req.listing, req.mode or "live")
-    return {"ok": not preflight.errors_only(issues), "issues": issues}
+    out = {"ok": not preflight.errors_only(issues), "issues": issues}
+    others = [k for k in dict.fromkeys(
+        (key or "").strip().lower() for key in req.marketplaces)
+        if k and k != "ebay"]
+    if others:
+        uid = _uid(request)
+        by: dict = {}
+        for key in others:
+            provider = marketplaces.get(key)
+            if provider is None:
+                continue
+            by[key] = await run_in_threadpool(
+                provider.preflight, uid, req.listing, req.mode or "live")
+        out["by_marketplace"] = by
+        out["ok"] = out["ok"] and not any(
+            preflight.errors_only(v) for v in by.values())
+    return out
 
 
 @app.get("/api/ebay/account-overview")
@@ -1106,45 +1049,10 @@ def save_prefs(request: Request, payload: dict) -> dict:
     return {"ok": True, "prefs": merged}
 
 
-def _auto_promote_enabled(uid: Optional[str]) -> bool:
-    """Account default: promote every newly published listing at eBay's
-    recommended ad rate. ON unless explicitly turned off in Settings — sellers
-    reported publishes landing unpromoted and only discovering it later from
-    the Dashboard nags. Anonymous/env-token publishes stay explicit-only."""
-    if not uid:
-        return False
-    try:
-        value = db.get_prefs(uid).get("auto_promote")
-    except Exception:  # noqa: BLE001 - prefs are optional
-        return True
-    return True if value is None else bool(value)
-
-
-def _promote(record_id: str, listing: Listing, creds: Optional[dict],
-             rate: Optional[float] = None,
-             ebay_listing_id: Optional[str] = None) -> dict:
-    """Turn Promoted Listings on for one listing and run the ad call.
-
-    The single place that decides an ad rate: an explicit `rate` wins, else
-    eBay's recommendation for `ebay_listing_id`, else the default. A 0% rate
-    makes promote_listing silently no-op — which is exactly why listings with
-    Promote toggled on were never actually promoted — so the rate is always
-    filled in here. Mutates listing.promote/ad_rate_percent so the caller can
-    persist what really ran, and never raises: a promotion problem must not
-    fail the publish that preceded it."""
-    try:
-        listing.promote = True
-        if not rate or rate <= 0:
-            rate = None
-            if ebay_listing_id:
-                recommended = promotions.suggested_ad_rates(
-                    creds, [str(ebay_listing_id)])
-                rate = recommended.get(str(ebay_listing_id))
-        listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
-        return promotions.promote_listing(record_id, listing, creds)
-    except Exception as exc:  # noqa: BLE001 - promotion must never break publish
-        log.warning("promote failed (%s): %s", record_id, exc)
-        return {"promoted": False, "message": f"Promotion failed: {exc}"}
+# Moved to marketplaces/ebay_provider.py with the publish pipeline; the local
+# names keep the sync/promotion routes below unchanged.
+_auto_promote_enabled = ebay_provider.auto_promote_enabled
+_promote = ebay_provider.promote
 
 
 def _pricing_strategy(uid: Optional[str]) -> str:
@@ -1861,8 +1769,9 @@ def price_suggestions(payload: dict, request: Request) -> dict:
 # status: image edits auto-save, bulk publish saves, and flattening
 # published/live/ended/sold/unlisted to "draft" made live listings vanish
 # from Active, resurrected sold ones as drafts, and pulled Shop-Mode finds
-# out of the Finds tab (architect findings #3 and #7).
-_STICKY_STATUSES = ("published", "live", "ended", "sold", "unlisted")
+# out of the Finds tab (architect findings #3 and #7). The tuple itself now
+# lives in marketplaces/state.py, shared with the per-marketplace state merge.
+_STICKY_STATUSES = STICKY_STATUSES
 
 
 def _preserved_status(session_id: str, default: str = "draft") -> str:
@@ -2469,9 +2378,11 @@ def insights(request: Request) -> dict:
         metrics_by_id = _metrics_by_record_id(creds, items)
         rates_by_id = _rates_by_record_id(creds, items)
         promoted_ids = _promoted_record_ids(creds, items)
+        # limit=50: the dashboard groups these by category now, so each group
+        # should show its full membership — the old flat list capped at 8.
         return {"recommendations": recommender.recommendations(
             items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
-            promoted_ids=promoted_ids)}
+            promoted_ids=promoted_ids, limit=50)}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": []}
@@ -2547,27 +2458,6 @@ def get_listing(listing_id: str, request: Request) -> dict:
         raise HTTPException(404, "Listing not found")
     _adopt_imported_images(listing_id, rec)
     return rec
-
-
-def _refresh_eps_urls(listing_id: str, token: str, item_id: str,
-                      uid: Optional[str]) -> None:
-    """After eBay ingests our /media photo URLs on a revise, fetch the fresh
-    EPS URLs it minted and store them as the listing's sync references. The
-    local working copies remain the editable truth either way — these URLs
-    only matter for unchanged-photo publishes and the read-only fallback."""
-    fresh = ebay_trading.get_listing(token, item_id)
-    urls = fresh.get("image_urls") or []
-    if not urls:
-        return
-    rec = db.get_listing(listing_id)
-    if not rec:
-        return
-    listing = rec.get("listing") or {}
-    listing["image_urls"] = urls
-    db.upsert_listing(listing_id, listing, status=rec.get("status") or "published",
-                      user_id=uid or rec.get("user_id"))
-    log.info("EPS refresh: %s now references %d eBay-hosted photos",
-             listing_id, len(urls))
 
 
 def _adopt_imported_images(listing_id: str, rec: dict) -> None:
@@ -2702,207 +2592,125 @@ def merge_listings(payload: dict, request: Request) -> dict:
 
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
+    """Publish orchestrator.
+
+    No `marketplaces` in the request (every pre-multi client) → the legacy
+    single-eBay path: the eBay provider (Trading-vs-Inventory routing,
+    imported revise/relist, preflight, promotion — moved verbatim to
+    marketplaces/ebay_provider.py) returns its legacy JSON body, returned
+    here untouched.
+
+    With `marketplaces` → fan out to each named provider independently: one
+    marketplace failing never blocks or rolls back the others, and the
+    response carries a per-marketplace result map.
+    """
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
-    creds = _ebay_creds_for(request)
-
+    uid = _uid(request)
     prev_rec = db.get_listing(req.session_id) or {}
-    already_live = prev_rec.get("status") in ("published", "live")
 
-    # A listing IMPORTED from eBay (or published by us through Trading) isn't
-    # Inventory-API managed, so edits go back through the Trading API instead
-    # of the publish path below.
-    if listing_sync.is_imported(req.listing):
-        uid = _uid(request)
-        # The record's REAL lifecycle stage decides what "publish" means here:
-        # live → revise in place; ended/sold → relist as a NEW listing (eBay
-        # refuses to revise an ended item). Status writes preserve the truth —
-        # a failed attempt must not move an Inactive record back to Active.
-        prev_status = (prev_rec.get("status")
-                       if prev_rec.get("status") in _STICKY_STATUSES else "published")
-        if req.mode == "draft":
-            db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status=prev_status, user_id=uid)
-            return JSONResponse({"dry_run": False, "mode": "draft",
-                                 "message": "Saved. Choose Update on eBay to push "
-                                            "these changes to your live listing."})
-        if not creds:
-            raise HTTPException(400, "Connect eBay first.")
-        relist = prev_status in ("ended", "sold")
-        # Photo sync: local working copies are the truth. Edited since the
-        # last sync (or photos added/removed) → send OUR /media URLs so eBay
-        # ingests fresh copies; untouched → reuse the live EPS URLs and skip
-        # the re-upload churn entirely. A relist always needs URLs.
-        urls, pushed_local = req.listing.image_urls or None, False
-        local_names = [n for n in (req.listing.images or [])
-                       if (storage.optimized_dir(req.session_id) / n).is_file()]
-        if local_names and (not urls or relist
-                            or image_import.images_changed(req.session_id, local_names)):
-            urls = ebay.image_urls_for(req.session_id, req.listing, _base_url(request))
-            pushed_local = True
-        try:
-            if relist:
-                # "Open one to relist it fresh" — the Inactive tab's promise.
-                # A fresh listing also mints a new item id (search boost).
-                if not urls:
-                    raise ValueError("This listing has no photos left to relist with.")
-                res = listing_sync.create_on_ebay(
-                    creds["access_token"], req.listing, urls, creds=creds)
-            else:
-                res = listing_sync.push_edit(creds["access_token"], req.listing,
-                                             image_urls=urls)
-        except ValueError as exc:  # TradingError — eBay's own reason
-            log.warning("%s (imported) failed: session=%s: %s",
-                        "relist" if relist else "revise", req.session_id, exc)
-            db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status=prev_status, user_id=uid)
-            return JSONResponse({
-                "dry_run": False, "error": True, "mode": "live",
-                "message": str(exc),
-                "issues": ebay_errors.from_response(str(exc)),
-            })
-        db.upsert_listing(req.session_id, req.listing.model_dump(),
-                          status="published", user_id=uid)
-        if pushed_local:
-            # eBay accepted our copies: re-baseline the checksums and, in the
-            # background (after the upsert above, so it can't be overwritten),
-            # pull the new EPS URLs eBay minted so the sync references stay
-            # current.
-            image_import.mark_synced(req.session_id, local_names)
-            _in_background(_refresh_eps_urls, req.session_id,
-                           creds["access_token"], req.listing.ebay_listing_id,
-                           uid, what="EPS URL refresh")
-        log.info("%s (imported) ok: session=%s item=%s photos=%s",
-                 "relist" if relist else "revise",
-                 req.session_id, res.get("listing_id"),
-                 "local-updated" if pushed_local else "unchanged")
-        return JSONResponse({"published": True, "revised": not relist,
-                             "relisted": relist, "mode": "live",
-                             "listing_id": res.get("listing_id"),
-                             "message": ("Relisted! It's live on eBay as a fresh "
-                                         "listing with a new item number."
-                                         if relist else
-                                         "Your eBay listing has been updated.")})
+    # The server owns per-marketplace state: whatever map the client sent is
+    # replaced with the stored record's before anything reads it, so a stale
+    # browser tab can never wipe another marketplace's listing id.
+    stored_states = ((prev_rec.get("listing") or {}).get("marketplaces") or {})
+    req.listing.marketplaces = {
+        k: MarketplaceState(**(v or {})) for k, v in stored_states.items()}
 
-    # A listing that's already live must NEVER lose its 'published' status in
-    # our records just because a revise attempt was blocked or errored — the
-    # listing is still live on eBay either way.
-    was_live = already_live
-    # Pre-publish checklist: catch everything eBay would reject BEFORE the
-    # round-trip, with field-targeted fixes. Only gates a real (connected)
-    # live publish — dry-runs and drafts stay permissive.
-    if req.mode == "live" and (creds or config.ebay_ready()):
-        problems = preflight.errors_only(_preflight_issues(request, req.listing, "live"))
-        if problems:
-            db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status="published" if was_live else "draft",
-                              user_id=_uid(request))
-            log.info("publish blocked by preflight: session=%s issues=%d",
-                     req.session_id, len(problems))
-            return JSONResponse({
-                "dry_run": False,
-                "error": True,
-                "mode": req.mode,
-                "message": f"Not quite ready — {len(problems)} thing"
-                           f"{'s' if len(problems) != 1 else ''} to fix before eBay will accept it:",
-                "issues": problems,
-            })
-    # Self-heal the ship-from location on a live publish: re-ensure it from the
-    # saved ZIP so a location missing its country (eBay 'Item.Country empty')
-    # gets repaired without the user re-saving settings.
-    if req.mode == "live" and creds and creds.get("ship_from_postal"):
-        try:
-            key = ebay_auth.ensure_inventory_location(
-                creds["access_token"], creds["ship_from_postal"])
-            if key:
-                creds["merchant_location_key"] = key
-                db.save_ebay_account(creds["_uid"], merchant_location_key=key)
-        except Exception as exc:  # noqa: BLE001 - don't block publish on this
-            log.warning(f"ebay: location re-ensure failed: {exc}")
-    # NEW live listings go out through the Trading API, not the Inventory API.
-    # An Inventory-API listing is "inventory-based" and eBay refuses to let the
-    # seller edit it anywhere but the tool that made it — Seller Hub answers
-    # "Inventory-based listing management is not currently supported by this
-    # tool." Publishing through Trading produces an ordinary listing they can
-    # edit in Seller Hub, the eBay app, or here; source="ebay" then routes later
-    # edits from this app down the same revise path imported listings use.
-    if (req.mode == "live" and creds and not already_live
-            and not listing_sync.is_imported(req.listing)
-            and not req.listing.ebay_listing_id):
-        urls = ebay.image_urls_for(req.session_id, req.listing, _base_url(request))
-        try:
-            res = listing_sync.create_on_ebay(
-                creds["access_token"], req.listing, urls, creds=creds)
-        except ValueError as exc:  # TradingError — eBay's own reason
-            log.warning("trading publish failed: session=%s: %s", req.session_id, exc)
-            db.upsert_listing(req.session_id, req.listing.model_dump(),
-                              status="draft", user_id=_uid(request))
-            return JSONResponse({
-                "dry_run": False, "error": True, "mode": "live",
-                "message": str(exc),
-                "issues": ebay_errors.from_response(str(exc)),
-            })
-        storage.save_listing(req.session_id, req.listing)
-        result = {"published": True, "mode": "live",
-                  "listing_id": res["listing_id"],
-                  "message": "Your listing is live on eBay."}
-        if req.listing.promote or _auto_promote_enabled(_uid(request)):
-            result["promote_status"] = _promote(
-                req.session_id, req.listing, creds,
-                rate=req.listing.ad_rate_percent,
-                ebay_listing_id=res["listing_id"])
-        db.upsert_listing(req.session_id, req.listing.model_dump(),
-                          status="published", user_id=_uid(request))
-        log.info("trading publish ok: session=%s item=%s",
-                 req.session_id, res["listing_id"])
-        return JSONResponse(result)
+    targets: list[str] = []
+    for key in req.marketplaces:
+        key = (key or "").strip().lower()
+        if key and key not in targets:
+            targets.append(key)
 
-    log.info("publish request: session=%s mode=%s connected=%s", req.session_id,
-             req.mode, bool(creds))
-    result = ebay.publish(req.session_id, req.listing, req.mode, _base_url(request),
-                          creds=creds, is_revise=was_live)
-    # Record the outcome: published (live), draft, or dry-run. An errored
-    # attempt never demotes a live listing, and never records "live" for a
-    # listing that isn't (the old status=req.mode did exactly that).
-    if result.get("published"):
-        status = "published"
-        log.info("publish OK: session=%s listing_id=%s revised=%s",
-                 req.session_id, result.get("listing_id"), result.get("revised"))
-    elif result.get("error"):
-        status = "published" if was_live else "draft"
-        log.warning("publish error: session=%s step=%s", req.session_id, result.get("step"))
-    elif result.get("dry_run"):
-        status = "dry_run"
+    def _ctx() -> PublishContext:
+        return PublishContext(
+            session_id=req.session_id, listing=req.listing, mode=req.mode,
+            base_url=_base_url(request), uid=uid, prev_record=prev_rec)
+
+    if not targets or targets == ["ebay"]:
+        # Legacy path — byte-identical responses; the provider already
+        # persisted the record exactly as the old inline code did (including
+        # racing rules around the background EPS refresh), so no second
+        # upsert here.
+        provider = marketplaces.get("ebay")
+        outcome = provider.publish(_ctx(), provider.creds_for(uid))
+        return JSONResponse(outcome.raw)
+
+    outcomes: dict = {}
+    for key in targets:
+        provider = marketplaces.get(key)
+        if provider is None:
+            outcomes[key] = PublishOutcome(
+                ok=False, message=f"Unknown marketplace '{key}'.")
+            continue
+        try:
+            outcomes[key] = provider.publish(_ctx(), provider.creds_for(uid))
+        except HTTPException as exc:
+            outcomes[key] = PublishOutcome(ok=False, message=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 - isolate marketplace failures
+            log.warning("%s publish crashed: session=%s: %s",
+                        key, req.session_id, exc)
+            outcomes[key] = PublishOutcome(
+                ok=False, message=f"{provider.label} publish failed: {exc}")
+
+    # Fold every outcome into the record. Re-read first: providers (eBay
+    # especially) upsert internally, and their writes must not be lost.
+    fresh = db.get_listing(req.session_id) or {}
+    data = fresh.get("listing") or req.listing.model_dump()
+    for key, outcome in outcomes.items():
+        marketplace_state.merge_state(data, key, outcome)
+    top = marketplace_state.derive_top_status(
+        prev_rec.get("status") or "", outcomes, req.mode)
+    db.upsert_listing(req.session_id, data, status=top, user_id=uid)
+
+    live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
+    failed = [k for k, o in outcomes.items() if not o.ok]
+    dry = [k for k, o in outcomes.items() if o.dry_run]
+
+    def _label(key: str) -> str:
+        p = marketplaces.get(key)
+        return p.label if p else key
+
+    def _names(keys: list[str]) -> str:
+        labels = [_label(k) for k in keys]
+        return " and ".join(part for part in
+                            [", ".join(labels[:-1]), labels[-1]] if part)
+
+    if live:
+        message = f"Live on {_names(live)}."
+        if failed:
+            message += f" {_names(failed)} didn't make it — details below."
+    elif failed:
+        message = (f"{_names(failed)} rejected the listing — "
+                   "fix the issues below and try again.")
+    elif req.mode == "draft":
+        message = "Draft saved."
+    elif dry:
+        message = f"Dry run only — connect {_names(dry)} to post for real."
     else:
-        status = "published" if was_live else req.mode
-    dump = req.listing.model_dump()
-    # Persist the eBay item id so the app can link to (and keep tracking) the
-    # live listing across sessions.
-    if result.get("listing_id"):
-        dump["ebay_listing_id"] = str(result["listing_id"])
-    db.upsert_listing(req.session_id, dump, status=status, user_id=_uid(request))
-    # Promoted Listings: once the item is live, best-effort create/refresh its
-    # ad. Runs when the listing's Promote toggle is on OR the account's
-    # auto-promote default (Settings) is — at the chosen rate, else eBay's
-    # recommended rate. Never blocks or fails the publish; the status is
-    # attached for the UI to show (incl. 'reconnect to grant ad permissions').
-    if result.get("published") and (req.listing.promote
-                                    or _auto_promote_enabled(_uid(request))):
-        result["promote_status"] = _promote(
-            req.session_id, req.listing, creds,
-            rate=req.listing.ad_rate_percent,
-            ebay_listing_id=result.get("listing_id"))
-        if result["promote_status"].get("promoted"):
-            # Re-record with the promote flag + actual rate so the Dashboard
-            # and recommender see it as promoted.
-            dump = req.listing.model_dump()
-            if result.get("listing_id"):
-                dump["ebay_listing_id"] = str(result["listing_id"])
-            db.upsert_listing(req.session_id, dump, status=status,
-                              user_id=_uid(request))
-    return JSONResponse(result)
+        message = "Nothing was published."
+
+    return JSONResponse({
+        "multi": True,
+        "mode": req.mode,
+        "published": bool(live),
+        "message": message,
+        "results": {
+            key: {
+                "ok": o.ok,
+                "published": o.ok and o.status == "published",
+                "dry_run": o.dry_run,
+                "listing_id": o.listing_id,
+                "url": o.url,
+                "message": o.message,
+                "issues": o.issues,
+                **({"promote_status": o.raw["promote_status"]}
+                   if o.raw.get("promote_status") else {}),
+            } for key, o in outcomes.items()
+        },
+    })
 
 
 @app.post("/api/ebay/end-listing")
@@ -3086,6 +2894,220 @@ def terms():
 @app.get("/about")
 def about():
     return FileResponse(FRONTEND_DIR / "about.html")
+
+
+# --- marketplaces (generic connect/status plumbing) ------------------------
+# Registered AFTER every literal /api/ebay/* route on purpose: FastAPI matches
+# in registration order, so eBay keeps its original handlers (with their
+# account-preserving policy logic) and the {marketplace} patterns serve
+# everything registered later (Etsy, Depop, ...).
+
+
+@app.get("/api/marketplaces")
+def marketplace_roster(request: Request) -> dict:
+    """Every registered marketplace + this user's connection state — drives
+    the Settings connection cards and the publish-target chips in one call."""
+    uid = _uid(request)
+    out = []
+    for p in marketplaces.all_providers():
+        status = p.account_status(uid)
+        out.append({
+            "key": p.key,
+            "label": p.label,
+            "oauth_ready": p.oauth_ready(),
+            "oauth_missing": p.oauth_missing(),
+            "connected": bool(status.get("connected")),
+            "username": status.get("username", ""),
+            "env": status.get("env", "production"),
+            "supports": p.supports(),
+        })
+    return {"marketplaces": out}
+
+
+# Etsy-specific: the Settings pickers for the shop's shipping profiles and
+# return policies (Etsy's analog of /api/ebay/policies), and the AI category
+# suggestion. Literal paths, so they must sit above the {marketplace} routes.
+@app.get("/api/etsy/settings-options")
+def etsy_settings_options(request: Request) -> dict:
+    provider = marketplaces.get("etsy")
+    creds = provider.creds_for(_uid(request))
+    if not creds:
+        raise HTTPException(400, "Connect Etsy first.")
+    try:
+        profiles = etsy_auth.list_shipping_profiles(
+            creds["access_token"], creds["shop_id"])
+        policies = etsy_auth.list_return_policies(
+            creds["access_token"], creds["shop_id"])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Etsy couldn't list your shop's options: {exc}") from exc
+    settings = creds.get("settings") or {}
+    return {
+        "shipping_profiles": profiles,
+        "return_policies": policies,
+        "selected": {
+            "shipping_profile_id": str(settings.get("shipping_profile_id") or ""),
+            "return_policy_id": str(settings.get("return_policy_id") or ""),
+        },
+    }
+
+
+@app.post("/api/etsy/settings-options")
+def save_etsy_settings_options(request: Request, payload: dict) -> dict:
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    fields = {k: str(payload.get(k) or "")
+              for k in ("shipping_profile_id", "return_policy_id")
+              if k in payload}
+    if not fields:
+        raise HTTPException(400, "No settings provided.")
+    db.save_marketplace_account(uid, "etsy", settings=fields)
+    return {"ok": True, "selected": fields}
+
+
+@app.post("/api/etsy/suggest-taxonomy/{session_id}")
+def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> dict:
+    """Best Etsy category for this listing: cheap keyword shortlist over the
+    cached seller taxonomy, then one small Claude pick."""
+    if not config.etsy_oauth_ready():
+        raise HTTPException(400, "Etsy isn't configured on the server.")
+    _assert_session_owner(session_id, request)
+    listing = Listing(**(payload.get("listing") or {}))
+    try:
+        return etsy_service.suggest_taxonomy(listing)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Etsy category suggestion failed: {exc}") from exc
+
+
+def _flow_cookie(marketplace: str) -> str:
+    return f"{marketplace}_oauth_flow"
+
+
+def _marketplace_or_404(marketplace: str):
+    provider = marketplaces.get(marketplace)
+    if provider is None:
+        raise HTTPException(404, "Unknown marketplace")
+    return provider
+
+
+@app.get("/api/{marketplace}/connect")
+def marketplace_connect(marketplace: str, request: Request):
+    provider = _marketplace_or_404(marketplace)
+    if not provider.oauth_ready():
+        raise HTTPException(400, f"{provider.label} OAuth not configured "
+                                 f"(set {', '.join(provider.oauth_missing())}).")
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, f"Log in before connecting {provider.label}.")
+    import secrets as _secrets
+    nonce = _secrets.token_urlsafe(24)
+    url, flow = provider.authorize_url(auth.make_state(uid, nonce))
+    resp = RedirectResponse(url)
+    # Bind the flow to this browser, exactly like the eBay nonce cookie: the
+    # callback requires the nonce here to match the one in the signed state
+    # (CSRF protection). Flow secrets (e.g. Etsy's PKCE code_verifier) ride
+    # along — httponly, 10 minutes, this browser only.
+    resp.set_cookie(_flow_cookie(marketplace),
+                    json.dumps({"nonce": nonce, **flow}),
+                    max_age=600, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https")
+    return resp
+
+
+@app.get("/api/{marketplace}/callback")
+def marketplace_callback(marketplace: str, request: Request,
+                         code: str = "", state: str = ""):
+    provider = _marketplace_or_404(marketplace)
+    verified = auth.verify_state(state)
+    if not code or not verified:
+        return RedirectResponse(f"/?connect_error={marketplace}")
+    uid, nonce = verified
+    try:
+        flow = json.loads(request.cookies.get(_flow_cookie(marketplace), "") or "{}")
+    except ValueError:
+        flow = {}
+    # The nonce in the signed state must match the cookie set at connect time,
+    # so a callback can only bind an account to the browser that started the
+    # flow (blocks CSRF authorization-code injection).
+    if not flow.get("nonce") or flow.get("nonce") != nonce:
+        log.warning("%s callback: nonce mismatch (uid=%s)", marketplace, uid)
+        return RedirectResponse(f"/?connect_error={marketplace}")
+    try:
+        fields = provider.exchange_code(code, flow)
+    except Exception as exc:  # noqa: BLE001 - the redirect is the error surface
+        log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
+        return RedirectResponse(f"/?connect_error={marketplace}")
+    db.save_marketplace_account(uid, marketplace, **fields)
+    resp = RedirectResponse(f"/?connected={marketplace}")
+    resp.delete_cookie(_flow_cookie(marketplace))
+    return resp
+
+
+@app.get("/api/{marketplace}/status")
+def marketplace_status(marketplace: str, request: Request) -> dict:
+    provider = _marketplace_or_404(marketplace)
+    return provider.account_status(_uid(request))
+
+
+@app.post("/api/{marketplace}/disconnect")
+def marketplace_disconnect(marketplace: str, request: Request) -> dict:
+    provider = _marketplace_or_404(marketplace)
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    provider.disconnect(uid)
+    return {"ok": True}
+
+
+@app.post("/api/{marketplace}/end-listing")
+def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
+                            request: Request) -> dict:
+    """End this session's live listing on ONE marketplace. eBay keeps its
+    original /api/ebay/end-listing route (registered earlier, so it wins);
+    this generic one serves every other provider. The record's top-level
+    status only becomes 'ended' when nothing is live anywhere anymore."""
+    provider = _marketplace_or_404(marketplace)
+    rec = db.get_listing(req.session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    uid = _uid(request)
+    creds = provider.creds_for(uid)
+    if not creds:
+        raise HTTPException(400, f"Connect {provider.label} first.")
+    data = rec.get("listing") or {}
+    ctx = PublishContext(
+        session_id=req.session_id,
+        listing=Listing(**{k: v for k, v in data.items()
+                           if k in Listing.model_fields}),
+        mode="live", base_url=_base_url(request), uid=uid, prev_record=rec)
+    try:
+        res = provider.end(ctx, creds)
+    except NotImplementedError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    states = data.setdefault("marketplaces", {})
+    entry = dict(states.get(marketplace) or {})
+    entry["status"] = "ended"
+    entry["error"] = ""
+    states[marketplace] = entry
+    still_live = any((v or {}).get("status") == "published"
+                     for v in states.values())
+    # A pre-multi eBay listing may be live without an entry in the map.
+    if (not still_live and data.get("ebay_listing_id")
+            and not states.get("ebay")
+            and rec.get("status") in ("published", "live")):
+        still_live = True
+    prev_status = rec.get("status") or ""
+    if prev_status in ("published", "live"):
+        new_status = prev_status if still_live else "ended"
+    else:
+        new_status = prev_status or "draft"
+    db.upsert_listing(req.session_id, data, status=new_status,
+                      user_id=uid or rec.get("user_id"))
+    return {"ok": True, **res}
 
 
 # Serve the frontend (index.html + assets) at the root.

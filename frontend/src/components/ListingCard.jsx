@@ -120,6 +120,37 @@ export function ListingCard({
               )}
             </div>
           )}
+          {/* Cross-posting chips: where else this listing lives (Etsy, Depop,
+              ...). eBay stays implied by the origin/status badges above. */}
+          {(() => {
+            const others = Object.entries(l.marketplaces || {})
+              .filter(([key, st]) => key !== "ebay" && st && (st.status || st.error));
+            if (!others.length) return null;
+            const label = (key) => key.charAt(0).toUpperCase() + key.slice(1);
+            return (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {others.map(([key, st]) => (
+                  <span
+                    key={key}
+                    title={st.error
+                      ? `${label(key)}: ${st.error}`
+                      : `${label(key)}: ${st.status}`}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold",
+                      st.error
+                        ? "bg-warning-soft border-warning/40 text-warning"
+                        : st.status === "published"
+                          ? "bg-success-soft border-success/30 text-success"
+                          : "bg-bg-sunken border-line text-ink-secondary",
+                    )}
+                  >
+                    {label(key)}{" "}
+                    {st.error ? "!" : st.status === "published" ? "✓" : st.status}
+                  </span>
+                ))}
+              </div>
+            );
+          })()}
           {/* Profit framework: a sold item with a recorded cost basis shows
               what it made (sale price − what you paid, before fees). */}
           {item.status === "sold" && l.purchase_price != null && Number(l.price) > 0 && (

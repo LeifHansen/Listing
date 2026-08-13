@@ -16,6 +16,44 @@ class ItemSpecific(BaseModel):
     confidence: str = ""
 
 
+class MarketplaceState(BaseModel):
+    """One marketplace's live state for a listing (kept under
+    Listing.marketplaces, keyed by marketplace: "ebay", "etsy", ...). The
+    server owns this map — publish outcomes write it; client-sent copies are
+    replaced with the stored record's before merging, so a stale browser tab
+    can never wipe another marketplace's listing id."""
+
+    listing_id: str = ""
+    url: str = ""                # public view URL on that marketplace
+    status: str = ""             # "" | "draft" | "published" | "ended"
+    published_at: str = ""       # ISO-8601 UTC of the first live publish
+    error: str = ""              # last failed attempt's message ("" when ok)
+
+
+class EtsyFields(BaseModel):
+    """Etsy-only listing fields (Etsy Open API v3). who_made / when_made are
+    deliberately NOT defaulted: Etsy only allows handmade, vintage (20+
+    years), and craft supplies, so the seller must attest — a silent default
+    could publish a policy-violating listing."""
+
+    taxonomy_id: int = 0         # Etsy seller-taxonomy leaf id
+    who_made: str = ""           # i_did | someone_else | collective
+    when_made: str = ""          # made_to_order | 2020_2026 | ... | before_1700
+    is_supply: bool = False      # craft supply rather than finished item
+    materials: list[str] = Field(default_factory=list)   # <=13, shown on the listing
+    tags: list[str] = Field(default_factory=list)        # <=13 search tags, <=20 chars
+    # Per-listing overrides; "" = use the account defaults saved in Settings.
+    shipping_profile_id: str = ""
+    return_policy_id: str = ""
+
+
+class DepopFields(BaseModel):
+    """Depop-only listing fields (partner Selling API)."""
+
+    category: str = ""           # Depop category id/slug ("" until chosen)
+    size: str = ""               # explicit size; "" = derive from item specifics
+
+
 class Listing(BaseModel):
     """A full eBay listing draft, editable by the user before publishing."""
 
@@ -83,6 +121,13 @@ class Listing(BaseModel):
     sold_quantity: int = 0
     # eBay's own view URL for an imported listing (avoids guessing the domain).
     view_url: str = ""
+    # Per-marketplace publish state, keyed by marketplace ("ebay", "etsy",
+    # ...). `ebay_listing_id` above remains the authoritative legacy slot for
+    # eBay — the two are mirrored on every publish (marketplaces/state.py).
+    marketplaces: dict[str, MarketplaceState] = Field(default_factory=dict)
+    # Marketplace-specific listing fields, edited in their own cards.
+    etsy: EtsyFields = Field(default_factory=EtsyFields)
+    depop: DepopFields = Field(default_factory=DepopFields)
 
 
 class IdentifyResult(BaseModel):
@@ -101,6 +146,11 @@ class PublishRequest(BaseModel):
     session_id: str
     listing: Listing
     mode: str = "draft"  # "draft" or "live"
+    # Which marketplaces to publish to. Empty (every pre-multi client) means
+    # the legacy behavior: eBay only, byte-identical response shape. With
+    # entries, the response is the {multi: true, results: {...}} shape and
+    # each marketplace succeeds or fails independently.
+    marketplaces: list[str] = Field(default_factory=list)
 
 
 class SessionOnlyRequest(BaseModel):

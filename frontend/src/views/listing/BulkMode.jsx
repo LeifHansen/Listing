@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine } from "lucide-react";
+import {
+  Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
+} from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -10,6 +12,9 @@ import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
+import {
+  MarketTargetChips, missingRequired, publishListing, usePublishTargets,
+} from "./publishShared";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
    identifies each item, and (optionally) publishes them; this component polls
@@ -51,18 +56,6 @@ function duplicateSuspects(drafts) {
   return pairs;
 }
 
-// The fields eBay requires to publish — surfaced per auto-created draft so the
-// seller sees at a glance which items still need a value before going live.
-function missingRequired(l = {}) {
-  const miss = [];
-  if (!(l.title || "").trim()) miss.push("title");
-  if (!(Number(l.price) > 0)) miss.push("price");
-  const oz = (parseFloat(l.package_weight_lb) || 0) * 16 + (parseFloat(l.package_weight_oz) || 0);
-  if (!(oz > 0)) miss.push("weight");
-  if (!(l.category_id || "").toString().trim()) miss.push("category");
-  return miss;
-}
-
 // Selling formats, mirroring the full editor's Pricing card.
 const LISTING_FORMATS = [
   ["FIXED_PRICE", "Buy It Now"],
@@ -102,7 +95,10 @@ function ShippingServiceSelect({ value, onChange }) {
   );
 }
 
-function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, publishing }) {
+function BulkItemCard({
+  item, checked, onCheck, onChange, onOpen, onPublish, publishing,
+  onDelete, deleting,
+}) {
   const l = item.listing || {};
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
@@ -256,9 +252,17 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
       <div className="flex items-center gap-2 mt-auto">
         {editable && (
           <Button variant="ghost" size="sm" onClick={onOpen}>
-            <ExternalLink aria-hidden /> Full editor
+            <ExternalLink aria-hidden /> Preview &amp; Edit
           </Button>
         )}
+        {/* Not every auto-created draft is worth keeping — a duplicate you
+            don't want to merge, or something the AI shouldn't have drafted.
+            Deleting it here beats hunting for its card later. */}
+        <Button variant="ghost" size="sm" onClick={onDelete} loading={deleting}
+          aria-label="Delete this draft"
+          className="text-ink-faint hover:text-error">
+          <Trash2 aria-hidden /> Delete
+        </Button>
         {item.status === "draft" && (
           <Button variant="secondary" size="sm" className="ml-auto"
             onClick={onPublish} loading={publishing}>
@@ -271,12 +275,20 @@ function BulkItemCard({ item, checked, onCheck, onChange, onOpen, onPublish, pub
 }
 
 export function BulkQueue({ jobId, mode, onExit, onSettled }) {
-  const { setSession, loadListings } = useApp();
+  const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
+
+  // Bulk publish targets — the same remembered selection as the single-item
+  // publish bar and the drafts strip (see publishShared).
+  const {
+    selected: bulkTargets, toggle: toggleBulkTarget, otherConnected,
+    effectiveTargets,
+  } = usePublishTargets();
   const [job, setJob] = useState(null);
   const [items, setItems] = useState([]);
   const [checked, setChecked] = useState({});
   const [publishing, setPublishing] = useState({});
+  const [deleting, setDeleting] = useState({});
   const [merging, setMerging] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
@@ -381,17 +393,24 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const publishOne = useCallback(async (it) => {
     setPublishing((p) => ({ ...p, [it.session_id]: true }));
     try {
-      // Persist inline edits first, then publish.
-      await postJson(`/api/save/${it.session_id}`, it.listing);
-      const res = await postJson("/api/publish", {
-        session_id: it.session_id, listing: it.listing, mode: "live",
-      });
+      // Persist inline edits first, then publish (one request per item — the
+      // backend fans out to every selected marketplace); see publishShared.
+      const res = await publishListing(it.session_id, it.listing, effectiveTargets);
+      // Multi responses summarize per marketplace: "eBay ✓ · Etsy ✗".
+      const summary = res.multi
+        ? Object.entries(res.results || {})
+            .map(([key, r]) => `${key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
+            .join(" · ")
+        : null;
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
         ? {
             ...x,
             status: res.published ? "published" : "draft",
-            listing_id: res.listing_id || null,
-            error: res.published ? null
+            listing_id: (res.multi
+              ? res.results?.ebay?.listing_id : res.listing_id) || null,
+            error: res.published
+              ? (res.multi && Object.values(res.results || {}).some((r) => !r.ok)
+                  ? `${summary} — open the full editor to fix the rest.` : null)
               : (res.message || "Publish blocked — open the full editor to fix."),
           }
         : x));
@@ -403,7 +422,62 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
-  }, []);
+  }, [effectiveTargets]);
+
+  // Delete a draft straight from the queue — the counterpart to Merge for
+  // duplicates you don't want to keep at all, and the way out for anything
+  // the AI shouldn't have drafted.
+  const deleteOne = async (it) => {
+    const name = it.listing?.title || it.title || "this draft";
+    if (!(await confirm({
+      title: "Delete this draft?",
+      message: `"${name}" will be permanently removed, photos included. This can't be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    }))) return;
+    setDeleting((d) => ({ ...d, [it.session_id]: true }));
+    try {
+      await api(`/api/listings/${it.session_id}`, { method: "DELETE" });
+    } catch (e) {
+      // An item that never produced a record (a failed identify) has nothing
+      // to delete server-side — dropping it from the queue is the whole job.
+      if (!(e.message || "").includes("(404)")) {
+        toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+        setDeleting((d) => ({ ...d, [it.session_id]: false }));
+        return;
+      }
+    }
+    removed.current.add(it.session_id);
+    setItems((cur) => cur.filter((x) => x.session_id !== it.session_id));
+    setChecked((c) => { const n = { ...c }; delete n[it.session_id]; return n; });
+    setDeleting((d) => ({ ...d, [it.session_id]: false }));
+    loadListings({ quiet: true });
+  };
+
+  const deleteSelected = async () => {
+    const targets = items.filter((it) => checked[it.session_id]);
+    if (!targets.length) { toast("Nothing selected to delete.", { kind: "warning" }); return; }
+    if (!(await confirm({
+      title: `Delete ${targets.length} draft${targets.length === 1 ? "" : "s"}?`,
+      message: "They'll be permanently removed, photos included. This can't be undone.",
+      confirmLabel: "Delete all selected",
+      danger: true,
+    }))) return;
+    const ids = targets.map((t) => t.session_id);
+    try {
+      const res = await postJson("/api/listings/bulk-delete", { ids });
+      const gone = new Set(res.deleted || []);
+      gone.forEach((id) => removed.current.add(id));
+      setItems((cur) => cur.filter((x) => !gone.has(x.session_id)));
+      setChecked({});
+      loadListings({ quiet: true });
+      toast(`Deleted ${gone.size} draft${gone.size === 1 ? "" : "s"}.`
+        + (res.skipped?.length ? ` ${res.skipped.length} couldn't be removed.` : ""),
+        { kind: res.skipped?.length ? "warning" : "success" });
+    } catch (e) {
+      toast(`Couldn't delete: ${e.message}`, { kind: "error" });
+    }
+  };
 
   // Merge duplicate drafts of the SAME item into one listing: photos combine
   // under the first selected item; the other drafts are deleted.
@@ -448,9 +522,14 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
   const publishSelected = async () => {
     const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
     if (!targets.length) { toast("Nothing selected to publish.", { kind: "warning" }); return; }
+    const targetNames = effectiveTargets && effectiveTargets.length > 1
+      ? effectiveTargets
+          .map((k) => (connectedMarketplaces.find((m) => m.key === k) || {}).label || k)
+          .join(" and ")
+      : "your eBay store";
     if (!(await confirm({
       title: `Publish ${targets.length} listing${targets.length === 1 ? "" : "s"} live?`,
-      message: "Each goes straight to your eBay store.",
+      message: `Each goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0;
@@ -574,6 +653,11 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
       )}
 
       {job?.done && drafts.length > 0 && (
+        <MarketTargetChips selected={bulkTargets} toggle={toggleBulkTarget}
+          otherConnected={otherConnected} />
+      )}
+
+      {job?.done && drafts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2.5">
           <Button variant="primary" onClick={publishSelected}>
             <Rocket aria-hidden /> Publish selected ({drafts.filter((d) => checked[d.session_id]).length})
@@ -582,6 +666,14 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
             <Button variant="secondary" onClick={mergeSelected} loading={merging}
               title="Same item split into duplicates? Combine the selected drafts into one listing.">
               <Combine aria-hidden /> Merge into one
+            </Button>
+          )}
+          {/* Duplicates you'd rather drop than merge, and anything the batch
+              shouldn't have drafted. */}
+          {items.some((it) => checked[it.session_id]) && (
+            <Button variant="danger" onClick={deleteSelected}
+              title="Permanently delete the selected drafts.">
+              <Trash2 aria-hidden /> Delete selected ({items.filter((it) => checked[it.session_id]).length})
             </Button>
           )}
           <Button variant="ghost" onClick={onExit}>
@@ -604,6 +696,8 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
               onOpen={() => openItem(it)}
               onPublish={() => publishOne(it).then((ok) => ok && loadListings({ quiet: true }))}
               publishing={!!publishing[it.session_id]}
+              onDelete={() => deleteOne(it)}
+              deleting={!!deleting[it.session_id]}
             />
           ))}
         </AnimatePresence>

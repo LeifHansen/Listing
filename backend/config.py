@@ -362,3 +362,41 @@ def ebay_ready() -> bool:
 def taxonomy_ready() -> bool:
     """The Taxonomy API only needs an application token (client id/secret)."""
     return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
+
+
+# --- Etsy ------------------------------------------------------------------
+# Etsy Open API v3. OAuth 2.0 authorization-code with PKCE — no client secret
+# is ever used, so the only credentials are the app "keystring" and the exact
+# redirect URI registered on the Etsy app (https://<host>/api/etsy/callback).
+ETSY_CLIENT_ID = _env("ETSY_CLIENT_ID", "ETSY_KEYSTRING")
+ETSY_REDIRECT_URI = os.getenv("ETSY_REDIRECT_URI", "").strip()
+ETSY_SCOPES = "listings_r listings_w listings_d shops_r shops_w"
+ETSY_API_BASE = "https://api.etsy.com/v3"
+ETSY_AUTH_URL = "https://www.etsy.com/oauth/connect"
+ETSY_TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
+
+
+def etsy_oauth_ready() -> bool:
+    """Enough config to run the 'Sign in with Etsy' flow."""
+    return bool(ETSY_CLIENT_ID and ETSY_REDIRECT_URI)
+
+
+# --- Depop -----------------------------------------------------------------
+# Depop's official Selling API is partner-gated (partnerapi.depop.com): the
+# endpoints below become known once Depop grants partner credentials, so the
+# auth/token URLs are env vars — corrections need zero code changes. The
+# integration stays invisible in the UI until all four are set.
+DEPOP_CLIENT_ID = _env("DEPOP_CLIENT_ID")
+DEPOP_CLIENT_SECRET = _env("DEPOP_CLIENT_SECRET")
+DEPOP_API_BASE = os.getenv("DEPOP_API_BASE", "https://partnerapi.depop.com").strip()
+DEPOP_AUTH_URL = os.getenv("DEPOP_AUTH_URL", "").strip()
+DEPOP_TOKEN_URL = os.getenv("DEPOP_TOKEN_URL", "").strip()
+DEPOP_REDIRECT_URI = os.getenv("DEPOP_REDIRECT_URI", "").strip()
+DEPOP_SCOPES = os.getenv("DEPOP_SCOPES", "products_read products_write").strip()
+
+
+def depop_oauth_ready() -> bool:
+    """Enough config to run the 'Sign in with Depop' flow (partner creds +
+    the OAuth endpoints and redirect URI from the partner setup)."""
+    return bool(DEPOP_CLIENT_ID and DEPOP_CLIENT_SECRET
+                and DEPOP_AUTH_URL and DEPOP_TOKEN_URL and DEPOP_REDIRECT_URI)

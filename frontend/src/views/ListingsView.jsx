@@ -1,26 +1,27 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw, CheckSquare, Trash2, X, Truck,
+  PlusCircle, Store, LogIn, RefreshCw,
 } from "lucide-react";
-import { api, pollJob, postJson } from "@/lib/api";
+import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { OriginChip, originOf } from "@/components/ui/badges";
-import { InfoTip, Select } from "@/components/ui/fields";
+import { InfoTip } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
-  BoxIllustration, TagIllustration, ClipboardIllustration,
+  BoxIllustration, TagIllustration,
 } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 
-/* The unified listings pipeline: ONE view of the seller's whole store, cut by
-   lifecycle tab — the way sellers actually think about their pile. Replaces
-   the old Inventory / Drafts / Listings triplet. */
+/* The listings pipeline: ONE view of the seller's whole store, cut by
+   lifecycle tab. Rendered as the lower section of the merged Sell screen —
+   drafts have their own strip above it (DraftsStrip), so there is no Drafts
+   tab here (the "All" tab still mirrors every status, drafts included). */
 
 const TABS = [
   {
@@ -29,16 +30,6 @@ const TABS = [
     empty: {
       illustration: TagIllustration, title: "Nothing live yet",
       message: "Publish a draft (or create a listing from photos) and it shows up here the moment it's live.",
-      action: { label: "Create Listing", icon: PlusCircle, go: "new" },
-    },
-  },
-  {
-    id: "drafts", label: "Drafts", statuses: ["draft", "dry_run"],
-    sub: "Works in progress — open one to finish and publish",
-    selectable: true, draftTools: true,
-    empty: {
-      illustration: ClipboardIllustration, title: "No drafts",
-      message: "Drafts save automatically while you build a listing, so you can pick up right where you left off.",
       action: { label: "Create Listing", icon: PlusCircle, go: "new" },
     },
   },
@@ -84,64 +75,19 @@ const TABS = [
 const STALE_DAYS = 60;
 const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
 
-const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
-
-// Shipping service picker right on a draft's card — the same eBay fulfillment
-// policies the editor and bulk queue offer, account default preselected.
-// Saves the moment it's changed.
-function DraftShipping({ item }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
-  const { toast } = useToast();
-  const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
-  if (!ebay.connected) return null;
-  const policies = policiesData?.policies?.fulfillment || [];
-  if (!policies.length) return null;
-  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
-  const save = async (id) => {
-    setValue(id);
-    try {
-      await postJson(`/api/save/${item.id}`, {
-        ...(item.listing || {}), fulfillment_policy_id: id,
-      });
-    } catch (e) {
-      toast(`Couldn't save the shipping service: ${e.message}`, { kind: "error" });
-    }
-  };
-  return (
-    <div className="mt-1.5 flex items-center gap-1.5" title="Shipping service for this draft">
-      <Truck size={14} className="shrink-0 text-ink-faint" aria-hidden />
-      <Select
-        aria-label="Shipping service"
-        className="h-9 text-[13px]"
-        value={value || accountDefault}
-        onChange={(e) => save(e.target.value)}
-      >
-        {policies.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}{p.summary ? ` · ${p.summary}` : ""}
-          </option>
-        ))}
-      </Select>
-    </div>
-  );
-}
-
-export function ListingsView({ search = "", forceTab }) {
+export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
-    bulkDeleteListings, ebay, loadListings, metricsById,
-    skippedDraftIds, toggleSkipDraft, storeSync, syncStore,
+    ebay, loadListings, metricsById, skippedDraftIds, storeSync, syncStore,
     listingsTab, setListingsTab,
   } = useApp();
   const { confirm, toast } = useToast();
 
-  const tabId = forceTab || listingsTab || "active";
+  // "drafts" was a tab here before the drafts strip existed; a stale saved
+  // selection lands on Active.
+  const tabId = (listingsTab === "drafts" ? "active" : listingsTab) || "active";
   const tab = TABS.find((t) => t.id === tabId) || TABS[0];
-  const pick = (t) => { setListingsTab(t); setView("listings"); };
+  const pick = (t) => setListingsTab(t);
 
   const counts = Object.fromEntries(TABS.map((t) => [
     t.id,
@@ -149,22 +95,6 @@ export function ListingsView({ search = "", forceTab }) {
       ? listingsState.items.filter((i) => t.statuses.includes(i.status)).length
       : listingsState.items.length,
   ]));
-
-  // Select mode (Drafts): tap cards to select, then delete them all at once.
-  const [selecting, setSelecting] = useState(false);
-  const [sel, setSel] = useState({});
-  const selIds = Object.keys(sel).filter((id) => sel[id]);
-  const exitSelect = () => { setSelecting(false); setSel({}); };
-  const deleteSelected = async () => {
-    if (!selIds.length) return;
-    if (!(await confirm({
-      title: `Delete ${selIds.length} draft${selIds.length === 1 ? "" : "s"}?`,
-      message: "They'll be permanently removed, photos included. This can't be undone.",
-      confirmLabel: "Delete all selected",
-      danger: true,
-    }))) return;
-    if (await bulkDeleteListings(selIds)) exitSelect();
-  };
 
   // Manual re-run of the store mirror (the mirror itself runs at app load).
   const importFromEbay = async () => {
@@ -184,31 +114,6 @@ export function ListingsView({ search = "", forceTab }) {
     if (r.failed) {
       toast(`${r.failed} listing${r.failed === 1 ? "" : "s"} couldn't be read from eBay.`,
         { kind: "warning" });
-    }
-  };
-
-  // Start over on a draft: throw away the drafted copy and re-run the AI over
-  // the listing's own photos.
-  const [startingOver, setStartingOver] = useState(null); // id, or null
-  const startOver = async (item) => {
-    const name = item.listing?.title || item.title || "this draft";
-    if (!(await confirm({
-      title: "Start this listing over?",
-      message: `The AI will look at "${name}"'s photos again and rewrite the `
-        + "title, description, and item specifics. Your photos are kept; any "
-        + "edits you made to the text are replaced.",
-      confirmLabel: "Start over",
-    }))) return;
-    setStartingOver(item.id);
-    try {
-      const { job_id } = await postJson(`/api/identify-async/${item.id}`, {});
-      await pollJob(job_id);
-      await loadListings({ quiet: true });
-      toast("Rewritten from the photos.", { kind: "success" });
-    } catch (e) {
-      toast(`Couldn't start over: ${e.message}`, { kind: "error" });
-    } finally {
-      setStartingOver(null);
     }
   };
 
@@ -314,17 +219,10 @@ export function ListingsView({ search = "", forceTab }) {
             <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
               onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
               ending={endingId === item.id}
-              onStartOver={tab.draftTools && isDraft(item) ? startOver : undefined}
-              startingOver={startingOver === item.id}
-              onSkip={tab.draftTools && isDraft(item) ? () => toggleSkipDraft(item.id) : undefined}
               skipped={skippedDraftIds.has(item.id)}
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
-              metrics={metricsById[item.id]}
-              selectable={selecting}
-              selected={!!sel[item.id]}
-              onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
-            {tab.draftTools && isDraft(item) && !selecting && <DraftShipping item={item} />}
+              metrics={metricsById[item.id]} />
           </motion.div>
         ))}
       </div>
@@ -338,7 +236,7 @@ export function ListingsView({ search = "", forceTab }) {
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0 flex items-center gap-2">
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Listings</h1>
+          <h2 className="text-lg sm:text-xl font-bold tracking-tight text-ink">Listings</h2>
           <InfoTip text={tab.sub} />
         </div>
         <div className="flex items-center gap-2">
@@ -347,25 +245,6 @@ export function ListingsView({ search = "", forceTab }) {
               <RefreshCw aria-hidden /> Sync with eBay
             </Button>
           )}
-          {tab.selectable && hasItems && (selecting ? (
-            <>
-              <Button variant="danger" size="sm" onClick={deleteSelected}
-                disabled={!selIds.length}>
-                <Trash2 aria-hidden /> Delete selected ({selIds.length})
-              </Button>
-              <Button variant="ghost" size="sm"
-                onClick={() => setSel(Object.fromEntries(items.map((i) => [i.id, true])))}>
-                All
-              </Button>
-              <Button variant="ghost" size="sm" onClick={exitSelect}>
-                <X aria-hidden /> Cancel
-              </Button>
-            </>
-          ) : (
-            <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
-              <CheckSquare aria-hidden /> Select
-            </Button>
-          ))}
         </div>
       </div>
 
@@ -376,7 +255,7 @@ export function ListingsView({ search = "", forceTab }) {
           <button
             key={t.id}
             type="button"
-            onClick={() => { pick(t.id); exitSelect(); }}
+            onClick={() => pick(t.id)}
             aria-pressed={tabId === t.id}
             className={cn(
               "shrink-0 inline-flex items-center gap-1.5 h-9 px-3.5 rounded-full text-[13px]",
