@@ -94,6 +94,17 @@ export function AuthDialog() {
         <Button variant="primary" size="lg" className="w-full" onClick={submit} loading={busy}>
           {mode === "login" ? "Log in" : "Create account"}
         </Button>
+        {/* Shown in both modes: these links are the only way to reach the
+            policies from the native app, which has no address bar. */}
+        <p className="text-xs text-ink-secondary text-center text-balance">
+          {mode === "signup" ? "By creating an account you agree to our " : "See our "}
+          <a className="underline underline-offset-2 hover:text-ink"
+             href="/terms" target="_blank" rel="noreferrer">terms</a>
+          {" and "}
+          <a className="underline underline-offset-2 hover:text-ink"
+             href="/privacy-policy" target="_blank" rel="noreferrer">privacy policy</a>.
+          {mode === "signup" && " You can delete your account any time from Settings."}
+        </p>
       </div>
     </Dialog>
   );

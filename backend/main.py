@@ -30,7 +30,7 @@ from .models import (ItemSpecific, Listing, PublishRequest, RefineRequest,
                      SessionOnlyRequest)
 from .services import (claude_ai, ebay, ebay_trading, image_import, images,
                        listing_sync, metrics, orient, preflight, pricing,
-                       promotions, recommender, taxonomy)
+                       promotions, recommender, taxonomy, tokens)
 
 app = FastAPI(title="eBay Listing Generator")
 
@@ -258,6 +258,22 @@ def _category_query(listing) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _resolve_category(listing: Listing) -> None:
+    """Auto-resolve a numeric eBay category id for a fresh AI draft (single,
+    async, and bulk identify all need this). Best-effort — identify must never
+    fail on a taxonomy problem."""
+    if not config.taxonomy_ready() or listing.category_id:
+        return
+    try:
+        best = taxonomy.best_category_id(_category_query(listing))
+        if best.get("category_id"):
+            listing.category_id = best["category_id"]
+            if best.get("path"):
+                listing.category_suggestion = best["path"]
+    except Exception:  # noqa: BLE001 - never block identify on taxonomy
+        pass
+
+
 def _tag_text_for(paths: list, aspects: list[dict]) -> str:
     """Zoom-and-transcribe the item's tags when the category is one where the
     facts live ON a tag (any Size-style aspect = clothing/shoes). Sizes are
@@ -396,6 +412,33 @@ def _uid(request: Request):
     return user["id"] if user else None
 
 
+# --- AI token gate (monetization) ------------------------------------------
+# Every AI endpoint charges up front through these and refunds on failure
+# ("only pay for AI that worked"). When billing is off (no TOKENS_ENABLED /
+# no DB) they are no-ops, so dev and self-hosted installs stay free.
+
+def _charge_uid(uid: str, feature: str, units: int = 1):
+    """Debit a logged-in user. Returns the spend record for tokens.refund(),
+    or None when billing is off / the DB failed open. Raises 402 when broke."""
+    res = tokens.spend(uid, feature, units)
+    if res is not None and not res.get("ok"):
+        raise HTTPException(402, tokens.insufficient_message(res))
+    return res
+
+
+def _charge_ai(request: Request, feature: str, units: int = 1):
+    """Token gate for a request-context AI endpoint. 401s anonymous callers
+    when billing is on — balances are per-account, so metered AI requires a
+    login (the logged-out flows keep working wherever billing is off)."""
+    if not tokens.enabled():
+        return None
+    uid = _uid(request)
+    if uid is None:
+        raise HTTPException(
+            401, "Log in to use AI features — your token balance is per account.")
+    return _charge_uid(uid, feature, units)
+
+
 def _assert_session_owner(session_id: str, request: Request) -> None:
     """404 when this session's saved listing belongs to a DIFFERENT user.
     Session ids appear in media URLs and can leak, so possession of an id
@@ -433,22 +476,10 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
         return True
     if not objstore.enabled():
         return False
-    try:
-        data = objstore.get_bytes(objstore.key_for(session_id, name))
-    except Exception as exc:  # noqa: BLE001 - genuinely gone, or R2 is down
-        log.warning("rehydrate: %s/%s not available from R2: %s",
-                    session_id, name, exc)
-        return False
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".r2tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)  # atomic: never leave a half-written photo in place
-    except OSError as exc:
-        log.warning("rehydrate: couldn't write %s: %s", path, exc)
-        return False
-    log.info("rehydrate: pulled %s/%s back from R2", session_id, name)
-    return True
+    if objstore.restore(objstore.key_for(session_id, name), path):
+        log.info("rehydrate: pulled %s/%s back from R2", session_id, name)
+        return True
+    return False
 
 
 def _purge_session_images(session_id: str) -> None:
@@ -519,6 +550,151 @@ def auth_logout(response: Response) -> dict:
 def auth_me(request: Request) -> dict:
     return {"user": auth.current_user(request)}
 
+
+# --- AI tokens (monetization) ----------------------------------------------
+
+@app.get("/api/tokens")
+def tokens_status(request: Request) -> dict:
+    """Balance, feature costs, packs, and the next free reset — everything the
+    balance chip and the buy dialog render. Anonymous callers get the catalog
+    without a balance."""
+    return tokens.status(_uid(request))
+
+
+@app.get("/api/tokens/history")
+def tokens_history(request: Request) -> dict:
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to see your token history.")
+    return {"entries": db.token_history(uid)}
+
+
+@app.post("/api/tokens/checkout")
+def tokens_checkout(request: Request, payload: dict) -> dict:
+    """Start a Stripe Checkout for a token pack; returns the payment URL."""
+    if not tokens.enabled():
+        raise HTTPException(400, "Token billing isn't enabled on this server.")
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to buy tokens.")
+    pack_id = str(payload.get("pack_id", "")).strip()
+    try:
+        url = tokens.create_checkout(uid, pack_id, _base_url(request))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - stripe/network problem
+        log.warning("tokens: checkout failed for %s: %s", uid, exc)
+        raise HTTPException(502, f"Couldn't start the purchase: {exc}") from exc
+    return {"url": url}
+
+
+@app.get("/api/tokens/confirm")
+def tokens_confirm(request: Request, session_id: str = "") -> dict:
+    """Post-redirect fallback credit: verifies the Checkout session with
+    Stripe and credits idempotently (the webhook may have won the race)."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to confirm your purchase.")
+    try:
+        res = tokens.confirm_checkout(uid, session_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tokens: confirm failed for %s: %s", uid, exc)
+        raise HTTPException(502, str(exc)) from exc
+    res["balance"] = tokens.status(uid)
+    return res
+
+
+@app.post("/api/tokens/webhook")
+async def tokens_webhook(request: Request) -> dict:
+    """Stripe webhook (checkout.session.completed). Signature-verified against
+    the raw body; a DB outage returns 503 so Stripe retries the delivery."""
+    payload = await request.body()
+    try:
+        return tokens.handle_webhook(payload,
+                                     request.headers.get("Stripe-Signature", ""))
+    except PermissionError as exc:
+        raise HTTPException(400, "Invalid signature") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, "Temporarily unavailable — retry") from exc
+
+@app.get("/api/account/summary")
+def account_summary(request: Request) -> dict:
+    """What deleting this account would destroy — shown in the confirm dialog
+    so nobody deletes blind. Counting live listings separately matters: those
+    stay up on eBay after deletion, and a seller must know that before they
+    lose the tools to manage them.
+
+    `counted` says whether the numbers can be trusted. list_listings() returns
+    [] on a DB error like every read in db.py, and silently showing "0 live
+    listings" would suppress exactly the warning this endpoint exists to give
+    — so an unreachable DB is reported as unknown, not as zero.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    counted = db.db_status().get("connected", False)
+    rows = db.list_listings(limit=1000, user_id=user["id"]) if counted else []
+    live = sum(1 for r in rows
+               if (r.get("status") or "") in ("published", "live"))
+    return {
+        "email": user.get("email", ""),
+        "counted": counted,
+        "listings": len(rows),
+        "live_listings": live,
+        "ebay_connected": bool((db.get_ebay_account(user["id"]) or {}).get("refresh_token")),
+    }
+
+
+@app.post("/api/account/delete")
+def account_delete(request: Request, response: Response, payload: dict) -> dict:
+    """Permanently delete the signed-in account and everything keyed to it.
+
+    Deliberately a POST (not DELETE): some mobile webviews and corporate
+    proxies drop DELETE bodies, and this one carries the password.
+
+    Deleting means deleting — the account row, the eBay connection (our stored
+    refresh token goes with it), every listing, and every photo on disk and in
+    R2. What we cannot delete is anything on eBay's side: listings published
+    there stay live under the seller's own eBay account, and the authorization
+    grant is theirs to revoke in eBay's settings. Both facts are stated in the
+    confirm dialog and the privacy policy rather than quietly assumed.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    uid = user["id"]
+
+    # Re-authenticate: a leaked session token must not be enough to erase an
+    # account. (A password is always set — signup is the only way in.)
+    password = str(payload.get("password", ""))
+    stored = db.get_password_hash(uid)
+    if not stored:
+        raise HTTPException(
+            503, "Account service is temporarily unavailable. Please try again shortly.")
+    if not auth.verify_password(password, stored):
+        raise HTTPException(401, "That password doesn't match. Try again.")
+
+    listing_ids = db.delete_user(uid)
+    if listing_ids is None:
+        raise HTTPException(
+            503, "Couldn't delete your account just now — nothing was changed. "
+                 "Please try again in a moment.")
+
+    # Photos last, and only after the rows are really gone: one background
+    # sweep for the whole account (a thread per listing would spawn thousands
+    # on a synced store and exhaust the 1GB machine), so a slow R2 delete never
+    # holds the response or fails a deletion that already happened.
+    def _purge_all() -> None:
+        for lid in listing_ids:
+            _purge_session_images(lid)
+
+    _in_background(_purge_all, what="account-delete cleanup")
+
+    auth.clear_session_cookie(response)
+    log.info("account deleted: user=%s listings=%d", uid, len(listing_ids))
+    return {"ok": True, "deleted_listings": len(listing_ids)}
 
 # --- eBay connect (Sign in with eBay) --------------------------------------
 
@@ -1158,6 +1334,7 @@ MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
 
 @app.post("/api/upload")
 async def upload(
+    request: Request,
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
 ) -> dict:
@@ -1172,16 +1349,31 @@ async def upload(
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    # Uploading + optimizing stays free; the AI background removal toggle is
+    # metered per photo. Charged before any disk work so a broke/logged-out
+    # caller gets a clean 402/401 instead of a half-done upload.
+    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
-    for i, f in enumerate(files):
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
-        suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-        (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+    try:
+        for i, f in enumerate(files):
+            data = await f.read()
+            if len(data) > MAX_UPLOAD_BYTES:
+                tokens.refund(spent)
+                raise HTTPException(
+                    400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+            suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
+            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+    except OSError as exc:
+        # Disk full / write failure — same friendly answer as the bulk path,
+        # not a raw 500; drop the partial session rather than leaving an orphan.
+        # No cutout ever ran, so the background-removal charge goes back too.
+        tokens.refund(spent)
+        storage.purge_session(session_id)
+        log.error("upload: disk write failed (%s)", exc)
+        raise HTTPException(
+            507, "The server is out of storage space — try again shortly.") from exc
 
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
@@ -1189,12 +1381,18 @@ async def upload(
         images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
     optimized = storage.list_optimized(session_id)
     if not optimized:
+        tokens.refund(spent)
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
         raise HTTPException(
             400,
             "Could not process the uploaded image(s)"
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
+    # Photos whose cutout failed (engine down / out of credits) kept their
+    # background — give those tokens back.
+    bg_failed = sum(1 for r in opt_results if r.get("bg_error") or r.get("error"))
+    if spent and bg_failed:
+        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     # Mirror the optimized images to R2, but don't make the user wait for it:
     # the photos are already on the volume and /media serves the local copy,
     # so nothing on screen or on the way to eBay needs the bucket to have them
@@ -1228,6 +1426,8 @@ async def upload_more(
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    if strip_bg:
+        _charge_ai(request, "image_ai", units=len(files))
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -1304,7 +1504,6 @@ async def edit_image(
 
     def _save() -> None:
         from io import BytesIO
-        import os
         from PIL import Image
         img = Image.open(BytesIO(data)).convert("RGB")
         # Every edit is a new version — the outgoing working copy is snapshot
@@ -1393,7 +1592,6 @@ async def rotate_image(payload: dict, request: Request) -> dict:
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
-        import os
         from PIL import Image
         storage.snapshot_image(session_id, name)  # rotations version too
         with Image.open(path) as img:
@@ -1448,6 +1646,7 @@ async def image_analyze(
 
 @app.post("/api/image/auto-clean")
 async def image_auto_clean(
+    request: Request,
     session_id: str = Form(""),
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
@@ -1462,11 +1661,17 @@ async def image_auto_clean(
         img = _studio_load(session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
 
-    return await run_in_threadpool(_run)
+    spent = _charge_ai(request, "image_ai")
+    try:
+        return await run_in_threadpool(_run)
+    except Exception:
+        tokens.refund(spent)
+        raise
 
 
 @app.post("/api/image/remove-bg")
 async def image_remove_bg(
+    request: Request,
     session_id: str = Form(""),
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
@@ -1486,16 +1691,22 @@ async def image_remove_bg(
         # misconfigured key can't hide behind a silently-degraded result.
         return {"ok": True, "image": _data_url(out), "engine": engine}
 
+    spent = _charge_ai(request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except ValueError as exc:
         # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
         # of credits / rate limit) — the message tells the user exactly which.
+        tokens.refund(spent)
         raise HTTPException(422, str(exc)) from exc
+    except Exception:
+        tokens.refund(spent)
+        raise
 
 
 @app.post("/api/image/smart-crop")
 async def image_smart_crop(
+    request: Request,
     session_id: str = Form(""),
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
@@ -1515,7 +1726,15 @@ async def image_smart_crop(
                     "message": "Already nicely framed — no crop needed."}
         return {"ok": True, "applied": True, "image": _data_url(cropped)}
 
-    return await run_in_threadpool(_run)
+    spent = _charge_ai(request, "image_ai")
+    try:
+        res = await run_in_threadpool(_run)
+    except Exception:
+        tokens.refund(spent)
+        raise
+    if not res.get("applied"):  # nothing changed — don't charge for a no-op
+        tokens.refund(spent)
+    return res
 
 
 @app.post("/api/identify/{session_id}")
@@ -1525,31 +1744,23 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(
             400, "ANTHROPIC_API_KEY not configured; cannot identify images."
         )
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id)
     names = storage.list_optimized(session_id)
     if not names:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
+    spent = _charge_ai(request, "identify")
     try:
         result = claude_ai.identify(paths, names,
                                     strategy=_pricing_strategy(_uid(request)))
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
+        tokens.refund(spent)
         code, message = claude_ai.ai_error_message(exc)
         log.warning("identify failed (session=%s): %s", session_id, exc)
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
-
-    # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
-    if config.taxonomy_ready() and not result.listing.category_id:
-        try:
-            best = taxonomy.best_category_id(_category_query(result.listing))
-            if best.get("category_id"):
-                result.listing.category_id = best["category_id"]
-                if best.get("path"):
-                    result.listing.category_suggestion = best["path"]
-        except Exception:  # noqa: BLE001 - never block identify on taxonomy
-            pass
-
+    _resolve_category(result.listing)
     storage.save_listing(session_id, result.listing)
     db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
     return result.model_dump()
@@ -1578,10 +1789,12 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
     if not paths:
         raise HTTPException(400, "This listing's photos aren't on the server anymore.")
+    spent = _charge_ai(request, "specifics")
     try:
         filled = claude_ai.fill_aspects(paths, listing, aspects,
                                         tag_text=_tag_text_for(paths, aspects))
     except Exception as exc:  # noqa: BLE001
+        tokens.refund(spent)
         code, message = claude_ai.ai_error_message(exc)
         log.warning("autofill-specifics failed (session=%s): %s", session_id, exc)
         raise HTTPException(code, message) from exc
@@ -1662,9 +1875,13 @@ def _preserved_status(session_id: str, default: str = "draft") -> str:
 def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    # Authorize before billing: never charge for a request we're about to 404.
+    _assert_session_owner(req.session_id, request)
+    spent = _charge_ai(request, "refine")
     try:
         updated = claude_ai.refine(req.listing, req.prompt)
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
+        tokens.refund(spent)
         code, message = claude_ai.ai_error_message(exc)
         log.warning("refine failed (session=%s): %s", req.session_id, exc)
         raise HTTPException(code, message) from exc
@@ -1775,7 +1992,22 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
     """Background worker: optimize -> group -> per-item identify (-> publish)."""
     strategy = _pricing_strategy(uid)          # once, not per item
     auto_promote = _auto_promote_enabled(uid)  # ditto
+    billing = tokens.enabled() and uid is not None
     try:
+        # Bulk background removal is metered per photo, charged before the
+        # engines run. Not enough tokens -> photos are kept as-is (with a
+        # visible reason) rather than failing the whole batch.
+        bg_spent = None
+        if strip_bg and billing:
+            n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
+                           if p.is_file())
+            bg_spent = tokens.spend(uid, "image_ai", units=n_photos)
+            if bg_spent is not None and not bg_spent.get("ok"):
+                strip_bg = False
+                _bulk_set(job_id, bg_error=(
+                    "Not enough tokens for background removal — photos were "
+                    "kept as shot. " + tokens.insufficient_message(bg_spent)))
+                bg_spent = None
         _bulk_set(job_id, phase="optimizing", current=0)
         opt_results = images.optimize_all(
             storage.original_dir(staging_id), storage.optimized_dir(staging_id),
@@ -1790,6 +2022,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
         if bg_failed:
             _bulk_set(job_id, bg_error=bg_failed[0]["bg_error"],
                       bg_failed=len(bg_failed))
+            # Photos that kept their background weren't the AI they paid for.
+            tokens.refund(bg_spent,
+                          units=len(bg_failed) * tokens.COSTS.get("image_ai", 1))
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
@@ -1839,6 +2074,25 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
             item = {"session_id": sid, "name": group["name"], "status": "draft",
                     "error": None, "listing_id": None,
                     "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
+            # Each bulk item is one AI draft — same token price as a single
+            # listing. Out of tokens mid-batch: the item keeps its photos as a
+            # stub draft (retryable via "Start over" after a top-up), no AI
+            # spend happens for it, and the batch keeps going so the count of
+            # what's left is honest.
+            spent = tokens.spend(uid, "identify") if billing else None
+            if spent is not None and not spent.get("ok"):
+                stub = Listing(images=item_names, missing_info=[
+                    "Out of AI tokens when this item's turn came — your photos "
+                    "are safe. Top up (or wait for the monthly reset), then "
+                    "use Start over to run the AI."])
+                storage.save_listing(sid, stub)
+                db.upsert_listing(sid, stub.model_dump(), status="draft", user_id=uid)
+                item.update({"status": "error", "listing": stub.model_dump(),
+                             "title": group["name"],
+                             "error": tokens.insufficient_message(spent)})
+                _bulk_set(job_id, tokens_exhausted=True)
+                items.append(item)
+                continue
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names],
                                             item_names, strategy=strategy)
@@ -1847,15 +2101,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 # the queue card shows what will actually happen at publish
                 # rather than an unchecked box that promotes anyway.
                 listing.promote = listing.promote or auto_promote
-                if config.taxonomy_ready() and not listing.category_id:
-                    try:
-                        best = taxonomy.best_category_id(_category_query(listing))
-                        if best.get("category_id"):
-                            listing.category_id = best["category_id"]
-                            if best.get("path"):
-                                listing.category_suggestion = best["path"]
-                    except Exception:  # noqa: BLE001
-                        pass
+                _resolve_category(listing)
                 # Fill item specifics BEFORE publishing — bulk 'live' mode goes
                 # straight to eBay here, so without this the listing lands with
                 # only the generic first-pass specifics.
@@ -1895,6 +2141,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 item["listing"] = listing.model_dump()
                 item["title"] = listing.title
             except Exception as exc:  # noqa: BLE001 - one bad item shouldn't kill the batch
+                tokens.refund(spent)
                 log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
                 item["status"] = "error"
                 item["error"] = str(exc)
@@ -1936,6 +2183,11 @@ async def bulk_upload(
     item for review; 'live' also attempts to publish each one."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    # The worker thread can't return a 401, so the login requirement (billing
+    # is per-account) is enforced before the upload is accepted.
+    if tokens.enabled() and _uid(request) is None:
+        raise HTTPException(
+            401, "Log in to use AI features — your token balance is per account.")
     if mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     if not files:
@@ -1993,11 +2245,13 @@ def bulk_status(job_id: str) -> dict:
         return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
 
 
-def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
+def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
+                      spent: Optional[dict] = None) -> None:
     """Background worker for a single-item identify. Claude vision over several
     photos can take long enough that a synchronous request outlives the
     proxy/browser timeout ('server taking too long'); running it as a job the
-    client polls avoids that entirely and still saves the draft when done."""
+    client polls avoids that entirely and still saves the draft when done.
+    `spent` is the token charge taken by the endpoint — refunded on failure."""
     try:
         opt_dir = storage.optimized_dir(session_id)
         names = storage.list_optimized(session_id)
@@ -2007,16 +2261,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
         result = claude_ai.identify([opt_dir / n for n in names], names,
                                     strategy=_pricing_strategy(uid))
         _apply_listing_defaults(result.listing, uid)
-        # Auto-resolve a numeric eBay category ID when Taxonomy creds are present.
-        if config.taxonomy_ready() and not result.listing.category_id:
-            try:
-                best = taxonomy.best_category_id(_category_query(result.listing))
-                if best.get("category_id"):
-                    result.listing.category_id = best["category_id"]
-                    if best.get("path"):
-                        result.listing.category_suggestion = best["path"]
-            except Exception:  # noqa: BLE001 - never block identify on taxonomy
-                pass
+        _resolve_category(result.listing)
         # Fill the category's item specifics now so the draft is SEO-ready.
         _fill_category_specifics(result.listing, [opt_dir / n for n in names])
         # Second-layer maker ID — only runs when Brand/Maker/Manufacturer are
@@ -2026,6 +2271,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str]) -> None:
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
+        tokens.refund(spent)
         log.warning("identify job %s failed: %s", job_id, exc)
         reason = claude_ai.ai_error_message(exc)[1]
         # The upload must never vanish: without a DB record the photos are
@@ -2057,23 +2303,25 @@ def identify_async(session_id: str, request: Request) -> dict:
     synchronous request open, so slow vision calls can't time out the browser."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    _assert_session_owner(session_id, request)
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")
     uid = _uid(request)
+    spent = _charge_ai(request, "identify")  # up front: a broke caller 402s here
     job_id = storage.new_session_id()
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
         "done": False, "error": None, "result": None,
     })
     threading.Thread(
-        target=_run_identify_job, args=(job_id, session_id, uid), daemon=True,
+        target=_run_identify_job, args=(job_id, session_id, uid, spent), daemon=True,
     ).start()
     log.info("identify job %s: started (session=%s)", job_id, session_id)
     return {"job_id": job_id}
 
 
 @app.post("/api/shelf-scan")
-async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
+async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> dict:
     """Shop Mode 'Scan a shelf': the client samples frames from a recorded
     video and posts them here; Claude flags items worth a closer look. No
     pricing, no persistence — pure triage."""
@@ -2090,9 +2338,11 @@ async def shelf_scan(files: list[UploadFile] = File(...)) -> dict:
             frames.append(data)
     if not frames:
         raise HTTPException(400, "No readable frames.")
+    spent = _charge_ai(request, "shelf_scan")
     try:
         result = await run_in_threadpool(claude_ai.scan_shelf, frames)
     except Exception as exc:  # noqa: BLE001
+        tokens.refund(spent)
         raise HTTPException(502, f"Shelf scan failed: {exc}") from exc
     log.info("shelf scan: %d frames -> %d candidates", len(frames),
              len(result.get("items", [])))
@@ -2107,6 +2357,7 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")
+    _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     db.upsert_listing(req.session_id, req.listing.model_dump(),
                       status="unlisted", user_id=uid)
@@ -2186,7 +2437,7 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
             continue
         listing = it.get("listing") or {}
         eid = str(listing.get("ebay_listing_id") or "")
-        sku = ebay._sku(it["id"])
+        sku = ebay.sku_for(it["id"])
         if (eid and eid in ads) or (sku and sku in ads):
             promoted.add(it["id"])
     return promoted
@@ -2754,7 +3005,7 @@ def sync_listings(request: Request) -> dict:
 
 # Bounds one import run. A store bigger than this imports across repeated
 # syncs rather than tying up a single request indefinitely.
-IMPORT_LIMIT = listing_sync._ACTIVE_LIMIT
+IMPORT_LIMIT = listing_sync.ACTIVE_LIMIT
 
 
 @app.post("/api/ebay/import-listings")
@@ -2818,11 +3069,18 @@ def media(session_id: str, name: str, v: str = ""):
     raise HTTPException(404, "Not found")
 
 
-# Clean URLs for the static pages eBay's app settings link to (StaticFiles
-# only serves them under their exact .html filenames).
+# Clean URLs for the static policy pages (StaticFiles only serves them under
+# their exact .html filenames). These are linked from eBay's app settings, the
+# App Store listing, and — since a native app has no address bar — from inside
+# the app's own Settings screen.
 @app.get("/privacy-policy")
 def privacy_policy():
     return FileResponse(FRONTEND_DIR / "privacy-policy.html")
+
+
+@app.get("/terms")
+def terms():
+    return FileResponse(FRONTEND_DIR / "terms.html")
 
 
 @app.get("/about")

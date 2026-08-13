@@ -1,11 +1,11 @@
 name: CI
 
 # Pre-merge signal for a solo operator who merges from a phone: lint + the
-# pure-unit test suite (config/storage/objstore naming, plus the pure-Pillow
-# mask/framing helpers in services/images — the code whose misbehavior has
-# actually bitten production). Deliberately does NOT install the heavy model
-# stack (rembg/onnxruntime); the image tests run no inference. Pillow and
-# anthropic are here only so backend.services.images imports.
+# pure-unit test suite (config/storage/objstore naming, the token billing
+# engine, and the pure-Pillow mask/framing helpers in services/images — the
+# code whose misbehavior has actually bitten production or would bite
+# revenue). Deliberately does NOT install the heavy model stack
+# (rembg/onnxruntime); the image tests run no inference.
 on:
   pull_request:
   workflow_dispatch:
@@ -19,8 +19,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # Just what the unit tests import — deliberately not rembg/onnxruntime,
+      # which these tests never touch. SQLAlchemy/bcrypt/PyJWT/httpx are for
+      # the token + account tests (billing invariants run against SQLite);
+      # fastapi because backend/auth.py imports it for Request/Response;
+      # Pillow + anthropic so backend.services.images imports.
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 Pillow anthropic
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx Pillow anthropic
       - name: Ruff
         run: ruff check backend
       - name: Tests
