@@ -12,7 +12,15 @@ export async function api(path, opts = {}) {
     try {
       detail = (await res.json()).detail || detail;
     } catch (e) { /* non-JSON error body */ }
-    throw new Error(`(${res.status}) ${detail}`);
+    // Out of AI tokens (402 mentioning tokens — distinct from the unrelated
+    // 402 the server maps Anthropic-credit exhaustion to): let the app shell
+    // open the buy-tokens dialog on top of whatever toast the caller shows.
+    if (res.status === 402 && /token/i.test(String(detail))) {
+      try { window.dispatchEvent(new CustomEvent("tokens:needed", { detail })); } catch (e) {}
+    }
+    const err = new Error(`(${res.status}) ${detail}`);
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }

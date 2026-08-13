@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Pacifico&family=Anton&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css" />
   <style>
     .page { max-width: 720px; margin: 0 auto; padding: 24px 20px 60px; font-family: 'Nunito', sans-serif; line-height: 1.6; }
     .page h1 { font-family: 'Anton', sans-serif; letter-spacing: 1px; margin-bottom: 4px; }
@@ -19,7 +18,7 @@
 <body>
   <main class="page">
     <h1>Privacy Policy</h1>
-    <p class="updated">Thryft Shop (listing-lfwjrg.fly.dev) · Last updated August 11, 2026</p>
+    <p class="updated">Thryft Shop (listing-lfwjrg.fly.dev) · Last updated August 12, 2026</p>
 
     <p>Thryft Shop helps sellers create marketplace listings (eBay, Etsy, Depop)
     from photos. This page explains what information the service handles and how
@@ -31,7 +30,9 @@
         hashed password (we never store your password in plain text).</li>
       <li><strong>Photos you upload:</strong> product images you submit are
         stored so they can be optimized, analyzed, and attached to your
-        listings.</li>
+        listings. In the mobile app, the camera and photo library are used only
+        when you choose to add a photo, and only the photos you pick are
+        uploaded.</li>
       <li><strong>Listing drafts:</strong> titles, descriptions, prices, and
         other listing details generated or edited in the app.</li>
       <li><strong>Marketplace connections:</strong> if you connect a
@@ -51,13 +52,17 @@
         listing there.</li>
       <li>Account and listing data are stored in our database (hosted on Neon)
         so your listing history is available when you log in.</li>
+      <li>Uploaded photos are stored on our server and in Cloudflare R2 object
+        storage, which is also where eBay fetches them from when a listing is
+        published.</li>
     </ul>
 
     <h2>What we don't do</h2>
     <ul>
       <li>We do not sell your data or share it with anyone beyond the service
         providers named above (Anthropic, the marketplaces you connect —
-        eBay, Etsy, Depop — and our hosting providers Fly.io and Neon).</li>
+        eBay, Etsy, Depop — and our hosting/storage providers Fly.io, Neon,
+        and Cloudflare).</li>
       <li>We do not use your photos or listings for advertising.</li>
     </ul>
 
@@ -67,17 +72,25 @@
     notice for audit purposes; we do not key any personal data to eBay
     usernames.</p>
 
-    <h2>Your choices</h2>
-    <p>You can disconnect any marketplace account at any time from the app's
-    Settings page, or by revoking access in that marketplace's own account
-    settings. To delete your Thryft Shop account and its data, email us and
-    we'll remove it.</p>
+    <h2>Deleting your account</h2>
+    <p>You can delete your account yourself, from inside the app, at any time:
+    <strong>Settings → Delete account</strong>. It immediately removes your
+    account, your listing drafts, and your uploaded photos (from both our
+    database and our image storage), and hands your marketplace authorizations
+    back to those marketplaces so the connections stop existing on their side
+    too. You don't need to email anyone and there's no waiting period.</p>
+    <p>One thing we can't delete: listings you already published stay live on
+    eBay, Etsy, or Depop under your own seller account. End those on the
+    marketplace itself if you want them taken down.</p>
+    <p>You can also disconnect any marketplace on its own — either in Settings,
+    or by revoking access in that marketplace's own account settings — without
+    deleting your Thryft Shop account.</p>
 
     <h2>Contact</h2>
-    <p>Questions or deletion requests:
+    <p>Questions:
     <a href="mailto:leifhansen1990@gmail.com">leifhansen1990@gmail.com</a></p>
 
-    <p><a href="/">← Back to Thryft Shop</a></p>
+    <p><a href="/terms">Terms of service</a> · <a href="/">← Back to Thryft Shop</a></p>
   </main>
 </body>
 </html>

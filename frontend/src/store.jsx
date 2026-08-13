@@ -76,6 +76,16 @@ export function AppProvider({ children }) {
     loadEbayStatus();
   }, []);
 
+  // ---------- AI tokens (monetization) ----------
+  // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
+  // installs) hides the whole surface. The dialog opens from the TopBar chip
+  // or automatically when any AI call comes back 402 "out of tokens".
+  const [tokens, setTokens] = useState({ enabled: false, total: 0, packs: [], costs: {} });
+  const [tokensOpen, setTokensOpen] = useState(false);
+  const loadTokens = useCallback(async () => {
+    try { setTokens(await api("/api/tokens")); } catch (e) { /* keep previous */ }
+  }, []);
+
   // ---------- eBay connection ----------
   const [ebay, setEbay] = useState({
     connected: false, env: "", username: "", email: "", oauth_ready: false,
@@ -282,6 +292,39 @@ export function AppProvider({ children }) {
     if (e || ok || bad) history.replaceState({}, "", window.location.pathname);
   }, [toast, loadMarketplaces]);
 
+  // ---------- token purchase redirect landing ----------
+  // Stripe Checkout sends the buyer back with ?tokens=success&session_id=…;
+  // confirm credits the pack even if the webhook hasn't landed (idempotent
+  // server-side, so webhook + confirm can both run).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const t = params.get("tokens");
+    if (!t) return;
+    history.replaceState({}, "", window.location.pathname);
+    if (t === "cancelled") { toast("Purchase cancelled — no charge was made."); return; }
+    if (t !== "success") return;
+    const sessionId = params.get("session_id") || "";
+    (async () => {
+      try {
+        const res = await api(`/api/tokens/confirm?session_id=${encodeURIComponent(sessionId)}`);
+        toast(`Payment received — ${res.tokens} tokens added to your account!`, { kind: "success" });
+      } catch (e) {
+        toast(`Purchase confirmation is still processing: ${e.message}`, { kind: "warning" });
+      }
+      loadTokens();
+    })();
+  }, [toast, loadTokens]);
+
+  // Any AI call that 402s for tokens pops the buy dialog (see lib/api.js).
+  useEffect(() => {
+    const onNeeded = () => { loadTokens(); setTokensOpen(true); };
+    window.addEventListener("tokens:needed", onNeeded);
+    return () => window.removeEventListener("tokens:needed", onNeeded);
+  }, [loadTokens]);
+
+  // Balance changes with login state; it also refreshes when the dialog opens.
+  useEffect(() => { loadTokens(); }, [user, loadTokens]);
+
   useEffect(() => {
     loadHealth();
     loadAuth();
@@ -314,6 +357,7 @@ export function AppProvider({ children }) {
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
     marketplaces, loadMarketplaces, connectedMarketplaces,
+    tokens, tokensOpen, setTokensOpen, loadTokens,
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
     storeSync, syncStore,
@@ -322,8 +366,9 @@ export function AppProvider({ children }) {
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
-    loadAuth, logout, ebay, loadEbayStatus, canPublishLive,
-    marketplaces, loadMarketplaces, connectedMarketplaces, policiesData,
+    loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
+    marketplaces, loadMarketplaces, connectedMarketplaces,
+    tokens, tokensOpen, loadTokens,
     listingsState, loadListings, metricsById, storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,

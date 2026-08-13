@@ -136,6 +136,50 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
+# --- Monetization: AI tokens + Stripe --------------------------------------
+# The app is free; AI features spend tokens. Every account gets
+# FREE_TOKENS_PER_MONTH each calendar month (UTC, no rollover); when they run
+# out the user buys a pack (Stripe Checkout) — purchased tokens never expire.
+# Billing only activates when TOKENS_ENABLED is set AND a database exists
+# (balances are per-account); otherwise every AI feature stays free, which is
+# the right default for local dev and self-hosters.
+TOKENS_ENABLED = os.getenv("TOKENS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+FREE_TOKENS_PER_MONTH = _env_int("FREE_TOKENS_PER_MONTH", 50)
+
+# Stripe (payments). Secret key sk_live_/sk_test_; the webhook signing secret
+# (whsec_...) comes from the endpoint you register for checkout.session.completed
+# at https://<your-domain>/api/tokens/webhook. Purchases also confirm client-side
+# after the Checkout redirect, so the webhook is a safety net, not a requirement.
+STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
+
+
+def stripe_ready() -> bool:
+    return bool(STRIPE_SECRET_KEY)
+
+
+def tokens_enabled() -> bool:
+    """Billing is on: tokens are enforced on AI features."""
+    return TOKENS_ENABLED and bool(DATABASE_URL)
+
+
+if TOKENS_ENABLED and not DATABASE_URL:
+    log.warning("TOKENS_ENABLED is set but DATABASE_URL is not — token billing "
+                "needs a database for per-account balances, so AI features "
+                "remain free until one is configured.")
+if TOKENS_ENABLED and DATABASE_URL and not STRIPE_SECRET_KEY:
+    log.warning("Token billing is on without STRIPE_SECRET_KEY — users get the "
+                "monthly free allowance but cannot buy more tokens.")
+
 # --- Adobe Lightroom / Photoshop (Firefly Services) --------------------------
 # A paid photo engine, used only when BG_ENGINE (below) selects it — either
 # directly ("adobe") or as Photoroom's backup ("photoroom"). The Lightroom API

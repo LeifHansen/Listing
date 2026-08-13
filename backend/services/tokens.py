@@ -1,0 +1,319 @@
+"""The monetization engine: AI-token metering, packs, and Stripe checkout.
+
+The app itself is free. Every AI feature spends tokens; each account gets a
+monthly free allowance (config.FREE_TOKENS_PER_MONTH, calendar-month UTC, no
+rollover) and buys more when it runs out. Purchased tokens never expire and
+are spent AFTER free ones (free tokens are the ones that evaporate at month
+end, so they burn first).
+
+Pricing rationale (defaults; costs are env-overridable):
+  A full AI listing draft runs 4-6 vision calls (identify + item-specifics
+  fill + tag zoom/transcribe + occasional maker check) over up to 8 photos.
+  On the default Opus-tier vision model ($5/M input, $25/M output) that's
+  roughly $0.25 for a typical 3-photo listing and up to ~$0.80 for a maxed-out
+  8-photo one. At 5 tokens per draft and a $0.07-$0.12 retail token, a draft
+  brings in $0.35-$0.60 — a ~40-60% gross margin in the typical case that
+  still covers the worst case at the mid packs. Lighter features (refine,
+  shelf scan, photo tools) cost cents and are priced at 1-2 tokens.
+  The free allowance (50 = ~10 drafts) costs the operator at most ~$2.50 per
+  active user per month — the acquisition spend that makes "free app" true.
+
+Failure policy: tokens are charged up front and refunded when the AI call
+fails ("only pay for AI that worked"). On a transient DB error we FAIL OPEN
+(allow the call, log loudly): blocking every seller because the billing DB
+hiccuped costs more trust than the pennies of un-metered usage — and auth
+already fails closed before this layer when the DB is truly down.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import hashlib
+import hmac
+import json
+import os
+import time
+from typing import Optional
+from urllib.parse import quote
+
+import httpx
+
+from .. import config, db
+from ..config import log
+
+# --- Feature costs (tokens) -------------------------------------------------
+# Overridable per deployment: TOKENS_COST_IDENTIFY=4 etc. lets the operator
+# re-tune margins after switching VISION_MODEL to a cheaper tier.
+_DEFAULT_COSTS = {
+    # Full AI listing draft: identify + category + item specifics + tag read
+    # + maker check. Same price per item in a bulk batch (the batch's photo
+    # grouping pass is bundled into it).
+    "identify": 5,
+    # Free-form "refine with AI" instruction on an existing draft.
+    "refine": 1,
+    # Standalone "Autofill item specifics" button (bundled free inside a draft).
+    "specifics": 2,
+    # Shop Mode shelf scan (one video's frames).
+    "shelf_scan": 2,
+    # AI photo tools, per photo: background removal / auto-clean / smart crop.
+    "image_ai": 1,
+}
+
+
+def _load_costs() -> dict:
+    out = {}
+    for feature, default in _DEFAULT_COSTS.items():
+        try:
+            v = int(os.getenv(f"TOKENS_COST_{feature.upper()}", "") or default)
+        except ValueError:
+            v = default
+        out[feature] = max(0, v)
+    return out
+
+
+COSTS = _load_costs()
+
+FEATURE_LABELS = {
+    "identify": "AI listing draft",
+    "refine": "AI refine",
+    "specifics": "Autofill item specifics",
+    "shelf_scan": "Shelf scan",
+    "image_ai": "AI photo tool",
+}
+
+# --- Token packs (one-time purchases; tokens never expire) ------------------
+# Anchored so the effective per-token price falls with size ($0.12 -> $0.07)
+# while every pack stays comfortably above the API cost of the usage it buys.
+PACKS = [
+    {"id": "starter", "tokens": 50, "usd_cents": 599, "label": "Starter"},
+    {"id": "plus", "tokens": 120, "usd_cents": 1199, "label": "Plus"},
+    {"id": "pro", "tokens": 300, "usd_cents": 2499, "label": "Pro"},
+    {"id": "power", "tokens": 1000, "usd_cents": 6999, "label": "Power seller"},
+]
+
+
+def pack(pack_id: str) -> Optional[dict]:
+    return next((p for p in PACKS if p["id"] == pack_id), None)
+
+
+# --- Billing state ----------------------------------------------------------
+
+def enabled() -> bool:
+    return config.tokens_enabled()
+
+
+def cost(feature: str, units: int = 1) -> int:
+    return COSTS.get(feature, 0) * max(1, units)
+
+
+def period_now(now: Optional[_dt.datetime] = None) -> str:
+    """The current free-allowance period, e.g. '2026-08' (UTC calendar month)."""
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    return f"{now.year:04d}-{now.month:02d}"
+
+
+def next_reset(now: Optional[_dt.datetime] = None) -> str:
+    """ISO date the free allowance next resets (first of next month, UTC)."""
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+    return f"{year:04d}-{month:02d}-01"
+
+
+def plan_spend(free_quota: int, free_used: int, purchased: int,
+               amount: int) -> Optional[tuple[int, int]]:
+    """Pure arithmetic of one debit: how much comes from the free allowance vs
+    the purchased balance. Returns (free_part, paid_part), or None when the
+    combined balance can't cover it. db.token_spend applies the same split
+    under its row lock; this is the testable core."""
+    free_remaining = max(0, free_quota - max(0, free_used))
+    if amount <= 0:
+        return (0, 0)
+    if free_remaining + purchased < amount:
+        return None
+    free_part = min(amount, free_remaining)
+    return (free_part, amount - free_part)
+
+
+def status(user_id: Optional[str]) -> dict:
+    """Balance + catalog for the UI. Safe for anonymous callers (no balance)."""
+    out = {
+        "enabled": enabled(),
+        "stripe": config.stripe_ready(),
+        "free_quota": config.FREE_TOKENS_PER_MONTH,
+        "resets_on": next_reset(),
+        "costs": dict(COSTS),
+        "packs": [{k: p[k] for k in ("id", "tokens", "usd_cents", "label")}
+                  for p in PACKS],
+    }
+    if not enabled() or not user_id:
+        return out
+    snap = db.token_status(user_id, period_now(), config.FREE_TOKENS_PER_MONTH)
+    if snap is None:  # DB hiccup — report the quota, not a scary zero
+        snap = {"free_remaining": config.FREE_TOKENS_PER_MONTH, "purchased": 0}
+    out.update({
+        "free_remaining": snap["free_remaining"],
+        "purchased": snap["purchased"],
+        "total": snap["free_remaining"] + snap["purchased"],
+    })
+    return out
+
+
+def spend(user_id: str, feature: str, units: int = 1) -> Optional[dict]:
+    """Debit a feature's cost. Returns the db.token_spend result dict, or None
+    when billing is off / the feature is free / the DB failed (fail open)."""
+    if not enabled():
+        return None
+    amount = cost(feature, units)
+    if amount <= 0:
+        return None
+    res = db.token_spend(user_id, amount, config.FREE_TOKENS_PER_MONTH,
+                         period_now(), feature=feature)
+    if res is None:
+        log.warning("tokens: DB unavailable — allowing %s for %s un-metered",
+                    feature, user_id)
+        return None
+    res["user_id"] = user_id  # refund() needs it
+    return res
+
+
+def refund(spend_result: Optional[dict], units: Optional[int] = None) -> None:
+    """Give back a (possibly partial) spend after an AI failure. Accepts the
+    exact dict spend() returned; no-ops on None/declined/free spends."""
+    if not spend_result or not spend_result.get("ok") or not spend_result.get("entry_id"):
+        return
+    user_id = spend_result.get("user_id", "")
+    db.token_refund(user_id, spend_result["entry_id"], units=units)
+
+
+def insufficient_message(res: dict) -> str:
+    """The 402 detail. The word 'token' is load-bearing: the frontend opens
+    the buy-tokens dialog for 402s that mention tokens (and must NOT for the
+    unrelated 402 the AI layer maps Anthropic credit exhaustion to)."""
+    left = res.get("free_remaining", 0) + res.get("purchased", 0)
+    return (f"Out of AI tokens ({left} left). Your free "
+            f"{config.FREE_TOKENS_PER_MONTH} reset on {next_reset()} — or buy "
+            "a token pack to keep going now.")
+
+
+# --- Stripe (raw HTTPS via httpx; no SDK dependency) ------------------------
+
+_STRIPE_API = "https://api.stripe.com/v1"
+
+
+def _stripe_post(path: str, data: dict) -> dict:
+    resp = httpx.post(f"{_STRIPE_API}{path}", data=data,
+                      auth=(config.STRIPE_SECRET_KEY, ""), timeout=30)
+    body = resp.json()
+    if resp.status_code >= 400:
+        msg = (body.get("error") or {}).get("message", f"HTTP {resp.status_code}")
+        raise RuntimeError(f"Stripe error: {msg}")
+    return body
+
+
+def _stripe_get(path: str) -> dict:
+    resp = httpx.get(f"{_STRIPE_API}{path}",
+                     auth=(config.STRIPE_SECRET_KEY, ""), timeout=30)
+    body = resp.json()
+    if resp.status_code >= 400:
+        msg = (body.get("error") or {}).get("message", f"HTTP {resp.status_code}")
+        raise RuntimeError(f"Stripe error: {msg}")
+    return body
+
+
+def create_checkout(user_id: str, pack_id: str, base_url: str) -> str:
+    """Create a Stripe Checkout session for a pack; returns the URL to send
+    the buyer to. The user/pack ride in metadata so the webhook (or the
+    client-side confirm) can credit the right account."""
+    p = pack(pack_id)
+    if p is None:
+        raise ValueError("Unknown token pack")
+    if not config.stripe_ready():
+        raise RuntimeError("Payments aren't configured on this server (STRIPE_SECRET_KEY).")
+    session = _stripe_post("/checkout/sessions", {
+        "mode": "payment",
+        "client_reference_id": user_id,
+        "line_items[0][price_data][currency]": "usd",
+        "line_items[0][price_data][unit_amount]": str(p["usd_cents"]),
+        "line_items[0][price_data][product_data][name]":
+            f"Thryft Shop AI tokens — {p['label']} ({p['tokens']} tokens)",
+        "line_items[0][quantity]": "1",
+        "metadata[user_id]": user_id,
+        "metadata[pack_id]": p["id"],
+        "metadata[tokens]": str(p["tokens"]),
+        # {CHECKOUT_SESSION_ID} is substituted by Stripe on redirect.
+        "success_url": f"{base_url}/?tokens=success&session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"{base_url}/?tokens=cancelled",
+    })
+    return session["url"]
+
+
+def confirm_checkout(user_id: str, session_id: str) -> dict:
+    """Client-side fallback after the Checkout redirect: verify with Stripe
+    that the session is paid and belongs to this user, then credit
+    (idempotently — the webhook may already have)."""
+    if not session_id or "/" in session_id:
+        raise ValueError("Invalid session id")
+    session = _stripe_get(f"/checkout/sessions/{quote(session_id, safe='')}")
+    meta = session.get("metadata") or {}
+    if session.get("payment_status") != "paid":
+        raise ValueError("This purchase hasn't completed yet.")
+    if meta.get("user_id") != user_id:
+        raise ValueError("This purchase belongs to a different account.")
+    tokens = int(meta.get("tokens", "0") or 0)
+    if tokens <= 0:
+        raise ValueError("No token amount recorded on this purchase.")
+    res = db.token_credit(user_id, tokens, ref=str(session.get("id")),
+                          note=f"pack {meta.get('pack_id', '?')}")
+    if res is None:
+        raise RuntimeError("Payment received but the database is unavailable — "
+                           "your tokens will be credited automatically; contact "
+                           "support if they don't appear shortly.")
+    return {"credited": not res.get("already"), "tokens": tokens}
+
+
+def verify_stripe_signature(payload: bytes, sig_header: str, secret: str,
+                            tolerance: int = 300,
+                            now: Optional[float] = None) -> bool:
+    """Verify a Stripe-Signature header (t=...,v1=...) over the raw body.
+    Pure — unit-testable without Stripe."""
+    if not sig_header or not secret:
+        return False
+    parts = dict(
+        kv.split("=", 1) for kv in sig_header.split(",") if "=" in kv
+    )
+    ts, sig = parts.get("t"), parts.get("v1")
+    if not ts or not sig:
+        return False
+    try:
+        ts_val = int(ts)
+    except ValueError:
+        return False
+    if abs((now if now is not None else time.time()) - ts_val) > tolerance:
+        return False
+    expected = hmac.new(secret.encode(), f"{ts}.".encode() + payload,
+                        hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+
+def handle_webhook(payload: bytes, sig_header: str) -> dict:
+    """Process a Stripe webhook delivery. Credits checkout.session.completed
+    events; everything else is acknowledged and ignored."""
+    if not verify_stripe_signature(payload, sig_header, config.STRIPE_WEBHOOK_SECRET):
+        raise PermissionError("Invalid Stripe signature")
+    event = json.loads(payload)
+    if event.get("type") != "checkout.session.completed":
+        return {"handled": False}
+    session = (event.get("data") or {}).get("object") or {}
+    meta = session.get("metadata") or {}
+    user_id = meta.get("user_id", "")
+    tokens = int(meta.get("tokens", "0") or 0)
+    if session.get("payment_status") != "paid" or not user_id or tokens <= 0:
+        return {"handled": False}
+    res = db.token_credit(user_id, tokens, ref=str(session.get("id")),
+                          note=f"pack {meta.get('pack_id', '?')} (webhook)")
+    if res is None:
+        # Non-2xx makes Stripe retry the delivery — exactly what we want
+        # while the DB is down.
+        raise RuntimeError("Database unavailable; retry")
+    log.info("tokens: credited %d to %s (stripe %s, already=%s)",
+             tokens, user_id, session.get("id"), res.get("already"))
+    return {"handled": True, "credited": not res.get("already")}

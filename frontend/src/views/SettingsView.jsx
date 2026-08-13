@@ -3,11 +3,13 @@ import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
   PackageOpen, Truck, Plus, TrendingUp, Megaphone, Store, BadgeCheck,
+  Trash2,
 } from "lucide-react";
 import { api, postJson } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
+import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
@@ -140,6 +142,9 @@ export function SettingsView() {
             }
           />
         </Card>
+        {/* Logged out too: in the native app there's no address bar, so this
+            is the only route to the policies. */}
+        <LegalLinks />
       </SettingsShell>
     );
   }
@@ -393,6 +398,8 @@ export function SettingsView() {
       </Card>
 
       <MarketplaceConnections />
+      <DeleteAccountCard />
+      <LegalLinks />
     </SettingsShell>
   );
 }
@@ -573,6 +580,155 @@ function EtsyDefaults() {
         </Button>
       </div>
     </div>
+  );
+}
+
+// Leaving is as easy as joining: one button here, no email, no support ticket.
+// The dialog states plainly what goes and what survives (anything already
+// published stays live on the seller's own eBay account — we can delete our
+// copy, not their listings).
+function DeleteAccountCard() {
+  const { user, setUser, loadEbayStatus, setPoliciesData } = useApp();
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [password, setPassword] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState("");
+
+  const start = async () => {
+    setPassword("");
+    setError("");
+    setSummary(null);
+    setOpen(true);
+    try {
+      setSummary(await api("/api/account/summary"));
+    } catch {
+      setSummary({}); // the dialog still works; it just can't show the counts
+    }
+  };
+
+  const remove = async () => {
+    setDeleting(true);
+    setError("");
+    try {
+      const res = await postJson("/api/account/delete", { password });
+      setOpen(false);
+      // Clear every trace of the account from the running app, not just the
+      // user: the top bar reads the eBay connection and would keep showing
+      // the deleted account's username until a reload.
+      setUser(null);
+      setPoliciesData(null);
+      loadEbayStatus();
+      toast(
+        `Your account is deleted${res.deleted_listings
+          ? ` — ${res.deleted_listings} listing${res.deleted_listings === 1 ? "" : "s"} and ${res.deleted_listings === 1 ? "its" : "their"} photos are gone`
+          : ""}. Thanks for giving Thryft Shop a try.`,
+        { kind: "success" },
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <>
+      <Card>
+        <SectionHeader
+          icon={UserRound}
+          title="Delete account"
+          hint="Erases your account, listings, and photos — right here, no email required"
+        />
+        <div className="flex flex-col gap-4 max-w-lg">
+          <p className="text-sm text-ink-secondary">
+            You can close your account whenever you like. Anything you already
+            published stays live on eBay under your own seller account — end
+            those in eBay first if you want them gone too.
+          </p>
+          <div>
+            <Button variant="danger" onClick={start}>
+              <Trash2 aria-hidden /> Delete my account
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      <Dialog open={open} onClose={() => !deleting && setOpen(false)} title="Delete your account?">
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-ink-secondary">
+            This permanently erases <strong className="text-ink">{user?.email}</strong>
+            {summary?.counted && summary.listings ? (
+              <>, <strong className="text-ink">
+                {summary.listings} listing{summary.listings === 1 ? "" : "s"}
+              </strong> and every photo on them</>
+            ) : (
+              <> and everything saved to it</>
+            )}
+            {summary?.ebay_connected ? ", and disconnects your eBay account." : "."}
+            {" "}It can&rsquo;t be undone.
+          </p>
+
+          {/* Never let a DB hiccup hide this: if the counts couldn't be read,
+              warn generically rather than silently implying nothing is live. */}
+          {summary && (summary.counted === false || !!summary.live_listings) && (
+            <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink">
+              <AlertTriangle size={15} className="inline mr-1.5 -mt-0.5" aria-hidden />
+              {summary.counted === false ? (
+                <>Any listing you already published stays live on eBay under your
+                  own seller account and keeps selling — deleting here only removes
+                  Thryft Shop&rsquo;s copy. End them in eBay first if you want them
+                  taken down.</>
+              ) : (
+                <>{summary.live_listings} of your listings
+                  {" "}{summary.live_listings === 1 ? "is" : "are"} live on eBay.
+                  {" "}{summary.live_listings === 1 ? "It stays" : "They stay"} up
+                  and {summary.live_listings === 1 ? "keeps" : "keep"} selling — deleting
+                  here only removes Thryft Shop&rsquo;s copy. End
+                  {" "}{summary.live_listings === 1 ? "it" : "them"} in eBay first if
+                  you want {summary.live_listings === 1 ? "it" : "them"} taken down.</>
+              )}
+            </p>
+          )}
+
+          <Field label="Confirm your password" help="So a stray tap or a borrowed phone can't do this.">
+            <Input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => { setPassword(e.target.value); setError(""); }}
+              onKeyDown={(e) => { if (e.key === "Enter" && password && !deleting) remove(); }}
+            />
+          </Field>
+
+          {error && <p className="text-sm text-error">{error}</p>}
+
+          <div className="flex flex-wrap gap-2.5 justify-end">
+            <Button variant="secondary" onClick={() => setOpen(false)} disabled={deleting}>
+              Keep my account
+            </Button>
+            <Button variant="danger" onClick={remove} loading={deleting} disabled={!password}>
+              Delete permanently
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+    </>
+  );
+}
+
+// The app has no address bar, so these are the only way to reach the policies
+// from inside it — which Apple requires and which is just good manners.
+function LegalLinks() {
+  const link = "text-ink-secondary hover:text-ink underline underline-offset-2";
+  return (
+    <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-secondary px-1">
+      <a className={link} href="/privacy-policy" target="_blank" rel="noreferrer">Privacy policy</a>
+      <a className={link} href="/terms" target="_blank" rel="noreferrer">Terms of service</a>
+      <a className={link} href="/about" target="_blank" rel="noreferrer">About</a>
+      <a className={link} href="mailto:leifhansen1990@gmail.com">Support</a>
+    </p>
   );
 }
 

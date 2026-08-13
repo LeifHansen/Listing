@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Plus, Link2, CheckCircle2 } from "lucide-react";
+import { Search, Plus, Link2, CheckCircle2, Coins } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -7,7 +7,9 @@ import { useToast } from "@/components/ui/Toaster";
 
 // TopBar — search, eBay connection state, Quick Add. No clutter.
 export function TopBar({ onSearch, onManageEbay }) {
-  const { user, openAuth, ebay, startNew, setView, session } = useApp();
+  const {
+    user, openAuth, ebay, startNew, setView, session, tokens, setTokensOpen,
+  } = useApp();
   const { toast } = useToast();
   const [q, setQ] = useState("");
 
@@ -48,6 +50,21 @@ export function TopBar({ onSearch, onManageEbay }) {
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        {tokens.enabled && (
+          <Button
+            variant="soft"
+            size="md"
+            onClick={() => setTokensOpen(true)}
+            aria-label={`AI tokens: ${user ? (tokens.total ?? 0) : "log in to see balance"}`}
+            className={cn(
+              // Running low reads as a warning before it becomes a wall.
+              user && (tokens.total ?? 0) <= 5 && "bg-warning-soft text-warning",
+            )}
+          >
+            <Coins aria-hidden />
+            {user ? (tokens.total ?? 0) : "Tokens"}
+          </Button>
+        )}
         <Button
           variant={ebay.connected ? "soft" : "secondary"}
           size="md"
