@@ -232,18 +232,24 @@ def prune_exports(max_age_seconds: int) -> int:
     return freed
 
 
-def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> int:
+def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> list[str]:
     """Delete session dirs that aren't a known listing and haven't been touched
     in `max_age_seconds` — i.e. leftover bulk staging and abandoned uploads that
     were never saved. This reclaims volume space (bulk staging was never cleaned
-    up, growing until writes fail with a 500). Returns how many were removed.
+    up, growing until writes fail with a 500). Returns the removed dir names.
     Never raises. The caller MUST pass a real id set (never on a DB outage), or
-    live listings' images would look like orphans."""
-    removed = 0
+    live listings' images would look like orphans.
+
+    Returns names (not just a count) because the same photos may already have
+    been mirrored to R2 — an upload reaches the bucket before any listing row
+    exists — and the caller has to purge them there too. Nothing else can:
+    with no listing row, no id set and no user record ever names them again.
+    """
+    removed: list[str] = []
     try:
         base = config.SESSIONS_DIR
         if not base.exists():
-            return 0
+            return removed
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
             try:
@@ -252,7 +258,7 @@ def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> int:
                 if d.stat().st_mtime > cutoff:
                     continue  # too recent — may be an in-flight upload/session
                 shutil.rmtree(d, ignore_errors=True)
-                removed += 1
+                removed.append(d.name)
             except Exception:  # noqa: BLE001 - keep sweeping the rest
                 continue
     except Exception as exc:  # noqa: BLE001

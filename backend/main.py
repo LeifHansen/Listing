@@ -97,8 +97,20 @@ def _sweep_orphans() -> None:
     # ids would sweep every imported listing's photos as orphans.
     dir_names = {storage.session_dir(i).name for i in ids if i}
     removed = storage.sweep_orphan_sessions(dir_names, max_age_seconds=3 * 3600)
-    if removed:
-        log.info("sweep: removed %d orphaned session dir(s) to reclaim space", removed)
+    if not removed:
+        return
+    # The bucket needs the same sweep. /api/upload mirrors photos to R2 before
+    # any listing row exists, so an abandoned upload leaves objects that no
+    # later cleanup can name — not the id set (no row), not account deletion
+    # (it walks listing ids). Without this they accumulate in R2 forever, and
+    # survive the uploader deleting their account.
+    if objstore.enabled():
+        purged = sum(objstore.delete_prefix(objstore.session_prefix(name))
+                     for name in removed)
+        if purged:
+            log.info("sweep: purged %d orphaned R2 object(s)", purged)
+    log.info("sweep: removed %d orphaned session dir(s) to reclaim space",
+             len(removed))
 
 
 # How long a source upload / edit snapshot survives before it's reclaimed.
@@ -499,15 +511,19 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
 
 def _purge_session_images(session_id: str) -> None:
     """Delete a session's photos (local disk + R2) to reclaim storage once the
-    listing is archived (sold). Keeps the DB record. Best-effort, never raises;
-    eBay still hosts the images on the sold listing itself."""
+    listing is archived (sold) or deleted. Keeps the DB record. Best-effort,
+    never raises; eBay still hosts the images on the sold listing itself.
+
+    The R2 side deletes by PREFIX, not by walking the local directory. The
+    reclaim pass offloads photos to the bucket and unlinks the local copies
+    (see _offload_to_r2), so for any listing older than the offload TTL the
+    local dir is empty and a name-by-name delete removed nothing at all —
+    leaving the photos in the bucket forever, including on account deletion,
+    which promises the opposite.
+    """
     try:
         if objstore.enabled():
-            for n in storage.list_optimized(session_id):
-                try:
-                    objstore.delete(objstore.key_for(session_id, n))
-                except Exception:  # noqa: BLE001 - keep purging the rest
-                    pass
+            objstore.delete_prefix(objstore.session_prefix(session_id))
         d = storage.session_dir(session_id)
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
