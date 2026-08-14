@@ -1895,9 +1895,14 @@ BULK_GROUP_CHUNK = 100
 _BULK_JOBS_MAX = 200
 
 
-def _register_bulk_job(job_id: str, data: dict) -> None:
+def _register_bulk_job(job_id: str, data: dict, uid: Optional[str] = None) -> None:
+    """Register a background job. `uid` is the account that started it; job
+    status carries drafted titles and prices, so a logged-in user's job is
+    readable only by them (see _assert_job_owner). Anonymous jobs have no
+    owner and stay readable by whoever holds the id, matching how the rest of
+    the app treats logged-out sessions."""
     with _BULK_LOCK:
-        _BULK_JOBS[job_id] = data
+        _BULK_JOBS[job_id] = {**data, "_uid": uid}
         while len(_BULK_JOBS) > _BULK_JOBS_MAX:
             _BULK_JOBS.pop(next(iter(_BULK_JOBS)))
 
@@ -2147,7 +2152,7 @@ async def bulk_upload(
         "id": job_id, "mode": mode, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
-    })
+    }, uid=uid)
     threading.Thread(
         target=_run_bulk_job,
         args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
@@ -2159,12 +2164,19 @@ async def bulk_upload(
 
 
 @app.get("/api/bulk/status/{job_id}")
-def bulk_status(job_id: str) -> dict:
+def bulk_status(job_id: str, request: Request) -> dict:
     with _BULK_LOCK:
         job = _BULK_JOBS.get(job_id)
         if job is None:
             raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
-        return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
+        owner = job.get("_uid")
+        # Same rule as _assert_session_owner: an owned job is private to its
+        # owner (404, not 403 — don't confirm the id exists).
+        if owner and owner != _uid(request):
+            raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
+        snapshot = json.loads(json.dumps(job))  # deep copy, thread-safe
+    snapshot.pop("_uid", None)  # internal bookkeeping, not part of the API
+    return snapshot
 
 
 def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
@@ -2234,7 +2246,7 @@ def identify_async(session_id: str, request: Request) -> dict:
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
         "done": False, "error": None, "result": None,
-    })
+    }, uid=uid)
     threading.Thread(
         target=_run_identify_job, args=(job_id, session_id, uid, spent), daemon=True,
     ).start()
