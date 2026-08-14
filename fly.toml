@@ -41,6 +41,21 @@ primary_region = 'sjc'
   auto_start_machines = true
   min_machines_running = 1
 
+  # Without this Fly only knows something accepts TCP on 8080 — which a
+  # wedged event loop still does, and which a deploy that booted with a
+  # broken config still does. This is a LIVENESS check: it asks whether the
+  # app can still serve a request, and deliberately passes while Postgres or
+  # R2 are down. Tying it to those would have Fly restart the machine over an
+  # outage it cannot fix, turning someone else's blip into a restart loop —
+  # /api/health reports their state in its body for humans and the UI banner.
+  # grace_period covers the model warm-up thread started at boot.
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "60s"
+    method = "GET"
+    path = "/api/health"
+
 [[vm]]
   # Background removal loads onnxruntime + rembg (scipy/numba). The
   # isnet-general-use model ([env] above) needs 4GB — on 2GB it OOM-kills the

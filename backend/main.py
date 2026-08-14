@@ -479,8 +479,20 @@ def _assert_session_owner(session_id: str, request: Request) -> None:
     """404 when this session's saved listing belongs to a DIFFERENT user.
     Session ids appear in media URLs and can leak, so possession of an id
     must not grant write access. Unsaved or unowned (anonymous) sessions
-    pass — the app supports logged-out flows."""
-    rec = db.get_listing(session_id)
+    pass — the app supports logged-out flows.
+
+    Fails CLOSED on a database outage. This check is the only thing standing
+    between a leaked session id and write access to someone else's photos,
+    and it answers from the database — so if a read failure were treated like
+    "no such listing", one Neon blip would quietly disable the guard on every
+    session-scoped endpoint at once, while the rest of the app (on-disk
+    sessions, /media) kept serving. A brief 503 is the right trade.
+    """
+    rec = db.get_listing_strict(session_id)
+    if rec is db.UNAVAILABLE:
+        raise HTTPException(
+            503, "Can't verify who this listing belongs to right now — "
+                 "please try again in a moment.")
     if rec and rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
 
@@ -1991,11 +2003,22 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
     strategy = _pricing_strategy(uid)          # once, not per item
     auto_promote = _auto_promote_enabled(uid)  # ditto
     billing = tokens.enabled() and uid is not None
+    # Background-removal billing, tracked across the whole job: what was
+    # debited up front, and how much has already gone back. A batch that never
+    # reaches the end returns the whole un-refunded remainder (see finally) —
+    # the abort case is the common one, since the grouping call raises on any
+    # Anthropic 429/overload, and it used to keep the entire charge for zero
+    # delivered work. db.token_refund does not remember earlier partial
+    # refunds, so the running total has to be kept here.
+    bg_spent = None
+    bg_charged = 0
+    bg_refunded = 0
+    n_photos = 0
+    delivered = False
     try:
         # Bulk background removal is metered per photo, charged before the
         # engines run. Not enough tokens -> photos are kept as-is (with a
         # visible reason) rather than failing the whole batch.
-        bg_spent = None
         if strip_bg and billing:
             n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
                            if p.is_file())
@@ -2006,6 +2029,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                     "Not enough tokens for background removal — photos were "
                     "kept as shot. " + tokens.insufficient_message(bg_spent)))
                 bg_spent = None
+            elif bg_spent is not None:
+                # What was actually debited, so the settlement below can give
+                # back exactly the unused remainder. db.token_refund does not
+                # remember earlier partial refunds — a partial refund followed
+                # by a full one would pay the user twice — so the accounting
+                # has to live here.
+                bg_charged = tokens.cost("image_ai", n_photos)
         _bulk_set(job_id, phase="optimizing", current=0)
         opt_results = images.optimize_all(
             storage.original_dir(staging_id), storage.optimized_dir(staging_id),
@@ -2016,13 +2046,27 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
         # limit) on the job so the UI can say WHY the photos came back with
         # their backgrounds intact — silence here reads as "the feature is
         # broken" when the photo was deliberately kept unchanged.
-        bg_failed = [r for r in opt_results if r.get("bg_error")]
+        # A photo that failed to process AT ALL (corrupt/truncated file, a
+        # decoder that gave up) got no cutout either and owes nothing — count
+        # it the same way /api/upload does. Photos the batch never even looked
+        # at (a .mov in the pile: optimize_all filters by extension) never
+        # reach opt_results, and the settlement below returns those.
+        bg_failed = [r for r in opt_results
+                     if r.get("bg_error") or r.get("error")]
+        # Files the charge counted but optimize_all never looked at — it takes
+        # only known image extensions, while the charge counts everything in
+        # the staging dir, so a video or PDF in the pile was billed and could
+        # not even fail visibly.
+        unprocessed = max(0, n_photos - len(opt_results))
+        owed_now = (len(bg_failed) + unprocessed) * tokens.COSTS.get("image_ai", 1)
         if bg_failed:
-            _bulk_set(job_id, bg_error=bg_failed[0]["bg_error"],
-                      bg_failed=len(bg_failed))
+            reason = next((r["bg_error"] for r in bg_failed if r.get("bg_error")), None)
+            _bulk_set(job_id, bg_failed=len(bg_failed),
+                      **({"bg_error": reason} if reason else {}))
+        if owed_now:
             # Photos that kept their background weren't the AI they paid for.
-            tokens.refund(bg_spent,
-                          units=len(bg_failed) * tokens.COSTS.get("image_ai", 1))
+            tokens.refund(bg_spent, units=owed_now)
+            bg_refunded += owed_now
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
@@ -2147,6 +2191,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 item["title"] = group["name"]
             items.append(item)
 
+        delivered = True
         _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
         log.info("bulk %s: %d photos -> %d items (%s)", job_id, len(names), len(items), mode)
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
@@ -2164,6 +2209,17 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
         log.warning("bulk %s failed: %s", job_id, exc)
         _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
     finally:
+        # Give back whatever the batch charged for and never delivered. On an
+        # abort that is the whole un-refunded remainder; on a completed batch
+        # it is the photos the pile contained but optimize_all never processed
+        # (a video or PDF among the photos), which were charged and can't fail
+        # visibly because they never appear in the results at all.
+        if bg_spent is not None and not delivered:
+            owed = bg_charged - bg_refunded
+            if owed > 0:
+                tokens.refund(bg_spent, units=owed)
+                log.info("bulk %s: refunded %d unused background-removal token(s)",
+                         job_id, owed)
         # Staging photos were only needed to optimize + split into per-item
         # sessions; drop them so the volume doesn't grow with every batch.
         storage.purge_session(staging_id)
@@ -2261,6 +2317,12 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         opt_dir = storage.optimized_dir(session_id)
         names = storage.list_optimized(session_id)
         if not names:
+            # No AI ran, so the up-front charge goes back. This fires when the
+            # session's photos disappear between the endpoint's check and this
+            # thread's read — a concurrent delete of the last photo, or the
+            # reclaim pass offloading the local copies — and it billed a full
+            # draft for an error message.
+            tokens.refund(spent)
             _bulk_set(job_id, done=True, error="No optimized images found for this session.")
             return
         result = claude_ai.identify([opt_dir / n for n in names], names,

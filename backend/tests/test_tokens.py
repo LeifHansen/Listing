@@ -195,3 +195,65 @@ def test_purchase_credit_is_idempotent_by_ref(tokens_db):
     assert first["ok"] and not first["already"]
     assert again["ok"] and again["already"]
     assert tokens_db.token_status(uid, "2026-08", 0)["purchased"] == 120
+
+
+def test_new_account_first_concurrent_spends_do_not_fall_through_to_fail_open(
+        tokens_db, monkeypatch):
+    """The account row is created on the first spend, and FOR UPDATE cannot
+    lock a row that does not exist yet, so two concurrent first-ever spends
+    both INSERT. The loser used to surface as a DB error, which the caller
+    treats as an outage and FAILS OPEN (un-metered AI) — turning a double-tap
+    on a new account into free AI.
+
+    Set up as the real race: the winning writer has already committed the row
+    from another session, and this caller's first lookup predates it, so the
+    INSERT hits a genuine primary-key violation from the database.
+    """
+    uid, period = "race-1", "2026-08"
+
+    # The winner, from its own session/transaction.
+    with tokens_db.Session(tokens_db._get_engine()) as other:
+        other.add(tokens_db.TokenAccount(
+            user_id=uid, purchased=7, free_used=0, free_period="",
+            updated_at=tokens_db._now()))
+        other.commit()
+
+    orig_get = tokens_db.Session.get
+    stale = {"done": False}
+
+    def get_with_stale_first_read(self, entity, ident, **kw):
+        # Only the first TokenAccount lookup misses — the state this caller
+        # was in when it decided to INSERT.
+        if not stale["done"] and entity is tokens_db.TokenAccount:
+            stale["done"] = True
+            return None
+        return orig_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(tokens_db.Session, "get", get_with_stale_first_read)
+    try:
+        res = tokens_db.token_spend(uid, 5, free_quota=50, period=period,
+                                    feature="identify")
+    finally:
+        monkeypatch.undo()
+
+    # Metered normally rather than collapsing to None (which means fail-open).
+    assert res is not None, "insert race fell through to the fail-open path"
+    assert res["ok"] and res["free_part"] == 5
+    snap = tokens_db.token_status(uid, period, 50)
+    assert snap["free_used"] == 5
+    assert snap["purchased"] == 7, "the winner's row was clobbered, not reused"
+
+
+def test_get_listing_distinguishes_absent_from_unavailable(tokens_db, monkeypatch):
+    """The ownership guard reads through this: 'no such listing' must never be
+    confused with 'the database is down', or one blip disables the check."""
+    assert tokens_db.get_listing_strict("nope") is None      # genuinely absent
+
+    def boom(*a, **kw):
+        raise RuntimeError("neon unreachable")
+
+    monkeypatch.setattr(tokens_db, "_get_engine", boom)
+    assert tokens_db.get_listing_strict("nope") is tokens_db.UNAVAILABLE
+    # The lenient wrapper keeps its old contract for callers that just want
+    # the record.
+    assert tokens_db.get_listing("nope") is None
