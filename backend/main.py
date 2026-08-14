@@ -24,7 +24,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore, storage
+from . import (auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore,
+               ratelimit, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
@@ -222,6 +223,23 @@ def _warm_models() -> None:
 
 def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
+
+
+def _client_ip(request: Request) -> str:
+    """The caller's IP. Fly puts the real client in Fly-Client-IP; uvicorn
+    runs with --proxy-headers so request.client is already the forwarded
+    address, but the explicit header is the one Fly guarantees."""
+    return (request.headers.get("Fly-Client-IP")
+            or (request.client.host if request.client else "?"))
+
+
+def _rate_limit_auth(request: Request, bucket: str) -> None:
+    """429 when one client floods an auth endpoint (see backend/ratelimit)."""
+    ip = _client_ip(request)
+    if not ratelimit.check(f"{bucket}:{ip}"):
+        log.warning("auth: rate limited %s from %s", bucket, ip)
+        raise HTTPException(
+            429, "Too many attempts. Wait a few minutes and try again.")
 
 
 @app.get("/api/health")
@@ -501,6 +519,7 @@ def _purge_session_images(session_id: str) -> None:
 
 @app.post("/api/auth/signup")
 def auth_signup(request: Request, response: Response, payload: dict) -> dict:
+    _rate_limit_auth(request, "signup")
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
     if not email or "@" not in email:
@@ -522,6 +541,7 @@ def auth_signup(request: Request, response: Response, payload: dict) -> dict:
 
 @app.post("/api/auth/login")
 def auth_login(request: Request, response: Response, payload: dict) -> dict:
+    _rate_limit_auth(request, "login")
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
     if not db.enabled():
@@ -662,6 +682,10 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     if not user:
         raise HTTPException(401, "Log in first.")
     uid = user["id"]
+
+    # Password-guessing here is the same attack as on /login, with a worse
+    # payoff for the victim — throttle it the same way.
+    _rate_limit_auth(request, "account-delete")
 
     # Re-authenticate: a leaked session token must not be enough to erase an
     # account. (A password is always set — signup is the only way in.)
