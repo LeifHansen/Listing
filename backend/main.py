@@ -1324,7 +1324,13 @@ async def upload(
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+            # Off the event loop: a 40-photo batch is hundreds of MB of
+            # synchronous write() syscalls, and while they run nothing else on
+            # the machine is served — including the /media requests eBay itself
+            # makes at publish time. (The Pillow pass below was already
+            # offloaded for the same reason; this loop was missed.)
+            await run_in_threadpool(
+                (orig / f"src_{i:03d}{suffix}").write_bytes, data)
     except OSError as exc:
         # Disk full / write failure — same friendly answer as the bulk path,
         # not a raw 500; drop the partial session rather than leaving an orphan.
@@ -1407,7 +1413,7 @@ async def upload_more(
         suffix = Path(f.filename or f"add_{idx}").suffix or ".jpg"
         src = orig / f"add_{idx:03d}{suffix}"
         try:
-            src.write_bytes(data)
+            await run_in_threadpool(src.write_bytes, data)
         except OSError as exc:
             tokens.refund(spent)
             raise HTTPException(
@@ -2260,7 +2266,10 @@ async def bulk_upload(
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+            # Same reason as /api/upload — and more so here: a 250-photo
+            # batch is on the order of a gigabyte of blocking writes.
+            await run_in_threadpool(
+                (orig / f"src_{i:03d}{suffix}").write_bytes, data)
     except OSError as exc:
         # Disk full / write failure — clean up the partial staging and report it
         # clearly instead of a raw 500. Old orphans are swept on restart.
