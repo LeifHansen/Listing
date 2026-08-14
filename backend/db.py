@@ -399,8 +399,13 @@ def delete_user(user_id: str) -> Optional[list[str]]:
     gone is exactly the trap this feature exists to avoid — so failure is
     reported and the caller surfaces it.
 
-    The listings table has no foreign key to users (see ListingRecord), so
-    nothing cascades on its own; every table is cleared explicitly here.
+    No table here has a foreign key to users, so nothing cascades on its own;
+    every table keyed to a user is cleared explicitly below. When a table is
+    added to this module it MUST be added here too — Apple's account-deletion
+    requirement (App Store guideline 5.1.1(v)) and every privacy policy we
+    publish promise that "delete my account" leaves nothing behind. Leaving a
+    marketplace refresh token behind is worse than a stale row: it is a live
+    credential for someone else's eBay/Etsy/Depop account.
     """
     try:
         eng = _get_engine()
@@ -420,6 +425,16 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(
                 delete(ListingRecord).where(ListingRecord.user_id == user_id))
             s.execute(delete(EbayAccount).where(EbayAccount.user_id == user_id))
+            # Etsy/Depop/every future marketplace: these rows hold live OAuth
+            # refresh tokens, so they are the most important thing to erase.
+            s.execute(delete(MarketplaceAccount)
+                      .where(MarketplaceAccount.user_id == user_id))
+            # Billing: the balance row and its ledger. The ledger is an audit
+            # trail, but it is keyed to a person who asked to be forgotten and
+            # holds no money of ours — Stripe keeps the payment record it is
+            # legally required to keep, independently of this table.
+            s.execute(delete(TokenLedger).where(TokenLedger.user_id == user_id))
+            s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             s.commit()
             return listing_ids

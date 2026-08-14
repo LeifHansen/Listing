@@ -12,6 +12,7 @@ import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
+import { CategoryQuickPick } from "./CategoryQuickPick";
 import {
   MarketTargetChips, missingRequired, publishListing, usePublishTargets,
 } from "./publishShared";
@@ -205,6 +206,14 @@ function BulkItemCard({
               </Select>
             )}
           </div>
+
+          {/* Category on the card face: bulk batches are exactly where a
+              wrong AI category slips through unnoticed. Edits ride the same
+              local-then-save-on-publish path as the fields above. */}
+          <CategoryQuickPick
+            listing={l}
+            onPick={(patch) => onChange({ ...l, ...patch })}
+          />
 
           <ShippingServiceSelect
             value={l.fulfillment_policy_id}

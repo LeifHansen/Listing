@@ -1334,8 +1334,9 @@ async def upload_more(
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
-    if strip_bg:
-        _charge_ai(request, "image_ai", units=len(files))
+    # Keep the spend record: every failure path below has to give the tokens
+    # back, exactly as /api/upload does ("only pay for AI that worked").
+    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -1347,6 +1348,7 @@ async def upload_more(
     for j, f in enumerate(files):
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
+            tokens.refund(spent)
             raise HTTPException(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         idx = start + j
@@ -1355,25 +1357,36 @@ async def upload_more(
         try:
             src.write_bytes(data)
         except OSError as exc:
+            tokens.refund(spent)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
     rotations = await run_in_threadpool(
         orient.detect_rotations, [src for _idx, src in staged])
     new_names: list[str] = []
+    # Photos whose cutout failed (engine down / out of credits) kept their
+    # background, so they owe nothing — counted the same way /api/upload does.
+    bg_failed = 0
     for idx, src in staged:
         try:
-            await run_in_threadpool(
+            res = await run_in_threadpool(
                 images.optimize, src, opt_dir / f"img_{idx:03d}.jpg", strip_bg,
                 rotations.get(src.name, 0))
             new_names.append(f"img_{idx:03d}.jpg")
+            if res.get("bg_error"):
+                bg_failed += 1
         except OSError as exc:
+            tokens.refund(spent)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         except Exception as exc:  # noqa: BLE001 - skip a bad file, keep the rest
             log.warning("upload-more: couldn't process %s: %s", src.name, exc)
+            bg_failed += 1
     if not new_names:
+        tokens.refund(spent)
         raise HTTPException(400, "Could not process the uploaded image(s).")
+    if spent and bg_failed:
+        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
