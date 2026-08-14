@@ -1504,7 +1504,22 @@ async def edit_image(
 # /api/edit-image, so every AI action stays reviewable and cancellable.
 # ---------------------------------------------------------------------------
 
-def _studio_load(session_id: str, name: str, data: Optional[bytes]):
+def _studio_guard(request: Request) -> None:
+    """Shared entry check for the four photo-studio endpoints. They run the
+    local rembg model, which is serialized behind one process-wide inference
+    lock, so an unthrottled caller stalls every seller's photo work at once.
+    They deliberately are NOT token-metered — the border re-check fires
+    automatically after every crop and save, so charging it would bill people
+    for ordinary editing — which makes a rate ceiling the only brake."""
+    ip = _client_ip(request)
+    if not ratelimit.check(f"studio:{ip}", max_attempts=ratelimit.STUDIO_MAX_CALLS):
+        log.warning("studio: rate limited %s", ip)
+        raise HTTPException(
+            429, "Too many photo operations at once. Wait a moment and retry.")
+
+
+def _studio_load(request: Request, session_id: str, name: str,
+                 data: Optional[bytes]):
     from io import BytesIO
     from PIL import Image
 
@@ -1516,6 +1531,13 @@ def _studio_load(session_id: str, name: str, data: Optional[bytes]):
     name = (name or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
+    # Loading BY SESSION reaches a stored photo, so it needs the same
+    # ownership check every other session-scoped route makes. Session ids are
+    # not secrets — they appear in the public /media URLs handed to eBay — so
+    # holding one must not let a caller run the studio against someone else's
+    # photos. The inline-`file` path above is the editor's own canvas blob and
+    # touches nothing stored, so it stays open to the logged-out flows.
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
@@ -1580,18 +1602,24 @@ async def rotate_image(payload: dict, request: Request) -> dict:
 
 @app.post("/api/image/analyze")
 async def image_analyze(
+    request: Request,
     session_id: str = Form(""),
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
     """Re-check the item's borders: returns a mask of leftover background
-    (non-white areas outside the detected subject) for the editor to highlight."""
+    (non-white areas outside the detected subject) for the editor to highlight.
+
+    Free by design (it fires after every crop and save), but it runs the same
+    rembg model as its metered siblings — hence the shared studio guard.
+    """
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         res = images.analyze_cleanup(img)
         return {
             "ok": True,
@@ -1614,12 +1642,13 @@ async def image_auto_clean(
 ) -> dict:
     """AI clean-up: re-detect the subject and whiten everything outside it.
     Returns the cleaned image for the editor to preview (not saved yet)."""
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
 
     spent = _charge_ai(request, "image_ai")
@@ -1641,12 +1670,13 @@ async def image_remove_bg(
     default, Adobe Photoshop's Remove Background as the backup, the in-house
     model when neither is configured. Returns the processed image for the
     editor to preview (not saved)."""
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         out, engine = images.remove_background_white(img)
         # engine = which remover actually ran — the editor names it so a
         # misconfigured key can't hide behind a silently-degraded result.
@@ -1675,12 +1705,13 @@ async def image_smart_crop(
     """Crop to the detected subject with a clean margin, padded to a square.
     Returns the cropped image for preview, or applied=False if the frame is
     already tight (so the UI can say so instead of degrading the photo)."""
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         cropped = images.smart_crop(img)
         if cropped is None:
             return {"ok": True, "applied": False,
