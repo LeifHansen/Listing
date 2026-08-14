@@ -144,7 +144,9 @@ def ensure_inventory_location(access_token: str, postal_code: str,
         "location": {"address": addr},
         "locationTypes": ["WAREHOUSE"],
         "merchantLocationStatus": "ENABLED",
-        "name": "QuickFlip ship-from location",
+        # Display name only — the location is found by its key ("thryft-loc-1"
+        # above), never by name, so this is safe to keep in step with the brand.
+        "name": "Thryft Shop ship-from location",
     }
     r = httpx.post(f"{base}/sell/inventory/v1/location/{key}",
                    headers=headers, json=body, timeout=30)
@@ -326,7 +328,11 @@ def account_overview(access_token: str) -> dict:
 # Shipping services (per-listing selection + USPS Ground Advantage default)
 # ---------------------------------------------------------------------------
 
-GROUND_POLICY_NAME = "USPS Ground Advantage (QuickFlip)"
+# These policy names show up in the seller's own eBay account, so they carry
+# the app's real brand. They are display-only: find_policy_for_service matches
+# on the shipping SERVICE CODE, never the name, so renaming them cannot orphan
+# a policy an existing seller already has.
+GROUND_POLICY_NAME = "USPS Ground Advantage (Thryft Shop)"
 
 # The eBay (EBAY_US) shipping services a seller can one-tap into a fulfillment
 # policy. Codes are eBay ShippingServiceCodeType values; keep to well-known,
@@ -404,7 +410,7 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
     existing = find_policy_for_service(access_token, svc["code"])
     if existing and existing["id"]:
         return {**existing, "created": False}
-    name = (f"{svc['label']} (QuickFlip)"
+    name = (f"{svc['label']} (Thryft Shop)"
             if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
     body = {
         "name": name,
