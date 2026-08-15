@@ -85,6 +85,9 @@ export function DraftsStrip({ search = "" }) {
   const [sel, setSel] = useState({});
   const [publishing, setPublishing] = useState({});   // id -> bool
   const [startingOver, setStartingOver] = useState(null);
+  // Bulk publish runs one listing at a time (eBay's API is per-item), which on
+  // a big selection is a long wait — so the button counts it off out loud.
+  const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
 
   const q = search.trim().toLowerCase();
   const drafts = listingsState.items
@@ -97,67 +100,110 @@ export function DraftsStrip({ search = "" }) {
 
   if (!drafts.length) return null;
 
-  const selIds = Object.keys(sel).filter((id) => sel[id]);
+  // Both bulk actions work on the drafts you can actually see: narrowing the
+  // search after selecting must not publish or delete something off-screen.
+  const selectedDrafts = drafts.filter((d) => sel[d.id]);
+  // eBay refuses a listing that's missing title/price/weight/category, so the
+  // per-card Publish button is disabled for those. Bulk publish holds the same
+  // line: they're left selected and named, not fired off to fail one by one.
+  const readyToPublish = selectedDrafts.filter(
+    (d) => missingRequired(d.listing || {}).length === 0);
+  const allSelected = drafts.length > 0 && selectedDrafts.length === drafts.length;
   const exitSelect = () => { setSelecting(false); setSel({}); };
+  const toggleAll = () => setSel(allSelected
+    ? {}
+    : Object.fromEntries(drafts.map((i) => [i.id, true])));
 
-  const publishOne = async (item) => {
+  // Where a publish lands, in words — for the confirm dialog.
+  const targetNames = effectiveTargets && effectiveTargets.length > 1
+    ? effectiveTargets
+        .map((k) => k === "ebay" ? "eBay" : k.charAt(0).toUpperCase() + k.slice(1))
+        .join(" and ")
+    : "your eBay store";
+
+  // Publish one saved draft. Returns whether it went live; the caller owns the
+  // toast and the listings refresh, so a bulk run does one of each at the end
+  // rather than one per item.
+  const publishItem = async (item) => {
     setPublishing((p) => ({ ...p, [item.id]: true }));
     try {
       const res = await publishListing(item.id, item.listing || {}, effectiveTargets);
-      const summary = resultSummary(res);
-      if (res.published) {
-        const partial = res.multi
-          && Object.values(res.results || {}).some((r) => !r.ok);
-        toast(partial
-          ? `${summary} — open the listing to fix the rest.`
-          : (res.message || "Published! It's live now."),
-          { kind: partial ? "warning" : "success" });
-      } else {
-        toast(res.message || "Publish blocked — open the draft to see what to fix.",
-          { kind: "warning" });
-      }
-      await loadListings({ quiet: true });
-      return !!res.published;
+      return { published: !!res.published, res };
     } catch (e) {
-      toast(`Publish error: ${e.message}`, { kind: "error" });
-      return false;
+      return { published: false, error: e.message };
     } finally {
       setPublishing((p) => ({ ...p, [item.id]: false }));
     }
   };
 
+  const publishOne = async (item) => {
+    const { published, res, error } = await publishItem(item);
+    if (error) {
+      toast(`Publish error: ${error}`, { kind: "error" });
+      return false;
+    }
+    const summary = resultSummary(res);
+    if (published) {
+      const partial = res.multi
+        && Object.values(res.results || {}).some((r) => !r.ok);
+      toast(partial
+        ? `${summary} — open the listing to fix the rest.`
+        : (res.message || "Published! It's live now."),
+        { kind: partial ? "warning" : "success" });
+    } else {
+      toast(res.message || "Publish blocked — open the draft to see what to fix.",
+        { kind: "warning" });
+    }
+    await loadListings({ quiet: true });
+    return published;
+  };
+
   const publishSelected = async () => {
-    const targets = drafts.filter((d) => sel[d.id]);
-    if (!targets.length) { toast("Nothing selected to publish.", { kind: "warning" }); return; }
-    const targetNames = effectiveTargets && effectiveTargets.length > 1
-      ? effectiveTargets
-          .map((k) => k === "ebay" ? "eBay" : k.charAt(0).toUpperCase() + k.slice(1))
-          .join(" and ")
-      : "your eBay store";
+    if (!selectedDrafts.length) {
+      toast("Nothing selected to publish.", { kind: "warning" });
+      return;
+    }
+    const notReady = selectedDrafts.length - readyToPublish.length;
+    if (!readyToPublish.length) {
+      toast(`${notReady === 1 ? "That draft is" : `All ${notReady} selected drafts are`} missing required info — open them to fill in what eBay needs.`,
+        { kind: "warning" });
+      return;
+    }
     if (!(await confirm({
-      title: `Publish ${targets.length} draft${targets.length === 1 ? "" : "s"} live?`,
-      message: `Each goes straight to ${targetNames}.`,
+      title: `Publish ${readyToPublish.length} draft${readyToPublish.length === 1 ? "" : "s"} live?`,
+      message: `Each goes straight to ${targetNames}.`
+        + (notReady
+          ? ` ${notReady} of the ${selectedDrafts.length} selected ${notReady === 1 ? "is" : "are"} missing required info and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
+          : ""),
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0;
-    for (const item of targets) {
-      (await publishOne(item)) ? ok++ : failed++;
+    setBulkProgress({ done: 0, total: readyToPublish.length });
+    try {
+      for (const item of readyToPublish) {
+        (await publishItem(item)).published ? ok++ : failed++;
+        setBulkProgress((p) => ({ ...p, done: ok + failed }));
+      }
+    } finally {
+      setBulkProgress(null);
     }
+    await loadListings({ quiet: true });
     exitSelect();
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
-      + (failed ? ` ${failed} need attention — open them to fix.` : ""),
-      { kind: failed ? "warning" : "success" });
+      + (failed ? ` ${failed} need attention — open them to fix.` : "")
+      + (notReady ? ` ${notReady} skipped for missing info.` : ""),
+      { kind: failed || notReady ? "warning" : "success" });
   };
 
   const deleteSelected = async () => {
-    if (!selIds.length) return;
+    if (!selectedDrafts.length) return;
     if (!(await confirm({
-      title: `Delete ${selIds.length} draft${selIds.length === 1 ? "" : "s"}?`,
+      title: `Delete ${selectedDrafts.length} draft${selectedDrafts.length === 1 ? "" : "s"}?`,
       message: "They'll be permanently removed, photos included. This can't be undone.",
       confirmLabel: "Delete all selected",
       danger: true,
     }))) return;
-    if (await bulkDeleteListings(selIds)) exitSelect();
+    if (await bulkDeleteListings(selectedDrafts.map((d) => d.id))) exitSelect();
   };
 
   const askDelete = async (item) => {
@@ -201,29 +247,9 @@ export function DraftsStrip({ search = "" }) {
         title={`Drafts (${drafts.length})`}
         action={
           <div className="flex flex-wrap items-center justify-end gap-2">
+            <MarketTargetChips selected={selected} toggle={toggle}
+              otherConnected={otherConnected} />
             {!selecting && (
-              <MarketTargetChips selected={selected} toggle={toggle}
-                otherConnected={otherConnected} />
-            )}
-            {selecting ? (
-              <>
-                <Button variant="primary" size="sm" onClick={publishSelected}
-                  disabled={!selIds.length}>
-                  <Rocket aria-hidden /> Publish selected ({selIds.length})
-                </Button>
-                <Button variant="danger" size="sm" onClick={deleteSelected}
-                  disabled={!selIds.length}>
-                  <Trash2 aria-hidden /> Delete selected ({selIds.length})
-                </Button>
-                <Button variant="ghost" size="sm"
-                  onClick={() => setSel(Object.fromEntries(drafts.map((i) => [i.id, true])))}>
-                  All
-                </Button>
-                <Button variant="ghost" size="sm" onClick={exitSelect}>
-                  <X aria-hidden /> Cancel
-                </Button>
-              </>
-            ) : (
               <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
                 <CheckSquare aria-hidden /> Select
               </Button>
@@ -231,6 +257,48 @@ export function DraftsStrip({ search = "" }) {
           </div>
         }
       />
+
+      {/* Select mode gets its own bar rather than a row of buttons wedged into
+          the header: on a phone the bulk actions used to wrap behind the title,
+          which made "publish everything I just drafted" look impossible. */}
+      {selecting && (
+        <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-card
+          border border-blue/35 bg-blue-soft/90 backdrop-blur px-3 py-2.5 shadow-card">
+          <label className="flex items-center gap-2 text-[13px] font-semibold text-ink cursor-pointer select-none mr-1">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              ref={(el) => { if (el) el.indeterminate = selectedDrafts.length > 0 && !allSelected; }}
+              onChange={toggleAll}
+              className="size-4 accent-(--brand-blue) cursor-pointer"
+            />
+            Select all
+            <span className="text-ink-secondary font-medium tabular-nums">
+              ({selectedDrafts.length} of {drafts.length})
+            </span>
+          </label>
+          <div className="flex flex-wrap items-center gap-2 ml-auto">
+            <Button variant="primary" size="sm" onClick={publishSelected}
+              disabled={!selectedDrafts.length || !!bulkProgress}
+              loading={!!bulkProgress}
+              title={selectedDrafts.length && !readyToPublish.length
+                ? "Every selected draft is missing required info — open them to finish"
+                : undefined}>
+              <Rocket aria-hidden />
+              {bulkProgress
+                ? `Publishing ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
+                : `Publish selected (${selectedDrafts.length})`}
+            </Button>
+            <Button variant="danger" size="sm" onClick={deleteSelected}
+              disabled={!selectedDrafts.length || !!bulkProgress}>
+              <Trash2 aria-hidden /> Delete selected ({selectedDrafts.length})
+            </Button>
+            <Button variant="ghost" size="sm" onClick={exitSelect} disabled={!!bulkProgress}>
+              <X aria-hidden /> Cancel
+            </Button>
+          </div>
+        </div>
+      )}
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {drafts.map((item, i) => {
           const missing = missingRequired(item.listing || {});
