@@ -40,13 +40,12 @@ const MAX_BATCH_FILES = 250;
 // photos it can also run in bulk mode: one pile, many listings.
 export function UploadPhase({ onBulkStarted }) {
   const { setSession } = useApp();
-  const { toast, confirm } = useToast();
+  const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
   const [files, setFiles] = useState([]); // { file, url }
   const [removeBg, setRemoveBg] = useState(false);
   const [bulk, setBulk] = useState(false);
-  const [bulkLive, setBulkLive] = useState(false);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
   // Past the single-listing cap the pile can only be a bulk batch.
@@ -82,23 +81,16 @@ export function UploadPhase({ onBulkStarted }) {
 
   const startBulk = once("bulk", async () => {
     if (!files.length) return;
-    const mode = bulkLive ? "live" : "draft";
-    if (mode === "live" && !(await confirm({
-      title: "Auto-publish ALL detected items?",
-      message: "Each item the AI finds goes straight to your eBay store, live.",
-      confirmLabel: "Publish everything",
-    }))) return;
     setBusy(true);
     try {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
-      fd.append("mode", mode);
       fd.append("remove_bg", removeBg ? "true" : "false");
       const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
       files.forEach((f) => URL.revokeObjectURL(f.url));
       setFiles([]);
-      onBulkStarted(job_id, mode);
+      onBulkStarted(job_id);
     } catch (e) {
       toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
     } finally {
@@ -265,15 +257,6 @@ export function UploadPhase({ onBulkStarted }) {
                   onChange={setBulk}
                   label="Bulk mode — this pile has multiple items"
                   help="The AI sorts the photos into items and drafts a listing for each one."
-                />
-              )}
-
-              {bulkOn && (
-                <Toggle
-                  checked={bulkLive}
-                  onChange={setBulkLive}
-                  label="Auto-publish everything live"
-                  help="Off = every item queues as a draft for review (recommended)."
                 />
               )}
 

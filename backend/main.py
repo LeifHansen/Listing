@@ -1896,9 +1896,10 @@ def _bulk_set(job_id: str, **fields) -> None:
             job.update(fields)
 
 
-def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
-                  uid: Optional[str], creds: Optional[dict], base_url: str) -> None:
-    """Background worker: optimize -> group -> per-item identify (-> publish)."""
+def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
+                  uid: Optional[str]) -> None:
+    """Background worker: optimize -> group -> per-item identify. Every item
+    lands as a draft for review; publishing is always an explicit choice."""
     strategy = _pricing_strategy(uid)          # once, not per item
     auto_promote = _auto_promote_enabled(uid)  # ditto
     billing = tokens.enabled() and uid is not None
@@ -2011,42 +2012,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
                 # rather than an unchecked box that promotes anyway.
                 listing.promote = listing.promote or auto_promote
                 _resolve_category(listing)
-                # Fill item specifics BEFORE publishing — bulk 'live' mode goes
-                # straight to eBay here, so without this the listing lands with
-                # only the generic first-pass specifics.
+                # Fill item specifics up front so the draft the seller reviews
+                # carries real specifics, not just the generic first pass.
                 _fill_category_specifics(listing, [item_dir / n for n in item_names])
                 _fill_maker(listing, [item_dir / n for n in item_names])
                 storage.save_listing(sid, listing)
-                status = "draft"
-                if mode == "live":
-                    # Same reason as the single-listing path: publish through
-                    # Trading so the seller can edit these in Seller Hub too,
-                    # not just in this app.
-                    if creds:
-                        try:
-                            urls = ebay.image_urls_for(sid, listing, base_url)
-                            res = listing_sync.create_on_ebay(
-                                creds["access_token"], listing, urls, creds=creds)
-                            pub = {"published": True, "listing_id": res["listing_id"]}
-                        except ValueError as exc:  # TradingError
-                            pub = {"published": False, "message": str(exc)}
-                    else:
-                        pub = ebay.publish(sid, listing, "live", base_url, creds=creds)
-                    if pub.get("published"):
-                        status = "published"
-                        item["status"] = "published"
-                        item["listing_id"] = pub.get("listing_id")
-                        # Auto-promote each just-published listing (account
-                        # default, Settings) — the bulk path used to skip
-                        # promotion entirely, so live batches landed unpromoted.
-                        if creds and auto_promote:
-                            _promote(sid, listing, creds,
-                                     rate=listing.ad_rate_percent,
-                                     ebay_listing_id=pub.get("listing_id"))
-                    else:
-                        # Stay a draft; surface why it couldn't go live.
-                        item["error"] = pub.get("message") or "Couldn't publish automatically."
-                db.upsert_listing(sid, listing.model_dump(), status=status, user_id=uid)
+                db.upsert_listing(sid, listing.model_dump(), status="draft", user_id=uid)
                 item["listing"] = listing.model_dump()
                 item["title"] = listing.title
             except Exception as exc:  # noqa: BLE001 - one bad item shouldn't kill the batch
@@ -2059,7 +2030,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
             items.append(item)
 
         _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
-        log.info("bulk %s: %d photos -> %d items (%s)", job_id, len(names), len(items), mode)
+        log.info("bulk %s: %d photos -> %d items", job_id, len(names), len(items))
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
         if exc.errno == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)
@@ -2084,12 +2055,11 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool, mode: str,
 async def bulk_upload(
     request: Request,
     files: list[UploadFile] = File(...),
-    mode: str = Form("draft"),
     remove_bg: str = Form("false"),
 ) -> dict:
     """Bulk mode: accept a photo dump spanning multiple items, then process in
-    the background (poll /api/bulk/status/{job_id}). mode: 'draft' queues every
-    item for review; 'live' also attempts to publish each one."""
+    the background (poll /api/bulk/status/{job_id}). Every item queues as a
+    draft for review — publishing stays an explicit, per-listing action."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # The worker thread can't return a 401, so the login requirement (billing
@@ -2097,8 +2067,6 @@ async def bulk_upload(
     if tokens.enabled() and _uid(request) is None:
         raise HTTPException(
             401, "Log in to use AI features — your token balance is per account.")
-    if mode not in ("draft", "live"):
-        raise HTTPException(400, "mode must be 'draft' or 'live'")
     if not files:
         raise HTTPException(400, "No files uploaded")
     if len(files) > MAX_BULK_FILES:
@@ -2128,20 +2096,19 @@ async def bulk_upload(
 
     # Capture per-request context now — the worker thread has no Request.
     uid = _uid(request)
-    creds = _ebay_creds_for(request) if mode == "live" else None
     job_id = storage.new_session_id()
     _register_bulk_job(job_id, {
-        "id": job_id, "mode": mode, "phase": "uploading", "done": False,
+        "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
     })
     threading.Thread(
         target=_run_bulk_job,
         args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
-              mode, uid, creds, _base_url(request)),
+              uid),
         daemon=True,
     ).start()
-    log.info("bulk %s: started (%d files, mode=%s)", job_id, len(files), mode)
+    log.info("bulk %s: started (%d files)", job_id, len(files))
     return {"job_id": job_id}
 
 

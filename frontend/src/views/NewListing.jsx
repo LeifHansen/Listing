@@ -471,7 +471,6 @@ export function NewListing({ search = "" }) {
         </div>
         <BulkQueue
           jobId={activeBulk.jobId}
-          mode={activeBulk.mode}
           onExit={clearBulk}
           onSettled={bulkSettled}
         />
