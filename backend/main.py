@@ -20,7 +20,9 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -40,6 +42,19 @@ from .services import etsy as etsy_service
 from .services.background import run_in_background
 
 app = FastAPI(title="eBay Listing Generator")
+
+# The iOS/Android shell bundles the web build (guideline 4.2 forbids a bare
+# remote-webview app), so its pages live on capacitor://localhost and call
+# this API cross-origin with a Bearer token. Only those app origins are
+# allowed; no credentials mode, since the shell never uses the cookie.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[config.NATIVE_APP_ORIGIN, "capacitor://localhost",
+                   "https://localhost", "http://localhost"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    max_age=86400,
+)
 
 
 class _DropDeletionAcks(logging.Filter):
@@ -758,13 +773,62 @@ def _ebay_creds_for(request: Request):
 
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
+NATIVE_RETURN_COOKIE = "thryft_oauth_return"  # "app" when the flow started in the shell
+
+
+@app.post("/api/auth/connect-ticket")
+def connect_ticket(request: Request) -> dict:
+    """A 60-second single-purpose credential for starting an OAuth connect
+    flow from the native shell, where the connect NAVIGATION can carry
+    neither the Bearer header nor the cross-origin session cookie. Scoped so
+    a leaked URL is useless for anything but opening a connect screen."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    return {"ticket": auth.make_ticket(uid, "connect")}
+
+
+def _connect_uid(request: Request, ticket: str) -> Optional[str]:
+    """Who is starting this connect flow: the session (web) or a ticket
+    (native shell's full-page navigation)."""
+    return _uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
+
+
+def _mark_native_flow(resp, request: Request, native: str) -> None:
+    """Remember that this OAuth flow began inside the native shell, so the
+    callback can send the webview back into the app instead of leaving the
+    user stranded on the website. Rides a cookie exactly like the nonce."""
+    if str(native).lower() in ("1", "true", "yes"):
+        resp.set_cookie(NATIVE_RETURN_COOKIE, "app", max_age=600, httponly=True,
+                        samesite="lax", secure=request.url.scheme == "https")
+
+
+def _finish_connect(request: Request, path: str):
+    """End an OAuth flow: plain redirect on the web; when the flow started in
+    the native shell, an interstitial that navigates the webview back to the
+    app's own origin. The interstitial (JS + a visible button) is used instead
+    of a bare 302 to a custom scheme because WKWebView handles an in-page
+    navigation to capacitor:// more reliably than a server redirect."""
+    if request.cookies.get(NATIVE_RETURN_COOKIE) != "app":
+        return RedirectResponse(path)
+    target = f"{config.NATIVE_APP_ORIGIN}{path}"
+    resp = HTMLResponse(f"""<!doctype html><html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Returning to Thryft Shop…</title></head>
+<body style="font-family:-apple-system,sans-serif;display:grid;place-items:center;min-height:90vh;text-align:center">
+<div><p>All done — heading back to the app…</p>
+<p><a href="{target}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none">Return to Thryft Shop</a></p></div>
+<script>location.replace({json.dumps(target)});</script>
+</body></html>""")
+    resp.delete_cookie(NATIVE_RETURN_COOKIE)
+    return resp
 
 
 @app.get("/api/ebay/connect")
-def ebay_connect(request: Request):
+def ebay_connect(request: Request, ticket: str = "", native: str = ""):
     if not config.ebay_oauth_ready():
         raise HTTPException(400, "eBay OAuth not configured (EBAY_CLIENT_ID/SECRET/RUNAME).")
-    uid = _uid(request)
+    uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
     import secrets as _secrets
@@ -775,6 +839,7 @@ def ebay_connect(request: Request):
     # the top-level redirect back from eBay.
     resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
                     samesite="lax", secure=request.url.scheme == "https")
+    _mark_native_flow(resp, request, native)
     return resp
 
 
@@ -782,7 +847,7 @@ def ebay_connect(request: Request):
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
     if not code or not verified:
-        return RedirectResponse("/?ebay=error")
+        return _finish_connect(request, "/?ebay=error")
     uid, nonce = verified
     # The nonce in the signed state must match the cookie set at connect time,
     # so a callback can only bind an eBay account to the browser that started
@@ -790,7 +855,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
     cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
     if not cookie_nonce or cookie_nonce != nonce:
         log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
-        return RedirectResponse("/?ebay=error")
+        return _finish_connect(request, "/?ebay=error")
     try:
         tokens = ebay_auth.exchange_code(code)
         access = tokens["access_token"]
@@ -823,11 +888,11 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         else:
             save_kwargs.update(policies)
         db.save_ebay_account(uid, **save_kwargs)
-        resp = RedirectResponse("/?ebay=connected")
+        resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
     except Exception:  # noqa: BLE001
-        return RedirectResponse("/?ebay=error")
+        return _finish_connect(request, "/?ebay=error")
 
 
 @app.get("/api/ebay/status")
@@ -3158,12 +3223,13 @@ def _marketplace_or_404(marketplace: str):
 
 
 @app.get("/api/{marketplace}/connect")
-def marketplace_connect(marketplace: str, request: Request):
+def marketplace_connect(marketplace: str, request: Request,
+                        ticket: str = "", native: str = ""):
     provider = _marketplace_or_404(marketplace)
     if not provider.oauth_ready():
         raise HTTPException(400, f"{provider.label} OAuth not configured "
                                  f"(set {', '.join(provider.oauth_missing())}).")
-    uid = _uid(request)
+    uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, f"Log in before connecting {provider.label}.")
     import secrets as _secrets
@@ -3178,6 +3244,7 @@ def marketplace_connect(marketplace: str, request: Request):
                     json.dumps({"nonce": nonce, **flow}),
                     max_age=600, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https")
+    _mark_native_flow(resp, request, native)
     return resp
 
 
@@ -3187,7 +3254,7 @@ def marketplace_callback(marketplace: str, request: Request,
     provider = _marketplace_or_404(marketplace)
     verified = auth.verify_state(state)
     if not code or not verified:
-        return RedirectResponse(f"/?connect_error={marketplace}")
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     uid, nonce = verified
     try:
         flow = json.loads(request.cookies.get(_flow_cookie(marketplace), "") or "{}")
@@ -3198,14 +3265,14 @@ def marketplace_callback(marketplace: str, request: Request,
     # flow (blocks CSRF authorization-code injection).
     if not flow.get("nonce") or flow.get("nonce") != nonce:
         log.warning("%s callback: nonce mismatch (uid=%s)", marketplace, uid)
-        return RedirectResponse(f"/?connect_error={marketplace}")
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     try:
         fields = provider.exchange_code(code, flow)
     except Exception as exc:  # noqa: BLE001 - the redirect is the error surface
         log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
-        return RedirectResponse(f"/?connect_error={marketplace}")
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     db.save_marketplace_account(uid, marketplace, **fields)
-    resp = RedirectResponse(f"/?connected={marketplace}")
+    resp = _finish_connect(request, f"/?connected={marketplace}")
     resp.delete_cookie(_flow_cookie(marketplace))
     return resp
 

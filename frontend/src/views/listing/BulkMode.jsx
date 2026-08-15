@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
+import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -126,7 +127,7 @@ function BulkItemCard({
           />
         )}
         <img
-          src={`${item.thumb}?v=1`}
+          src={apiUrl(`${item.thumb}?v=1`)}
           alt=""
           className="size-12 rounded-[10px] object-cover border border-line"
           onError={(e) => { e.currentTarget.style.display = "none"; }}

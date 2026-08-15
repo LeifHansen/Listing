@@ -1,9 +1,69 @@
+import { API_BASE, apiUrl, storedToken } from "@/lib/platform";
+
+// Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
+// same-origin navigation, exactly as before. In the native shell the
+// navigation is cross-origin and carries neither the Bearer header nor a
+// cookie, so it first mints a 60-second single-purpose ticket and rides that;
+// native=1 tells the callback to steer the webview back into the app.
+export async function startConnect(path) {
+  if (!API_BASE) {
+    window.location.href = path;
+    return;
+  }
+  const { ticket } = await postJson("/api/auth/connect-ticket", {});
+  window.location.href = apiUrl(
+    `${path}?ticket=${encodeURIComponent(ticket)}&native=1`);
+}
+
+// Paths that transmit the user's photos onward to the AI provider. Apple's
+// guideline 5.1.2(i) (and plain courtesy) requires explicit consent before
+// the FIRST such transmission, so these calls gate on ensureAiConsent().
+// One choke point here beats a check in every upload flow — new flows are
+// covered automatically.
+const AI_PHOTO_RE = /^\/api\/(upload|upload-more|bulk\/upload|shelf-scan|identify)/;
+
+const AI_CONSENT_KEY = "thryft-ai-consent";
+
+export function hasAiConsent() {
+  try { return localStorage.getItem(AI_CONSENT_KEY) === "yes"; } catch (e) { return true; }
+}
+
+export function grantAiConsent() {
+  try { localStorage.setItem(AI_CONSENT_KEY, "yes"); } catch (e) {}
+}
+
+// Resolves once the user has agreed (now, or previously); rejects if they
+// decline. The dialog itself lives in the app shell — this just raises the
+// "ai-consent:needed" event and waits for its verdict.
+function ensureAiConsent() {
+  if (hasAiConsent()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const detail = {
+      accept: () => { grantAiConsent(); resolve(); },
+      decline: () => reject(new Error(
+        "Photos aren't analyzed without your OK — you can agree any time.")),
+    };
+    try {
+      window.dispatchEvent(new CustomEvent("ai-consent:needed", { detail }));
+    } catch (e) {
+      resolve(); // no listener/some exotic browser — never brick the app
+    }
+  });
+}
+
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.
 export async function api(path, opts = {}) {
+  if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
+  // Native shell: same-origin cookies never travel, so authenticate with the
+  // stored bearer token instead (no-op on the web build).
+  const token = storedToken();
+  if (token && !(opts.headers && opts.headers.Authorization)) {
+    opts = { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } };
+  }
   let res;
   try {
-    res = await fetch(path, opts);
+    res = await fetch(apiUrl(path), opts);
   } catch (e) {
     throw new Error("Network error — the server may be starting up. Try again in a few seconds.");
   }

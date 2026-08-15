@@ -7,6 +7,7 @@ import { Sidebar, BottomNav } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { AuthDialog } from "@/components/AuthDialog";
 import { TokensDialog } from "@/components/TokensDialog";
+import { AiConsentDialog } from "@/components/AiConsentDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
@@ -73,6 +74,7 @@ function Main() {
       <BottomNav />
       <AuthDialog />
       <TokensDialog />
+      <AiConsentDialog />
     </div>
   );
 }

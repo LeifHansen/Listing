@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Search, Plus, Link2, CheckCircle2, Coins } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { startConnect } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toaster";
@@ -20,7 +21,9 @@ export function TopBar({ onSearch, onManageEbay }) {
       toast("eBay isn't configured on the server yet (needs EBAY_CLIENT_ID / SECRET / RUNAME).", { kind: "warning" });
       return;
     }
-    window.location.href = "/api/ebay/connect";
+    startConnect("/api/ebay/connect")
+      .catch((e) => toast(`Couldn't open the eBay connect screen: ${e.message}`,
+        { kind: "error" }));
   };
 
   return (

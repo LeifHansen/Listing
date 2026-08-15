@@ -31,8 +31,14 @@ set_str() {  # set_str <key> <value>
   $PB -c "Add :$1 string $2" "$PLIST"
 }
 
-echo "==> Building web bundle"
-npm run build
+# The shell BUNDLES the web app (guideline 4.2 rejects bare remote-webview
+# apps), so the API origin must be baked into the build. The web deploy
+# builds withOUT this var and keeps relative URLs; only the native bundle
+# gets an absolute base. Override with THRYFT_API_BASE for a staging server.
+API_BASE="${THRYFT_API_BASE:-https://listing-lfwjrg.fly.dev}"
+
+echo "==> Building web bundle (API at $API_BASE)"
+VITE_API_BASE="$API_BASE" npm run build
 
 if [ ! -d ios ]; then
   echo "==> No ios/ project yet — creating it"
@@ -62,6 +68,69 @@ set_str NSMicrophoneUsageDescription \
 # cryptography in the app.
 $PB -c "Delete :ITSAppUsesNonExemptEncryption" "$PLIST" 2>/dev/null || true
 $PB -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
+
+# --- Privacy manifest (PrivacyInfo.xcprivacy) --------------------------------
+# Required since May 2024: App Store Connect rejects binaries that touch
+# "required reason" APIs without declaring an approved reason (ITMS-91053).
+# Capacitor's runtime touches UserDefaults (CA92.1) and file timestamps
+# (C617.1); SystemBootTime (35F9.1) and DiskSpace (E174.1) cover WebKit and
+# common plugins. No tracking, no tracking domains.
+#
+# Recent Capacitor iOS templates ship this file already wired into the Xcode
+# target — in that case we overwrite its contents and we're done. If it did
+# NOT exist, the file is created but Xcode doesn't know about it yet: add it
+# to the App target once (File → Add Files… → tick "App"), and it survives
+# every future `cap sync`.
+PRIVACY="ios/App/App/PrivacyInfo.xcprivacy"
+PRIVACY_EXISTED=1
+[ -f "$PRIVACY" ] || PRIVACY_EXISTED=0
+echo "==> Writing $PRIVACY"
+cat > "$PRIVACY" <<'XCPRIVACY'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSPrivacyTracking</key>
+  <false/>
+  <key>NSPrivacyTrackingDomains</key>
+  <array/>
+  <key>NSPrivacyCollectedDataTypes</key>
+  <array/>
+  <key>NSPrivacyAccessedAPITypes</key>
+  <array>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array><string>CA92.1</string></array>
+    </dict>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array><string>C617.1</string></array>
+    </dict>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array><string>35F9.1</string></array>
+    </dict>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array><string>E174.1</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>
+XCPRIVACY
+if [ "$PRIVACY_EXISTED" = 0 ]; then
+  echo "    NOTE: PrivacyInfo.xcprivacy was just CREATED. One-time step:"
+  echo "    open Xcode → File → Add Files to \"App\"… → select it → tick the"
+  echo "    App target. (Newer Capacitor templates include it already.)"
+fi
 
 echo "==> Verifying"
 for key in NSCameraUsageDescription NSPhotoLibraryUsageDescription \

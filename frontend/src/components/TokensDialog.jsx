@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Coins, Sparkles, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp, postJson } from "@/store";
+import { isNative, openExternal } from "@/lib/platform";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toaster";
@@ -36,6 +37,24 @@ export function TokensDialog() {
     setBuying(packId);
     try {
       const res = await postJson("/api/tokens/checkout", { pack_id: packId });
+      if (isNative()) {
+        // App Store rule (guideline 3.1.1): a non-Apple checkout must NOT
+        // complete inside the app — but a link out to the system browser is
+        // allowed on the US storefront. Never fall back to in-webview
+        // navigation here; a visible error beats a rejected binary.
+        const opened = await openExternal(res.url);
+        if (opened) {
+          toast("Finishing your purchase in the browser — your tokens appear "
+            + "here automatically once it completes.", { duration: 6000 });
+          setTokensOpen(false);
+        } else {
+          toast("Couldn't open the browser. Visit the Thryft Shop website to "
+            + "buy tokens — they arrive on this account either way.",
+          { kind: "warning", duration: 8000 });
+        }
+        setBuying(null);
+        return;
+      }
       window.location.href = res.url; // off to Stripe Checkout
     } catch (e) {
       toast(`Couldn't start the purchase: ${e.message}`, { kind: "error" });

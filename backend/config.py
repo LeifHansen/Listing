@@ -131,6 +131,12 @@ def r2_public_urls() -> bool:
     """Serve photos from the bucket's own public URL (vs presigned GETs)."""
     return bool(R2_PUBLIC_BASE_URL)
 
+# --- Native app shell -------------------------------------------------------
+# The origin the bundled Capacitor app's pages live on. iOS uses
+# capacitor://localhost; Android uses https://localhost (override there).
+# Used for CORS and to send OAuth flows back into the app when they finish.
+NATIVE_APP_ORIGIN = os.getenv("NATIVE_APP_ORIGIN", "capacitor://localhost").strip().rstrip("/")
+
 # --- Anthropic / Claude ----------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
