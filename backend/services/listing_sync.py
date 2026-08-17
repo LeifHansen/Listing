@@ -19,6 +19,7 @@ is skipped rather than failing the whole sync.
 from __future__ import annotations
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
@@ -66,12 +67,17 @@ def _is_blank(value) -> bool:
     return len(value) == 0 if hasattr(value, "__len__") else False
 
 
-def _merge(existing: Optional[dict], fresh: dict) -> dict:
+def _merge(existing: Optional[dict], fresh: dict, *, own_source: bool = False) -> dict:
     """Fresh eBay data merged over an existing record.
 
     A first import takes everything. A re-sync only refreshes the fields eBay
     owns (price, quantity, counters, photos) plus anything still blank locally
     — otherwise a sync would wipe the seller's in-app edits.
+
+    `own_source` keeps the record's own source, for a listing this app
+    published rather than imported. Those published through the Inventory API
+    carry no source, and stamping "ebay" on them would route later edits to
+    Trading's ReviseItem — which eBay refuses for inventory-based listings.
     """
     if not existing:
         return fresh
@@ -82,11 +88,79 @@ def _merge(existing: Optional[dict], fresh: dict) -> dict:
     for key, value in fresh.items():
         if key in _LIVE_FIELDS:
             continue
+        # An app record's blank source is meaningful (Inventory-API path), so
+        # it's the seller's, not a gap for eBay's "ebay" to fill.
+        if own_source and key == "source":
+            continue
         if _is_blank(merged.get(key)) and not _is_blank(value):
             merged[key] = value
-    merged["source"] = "ebay"
+    if not own_source:
+        merged["source"] = "ebay"
     merged["ebay_listing_id"] = fresh.get("ebay_listing_id") or merged.get("ebay_listing_id", "")
     return merged
+
+
+# "https://www.ebay.com/itm/1234567890" — the item id a publish saved on the
+# record even in the rare case the id field itself didn't make it.
+_ITEM_URL_RE = re.compile(r"/itm/(?:[^/?#]+/)?(\d{9,})")
+
+
+def _item_id_of(listing: dict) -> str:
+    """The eBay item id a record already carries, if any."""
+    item = str(listing.get("ebay_listing_id") or "").strip()
+    if item:
+        return item
+    found = _ITEM_URL_RE.search(str(listing.get("view_url") or ""))
+    return found.group(1) if found else ""
+
+
+def _index_by_item(records) -> dict[str, dict]:
+    """eBay item id -> the record that already represents it.
+
+    An item can be in the app under two different ids: the "ebay-<item>"
+    mirror a sync writes, and the session id of a listing this app published
+    (publishing stamps ebay_listing_id onto that record). The app-created one
+    wins — it owns the photos on disk and everything the AI wrote — so a sync
+    updates it in place instead of importing the same item a second time.
+    """
+    out: dict[str, dict] = {}
+    for rec in records:
+        item = _item_id_of(rec.get("listing") or {})
+        if not item:
+            continue
+        current = out.get(item)
+        if current is None or (_is_mirror(current) and not _is_mirror(rec)):
+            out[item] = rec
+    return out
+
+
+def _is_mirror(record: dict) -> bool:
+    """True for a record this sync created (id "ebay-<item>")."""
+    return str(record.get("id") or "").startswith("ebay-")
+
+
+def _drop_stale_mirrors(known: dict, owned: dict, user_id: str) -> int:
+    """Delete mirror rows for items the app already has its own record of.
+
+    Every sync before the id match above left one of these behind, so the
+    cleanup covers the whole store rather than only the items this run
+    happened to fetch — an ended duplicate never comes back in the active
+    list, and would otherwise sit in Inactive forever. Returns how many went.
+    """
+    dropped = 0
+    for rid, rec in list(known.items()):
+        if not _is_mirror(rec):
+            continue
+        item = _item_id_of(rec.get("listing") or {}) or rid[len("ebay-"):]
+        keeper = owned.get(item)
+        if not keeper or keeper["id"] == rid:
+            continue
+        if db.delete_listing(rid, user_id=user_id):
+            known.pop(rid, None)
+            dropped += 1
+            log.info("sync: dropped duplicate %s — item %s already lives on %s",
+                     rid, item, keeper["id"])
+    return dropped
 
 
 # How many ended/sold listings to mirror alongside the active ones. eBay only
@@ -144,6 +218,11 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
     known = {r["id"]: r
              for r in db.list_listings(limit=max(1000, len(jobs) * 2),
                                        user_id=user_id)}
+    # Match on the eBay item id, not just on the mirror id: a listing this app
+    # published is already here under its session id, and keying the sync on
+    # "ebay-<item>" alone imported it again as a separate card on every sync —
+    # the duplicate pairs (one Thryft, one eBay) sellers were seeing.
+    owned = _index_by_item(known.values())
     imported = updated = failed = 0
 
     def _fetch(job: tuple[str, str]):
@@ -164,9 +243,11 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
         if fresh is None:
             failed += 1
             continue
-        rid = record_id(item_id)
-        prior = known.get(rid)
-        data = _merge(prior.get("listing") if prior else None, fresh)
+        mirror_id = record_id(item_id)
+        prior = owned.get(item_id) or known.get(mirror_id)
+        rid = prior["id"] if prior else mirror_id
+        data = _merge(prior.get("listing") if prior else None, fresh,
+                      own_source=bool(prior) and not _is_mirror(prior))
         # Validate through the model so a malformed field can't poison the DB.
         try:
             data = Listing(**{k: v for k, v in data.items()
@@ -187,10 +268,11 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
             updated += 1
         else:
             imported += 1
-    log.info("sync: user=%s found=%d imported=%d updated=%d failed=%d",
-             user_id, len(jobs), imported, updated, failed)
+    deduped = _drop_stale_mirrors(known, owned, user_id)
+    log.info("sync: user=%s found=%d imported=%d updated=%d deduped=%d failed=%d",
+             user_id, len(jobs), imported, updated, deduped, failed)
     return {"found": len(jobs), "imported": imported, "updated": updated,
-            "failed": failed}
+            "deduped": deduped, "failed": failed}
 
 
 def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:

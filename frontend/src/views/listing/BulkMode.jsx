@@ -4,7 +4,7 @@ import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
   ArrowRight,
 } from "lucide-react";
-import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
+import { cn, CONDITIONS, conditionLabel, mediaUrl } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
@@ -108,6 +108,11 @@ function BulkItemCard({
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
   const isAuction = fmt.startsWith("AUCTION");
   const missing = item.status === "draft" ? missingRequired(l) : [];
+  // All of the item's photos, not just the first. An item that failed before
+  // a listing existed still has the server-picked `thumb`.
+  const photos = (l.images?.length
+    ? l.images.map((n) => mediaUrl(item.session_id, n, 1))
+    : [item.thumb && apiUrl(`${item.thumb}?v=1`)]).filter(Boolean);
   return (
     <motion.div
       layout
@@ -128,13 +133,21 @@ function BulkItemCard({
             className="size-4 accent-(--brand-blue) shrink-0"
           />
         )}
-        <img
-          src={apiUrl(`${item.thumb}?v=1`)}
-          alt=""
-          className="size-12 rounded-[10px] object-cover border border-line"
-          onError={(e) => { e.currentTarget.style.display = "none"; }}
-        />
-        <div className="ml-auto">
+        {/* One row of thumbnails, as many as the card is wide — extras wrap
+            below the max-height and are clipped away. */}
+        <div className="flex-1 min-w-0 flex flex-wrap gap-1.5 max-h-12 overflow-hidden">
+          {photos.map((src) => (
+            <img
+              key={src}
+              src={src}
+              alt=""
+              loading="lazy"
+              className="size-12 shrink-0 rounded-[10px] object-cover border border-line"
+              onError={(e) => { e.currentTarget.style.display = "none"; }}
+            />
+          ))}
+        </div>
+        <div className="shrink-0">
           {item.status === "published" && (
             <TagPill tone="green">
               <CheckCircle2 size={12} aria-hidden /> Live{item.listing_id ? ` · ${item.listing_id}` : ""}
@@ -267,7 +280,7 @@ function BulkItemCard({
       <div className="flex flex-wrap items-center gap-2 mt-auto">
         {editable && (
           <Button variant="ghost" size="sm" onClick={onOpen}>
-            <ExternalLink aria-hidden /> Preview &amp; Edit
+            <ExternalLink aria-hidden /> Review &amp; List
           </Button>
         )}
         {/* Not every auto-created draft is worth keeping — a duplicate you
@@ -289,7 +302,7 @@ function BulkItemCard({
   );
 }
 
-export function BulkQueue({ jobId, mode, onExit, onSettled }) {
+export function BulkQueue({ jobId, onExit, onSettled }) {
   const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
 
@@ -560,10 +573,8 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
 
   const busy = job && !job.done;
   const phase = job?.phase || "uploading";
-  // Experimental UX: while the job runs, show ONE loading screen with a real
-  // progress bar instead of streaming cards in as they're drafted — the queue
-  // appears all at once when the batch is done. (Easy revert: drop the
-  // `job?.done &&` gates below and this % math.)
+  // Phase-weighted % for the progress bar shown while the job runs; the
+  // cards stream in below it as each item is drafted.
   const pct = Math.round((() => {
     const frac = (cur, tot) => (tot ? Math.min(1, (cur || 0) / tot) : 0);
     if (!job) return 3;
@@ -611,7 +622,7 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
                 : <>
                     <CheckCircle2 size={17} className="text-success" aria-hidden />
                     <span title="Also saved in Drafts — review below or come back anytime.">
-                      {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}
+                      {items.length} item{items.length === 1 ? "" : "s"} queued as drafts
                     </span>
                   </>}
             </p>
@@ -676,12 +687,12 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         </Card>
       )}
 
-      {job?.done && drafts.length > 0 && (
+      {drafts.length > 0 && (
         <MarketTargetChips selected={bulkTargets} toggle={toggleBulkTarget}
           otherConnected={otherConnected} />
       )}
 
-      {job?.done && drafts.length > 0 && (
+      {drafts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2.5">
           <Button variant="primary" onClick={publishSelected}>
             <Rocket aria-hidden /> Publish selected ({drafts.filter((d) => checked[d.session_id]).length})
@@ -706,11 +717,10 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
         </div>
       )}
 
-      {/* Cards render only once the whole batch settles (see the progress
-          screen above) — not streamed in one by one. */}
+      {/* Preview cards stream in one by one, as each item is drafted. */}
       <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
         <AnimatePresence>
-          {(job?.done ? items : []).map((it) => (
+          {items.map((it) => (
             <BulkItemCard
               key={it.session_id}
               item={it}
