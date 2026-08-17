@@ -152,6 +152,33 @@ export function useListingForm() {
     });
   }, []);
 
+  // Accept an AI-inferred value as-is. The point of the ⚠ flag is that a
+  // wrong specific is worse than a missing one, so the seller has to actually
+  // look at every inference — but "I looked, it's right" needed a gesture
+  // that wasn't retyping the value it already holds. Clearing the flag (not
+  // the value) is that gesture, and it makes the review count fall as they go.
+  const confirmSpecific = useCallback((name) => {
+    setForm((f) => {
+      const specs = [...f.item_specifics];
+      const i = specs.findIndex(
+        (s) => s.name.trim().toLowerCase() === name.trim().toLowerCase());
+      if (i < 0) return f;
+      specs[i] = { ...specs[i], confidence: "" };
+      return { ...f, item_specifics: specs };
+    });
+  }, []);
+
+  // Accept every outstanding inference at once. Deliberately NOT offered as a
+  // headline action — see the comment at its call site; it exists for the
+  // seller who has already read the list.
+  const confirmAllSpecifics = useCallback(() => {
+    setForm((f) => ({
+      ...f,
+      item_specifics: f.item_specifics.map(
+        (s) => (s.confidence === "medium" ? { ...s, confidence: "" } : s)),
+    }));
+  }, []);
+
   // ---------- category-driven fields ----------
   // Fetch the category's valid conditions + required/recommended aspects so
   // the seller completes everything without leaving.
@@ -541,6 +568,7 @@ export function useListingForm() {
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, getSpecificRow, upsertSpecific,
+    confirmSpecific, confirmAllSpecifics,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
     imageVersions, bumpImageVersion,
     completion,
