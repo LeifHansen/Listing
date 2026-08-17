@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -176,6 +177,40 @@ def stripe_ready() -> bool:
 def tokens_enabled() -> bool:
     """Billing is on: tokens are enforced on AI features."""
     return TOKENS_ENABLED and bool(DATABASE_URL)
+
+
+def tokens_missing() -> list[str]:
+    """What still stands between the current config and a working paid tier
+    ([] = ready to take money). Every other integration reports its gaps in
+    /api/health; billing did not, so a half-configured launch — metering on
+    with no way to pay, or a webhook with no signing secret — looked exactly
+    like a working one until a seller hit the wall or a purchase went missing.
+    """
+    missing = []
+    if not TOKENS_ENABLED:
+        missing.append("TOKENS_ENABLED")
+    if not DATABASE_URL:
+        missing.append("DATABASE_URL")
+    if not STRIPE_SECRET_KEY:
+        missing.append("STRIPE_SECRET_KEY")
+    if not STRIPE_WEBHOOK_SECRET:
+        # Not fatal on the web (the post-redirect confirm also credits), but
+        # it IS the only delivery path for a native purchase, which completes
+        # in the system browser where no redirect ever reaches the app.
+        missing.append("STRIPE_WEBHOOK_SECRET")
+    return missing
+
+
+def stripe_live_mode() -> Optional[bool]:
+    """True on a live key, False on a test key, None when unset/unrecognized.
+    Surfaced so "we're taking real money" is never a guess — and so a test key
+    left on a production deploy is visible instead of silently accepting
+    nothing."""
+    if STRIPE_SECRET_KEY.startswith("sk_live_"):
+        return True
+    if STRIPE_SECRET_KEY.startswith("sk_test_"):
+        return False
+    return None
 
 
 if TOKENS_ENABLED and not DATABASE_URL:

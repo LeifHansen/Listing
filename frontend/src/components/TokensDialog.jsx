@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Coins, Sparkles, Check } from "lucide-react";
+import { Coins, Sparkles, Check, History } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import { useApp, postJson } from "@/store";
 import { isNative, openExternal } from "@/lib/platform";
 import { Dialog } from "@/components/ui/Dialog";
@@ -17,8 +18,36 @@ const COST_LABELS = [
   ["image_ai", "AI photo tool (per photo)"],
 ];
 
+// Ledger `kind` in seller language. "reversal" is what a refund or a lost
+// chargeback looks like from this side, and it has to be legible: a balance
+// that dropped with no explanation is worse than the refund itself.
+const ENTRY_LABELS = {
+  purchase: "Bought tokens",
+  grant: "Tokens added",
+  spend: "AI used",
+  refund: "Refunded (AI failed)",
+  reversal: "Purchase refunded",
+};
+
+const FEATURE_LABELS = {
+  identify: "listing draft",
+  refine: "AI refine",
+  specifics: "item specifics",
+  shelf_scan: "shelf scan",
+  image_ai: "photo tool",
+};
+
 function fmtUsd(cents) {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch (e) {
+    return "";
+  }
 }
 
 // TokensDialog — balance, what things cost, and the packs. Opens from the
@@ -27,10 +56,27 @@ export function TokensDialog() {
   const { tokens, tokensOpen, setTokensOpen, loadTokens, user, openAuth } = useApp();
   const { toast } = useToast();
   const [buying, setBuying] = useState(null); // pack id being checked out
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState(null); // null = not loaded yet
 
   // Refresh the balance every time the dialog opens — the chip can be stale
   // after a run of AI actions.
   useEffect(() => { if (tokensOpen) loadTokens(); }, [tokensOpen, loadTokens]);
+
+  // Fetched only when the section is opened, and re-fetched each time so it
+  // reflects AI spent since the dialog was last looked at.
+  useEffect(() => {
+    if (!historyOpen || !user) return undefined;
+    let alive = true;
+    setHistory(null);
+    api("/api/tokens/history")
+      .then((r) => { if (alive) setHistory({ entries: r.entries || [] }); })
+      .catch((e) => { if (alive) setHistory({ error: `Couldn't load your activity: ${e.message}` }); });
+    return () => { alive = false; };
+  }, [historyOpen, user, tokensOpen]);
+
+  // Closing the dialog collapses the section, so it opens as a buying screen.
+  useEffect(() => { if (!tokensOpen) setHistoryOpen(false); }, [tokensOpen]);
 
   const buy = async (packId) => {
     if (!user) { setTokensOpen(false); openAuth(); return; }
@@ -163,6 +209,61 @@ export function TokensDialog() {
             Purchases aren't set up on this server yet — your free monthly tokens
             still apply.
           </p>
+        )}
+
+        {/* Where the tokens went. Once people are paying, "my balance dropped
+            and I don't know why" is the single most common support question,
+            and the only honest answer is the ledger itself. Collapsed by
+            default so the dialog stays a buying screen. */}
+        {user && (
+          <div className="border-t border-line pt-3">
+            <button
+              type="button"
+              onClick={() => setHistoryOpen((o) => !o)}
+              aria-expanded={historyOpen}
+              className="text-[13px] font-semibold text-ink-secondary hover:text-ink cursor-pointer inline-flex items-center gap-1.5"
+            >
+              <History size={14} aria-hidden />
+              {historyOpen ? "Hide activity" : "Recent activity"}
+            </button>
+            {historyOpen && (
+              <div className="mt-2.5">
+                {history == null && (
+                  <p className="text-[13px] text-ink-faint">Loading…</p>
+                )}
+                {history?.error && (
+                  <p className="text-[13px] text-ink-secondary">{history.error}</p>
+                )}
+                {history?.entries?.length === 0 && (
+                  <p className="text-[13px] text-ink-faint">
+                    Nothing yet — your AI activity will show up here.
+                  </p>
+                )}
+                {history?.entries?.length > 0 && (
+                  <ul className="text-[13px] divide-y divide-line max-h-56 overflow-y-auto">
+                    {history.entries.map((e, i) => (
+                      <li key={i} className="flex items-baseline justify-between gap-3 py-1.5">
+                        <span className="min-w-0 text-ink-secondary truncate">
+                          {ENTRY_LABELS[e.kind] || e.kind}
+                          {e.feature ? ` · ${FEATURE_LABELS[e.feature] || e.feature}` : ""}
+                          {e.note ? ` · ${e.note}` : ""}
+                        </span>
+                        <span className="shrink-0 flex items-baseline gap-2">
+                          <span className={cn("font-bold tabular-nums",
+                            e.tokens > 0 ? "text-green" : "text-ink")}>
+                            {e.tokens > 0 ? `+${e.tokens}` : e.tokens}
+                          </span>
+                          <span className="text-ink-faint tabular-nums text-[12px]">
+                            {fmtDate(e.created_at)}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </div>
     </Dialog>

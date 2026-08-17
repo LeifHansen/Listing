@@ -852,6 +852,57 @@ def token_credit(user_id: str, tokens: int, ref: Optional[str], kind: str = "pur
         return None
 
 
+def token_reverse_purchase(ref: str, reason: str = "") -> Optional[dict]:
+    """Claw back a purchase whose money went back to the buyer — a Stripe
+    refund or a chargeback. Idempotent by a derived ref, so Stripe redelivering
+    the event (it does) can't debit twice.
+
+    Returns {"ok", "already", "reversed", "shortfall", "user_id"}, or None on a
+    DB error / unknown purchase.
+
+    The balance floors at zero rather than going negative. A negative balance
+    would silently swallow the buyer's next legitimate purchase, which turns
+    one refund into a second support problem — and for a chargeback the money
+    is already gone either way. What was spent before the reversal is recorded
+    as `shortfall` so the operator can see what it actually cost them.
+    """
+    if not ref:
+        return None
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            purchase = s.execute(
+                select(TokenLedger).where(TokenLedger.ref == ref)
+            ).scalar_one_or_none()
+            if purchase is None or purchase.kind not in ("purchase", "grant"):
+                return None
+            rev_ref = f"{ref}:reversed"
+            if s.execute(select(TokenLedger).where(TokenLedger.ref == rev_ref)
+                         ).scalar_one_or_none() is not None:
+                return {"ok": True, "already": True, "user_id": purchase.user_id}
+            acct = _token_account(s, purchase.user_id)
+            amount = max(0, purchase.tokens)
+            taken = min(amount, max(0, acct.purchased))
+            acct.purchased -= taken
+            acct.updated_at = _now()
+            s.add(TokenLedger(
+                id=_uuid.uuid4().hex, user_id=purchase.user_id, kind="reversal",
+                tokens=-taken, paid_part=-taken, ref=rev_ref,
+                note=(reason or "purchase reversed")[:255], created_at=_now()))
+            try:
+                s.commit()
+            except Exception:  # noqa: BLE001 - lost the idempotency race
+                s.rollback()
+                return {"ok": True, "already": True, "user_id": purchase.user_id}
+            return {"ok": True, "already": False, "reversed": taken,
+                    "shortfall": amount - taken, "user_id": purchase.user_id}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: token_reverse_purchase failed: {exc}")
+        return None
+
+
 def token_history(user_id: str, limit: int = 50) -> list[dict]:
     """Recent ledger entries, newest first. Never raises."""
     try:

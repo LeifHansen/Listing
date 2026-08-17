@@ -301,6 +301,13 @@ def health() -> dict:
         # The background-removal engines that will actually run, in order.
         "bg_engines": config.bg_engine_chain(),
         "storage": "r2" if objstore.enabled() else "local",
+        # Monetization, reported like every other integration: whether metering
+        # is actually on, what's still missing before money can move, and which
+        # Stripe mode the keys are in — a test key on a production deploy
+        # accepts nothing and otherwise looks identical to a working one.
+        "tokens_enabled": config.tokens_enabled(),
+        "tokens_missing": config.tokens_missing(),
+        "stripe_live_mode": config.stripe_live_mode(),
         "db": db.db_status(),
     }
 
