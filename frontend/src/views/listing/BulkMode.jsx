@@ -211,7 +211,7 @@ function BulkItemCard({
             onChange={(id) => onChange({ ...l, fulfillment_policy_id: id })}
           />
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <Toggle
               checked={!!l.promote}
               onChange={(on) => onChange({
@@ -249,7 +249,10 @@ function BulkItemCard({
         <p className="text-xs text-warning font-medium">{item.error}</p>
       )}
 
-      <div className="flex items-center gap-2 mt-auto">
+      {/* flex-wrap: the buttons can't shrink (nowrap labels), so on narrow
+          cards Publish must drop to its own right-aligned line instead of
+          poking out past the card edge. */}
+      <div className="flex flex-wrap items-center gap-2 mt-auto">
         {editable && (
           <Button variant="ghost" size="sm" onClick={onOpen}>
             <ExternalLink aria-hidden /> Preview &amp; Edit
