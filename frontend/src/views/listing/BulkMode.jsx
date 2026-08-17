@@ -265,7 +265,7 @@ function BulkItemCard({
       <div className="flex items-center gap-2 mt-auto">
         {editable && (
           <Button variant="ghost" size="sm" onClick={onOpen}>
-            <ExternalLink aria-hidden /> Preview &amp; Edit
+            <ExternalLink aria-hidden /> Review &amp; List
           </Button>
         )}
         {/* Not every auto-created draft is worth keeping — a duplicate you
