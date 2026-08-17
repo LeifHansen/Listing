@@ -410,7 +410,7 @@ function Workflow() {
 }
 
 // The merged Sell screen: upload box on top, then the drafts strip (one
-// click from Publish or Preview & Edit), then the rest of the store below.
+// click from Publish or Review & List), then the rest of the store below.
 function SellHome({ search }) {
   const { startBulk, listingsJumpRef } = useApp();
   const managerRef = useRef(null);

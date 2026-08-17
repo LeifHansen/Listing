@@ -15,7 +15,7 @@ import {
 } from "./publishShared";
 
 /* The drafts experience on the merged Sell screen: every draft one click
-   from Publish or Preview & Edit, plus select-mode bulk publish/delete.
+   from Publish or Review & List, plus select-mode bulk publish/delete.
    Renders nothing when there are no (matching) drafts — the upload box
    directly above is the empty-state CTA. */
 
@@ -260,13 +260,13 @@ export function DraftsStrip({ search = "" }) {
                       loading={!!publishing[item.id]}
                       disabled={missing.length > 0}
                       title={missing.length
-                        ? `Missing: ${missing.join(", ")} — open Preview & Edit to finish`
+                        ? `Missing: ${missing.join(", ")} — open Review & List to finish`
                         : undefined}>
                       <Rocket aria-hidden /> Publish
                     </Button>
                     <Button variant="ghost" size="sm" className="flex-1"
                       onClick={() => openListing(item.id)}>
-                      <PenLine aria-hidden /> Preview &amp; Edit
+                      <PenLine aria-hidden /> Review &amp; List
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => askDelete(item)}
                       aria-label="Delete this draft" title="Delete this draft"
