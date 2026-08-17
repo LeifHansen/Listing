@@ -28,6 +28,7 @@ from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
 from . import ebay_trading, notifications, taxonomy
+from .ebay_trading import AlreadyListedError, TradingError
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
 # live/market facts from eBay but keep everything else the record already has,
@@ -173,6 +174,14 @@ _INACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_INACTIVE_LIMIT", "100") or "100")
 # matters is eBay's own paging (_MAX_PAGES * _PAGE_SIZE).
 ACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_ACTIVE_LIMIT", "2500") or "2500")
 
+# How many existing records a sync reads before deciding what's new. This is
+# NOT a store-size limit — it's the dedupe's field of view, and it has to be
+# wider than the store: an active listing, an ended mirror, and a sold record
+# can all exist for one item at once, so the row count runs well ahead of the
+# active-listing count. Sized to stay ahead of ACTIVE_LIMIT + the inactive
+# mirrors + whatever duplicates are still waiting to be cleaned up.
+_KNOWN_LIMIT = int(os.getenv("EBAY_SYNC_KNOWN_LIMIT", "10000") or "10000")
+
 
 def _started_at(data: dict) -> Optional[datetime]:
     """An imported listing's eBay start time, as an aware datetime.
@@ -213,11 +222,18 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.info("sync: couldn't list %s items: %s", status, exc)
 
-    # Has to cover everything we're about to write, or listings past the cut
-    # look new every sync and get re-imported instead of updated.
-    known = {r["id"]: r
-             for r in db.list_listings(limit=max(1000, len(jobs) * 2),
-                                       user_id=user_id)}
+    # Has to cover EVERY record the seller has, not a guess scaled off this
+    # run's job count. A record the read misses is a record the dedupe below
+    # can't match, and the visible result is the duplicate pair it exists to
+    # remove — so the ceiling is deliberately far above any real store rather
+    # than a multiple of what eBay happened to return.
+    known = {r["id"]: r for r in db.list_listings(limit=_KNOWN_LIMIT,
+                                                  user_id=user_id)}
+    if len(known) >= _KNOWN_LIMIT:
+        # Never silently: past this the dedupe is working from a partial view.
+        log.warning("sync: user=%s has at least %d records — the dedupe read is "
+                    "capped, duplicates may survive this run",
+                    user_id, _KNOWN_LIMIT)
     # Match on the eBay item id, not just on the mirror id: a listing this app
     # published is already here under its session id, and keying the sync on
     # "ebay-<item>" alone imported it again as a separate card on every sync —
@@ -322,7 +338,8 @@ def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
 
 
 def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
-                   creds: Optional[dict] = None) -> dict:
+                   creds: Optional[dict] = None,
+                   idempotency_key: str = "") -> dict:
     """Publish a NEW listing through the Trading API and mark it as one.
 
     Listings published via the Sell Inventory API are "inventory-based": eBay
@@ -331,6 +348,11 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     Trading instead gives the seller an ordinary listing they can edit
     anywhere — here, Seller Hub, or the eBay app — and edits from this app
     keep flowing back through revise_listing.
+
+    `idempotency_key` (see services/publish_guard) makes the create safe to
+    repeat: eBay rejects a second attempt under the same key rather than
+    minting a duplicate listing, and this resolves that rejection back to the
+    listing that already exists so the caller can adopt it.
     """
     c = creds or {}
     # Make every specific legal for its aspect before it goes near eBay —
@@ -350,16 +372,37 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                 db.save_ebay_account(c["_uid"], ship_from_postal=postal)
             except Exception as exc:  # noqa: BLE001 - caching is optional
                 log.info("sync: couldn't save the resolved ship-from ZIP: %s", exc)
-    res = ebay_trading.create_listing(
-        token, listing, image_urls,
-        # A per-listing shipping choice (the editor's / bulk card's Shipping
-        # service dropdown) beats the account default; payment/returns stay
-        # account-level.
-        policies={"fulfillment_policy_id": (listing.fulfillment_policy_id
-                                            or c.get("fulfillment_policy_id")),
-                  "payment_policy_id": c.get("payment_policy_id"),
-                  "return_policy_id": c.get("return_policy_id")},
-        postal_code=postal)
+    try:
+        res = ebay_trading.create_listing(
+            token, listing, image_urls,
+            # A per-listing shipping choice (the editor's / bulk card's Shipping
+            # service dropdown) beats the account default; payment/returns stay
+            # account-level.
+            policies={"fulfillment_policy_id": (listing.fulfillment_policy_id
+                                                or c.get("fulfillment_policy_id")),
+                      "payment_policy_id": c.get("payment_policy_id"),
+                      "return_policy_id": c.get("return_policy_id")},
+            postal_code=postal, idempotency_key=idempotency_key)
+    except AlreadyListedError as exc:
+        # This publish already produced a listing — a retry, or a second
+        # request that raced this one. Adopt what's there instead of creating a
+        # twin: eBay names the item sometimes, and the tracking number finds it
+        # the rest of the time.
+        item_id = exc.item_id or ebay_trading.item_id_for_tracking_number(
+            token, idempotency_key)
+        if not item_id:
+            # Nothing to adopt and nothing created. Re-raising as an ordinary
+            # failure is the honest outcome — but never retry the create here,
+            # which is how a duplicate would slip through after all.
+            raise TradingError(
+                "eBay says this listing was already submitted, but wouldn't say "
+                "which listing it became. Check your eBay listings before "
+                "publishing again — publishing now could create a duplicate."
+            ) from exc
+        log.info("trading publish: adopted already-created item %s (key=%s)",
+                 item_id, idempotency_key)
+        res = {"published": True, "listing_id": item_id, "already_listed": True,
+               "view_url": f"https://www.ebay.com/itm/{item_id}"}
     # source="ebay" is what routes later edits down the Trading path, exactly
     # like a listing imported from the seller's store.
     listing.source = "ebay"

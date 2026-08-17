@@ -21,7 +21,7 @@ from .. import config, db, ebay_auth, ebay_errors, storage
 from ..config import log
 from ..models import Listing
 from ..services import (ebay, ebay_trading, image_import, listing_sync,
-                        preflight, promotions, taxonomy)
+                        preflight, promotions, publish_guard, taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
@@ -134,6 +134,38 @@ def refresh_eps_urls(listing_id: str, token: str, item_id: str,
                       user_id=uid or rec.get("user_id"))
     log.info("EPS refresh: %s now references %d eBay-hosted photos",
              listing_id, len(urls))
+
+
+# The listing fields that say "this is already on eBay". The server owns them
+# outright — the browser only ever echoes back what a previous publish told it,
+# and an echo that lost them reads as "never listed". Believing that costs a
+# duplicate live listing, so the stored record wins on every one of them.
+_IDENTITY_FIELDS = ("ebay_listing_id", "source", "view_url")
+
+
+def _with_stored_identity(ctx: PublishContext) -> PublishContext:
+    """`ctx` with the eBay identity fields taken from the stored record, and
+    prev_record re-read inside the publish lock.
+
+    Called under publish_guard.session_lock, so the snapshot it takes is the
+    one the create-vs-revise decision is made from: any earlier publish of this
+    listing has already finished and committed its item id.
+    """
+    fresh = db.get_listing(ctx.session_id)
+    if not fresh:
+        # Nothing stored (a brand-new session, or no DB): the payload is all
+        # there is. The idempotency key still guards the create itself.
+        return ctx
+    stored = fresh.get("listing") or {}
+    for field_name in _IDENTITY_FIELDS:
+        value = stored.get(field_name)
+        if value and value != getattr(ctx.listing, field_name, None):
+            log.info("publish: taking %s from the stored record for session=%s",
+                     field_name, ctx.session_id)
+            setattr(ctx.listing, field_name, value)
+    return PublishContext(
+        session_id=ctx.session_id, listing=ctx.listing, mode=ctx.mode,
+        base_url=ctx.base_url, uid=ctx.uid, prev_record=fresh)
 
 
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
@@ -257,6 +289,22 @@ class EbayProvider:
 
     def publish(self, ctx: PublishContext,
                 creds: Optional[dict]) -> PublishOutcome:
+        """Publish/revise one listing on eBay.
+
+        Wraps the real work in the publish guard: publishes of the SAME listing
+        run one at a time, and the record is re-read inside the lock so the
+        decision to create a new eBay listing is made from what the server
+        knows, never from a payload the browser may have assembled before the
+        first publish. Two attempts that overlap (a reload mid-publish, a
+        double tap, a retried request) otherwise both read "never listed" and
+        each create a live listing — the duplicate pairs sellers were seeing.
+        """
+        with publish_guard.session_lock(ctx.session_id):
+            ctx = _with_stored_identity(ctx)
+            return self._publish_locked(ctx, creds)
+
+    def _publish_locked(self, ctx: PublishContext,
+                        creds: Optional[dict]) -> PublishOutcome:
         session_id, listing, mode = ctx.session_id, ctx.listing, ctx.mode
         prev_rec = ctx.prev_record
         already_live = prev_rec.get("status") in ("published", "live")
@@ -284,6 +332,10 @@ class EbayProvider:
             if not creds:
                 raise HTTPException(400, "Connect eBay first.")
             relist = prev_status in ("ended", "sold")
+            # Captured before the create overwrites it: a relist mints a new
+            # item id, and the OLD one is what makes this relist's idempotency
+            # key distinct from the publish that first listed the item.
+            ended_item_id = listing.ebay_listing_id or ""
             # Photo sync: local working copies are the truth. Edited since the
             # last sync (or photos added/removed) → send OUR /media URLs so
             # eBay ingests fresh copies; untouched → reuse the live EPS URLs
@@ -303,8 +355,13 @@ class EbayProvider:
                     # (search boost).
                     if not urls:
                         raise ValueError("This listing has no photos left to relist with.")
+                    # Keyed on the item being replaced: a retried relist reuses
+                    # the key (so it can't double-list), while an intentional
+                    # later relist of a different item gets its own.
                     res = listing_sync.create_on_ebay(
-                        creds["access_token"], listing, urls, creds=creds)
+                        creds["access_token"], listing, urls, creds=creds,
+                        idempotency_key=publish_guard.idempotency_key(
+                            session_id, replacing_item_id=ended_item_id))
                 else:
                     res = listing_sync.push_edit(creds["access_token"], listing,
                                                  image_urls=urls)
@@ -401,7 +458,8 @@ class EbayProvider:
             urls = ebay.image_urls_for(session_id, listing, ctx.base_url)
             try:
                 res = listing_sync.create_on_ebay(
-                    creds["access_token"], listing, urls, creds=creds)
+                    creds["access_token"], listing, urls, creds=creds,
+                    idempotency_key=publish_guard.idempotency_key(session_id))
             except ValueError as exc:  # TradingError — eBay's own reason
                 log.warning("trading publish failed: session=%s: %s", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
@@ -412,19 +470,30 @@ class EbayProvider:
                     raw={"dry_run": False, "error": True, "mode": "live",
                          "message": str(exc),
                          "issues": ebay_errors.from_response(str(exc))})
+            # Record the item id FIRST. Everything below is optional extra work
+            # (photo bookkeeping, promotion) and none of it is worth risking the
+            # one write that stops the next publish creating a second listing:
+            # an id that never lands is indistinguishable from "never listed".
+            db.upsert_listing(session_id, listing.model_dump(),
+                              status="published", user_id=ctx.uid)
             storage.save_listing(session_id, listing)
             result = {"published": True, "mode": "live",
                       "listing_id": res["listing_id"],
-                      "message": "Your listing is live on eBay."}
+                      "message": ("Your listing is live on eBay."
+                                  if not res.get("already_listed") else
+                                  "This listing was already live on eBay — "
+                                  "reusing it instead of posting a duplicate.")}
             if listing.promote or auto_promote_enabled(ctx.uid):
                 result["promote_status"] = promote(
                     session_id, listing, creds,
                     rate=listing.ad_rate_percent,
                     ebay_listing_id=res["listing_id"])
-            db.upsert_listing(session_id, listing.model_dump(),
-                              status="published", user_id=ctx.uid)
-            log.info("trading publish ok: session=%s item=%s",
-                     session_id, res["listing_id"])
+                # promote() records the rate it actually used on the listing.
+                db.upsert_listing(session_id, listing.model_dump(),
+                                  status="published", user_id=ctx.uid)
+            log.info("trading publish ok: session=%s item=%s adopted=%s",
+                     session_id, res["listing_id"],
+                     bool(res.get("already_listed")))
             listing_id = str(res["listing_id"])
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",

@@ -35,7 +35,7 @@ from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
 from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (claude_ai, ebay, ebay_orders, ebay_trading,
+from .services import (bulk_actions, claude_ai, ebay, ebay_orders, ebay_trading,
                        image_import, images, listing_sync, metrics,
                        notifications, orient, preflight, pricing, promotions,
                        recommender, taxonomy, tokens)
@@ -2649,6 +2649,80 @@ def promote_all(request: Request) -> dict:
             needs_reconnect = True
             break
     return {"promoted": promoted, "total": len(items), "needs_reconnect": needs_reconnect}
+
+
+# How many listings one bulk price run touches. Each is a serial eBay revise;
+# this keeps the request inside the gateway's patience, and whatever is left
+# over comes back as `deferred` for the seller to run again.
+BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
+
+
+@app.post("/api/ebay/lower-prices")
+def lower_prices(payload: dict, request: Request) -> dict:
+    """Lower the price of several live listings by one percentage, and push each
+    change to eBay — the Dashboard's "Lower prices" suggestion group applied in
+    one go instead of opening a dozen listings to make the same edit.
+
+    The caller names the listings (the group's own membership), so this can
+    never widen to the seller's whole store. Per listing: skipped when it isn't
+    live or the cut wouldn't change the price, failed with eBay's reason when
+    the revise is rejected, and neither stops the rest of the run.
+    """
+    user = auth.current_user(request)
+    creds = _ebay_creds_for(request)
+    if not user or not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        percent = bulk_actions.validate_percent(payload.get("percent"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing to reprice.")
+    wanted = set(ids)
+    mine = [r for r in db.list_listings(limit=LIST_CAP, user_id=user["id"])
+            if r["id"] in wanted]
+    # Each listing is its own revise round-trip to eBay, run one after another.
+    # Past this many the request outlives the gateway and the seller sees a
+    # timeout instead of a result, so the run is bounded and the remainder is
+    # reported for a second pass rather than silently dropped.
+    records, deferred = mine[:BULK_PRICE_CAP], mine[BULK_PRICE_CAP:]
+    provider = marketplaces.get("ebay")
+
+    def _apply(rec: dict) -> dict:
+        if rec.get("status") not in ("published", "live"):
+            return {"skip": "No longer live on eBay."}
+        data = rec.get("listing") or {}
+        new_price = bulk_actions.lower_price(data.get("price"), percent)
+        if new_price is None:
+            return {"skip": "Price is already at the floor for a bulk drop."}
+        listing = Listing(**data)
+        was = listing.price
+        listing.price = new_price
+        # Through the provider, so each listing takes whichever revise path it
+        # belongs to (Trading for store listings, the Inventory API for the
+        # older app-published ones) and the record's status is written by the
+        # same code a single publish uses.
+        outcome = provider.publish(
+            PublishContext(session_id=rec["id"], listing=listing, mode="live",
+                           base_url=_base_url(request), uid=user["id"],
+                           prev_record=rec),
+            creds)
+        if not outcome.ok:
+            return {"message": outcome.message or "eBay rejected the new price."}
+        return {"ok": True, "was": was, "now": new_price}
+
+    result = bulk_actions.run(records, _apply)
+    # Listings the client asked for that aren't the seller's (or are gone) are
+    # reported rather than silently dropped from the totals.
+    missing = wanted - {r["id"] for r in mine}
+    for rid in sorted(missing):
+        result.skipped.append({"listing_id": rid, "title": "this listing",
+                               "message": "Listing not found."})
+    log.info("bulk lower-prices: user=%s percent=%s changed=%d skipped=%d "
+             "failed=%d deferred=%d", user["id"], percent, len(result.changed),
+             len(result.skipped), len(result.failed), len(deferred))
+    return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
 
 
 @app.get("/api/listings/{listing_id}")

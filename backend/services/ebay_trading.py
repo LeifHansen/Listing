@@ -21,6 +21,7 @@ message on failure — no XML leaks past this module.
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 from typing import Any, Optional
@@ -41,7 +42,31 @@ _TIMEOUT = 45
 
 
 class TradingError(ValueError):
-    """A Trading API call failed — carries a user-facing reason."""
+    """A Trading API call failed — carries a user-facing reason.
+
+    `code` is eBay's own ErrorCode when the failure came back as a rejection
+    rather than a transport problem, so callers can branch on a specific
+    condition (see AlreadyListedError) instead of matching on message text.
+    """
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code
+
+
+class AlreadyListedError(TradingError):
+    """eBay refused a create because THIS publish already produced a listing.
+
+    Raised when the idempotency key on AddItem/AddFixedPriceItem (see
+    `create_listing`) collides with one eBay has already seen — the signal that
+    a retried or racing publish is about to mint a duplicate. `item_id` is the
+    listing that already exists when eBay names it, so the caller can adopt it
+    instead of creating a second one.
+    """
+
+    def __init__(self, message: str, code: str = "", item_id: str = ""):
+        super().__init__(message, code)
+        self.item_id = item_id
 
 
 def _endpoint() -> str:
@@ -116,8 +141,8 @@ def _call(call: str, token: str, body: str) -> ET.Element:
             if code in ("931", "932", "16110", "21917053"):  # auth/token codes
                 raise TradingError(
                     "eBay didn't accept the account connection — reconnect eBay "
-                    "in Settings and try again.")
-            raise TradingError(msg.strip()[:300])
+                    "in Settings and try again.", code=code)
+            raise TradingError(msg.strip()[:300], code=code)
     return root
 
 
@@ -391,6 +416,28 @@ def get_listing(token: str, item_id: str) -> dict:
     return _item_to_listing(item)
 
 
+def item_id_for_tracking_number(token: str, tracking_number: str) -> str:
+    """The item id of the listing carrying this InventoryTrackingNumber, or "".
+
+    GetItem accepts an InventoryTrackingNumber in place of an ItemID, which is
+    what makes the tracking number a usable idempotency key: after a publish
+    whose response never arrived, this answers "did that listing actually go
+    up, and what is it?" without guessing from titles. Never raises — a lookup
+    failure just means "unknown".
+    """
+    if not tracking_number:
+        return ""
+    try:
+        root = _call("GetItem", token,
+                     f"<InventoryTrackingNumber>{_esc(tracking_number)}</InventoryTrackingNumber>")
+    except TradingError as exc:
+        log.info("trading: no item for tracking number %s (%s)",
+                 tracking_number, exc)
+        return ""
+    item = _find(root, "Item")
+    return _text(item, "ItemID") if item is not None else ""
+
+
 def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> list[str]:
     """The <Item> children shared by create and revise: the listing's content."""
     parts: list[str] = []
@@ -448,7 +495,8 @@ def _package_details(listing: Listing) -> str:
 
 def create_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
-                   postal_code: str = "") -> dict:
+                   postal_code: str = "",
+                   idempotency_key: str = "") -> dict:
     """Publish a NEW listing through the Trading API.
 
     This is what keeps a listing editable everywhere. A listing published via
@@ -461,6 +509,16 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     `policies` carries the seller's business-policy ids (fulfillment/payment/
     return); with those set eBay takes shipping, payment, and returns from the
     profiles, so they don't have to be spelled out per listing.
+
+    `idempotency_key` makes this call safe to repeat. Creating a listing is the
+    one operation here that isn't naturally idempotent — a second call means a
+    second live listing, which is both a duplicate on the seller's account and
+    an eBay policy problem. The key rides along two ways: as UUID, which eBay
+    checks against calls it has already processed, and (fixed-price only) as
+    InventoryTrackingNumber, which must be unique among the seller's active
+    listings and is separately queryable, so a caller that loses the response
+    can find the listing it made. Either collision raises AlreadyListedError
+    instead of duplicating. Pass "" to opt out.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -511,14 +569,64 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     if profiles:
         parts.append(f"<SellerProfiles>{profiles}</SellerProfiles>")
 
+    if idempotency_key:
+        # InventoryTrackingNumber is fixed-price only, and can't be combined
+        # with an item-level SKU (this path sends none).
+        if not is_auction:
+            parts.append("<InventoryTrackingNumber>"
+                         f"{_esc(idempotency_key[:50])}</InventoryTrackingNumber>")
+        parts.append(f"<UUID>{_esc(_uuid_form(idempotency_key))}</UUID>")
+
     call = "AddItem" if is_auction else "AddFixedPriceItem"
-    root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
+    try:
+        root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
+    except TradingError as exc:
+        if idempotency_key and _is_duplicate_rejection(exc):
+            # eBay has already processed this exact publish. Surfacing its raw
+            # wording ("UUID has already been used") would read as a failure to
+            # a seller whose listing is in fact live.
+            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
+                     call, idempotency_key, exc.code)
+            raise AlreadyListedError(
+                "This listing was already published to eBay.", code=exc.code,
+                item_id=_item_id_in_error(str(exc))) from exc
+        raise
     item_id = _text(root, "ItemID")
     if not item_id:
         raise TradingError("eBay accepted the listing but returned no item id.")
     log.info("trading: %s ok item=%s", call, item_id)
     return {"published": True, "listing_id": item_id,
             "view_url": f"https://www.ebay.com/itm/{item_id}"}
+
+
+# eBay's error codes for "you already sent this": a reused UUID, and an
+# InventoryTrackingNumber already on an active listing. Codes are matched
+# first, with a text fallback so a code eBay adds later still lands here —
+# duplicating a listing is worse than one publish reported as already-live.
+_DUPLICATE_CODES = {"21916884", "21916885", "21919188", "21916752"}
+_DUPLICATE_TEXT = re.compile(
+    r"(uuid|inventory\s*tracking\s*number).{0,60}?"
+    r"(already\s+(been\s+)?(used|exists|specified)|not\s+unique|duplicate)"
+    r"|duplicate.{0,30}(uuid|inventory\s*tracking)", re.I | re.S)
+# eBay names the offending listing inside the message often enough to be worth
+# reading ("...already used for item 123456789012").
+_ERROR_ITEM_RE = re.compile(r"\b(\d{9,})\b")
+
+
+def _is_duplicate_rejection(exc: TradingError) -> bool:
+    return exc.code in _DUPLICATE_CODES or bool(_DUPLICATE_TEXT.search(str(exc)))
+
+
+def _item_id_in_error(message: str) -> str:
+    found = _ERROR_ITEM_RE.search(message or "")
+    return found.group(1) if found else ""
+
+
+def _uuid_form(key: str) -> str:
+    """`key` as the 32-hex-character UUID eBay's UUID element requires."""
+    if re.fullmatch(r"[0-9a-fA-F]{32}", key or ""):
+        return (key or "").lower()
+    return hashlib.md5(str(key).encode("utf-8")).hexdigest()  # noqa: S324
 
 
 def _revise_call_name(listing: Listing) -> str:

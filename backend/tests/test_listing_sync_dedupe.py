@@ -185,6 +185,39 @@ def test_app_record_wins_over_the_mirror_either_way_round():
     assert listing_sync._index_by_item([mirror, app])[ITEM] is app
 
 
+def test_the_dedupe_reads_past_a_big_sellers_whole_store(monkeypatch):
+    """The read that feeds the dedupe used to be sized off this run's job count
+    (max(1000, jobs * 2)). A seller with a few hundred listings plus their
+    ended/sold mirrors can hold more rows than that — and a record the read
+    misses is one the dedupe can't match, which puts the duplicate pair right
+    back on screen. It has to see everything.
+
+    The fake truncates exactly like the real query, so an undersized limit
+    fails here rather than only in a big production account."""
+    class TruncatingDb(FakeDb):
+        def list_listings(self, limit=50, user_id=None):
+            mine = [r for r in self.records.values() if r.get("user_id") == user_id]
+            return mine[:limit]
+
+    # One app-published listing for the item eBay reports, buried behind more
+    # unrelated rows than the old formula would have read.
+    filler = [{"id": f"sess-{i}", "user_id": "u1", "status": "published",
+               "listing": {"title": f"Other thing {i}",
+                           "ebay_listing_id": f"9{i:011d}"}}
+              for i in range(2500)]
+    records = [*filler, _app_record(), _mirror_record()]
+
+    fake_db = TruncatingDb(records)
+    monkeypatch.setattr(listing_sync, "db", fake_db)
+    monkeypatch.setattr(listing_sync, "ebay_trading", FakeTrading(ITEM, DETAIL))
+    result = listing_sync.import_active("token", "u1")
+
+    assert listing_sync.record_id(ITEM) in fake_db.deleted, \
+        "the duplicate survived because the dedupe never saw the app record"
+    assert result["deduped"] == 1
+    assert result["imported"] == 0
+
+
 def test_merge_keeps_an_app_records_own_edit_path():
     # Published through the Inventory API: no source, and it has to stay that
     # way or later edits go to Trading's ReviseItem, which eBay refuses there.
