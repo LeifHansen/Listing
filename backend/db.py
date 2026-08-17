@@ -18,6 +18,7 @@ from typing import Optional
 
 from sqlalchemy import (DateTime, JSON, String, create_engine, delete, select,
                         text)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from . import config
@@ -176,7 +177,21 @@ def _get_engine():
     if not enabled():
         return None
     if _engine is None:
-        _engine = create_engine(_normalize_url(config.DATABASE_URL), pool_pre_ping=True)
+        # Pool sized against the concurrency that can actually reach it, and
+        # set to fail fast rather than hang. Almost every route here is a sync
+        # `def`, so FastAPI runs it in anyio's 40-thread pool, and background
+        # daemons (bulk, identify, the R2 pushes, the store sync) add more on
+        # top. Against SQLAlchemy's default 5+10 that meant callers past the
+        # fifteenth queued for the default 30s checkout and then hit a timeout
+        # that db.py swallows into []/None — a half-minute hang followed by a
+        # confidently empty answer. pool_recycle matters for Neon specifically:
+        # it drops idle connections, and a stale one surfaces as a failed query
+        # on somebody's next request.
+        _engine = create_engine(
+            _normalize_url(config.DATABASE_URL),
+            pool_pre_ping=True, pool_size=10, max_overflow=20,
+            pool_timeout=5, pool_recycle=300,
+        )
     if not _initialized:
         Base.metadata.create_all(_engine)  # may raise if DB unreachable
         # Lightweight migrations for DBs created before a column existed. Each
@@ -424,8 +439,13 @@ def delete_user(user_id: str) -> Optional[list[str]]:
     gone is exactly the trap this feature exists to avoid — so failure is
     reported and the caller surfaces it.
 
-    The listings table has no foreign key to users (see ListingRecord), so
-    nothing cascades on its own; every table is cleared explicitly here.
+    No table here has a foreign key to users, so nothing cascades on its own;
+    every table keyed to a user is cleared explicitly below. When a table is
+    added to this module it MUST be added here too — Apple's account-deletion
+    requirement (App Store guideline 5.1.1(v)) and every privacy policy we
+    publish promise that "delete my account" leaves nothing behind. Leaving a
+    marketplace refresh token behind is worse than a stale row: it is a live
+    credential for someone else's eBay/Etsy/Depop account.
     """
     try:
         eng = _get_engine()
@@ -445,6 +465,16 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(
                 delete(ListingRecord).where(ListingRecord.user_id == user_id))
             s.execute(delete(EbayAccount).where(EbayAccount.user_id == user_id))
+            # Etsy/Depop/every future marketplace: these rows hold live OAuth
+            # refresh tokens, so they are the most important thing to erase.
+            s.execute(delete(MarketplaceAccount)
+                      .where(MarketplaceAccount.user_id == user_id))
+            # Billing: the balance row and its ledger. The ledger is an audit
+            # trail, but it is keyed to a person who asked to be forgotten and
+            # holds no money of ours — Stripe keeps the payment record it is
+            # legally required to keep, independently of this table.
+            s.execute(delete(TokenLedger).where(TokenLedger.user_id == user_id))
+            s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(Notification).where(Notification.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             s.commit()
@@ -584,16 +614,31 @@ def disconnect_marketplace_account(user_id: str, marketplace: str) -> None:
 
 
 def get_listing(listing_id: str) -> Optional[dict]:
+    res = get_listing_strict(listing_id)
+    return None if res is UNAVAILABLE else res
+
+
+# Sentinel telling "the read could not be performed" apart from "no such
+# listing" — the same trick as EMAIL_TAKEN above. get_listing collapses the
+# two into None, which is right for the callers that just want the record but
+# wrong for a security check: an ownership guard that reads None as "unowned"
+# stops guarding the moment the database hiccups.
+UNAVAILABLE = object()
+
+
+def get_listing_strict(listing_id: str):
+    """The listing record, None when there is genuinely no such row, or
+    UNAVAILABLE when a database is configured but the read failed."""
     try:
         eng = _get_engine()
         if eng is None:
-            return None
+            return None  # no DB configured at all — nothing is owned
         with Session(eng) as s:
             rec = s.get(ListingRecord, listing_id)
             return _record_to_dict(rec) if rec else None
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_listing failed: {exc}")
-        return None
+        return UNAVAILABLE
 
 
 def touch_listing(listing_id: str) -> None:
@@ -653,10 +698,23 @@ def _token_account(s: Session, user_id: str,
     an old spend) is not permission to reset this month's free usage."""
     acct = s.get(TokenAccount, user_id, with_for_update=True)
     if acct is None:
+        # FOR UPDATE cannot lock a row that does not exist, so two concurrent
+        # first-ever spends by the same account both see None and both INSERT.
+        # The loser's flush raises IntegrityError, which token_spend's blanket
+        # handler turns into "DB unavailable" — and that path deliberately
+        # FAILS OPEN, handing out un-metered AI. A double-tap on a new
+        # account's first draft should not be a free-AI coupon: catch the race
+        # here and re-read, where the lock is now real.
         acct = TokenAccount(user_id=user_id, purchased=0, free_used=0,
                             free_period=period or "", updated_at=_now())
         s.add(acct)
-        s.flush()
+        try:
+            s.flush()
+        except IntegrityError:
+            s.rollback()
+            acct = s.get(TokenAccount, user_id, with_for_update=True)
+            if acct is None:  # not the race after all — let the caller see it
+                raise
     if period is not None and acct.free_period != period:
         acct.free_period = period
         acct.free_used = 0

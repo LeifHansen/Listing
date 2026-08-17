@@ -86,6 +86,33 @@ def current_user(request: Request) -> Optional[dict]:
         return None
 
 
+def make_ticket(user_id: str, purpose: str, ttl_seconds: int = 60) -> str:
+    """A short-lived, single-purpose credential for a top-level NAVIGATION.
+
+    The native shell authenticates with a Bearer header, but starting an OAuth
+    connect flow is a full-page navigation — no header rides along, and the
+    session cookie never crosses origins. Putting the real 30-day session JWT
+    in a URL would park a long-lived credential in every access log, so the
+    navigation instead carries this: 60 seconds, one declared purpose, useless
+    for anything else.
+    """
+    now = _dt.datetime.now(_dt.timezone.utc)
+    payload = {"sub": user_id, "purpose": purpose, "iat": now,
+               "exp": now + _dt.timedelta(seconds=ttl_seconds)}
+    return jwt.encode(payload, config.SECRET_KEY, algorithm="HS256")
+
+
+def verify_ticket(ticket: str, purpose: str) -> Optional[str]:
+    """The user id from a valid, unexpired ticket minted for `purpose`."""
+    try:
+        payload = jwt.decode(ticket, config.SECRET_KEY, algorithms=["HS256"])
+        if payload.get("purpose") != purpose:
+            return None
+        return payload.get("sub") or None
+    except Exception:  # noqa: BLE001 - expired/garbled -> not authenticated
+        return None
+
+
 def _state_sig(user_id: str, nonce: str) -> str:
     msg = f"{user_id}.{nonce}".encode()
     return hmac.new(config.SECRET_KEY.encode(), msg, hashlib.sha256).hexdigest()[:32]

@@ -1,6 +1,6 @@
 """eBay Sell (Inventory) API integration.
 
-Publishing flow (live only — drafts stay in QuickFlip and never touch eBay):
+Publishing flow (live only — drafts stay in the app and never touch eBay):
   1. createOrReplaceInventoryItem  (the product + condition + images)
   2. createOffer / updateOffer     (price, policies, marketplace, location)
   3. publishOffer                  (turns the offer into a live listing)
@@ -643,7 +643,7 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
     creds: a connected user's eBay credentials (access_token + policy ids +
     location). When present we publish with those; otherwise we fall back to
     env config, and dry-run if neither is available.
-    mode: "draft" saves in QuickFlip only (no eBay call); "live" publishes to eBay.
+    mode: "draft" saves in the app only (no eBay call); "live" publishes to eBay.
     is_revise: this listing is already live on eBay — reuse eBay's hosted images
       rather than re-sending ours (avoids the "photos aren't on the server"
       block and eBay's self-hosted/eBay-hosted image-mix rejection).
@@ -662,14 +662,14 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
 
     ready = bool((creds or {}).get("access_token")) or config.ebay_ready()
     if not ready:
-        # No eBay connection: a draft stays in QuickFlip only (we can't reach
+        # No eBay connection: a draft stays in the app only (we can't reach
         # eBay), and a live publish returns the dry-run payload to inspect.
         if mode == "draft":
             return {
                 "dry_run": False,
                 "draft": True,
                 "mode": mode,
-                "message": ("Saved to your QuickFlip drafts — find it under Drafts. "
+                "message": ("Saved to your drafts — find it under Drafts. "
                             "It is NOT on eBay: connect your eBay account and press "
                             "Publish Live when you're ready to list it."),
                 "export_path": str(export_path),

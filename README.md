@@ -55,18 +55,27 @@ publishing work — the app uses its public origin for `imageUrls`.
 
 ```bash
 fly launch --no-deploy        # or: fly apps create <name> ; edit fly.toml `app`
+# The /data volume in fly.toml's [mounts] must exist before the first deploy:
+fly volumes create data --size 3 --region sjc
 fly secrets set ANTHROPIC_API_KEY=sk-ant-...
-# eBay sandbox creds (see below):
+# Optional server-level eBay creds (see below). Most sellers instead connect
+# their own account through the in-app OAuth flow, which needs none of these:
 fly secrets set EBAY_OAUTH_TOKEN=... \
   EBAY_FULFILLMENT_POLICY_ID=... EBAY_PAYMENT_POLICY_ID=... \
   EBAY_RETURN_POLICY_ID=... EBAY_MERCHANT_LOCATION_KEY=...
 fly deploy
 ```
 
-`EBAY_ENV=sandbox` is preset in `fly.toml`. The app listens on `$PORT` (8080)
-and runs uvicorn with `--proxy-headers` so it sees Fly's HTTPS origin. Uploaded
-files live on the container's ephemeral disk by default; uncomment the
-`[mounts]` block in `fly.toml` (and create a volume) to persist them.
+> **`fly.toml` sets `EBAY_ENV=production`** — a deploy publishes REAL, fee-
+> incurring, publicly visible eBay listings. For a sandbox deploy override it
+> with `fly secrets set EBAY_ENV=sandbox` (a secret wins over `[env]`).
+
+The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
+sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
+optional: photos are served from `/data` and eBay fetches those URLs at publish
+time, so on the container's ephemeral disk a restart turns every in-flight
+listing's images into eBay's opaque 25001 error. Fly health-checks
+`/api/health` every 15s.
 
 > **Sandbox keysets don't need eBay's "Alerts & Notifications" page.** The one
 > notification eBay mandates — *Marketplace Account Deletion* — applies to

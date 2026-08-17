@@ -1,8 +1,10 @@
 # TestFlight launch checklist (iOS)
 
 The short, do-in-order version. Full explanations live in `MOBILE.md`.
-Everything here runs **on your Mac**; the web side is already deployed and the
-app shell loads the live site, so no code changes are needed for v1.
+Everything here runs **on your Mac**. The shell **bundles the web build** and
+talks to the deployed API — it does not load the website in a webview (that
+architecture is an App Store guideline 4.2 rejection). `ios-prepare.sh` does
+the whole build; there is nothing to hand-configure.
 
 ## A. One-time setup
 
@@ -28,12 +30,15 @@ npm install
 
 - [ ] Script finished clean and printed all five Info.plist keys
 
-`ios-prepare.sh` builds the web bundle, creates `ios/` if it's missing, runs
-`cap sync`, and writes every required plist key — including
-`NSMicrophoneUsageDescription` (without it, tapping **Scan a shelf** kills the
-app) and `ITSAppUsesNonExemptEncryption`, which stops App Store Connect asking
-the export-compliance question on every upload. It's idempotent; run it before
-every build and never hand-edit `Info.plist`.
+`ios-prepare.sh` builds the web bundle (with the production API base baked
+in), creates `ios/` if it's missing, runs `cap sync`, writes every required
+plist key — including `NSMicrophoneUsageDescription` (without it, tapping
+**Scan a shelf** kills the app) and `ITSAppUsesNonExemptEncryption`, which
+stops App Store Connect asking the export-compliance question on every
+upload — and writes the **privacy manifest** (`PrivacyInfo.xcprivacy`) App
+Store Connect requires. It's idempotent; run it before every build and never
+hand-edit `Info.plist`. If it prints a note that the privacy manifest was
+just created, do the one-time "add file to App target" step it describes.
 
 Only if the app icon changed:
 
@@ -75,10 +80,19 @@ npx cap open ios
 - [ ] **Scan a shelf** records video without the app dying (this is the
       microphone permission — if the app vanishes, `Info.plist` is missing
       `NSMicrophoneUsageDescription`; re-run `./scripts/ios-prepare.sh`)
+- [ ] **AI consent dialog appears once** before the first photo upload —
+      Agree proceeds; "Not now" cancels cleanly and re-asks next time
 - [ ] Photo upload → AI identify → draft appears
-- [ ] **Connect eBay stays INSIDE the app** — if it opens Safari and strands
-      you there, add `"allowNavigation": ["auth.ebay.com", "*.ebay.com"]` to
-      the `server` block in `capacitor.config.json`
+- [ ] **Connect eBay round-trips back into the app**: tap Connect → eBay's
+      sign-in loads in the webview (allowNavigation already covers it) →
+      after approving, the "Returning to Thryft Shop…" page lands you back in
+      the app with the "eBay connected!" toast. If the auto-return stalls,
+      the page's **Return to Thryft Shop** button must work — report if only
+      the button path works.
+- [ ] **Buy tokens opens the SYSTEM browser (Safari), not in-app** — this is
+      an App Store compliance requirement, not a preference. Complete a test
+      purchase; on returning to the app the balance updates by itself
+      (requires `STRIPE_WEBHOOK_SECRET` set on the server).
 - [ ] **View on eBay** (after publishing) actually opens — `window.open` is
       silently a no-op in some webview configs
 - [ ] Settings → **Delete account** shows the confirm dialog, and the privacy
@@ -88,6 +102,7 @@ npx cap open ios
 
 ## Iterating
 
-Web changes deploy on merge and appear in the app on next launch — **no new
-TestFlight build needed**. Re-run sections B–C only when the icon, permissions,
-native plugins, or `server.url` change.
+The app now **bundles** the web build (see MOBILE.md), so web changes need a
+new build to reach the app: re-run `./scripts/ios-prepare.sh` + archive for
+any frontend change you want in the shell. Backend/API changes still land on
+deploy with no new build.

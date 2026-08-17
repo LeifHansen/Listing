@@ -10,6 +10,7 @@ import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
+import { CategoryQuickPick } from "./CategoryQuickPick";
 import {
   MarketTargetChips, missingRequired, publishListing, usePublishTargets,
 } from "./publishShared";
@@ -63,6 +64,28 @@ function DraftShipping({ item }) {
       </Select>
     </div>
   );
+}
+
+// Category display + quick fix right on the draft card — a miscategorized
+// item is the AI misfire that costs most once it's published, so the pick
+// has to be visible (and fixable) without opening the full editor.
+function DraftCategory({ item }) {
+  const { loadListings } = useApp();
+  const { toast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const save = async (patch) => {
+    setSaving(true);
+    try {
+      await postJson(`/api/save/${item.id}`, { ...(item.listing || {}), ...patch });
+      // Refresh the cache so the card (and its Publish gate) sees the change.
+      await loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't save the category: ${e.message}`, { kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <CategoryQuickPick listing={item.listing} onPick={save} saving={saving} />;
 }
 
 // A multi-marketplace publish response as one toast line: "eBay ✓ · Etsy ✗".
@@ -342,6 +365,7 @@ export function DraftsStrip({ search = "" }) {
                       <Trash2 aria-hidden />
                     </Button>
                   </div>
+                  <DraftCategory item={item} />
                   <DraftShipping item={item} />
                 </>
               )}

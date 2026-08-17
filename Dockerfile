@@ -1,4 +1,4 @@
-# QuickFlip - container image (used by Fly.io and any Docker host)
+# Thryft Shop - container image (used by Fly.io and any Docker host)
 
 # Stage 1: build the React frontend (Vite outputs static files to dist/).
 FROM node:22-slim AS frontend

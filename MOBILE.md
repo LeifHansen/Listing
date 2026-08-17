@@ -1,9 +1,24 @@
 # Thryft Shop — native app (TestFlight / Play) runbook
 
-The app is a web app; we ship it as a native app with **Capacitor**, which wraps
-it in a native shell. v1 loads the live production site
-(`https://listing-lfwjrg.fly.dev`) directly, so there are **no code changes** —
-auth, API calls, camera, and CORS all work exactly like the mobile website.
+The app is a web app; we ship it as a native app with **Capacitor**. The shell
+**bundles the web build locally** and talks to the production API
+(`https://listing-lfwjrg.fly.dev`) cross-origin — it does NOT load the remote
+site in a webview. That architecture is deliberate: Apple's guideline 4.2
+rejects "repackaged website" apps, and Capacitor documents `server.url` as a
+development-only feature. The pieces that make the bundled shell work are
+already in the codebase:
+
+- `scripts/ios-prepare.sh` builds the bundle with `VITE_API_BASE` baked in
+  (the web deploy builds without it and keeps relative URLs).
+- Auth uses a **Bearer token** in the shell (cookies never cross origins);
+  the backend allows the `capacitor://localhost` origin via CORS.
+- OAuth connects (eBay/Etsy) mint a 60-second ticket for the navigation and
+  finish on an interstitial that steers the webview back into the app.
+- Token purchases open **in the system browser** (App Store guideline 3.1.1
+  forbids completing a non-Apple checkout inside the app; a link out is
+  allowed on the US storefront). The webhook credits the purchase, so set
+  `STRIPE_WEBHOOK_SECRET` in production — for native buyers it is the
+  delivery path, not a safety net.
 
 Everything up to `npx cap add ios` can run anywhere; **the iOS build, signing,
 and TestFlight upload must run on a Mac with Xcode.**
@@ -32,6 +47,9 @@ cd frontend
 # package.json on a branch that Fly builds with `npm ci`; install locally).
 npm install --save-dev @capacitor/cli
 npm install @capacitor/core @capacitor/ios @capacitor/android
+# Browser plugin: token purchases must open in the SYSTEM browser (App Store
+# guideline 3.1.1) — the app detects and uses this plugin when present.
+npm install @capacitor/browser
 
 # capacitor.config.json is already in this folder (deliberately JSON, not TS:
 # the CLI's TypeScript config loader breaks on TypeScript 6 with

@@ -2,6 +2,7 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
 import { api, postJson } from "@/lib/api";
+import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
 /* Central app state, ported from the original app.js:
@@ -72,6 +73,7 @@ export function AppProvider({ children }) {
 
   const logout = useCallback(async () => {
     try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+    storeToken(null); // native shell's bearer token — no-op on the web
     setUser(null);
     loadEbayStatus();
   }, []);
@@ -362,6 +364,16 @@ export function AppProvider({ children }) {
 
   // Balance changes with login state; it also refreshes when the dialog opens.
   useEffect(() => { loadTokens(); }, [user, loadTokens]);
+
+  // Refresh the balance when the app regains focus. In the native shell a
+  // token purchase happens in the system browser (App Store rules), so the
+  // moment of return IS the moment the balance changed; on the web it just
+  // keeps a long-lived tab honest.
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) loadTokens(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [loadTokens]);
 
   useEffect(() => {
     loadHealth();

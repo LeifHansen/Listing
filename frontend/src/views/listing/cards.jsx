@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2, Ruler, Check, Store, ShoppingBag,
+  Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
@@ -11,7 +11,6 @@ import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
-import { TagPill } from "@/components/ui/badges";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
@@ -306,15 +305,45 @@ const DIMENSION_ASPECTS = new Set([
   "item weight", "height", "length", "width", "depth", "diameter",
 ]);
 
-// The ✓/⚠ trust badge for one specific: ✓ = the AI read it off the item
-// (tag, label, print) or it's unambiguous; ⚠ = a reasonable inference worth a
+// The trust marker for one specific: ✓ = the AI read it off the item (tag,
+// label, print) or it's unambiguous; ⚠ = a reasonable inference worth a
 // glance; nothing = the seller typed or confirmed it (or it's empty).
-function ConfidencePill({ row }) {
+//
+// A bare icon rather than a pill: a category can carry twenty of these, and
+// twenty pills read as decoration rather than signal. The icon keeps the
+// per-field cue while the section headers carry the words.
+function ConfidenceMark({ row, className }) {
   if (!row || !(row.value || "").trim() || !row.confidence) return null;
-  return row.confidence === "high" ? (
-    <TagPill tone="green"><Check size={11} aria-hidden /> AI</TagPill>
-  ) : (
-    <TagPill tone="yellow"><AlertTriangle size={11} aria-hidden /> Review</TagPill>
+  const high = row.confidence === "high";
+  const label = high
+    ? "Read from your photos by the AI"
+    : "Inferred by the AI — worth a glance";
+  return (
+    <span
+      title={label} aria-label={label} tabIndex={0}
+      className={cn("inline-flex shrink-0 cursor-help outline-none",
+        high ? "text-green" : "text-warning", className)}
+    >
+      {high ? <Check size={13} aria-hidden /> : <AlertTriangle size={13} aria-hidden />}
+    </span>
+  );
+}
+
+// One labelled group of specifics. The rule under the heading is what makes a
+// long list scannable — without it, required and optional fields are one
+// undifferentiated grid and the eye has nothing to anchor on.
+function SpecGroup({ title, note, count, children }) {
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex items-baseline flex-wrap gap-x-2 gap-y-0.5 pb-1.5 border-b border-line">
+        <h4 className="text-[13px] font-bold text-ink">{title}</h4>
+        {count != null && (
+          <span className="text-[12px] font-semibold text-ink-faint tabular-nums">{count}</span>
+        )}
+        {note && <span className="text-[12px] font-normal text-ink-faint">{note}</span>}
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -340,6 +369,14 @@ export function SpecificsCard({ w }) {
 
   const catAspects = [...required, ...dimensions, ...recommendedAll];
   const filledCount = catAspects.filter((a) => w.getSpecific(a.name)).length;
+  // Brand mirrors the listing's own brand field (see renderAspect), so a
+  // required Brand aspect isn't "empty" just because no specifics row exists
+  // for it — counting it as missing would send the seller hunting for a field
+  // that already shows a value.
+  const isFilled = (a) => !!(w.getSpecific(a.name)
+    || (a.name.trim().toLowerCase() === "brand" && (w.form.brand || "").trim()));
+  const missingRequired = required.filter((a) => !isFilled(a)).length;
+  const recommendedFilled = recommendedAll.filter(isFilled).length;
   const reviewCount = w.form.item_specifics
     .filter((s) => (s.value || "").trim() && s.confidence === "medium").length;
 
@@ -374,21 +411,34 @@ export function SpecificsCard({ w }) {
       w.upsertSpecific(a.name, v);
     };
     // An empty REQUIRED aspect blocks publishing — it must be unmissable in
-    // the grid, not discovered via a failed publish. Amber ring + "Missing"
-    // pill until it's filled.
+    // the grid, not discovered via a failed publish. Amber ring + the word
+    // "Required" in amber until it's filled.
+    //
+    // Nothing else earns a badge here. Which fields are required and which
+    // are optional is what the group heading says, so repeating it on every
+    // row was pure noise — and a "Recommended" pill on twenty rows made the
+    // two rows that actually needed attention impossible to spot.
     const missing = a.required && !shown.trim();
     const ringCls = missing ? "ring-2 ring-warning/60" : undefined;
+    // An inference the seller hasn't looked at yet. This is the one thing in
+    // the card that can put a WRONG value on a live listing, so it gets the
+    // only interactive affordance on a field label: read it, tap ✓, done.
+    const unreviewed = row?.confidence === "medium" && (shown || "").trim();
     const badge = (
       <span className="inline-flex items-center gap-1.5">
-        <ConfidencePill row={row} />
-        {missing ? (
-          <TagPill tone="yellow">
-            <AlertTriangle size={11} aria-hidden /> Missing — required
-          </TagPill>
-        ) : (
-          <TagPill tone={a.required ? "red" : "neutral"}>
-            {a.required ? "Required" : "Recommended"}
-          </TagPill>
+        <ConfidenceMark row={row} />
+        {unreviewed && (
+          <button
+            type="button"
+            onClick={() => w.confirmSpecific(a.name)}
+            title={`Confirm "${shown}" is correct`}
+            className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning-soft px-1.5 py-px text-[11px] font-bold text-warning cursor-pointer hover:border-warning transition-colors"
+          >
+            <Check size={10} aria-hidden /> Looks right
+          </button>
+        )}
+        {missing && (
+          <span className="text-[12px] font-semibold text-warning">Required</span>
         )}
       </span>
     );
@@ -434,78 +484,148 @@ export function SpecificsCard({ w }) {
     <WorkflowCard
       id="specifics" icon={ListChecks} title="Item specifics"
       hint={catAspects.length
-        ? `${filledCount} of ${catAspects.length} filled`
-          + (reviewCount ? ` · ${reviewCount} for you to review` : "")
-          + " — required ones gate publishing"
+        ? `${filledCount} of ${catAspects.length} filled by the AI`
+          + (missingRequired ? ` · ${missingRequired} required still empty` : "")
+          + (reviewCount ? ` · ${reviewCount} to check` : "")
+          + ". Required ones gate publishing; a wrong specific is worse than a "
+          + "missing one, so check anything flagged."
         : "Details buyers filter by — required ones gate publishing"}
       state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
     >
-      <div className="flex flex-col gap-5">
-        {(required.length > 0 || recommended.length > 0) && (
-          <div className="grid sm:grid-cols-2 gap-4">
-            {[...required, ...recommended].map(renderAspect)}
+      <div className="flex flex-col gap-6">
+        {/* What still needs a human. The AI fills as much as it can, so the
+            seller's actual job here is the exception list — surfacing it at
+            the top is the difference between "scan twenty fields" and "handle
+            these three". Hidden entirely once there's nothing outstanding. */}
+        {(missingRequired > 0 || reviewCount > 0) && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-warning/40 bg-warning-soft px-3.5 py-2.5">
+            <AlertTriangle size={16} className="text-warning shrink-0" aria-hidden />
+            <span className="text-[13px] text-ink flex-1 min-w-0">
+              {missingRequired > 0 && (
+                <strong className="font-bold">
+                  {missingRequired} required {missingRequired === 1 ? "specific is" : "specifics are"} empty
+                </strong>
+              )}
+              {missingRequired > 0 && reviewCount > 0 && " · "}
+              {reviewCount > 0 && (
+                <>
+                  <strong className="font-bold">{reviewCount} AI {reviewCount === 1 ? "guess" : "guesses"}</strong>
+                  {" "}to check — a wrong specific is worse than a missing one
+                </>
+              )}
+            </span>
+            {reviewCount > 1 && (
+              // Offered last and worded plainly, never as the primary action:
+              // one tap that accepts everything is exactly how a wrong value
+              // reaches a live listing.
+              <button
+                type="button"
+                onClick={w.confirmAllSpecifics}
+                className="shrink-0 text-[12px] font-semibold text-ink-secondary underline underline-offset-2 cursor-pointer hover:text-ink"
+              >
+                I've read them all
+              </button>
+            )}
           </div>
         )}
-        {hiddenCount > 0 && (
-          <div>
-            <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
-              <Plus aria-hidden /> Show {hiddenCount} more optional specific{hiddenCount === 1 ? "" : "s"}
-            </Button>
-          </div>
+
+        {required.length > 0 && (
+          <SpecGroup
+            title="Required to publish"
+            count={`${required.length - missingRequired}/${required.length}`}
+            note={missingRequired > 0 ? "eBay rejects the listing without these" : "all set"}
+          >
+            <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3.5">
+              {required.map(renderAspect)}
+            </div>
+          </SpecGroup>
+        )}
+
+        {recommended.length > 0 && (
+          <SpecGroup
+            title="Recommended"
+            count={`${recommendedFilled}/${recommendedAll.length}`}
+            note="buyers filter by these — more filled, more views"
+          >
+            <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3.5">
+              {recommended.map(renderAspect)}
+            </div>
+            {hiddenCount > 0 && (
+              <div>
+                <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
+                  <Plus aria-hidden /> Show {hiddenCount} more
+                </Button>
+              </div>
+            )}
+          </SpecGroup>
         )}
 
         {/* Item size — the ITEM's own measurements (eBay sometimes rejects a
             publish without them), distinct from the shipping box under
             Shipping. AI pre-fills estimates; tweak as needed. */}
         {dimensions.length > 0 && (
-          <div>
-            <p className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
-              <Ruler size={14} className="text-blue" aria-hidden /> Item size
-              <span className="font-normal text-ink-faint">
-                — the item itself, not the shipping box (e.g. “7 in”)
-              </span>
-            </p>
-            <div className="grid sm:grid-cols-3 gap-4 mt-2.5">
+          <SpecGroup title="Item size" note="the item itself, not the shipping box (e.g. “7 in”)">
+            <div className="grid sm:grid-cols-3 gap-x-4 gap-y-3.5">
               {dimensions.map(renderAspect)}
             </div>
-          </div>
+          </SpecGroup>
         )}
 
         {freeRows.length > 0 && (
-          <div className="flex flex-col gap-2.5">
-            {freeRows.map((s) => (
-              <div key={s.i} className="flex gap-2.5 items-center">
-                <Input
-                  value={s.name} placeholder="Name" className="flex-1"
-                  onChange={(e) => setRow(s.i, "name", e.target.value)}
-                />
-                <Input
-                  value={s.value} placeholder="Value" className="flex-[1.4]"
-                  onChange={(e) => setRow(s.i, "value", e.target.value)}
-                />
-                <ConfidencePill row={s} />
-                <Button variant="ghost" size="iconSm" aria-label="Remove specific"
-                  onClick={() => removeRow(s.i)}>
-                  <X size={15} />
-                </Button>
-              </div>
-            ))}
-          </div>
+          <SpecGroup title="Your own specifics" count={freeRows.length}>
+            <div className="flex flex-col gap-2.5">
+              {freeRows.map((s) => (
+                <div key={s.i} className="flex gap-2.5 items-center">
+                  <Input
+                    value={s.name} placeholder="Name" className="flex-1"
+                    aria-label="Specific name"
+                    onChange={(e) => setRow(s.i, "name", e.target.value)}
+                  />
+                  <Input
+                    value={s.value} placeholder="Value" className="flex-[1.4]"
+                    aria-label="Specific value"
+                    onChange={(e) => setRow(s.i, "value", e.target.value)}
+                  />
+                  <ConfidenceMark row={s} />
+                  <Button variant="ghost" size="iconSm" aria-label="Remove specific"
+                    onClick={() => removeRow(s.i)}>
+                    <X size={15} />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </SpecGroup>
         )}
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <Button
-            variant="ghost"
-            onClick={() => w.set("item_specifics", [...w.form.item_specifics, { name: "", value: "" }])}
-          >
-            <Plus aria-hidden /> Add specific
-          </Button>
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-0.5">
+          <span className="inline-flex flex-wrap items-center gap-2">
+            {/* The AI fills these automatically once per listing, but only
+                when a REQUIRED aspect is empty — so a category change (a whole
+                new aspect set), a run that errored, or a listing that's merely
+                missing recommended fields all left the seller typing by hand
+                with no way to ask again. This is that way. */}
+            {catAspects.length > 0 && filledCount < catAspects.length && (
+              <Button variant="secondary" onClick={w.autofillSpecifics}>
+                <Sparkles aria-hidden /> Fill {catAspects.length - filledCount} with AI
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              onClick={() => w.set("item_specifics", [...w.form.item_specifics, { name: "", value: "" }])}
+            >
+              <Plus aria-hidden /> Add specific
+            </Button>
+          </span>
+          {/* The key, one quiet line — it explains the two marks a seller
+              actually sees on the fields, and nothing else. */}
           {w.form.item_specifics.length > 0 && (
-            <span className="text-[13px] text-ink-secondary inline-flex items-center gap-1.5 flex-wrap">
-              <Sparkles size={14} className="text-blue" aria-hidden />
-              <TagPill tone="green"><Check size={11} aria-hidden /> AI</TagPill> read from
-              your photos & tags · <TagPill tone="yellow"><AlertTriangle size={11} aria-hidden /> Review</TagPill> inferred
-              — worth a glance.
+            <span className="text-[12px] text-ink-faint inline-flex items-center gap-3 flex-wrap">
+              <span className="inline-flex items-center gap-1">
+                <Check size={13} className="text-green" aria-hidden /> AI read it off the item
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <AlertTriangle size={13} className="text-warning" aria-hidden /> AI guessed — check it
+              </span>
             </span>
           )}
         </div>

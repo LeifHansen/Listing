@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, mediaUrl } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
+import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -14,6 +15,7 @@ import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
+import { CategoryQuickPick } from "./CategoryQuickPick";
 import {
   MarketTargetChips, missingRequired, publishListing, usePublishTargets,
 } from "./publishShared";
@@ -110,7 +112,7 @@ function BulkItemCard({
   // a listing existed still has the server-picked `thumb`.
   const photos = (l.images?.length
     ? l.images.map((n) => mediaUrl(item.session_id, n, 1))
-    : [item.thumb && `${item.thumb}?v=1`]).filter(Boolean);
+    : [item.thumb && apiUrl(`${item.thumb}?v=1`)]).filter(Boolean);
   return (
     <motion.div
       layout
@@ -220,6 +222,14 @@ function BulkItemCard({
               </Select>
             )}
           </div>
+
+          {/* Category on the card face: bulk batches are exactly where a
+              wrong AI category slips through unnoticed. Edits ride the same
+              local-then-save-on-publish path as the fields above. */}
+          <CategoryQuickPick
+            listing={l}
+            onPick={(patch) => onChange({ ...l, ...patch })}
+          />
 
           <ShippingServiceSelect
             value={l.fulfillment_policy_id}

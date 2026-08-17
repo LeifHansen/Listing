@@ -9,6 +9,8 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -92,12 +94,34 @@ Rules:
 """ % ", ".join(EBAY_CONDITIONS)
 
 
+# One shared client, built on first use. Every call used to construct its own,
+# which threw away the underlying HTTP connection pool — so each vision request
+# paid a fresh TLS handshake, and a bulk batch paid one per photo. The SDK's
+# client is thread-safe, which is what the bulk/identify worker threads need.
+_CLIENT: Optional[Anthropic] = None
+_CLIENT_LOCK = threading.Lock()
+
+# The SDK defaults to a 600s timeout with 2 retries — worst case ~30 minutes on
+# a wedged request, far longer than any caller waits (the client gives up on a
+# job at 240s) and long enough to pin a worker thread the whole time. These
+# bound it to something a seller might actually still be waiting for.
+_AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "120") or 120)
+_AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2") or 2)
+
+
 def _client() -> Anthropic:
+    global _CLIENT
     if not config.anthropic_ready():
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set. Add it to your .env file."
         )
-    return Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    if _CLIENT is None:
+        with _CLIENT_LOCK:
+            if _CLIENT is None:
+                _CLIENT = Anthropic(api_key=config.ANTHROPIC_API_KEY,
+                                    timeout=_AI_TIMEOUT_SECONDS,
+                                    max_retries=_AI_MAX_RETRIES)
+    return _CLIENT
 
 
 def ai_error_message(exc: Exception) -> tuple[int, str]:

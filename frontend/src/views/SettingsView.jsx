@@ -5,7 +5,7 @@ import {
   PackageOpen, Truck, Plus, TrendingUp, Megaphone, Store, BadgeCheck,
   Trash2,
 } from "lucide-react";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, startConnect } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
@@ -195,7 +195,8 @@ export function SettingsView() {
               <div>
                 <Button
                   variant="primary"
-                  onClick={() => { window.location.href = "/api/ebay/connect"; }}
+                  onClick={() => startConnect("/api/ebay/connect").catch((e) =>
+                    toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" }))}
                 >
                   <Link2 aria-hidden /> Connect eBay
                 </Button>
@@ -467,7 +468,8 @@ function MarketplaceConnections() {
               ) : m.oauth_ready ? (
                 <Button
                   variant="primary"
-                  onClick={() => { window.location.href = `/api/${m.key}/connect`; }}
+                  onClick={() => startConnect(`/api/${m.key}/connect`).catch((e) =>
+                    toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" }))}
                 >
                   <Link2 aria-hidden /> Connect {m.label}
                 </Button>

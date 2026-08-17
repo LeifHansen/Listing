@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { postJson } from "@/lib/api";
+import { storeToken } from "@/lib/platform";
 import { useApp } from "@/store";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -30,6 +31,9 @@ export function AuthDialog() {
       const res = await postJson(`/api/auth/${mode === "login" ? "login" : "signup"}`, {
         email: email.trim(), password,
       });
+      // The native shell can't use the session cookie (cross-origin), so the
+      // server hands back a bearer token too; storeToken keeps it only there.
+      storeToken(res.token);
       setUser(res.user);
       setEmail("");
       setPassword("");

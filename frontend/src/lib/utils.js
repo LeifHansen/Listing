@@ -1,5 +1,6 @@
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { apiUrl } from "@/lib/platform";
 
 export function cn(...inputs) {
   return twMerge(clsx(inputs));
@@ -36,7 +37,7 @@ export function mediaUrl(sessionId, name, bust) {
   // key (cache holds until the value changes, e.g. a listing's updated_at).
   const v = bust === true ? `?v=${Date.now()}`
     : bust ? `?v=${encodeURIComponent(bust)}` : "";
-  return `/media/${sessionId}/optimized/${name}${v}`;
+  return apiUrl(`/media/${sessionId}/optimized/${name}${v}`);
 }
 
 export function formatMoney(n, currency = "USD") {

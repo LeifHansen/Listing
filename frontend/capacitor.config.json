@@ -3,7 +3,14 @@
   "appName": "Thryft Shop",
   "webDir": "dist",
   "server": {
-    "url": "https://listing-lfwjrg.fly.dev",
+    "allowNavigation": [
+      "listing-lfwjrg.fly.dev",
+      "auth.ebay.com",
+      "signin.ebay.com",
+      "*.ebay.com",
+      "www.etsy.com",
+      "*.etsy.com"
+    ],
     "cleartext": false
   },
   "ios": {

@@ -20,11 +20,14 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore, storage
+from . import (auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore,
+               ratelimit, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
@@ -40,6 +43,19 @@ from .services import etsy as etsy_service
 from .services.background import run_in_background
 
 app = FastAPI(title="eBay Listing Generator")
+
+# The iOS/Android shell bundles the web build (guideline 4.2 forbids a bare
+# remote-webview app), so its pages live on capacitor://localhost and call
+# this API cross-origin with a Bearer token. Only those app origins are
+# allowed; no credentials mode, since the shell never uses the cookie.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[config.NATIVE_APP_ORIGIN, "capacitor://localhost",
+                   "https://localhost", "http://localhost"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    max_age=86400,
+)
 
 
 class _DropDeletionAcks(logging.Filter):
@@ -97,8 +113,20 @@ def _sweep_orphans() -> None:
     # ids would sweep every imported listing's photos as orphans.
     dir_names = {storage.session_dir(i).name for i in ids if i}
     removed = storage.sweep_orphan_sessions(dir_names, max_age_seconds=3 * 3600)
-    if removed:
-        log.info("sweep: removed %d orphaned session dir(s) to reclaim space", removed)
+    if not removed:
+        return
+    # The bucket needs the same sweep. /api/upload mirrors photos to R2 before
+    # any listing row exists, so an abandoned upload leaves objects that no
+    # later cleanup can name — not the id set (no row), not account deletion
+    # (it walks listing ids). Without this they accumulate in R2 forever, and
+    # survive the uploader deleting their account.
+    if objstore.enabled():
+        purged = sum(objstore.delete_prefix(objstore.session_prefix(name))
+                     for name in removed)
+        if purged:
+            log.info("sweep: purged %d orphaned R2 object(s)", purged)
+    log.info("sweep: removed %d orphaned session dir(s) to reclaim space",
+             len(removed))
 
 
 # How long a source upload / edit snapshot survives before it's reclaimed.
@@ -223,6 +251,23 @@ def _warm_models() -> None:
 
 def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
+
+
+def _client_ip(request: Request) -> str:
+    """The caller's IP. Fly puts the real client in Fly-Client-IP; uvicorn
+    runs with --proxy-headers so request.client is already the forwarded
+    address, but the explicit header is the one Fly guarantees."""
+    return (request.headers.get("Fly-Client-IP")
+            or (request.client.host if request.client else "?"))
+
+
+def _rate_limit_auth(request: Request, bucket: str) -> None:
+    """429 when one client floods an auth endpoint (see backend/ratelimit)."""
+    ip = _client_ip(request)
+    if not ratelimit.check(f"{bucket}:{ip}"):
+        log.warning("auth: rate limited %s from %s", bucket, ip)
+        raise HTTPException(
+            429, "Too many attempts. Wait a few minutes and try again.")
 
 
 @app.get("/api/health")
@@ -450,8 +495,20 @@ def _assert_session_owner(session_id: str, request: Request) -> None:
     """404 when this session's saved listing belongs to a DIFFERENT user.
     Session ids appear in media URLs and can leak, so possession of an id
     must not grant write access. Unsaved or unowned (anonymous) sessions
-    pass — the app supports logged-out flows."""
-    rec = db.get_listing(session_id)
+    pass — the app supports logged-out flows.
+
+    Fails CLOSED on a database outage. This check is the only thing standing
+    between a leaked session id and write access to someone else's photos,
+    and it answers from the database — so if a read failure were treated like
+    "no such listing", one Neon blip would quietly disable the guard on every
+    session-scoped endpoint at once, while the rest of the app (on-disk
+    sessions, /media) kept serving. A brief 503 is the right trade.
+    """
+    rec = db.get_listing_strict(session_id)
+    if rec is db.UNAVAILABLE:
+        raise HTTPException(
+            503, "Can't verify who this listing belongs to right now — "
+                 "please try again in a moment.")
     if rec and rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
 
@@ -482,15 +539,19 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
 
 def _purge_session_images(session_id: str) -> None:
     """Delete a session's photos (local disk + R2) to reclaim storage once the
-    listing is archived (sold). Keeps the DB record. Best-effort, never raises;
-    eBay still hosts the images on the sold listing itself."""
+    listing is archived (sold) or deleted. Keeps the DB record. Best-effort,
+    never raises; eBay still hosts the images on the sold listing itself.
+
+    The R2 side deletes by PREFIX, not by walking the local directory. The
+    reclaim pass offloads photos to the bucket and unlinks the local copies
+    (see _offload_to_r2), so for any listing older than the offload TTL the
+    local dir is empty and a name-by-name delete removed nothing at all —
+    leaving the photos in the bucket forever, including on account deletion,
+    which promises the opposite.
+    """
     try:
         if objstore.enabled():
-            for n in storage.list_optimized(session_id):
-                try:
-                    objstore.delete(objstore.key_for(session_id, n))
-                except Exception:  # noqa: BLE001 - keep purging the rest
-                    pass
+            objstore.delete_prefix(objstore.session_prefix(session_id))
         d = storage.session_dir(session_id)
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
@@ -502,6 +563,7 @@ def _purge_session_images(session_id: str) -> None:
 
 @app.post("/api/auth/signup")
 def auth_signup(request: Request, response: Response, payload: dict) -> dict:
+    _rate_limit_auth(request, "signup")
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
     if not email or "@" not in email:
@@ -523,6 +585,7 @@ def auth_signup(request: Request, response: Response, payload: dict) -> dict:
 
 @app.post("/api/auth/login")
 def auth_login(request: Request, response: Response, payload: dict) -> dict:
+    _rate_limit_auth(request, "login")
     email = str(payload.get("email", "")).strip().lower()
     password = str(payload.get("password", ""))
     if not db.enabled():
@@ -664,6 +727,10 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
         raise HTTPException(401, "Log in first.")
     uid = user["id"]
 
+    # Password-guessing here is the same attack as on /login, with a worse
+    # payoff for the victim — throttle it the same way.
+    _rate_limit_auth(request, "account-delete")
+
     # Re-authenticate: a leaked session token must not be enough to erase an
     # account. (A password is always set — signup is the only way in.)
     password = str(payload.get("password", ""))
@@ -707,13 +774,62 @@ def _ebay_creds_for(request: Request):
 
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
+NATIVE_RETURN_COOKIE = "thryft_oauth_return"  # "app" when the flow started in the shell
+
+
+@app.post("/api/auth/connect-ticket")
+def connect_ticket(request: Request) -> dict:
+    """A 60-second single-purpose credential for starting an OAuth connect
+    flow from the native shell, where the connect NAVIGATION can carry
+    neither the Bearer header nor the cross-origin session cookie. Scoped so
+    a leaked URL is useless for anything but opening a connect screen."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    return {"ticket": auth.make_ticket(uid, "connect")}
+
+
+def _connect_uid(request: Request, ticket: str) -> Optional[str]:
+    """Who is starting this connect flow: the session (web) or a ticket
+    (native shell's full-page navigation)."""
+    return _uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
+
+
+def _mark_native_flow(resp, request: Request, native: str) -> None:
+    """Remember that this OAuth flow began inside the native shell, so the
+    callback can send the webview back into the app instead of leaving the
+    user stranded on the website. Rides a cookie exactly like the nonce."""
+    if str(native).lower() in ("1", "true", "yes"):
+        resp.set_cookie(NATIVE_RETURN_COOKIE, "app", max_age=600, httponly=True,
+                        samesite="lax", secure=request.url.scheme == "https")
+
+
+def _finish_connect(request: Request, path: str):
+    """End an OAuth flow: plain redirect on the web; when the flow started in
+    the native shell, an interstitial that navigates the webview back to the
+    app's own origin. The interstitial (JS + a visible button) is used instead
+    of a bare 302 to a custom scheme because WKWebView handles an in-page
+    navigation to capacitor:// more reliably than a server redirect."""
+    if request.cookies.get(NATIVE_RETURN_COOKIE) != "app":
+        return RedirectResponse(path)
+    target = f"{config.NATIVE_APP_ORIGIN}{path}"
+    resp = HTMLResponse(f"""<!doctype html><html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Returning to Thryft Shop…</title></head>
+<body style="font-family:-apple-system,sans-serif;display:grid;place-items:center;min-height:90vh;text-align:center">
+<div><p>All done — heading back to the app…</p>
+<p><a href="{target}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none">Return to Thryft Shop</a></p></div>
+<script>location.replace({json.dumps(target)});</script>
+</body></html>""")
+    resp.delete_cookie(NATIVE_RETURN_COOKIE)
+    return resp
 
 
 @app.get("/api/ebay/connect")
-def ebay_connect(request: Request):
+def ebay_connect(request: Request, ticket: str = "", native: str = ""):
     if not config.ebay_oauth_ready():
         raise HTTPException(400, "eBay OAuth not configured (EBAY_CLIENT_ID/SECRET/RUNAME).")
-    uid = _uid(request)
+    uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
     import secrets as _secrets
@@ -724,6 +840,7 @@ def ebay_connect(request: Request):
     # the top-level redirect back from eBay.
     resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
                     samesite="lax", secure=request.url.scheme == "https")
+    _mark_native_flow(resp, request, native)
     return resp
 
 
@@ -731,7 +848,7 @@ def ebay_connect(request: Request):
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
     if not code or not verified:
-        return RedirectResponse("/?ebay=error")
+        return _finish_connect(request, "/?ebay=error")
     uid, nonce = verified
     # The nonce in the signed state must match the cookie set at connect time,
     # so a callback can only bind an eBay account to the browser that started
@@ -739,7 +856,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
     cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
     if not cookie_nonce or cookie_nonce != nonce:
         log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
-        return RedirectResponse("/?ebay=error")
+        return _finish_connect(request, "/?ebay=error")
     try:
         tokens = ebay_auth.exchange_code(code)
         access = tokens["access_token"]
@@ -772,11 +889,11 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         else:
             save_kwargs.update(policies)
         db.save_ebay_account(uid, **save_kwargs)
-        resp = RedirectResponse("/?ebay=connected")
+        resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
     except Exception:  # noqa: BLE001
-        return RedirectResponse("/?ebay=error")
+        return _finish_connect(request, "/?ebay=error")
 
 
 @app.get("/api/ebay/status")
@@ -1276,7 +1393,13 @@ async def upload(
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+            # Off the event loop: a 40-photo batch is hundreds of MB of
+            # synchronous write() syscalls, and while they run nothing else on
+            # the machine is served — including the /media requests eBay itself
+            # makes at publish time. (The Pillow pass below was already
+            # offloaded for the same reason; this loop was missed.)
+            await run_in_threadpool(
+                (orig / f"src_{i:03d}{suffix}").write_bytes, data)
     except OSError as exc:
         # Disk full / write failure — same friendly answer as the bulk path,
         # not a raw 500; drop the partial session rather than leaving an orphan.
@@ -1338,8 +1461,9 @@ async def upload_more(
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
-    if strip_bg:
-        _charge_ai(request, "image_ai", units=len(files))
+    # Keep the spend record: every failure path below has to give the tokens
+    # back, exactly as /api/upload does ("only pay for AI that worked").
+    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -1351,33 +1475,45 @@ async def upload_more(
     for j, f in enumerate(files):
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
+            tokens.refund(spent)
             raise HTTPException(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         idx = start + j
         suffix = Path(f.filename or f"add_{idx}").suffix or ".jpg"
         src = orig / f"add_{idx:03d}{suffix}"
         try:
-            src.write_bytes(data)
+            await run_in_threadpool(src.write_bytes, data)
         except OSError as exc:
+            tokens.refund(spent)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
     rotations = await run_in_threadpool(
         orient.detect_rotations, [src for _idx, src in staged])
     new_names: list[str] = []
+    # Photos whose cutout failed (engine down / out of credits) kept their
+    # background, so they owe nothing — counted the same way /api/upload does.
+    bg_failed = 0
     for idx, src in staged:
         try:
-            await run_in_threadpool(
+            res = await run_in_threadpool(
                 images.optimize, src, opt_dir / f"img_{idx:03d}.jpg", strip_bg,
                 rotations.get(src.name, 0))
             new_names.append(f"img_{idx:03d}.jpg")
+            if res.get("bg_error"):
+                bg_failed += 1
         except OSError as exc:
+            tokens.refund(spent)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         except Exception as exc:  # noqa: BLE001 - skip a bad file, keep the rest
             log.warning("upload-more: couldn't process %s: %s", src.name, exc)
+            bg_failed += 1
     if not new_names:
+        tokens.refund(spent)
         raise HTTPException(400, "Could not process the uploaded image(s).")
+    if spent and bg_failed:
+        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
@@ -1455,7 +1591,22 @@ async def edit_image(
 # /api/edit-image, so every AI action stays reviewable and cancellable.
 # ---------------------------------------------------------------------------
 
-def _studio_load(session_id: str, name: str, data: Optional[bytes]):
+def _studio_guard(request: Request) -> None:
+    """Shared entry check for the four photo-studio endpoints. They run the
+    local rembg model, which is serialized behind one process-wide inference
+    lock, so an unthrottled caller stalls every seller's photo work at once.
+    They deliberately are NOT token-metered — the border re-check fires
+    automatically after every crop and save, so charging it would bill people
+    for ordinary editing — which makes a rate ceiling the only brake."""
+    ip = _client_ip(request)
+    if not ratelimit.check(f"studio:{ip}", max_attempts=ratelimit.STUDIO_MAX_CALLS):
+        log.warning("studio: rate limited %s", ip)
+        raise HTTPException(
+            429, "Too many photo operations at once. Wait a moment and retry.")
+
+
+def _studio_load(request: Request, session_id: str, name: str,
+                 data: Optional[bytes]):
     from io import BytesIO
     from PIL import Image
 
@@ -1467,6 +1618,13 @@ def _studio_load(session_id: str, name: str, data: Optional[bytes]):
     name = (name or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo this is — reopen the editor.")
+    # Loading BY SESSION reaches a stored photo, so it needs the same
+    # ownership check every other session-scoped route makes. Session ids are
+    # not secrets — they appear in the public /media URLs handed to eBay — so
+    # holding one must not let a caller run the studio against someone else's
+    # photos. The inline-`file` path above is the editor's own canvas blob and
+    # touches nothing stored, so it stays open to the logged-out flows.
+    _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
@@ -1531,18 +1689,24 @@ async def rotate_image(payload: dict, request: Request) -> dict:
 
 @app.post("/api/image/analyze")
 async def image_analyze(
+    request: Request,
     session_id: str = Form(""),
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
     """Re-check the item's borders: returns a mask of leftover background
-    (non-white areas outside the detected subject) for the editor to highlight."""
+    (non-white areas outside the detected subject) for the editor to highlight.
+
+    Free by design (it fires after every crop and save), but it runs the same
+    rembg model as its metered siblings — hence the shared studio guard.
+    """
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         res = images.analyze_cleanup(img)
         return {
             "ok": True,
@@ -1565,12 +1729,13 @@ async def image_auto_clean(
 ) -> dict:
     """AI clean-up: re-detect the subject and whiten everything outside it.
     Returns the cleaned image for the editor to preview (not saved yet)."""
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
 
     spent = _charge_ai(request, "image_ai")
@@ -1592,12 +1757,13 @@ async def image_remove_bg(
     default, Adobe Photoshop's Remove Background as the backup, the in-house
     model when neither is configured. Returns the processed image for the
     editor to preview (not saved)."""
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         out, engine = images.remove_background_white(img)
         # engine = which remover actually ran — the editor names it so a
         # misconfigured key can't hide behind a silently-degraded result.
@@ -1626,12 +1792,13 @@ async def image_smart_crop(
     """Crop to the detected subject with a clean margin, padded to a square.
     Returns the cropped image for preview, or applied=False if the frame is
     already tight (so the UI can say so instead of degrading the photo)."""
+    _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
     def _run() -> dict:
-        img = _studio_load(session_id, name, data)
+        img = _studio_load(request, session_id, name, data)
         cropped = images.smart_crop(img)
         if cropped is None:
             return {"ok": True, "applied": False,
@@ -1886,9 +2053,14 @@ BULK_GROUP_CHUNK = 100
 _BULK_JOBS_MAX = 200
 
 
-def _register_bulk_job(job_id: str, data: dict) -> None:
+def _register_bulk_job(job_id: str, data: dict, uid: Optional[str] = None) -> None:
+    """Register a background job. `uid` is the account that started it; job
+    status carries drafted titles and prices, so a logged-in user's job is
+    readable only by them (see _assert_job_owner). Anonymous jobs have no
+    owner and stay readable by whoever holds the id, matching how the rest of
+    the app treats logged-out sessions."""
     with _BULK_LOCK:
-        _BULK_JOBS[job_id] = data
+        _BULK_JOBS[job_id] = {**data, "_uid": uid}
         while len(_BULK_JOBS) > _BULK_JOBS_MAX:
             _BULK_JOBS.pop(next(iter(_BULK_JOBS)))
 
@@ -1907,11 +2079,22 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     strategy = _pricing_strategy(uid)          # once, not per item
     auto_promote = _auto_promote_enabled(uid)  # ditto
     billing = tokens.enabled() and uid is not None
+    # Background-removal billing, tracked across the whole job: what was
+    # debited up front, and how much has already gone back. A batch that never
+    # reaches the end returns the whole un-refunded remainder (see finally) —
+    # the abort case is the common one, since the grouping call raises on any
+    # Anthropic 429/overload, and it used to keep the entire charge for zero
+    # delivered work. db.token_refund does not remember earlier partial
+    # refunds, so the running total has to be kept here.
+    bg_spent = None
+    bg_charged = 0
+    bg_refunded = 0
+    n_photos = 0
+    delivered = False
     try:
         # Bulk background removal is metered per photo, charged before the
         # engines run. Not enough tokens -> photos are kept as-is (with a
         # visible reason) rather than failing the whole batch.
-        bg_spent = None
         if strip_bg and billing:
             n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
                            if p.is_file())
@@ -1922,6 +2105,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                     "Not enough tokens for background removal — photos were "
                     "kept as shot. " + tokens.insufficient_message(bg_spent)))
                 bg_spent = None
+            elif bg_spent is not None:
+                # What was actually debited, so the settlement below can give
+                # back exactly the unused remainder. db.token_refund does not
+                # remember earlier partial refunds — a partial refund followed
+                # by a full one would pay the user twice — so the accounting
+                # has to live here.
+                bg_charged = tokens.cost("image_ai", n_photos)
         _bulk_set(job_id, phase="optimizing", current=0)
         opt_results = images.optimize_all(
             storage.original_dir(staging_id), storage.optimized_dir(staging_id),
@@ -1932,13 +2122,27 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # limit) on the job so the UI can say WHY the photos came back with
         # their backgrounds intact — silence here reads as "the feature is
         # broken" when the photo was deliberately kept unchanged.
-        bg_failed = [r for r in opt_results if r.get("bg_error")]
+        # A photo that failed to process AT ALL (corrupt/truncated file, a
+        # decoder that gave up) got no cutout either and owes nothing — count
+        # it the same way /api/upload does. Photos the batch never even looked
+        # at (a .mov in the pile: optimize_all filters by extension) never
+        # reach opt_results, and the settlement below returns those.
+        bg_failed = [r for r in opt_results
+                     if r.get("bg_error") or r.get("error")]
+        # Files the charge counted but optimize_all never looked at — it takes
+        # only known image extensions, while the charge counts everything in
+        # the staging dir, so a video or PDF in the pile was billed and could
+        # not even fail visibly.
+        unprocessed = max(0, n_photos - len(opt_results))
+        owed_now = (len(bg_failed) + unprocessed) * tokens.COSTS.get("image_ai", 1)
         if bg_failed:
-            _bulk_set(job_id, bg_error=bg_failed[0]["bg_error"],
-                      bg_failed=len(bg_failed))
+            reason = next((r["bg_error"] for r in bg_failed if r.get("bg_error")), None)
+            _bulk_set(job_id, bg_failed=len(bg_failed),
+                      **({"bg_error": reason} if reason else {}))
+        if owed_now:
             # Photos that kept their background weren't the AI they paid for.
-            tokens.refund(bg_spent,
-                          units=len(bg_failed) * tokens.COSTS.get("image_ai", 1))
+            tokens.refund(bg_spent, units=owed_now)
+            bg_refunded += owed_now
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
@@ -2033,6 +2237,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 item["title"] = group["name"]
             items.append(item)
 
+        delivered = True
         _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
         log.info("bulk %s: %d photos -> %d items", job_id, len(names), len(items))
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
@@ -2050,6 +2255,17 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         log.warning("bulk %s failed: %s", job_id, exc)
         _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
     finally:
+        # Give back whatever the batch charged for and never delivered. On an
+        # abort that is the whole un-refunded remainder; on a completed batch
+        # it is the photos the pile contained but optimize_all never processed
+        # (a video or PDF among the photos), which were charged and can't fail
+        # visibly because they never appear in the results at all.
+        if bg_spent is not None and not delivered:
+            owed = bg_charged - bg_refunded
+            if owed > 0:
+                tokens.refund(bg_spent, units=owed)
+                log.info("bulk %s: refunded %d unused background-removal token(s)",
+                         job_id, owed)
         # Staging photos were only needed to optimize + split into per-item
         # sessions; drop them so the volume doesn't grow with every batch.
         storage.purge_session(staging_id)
@@ -2087,7 +2303,10 @@ async def bulk_upload(
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
-            (orig / f"src_{i:03d}{suffix}").write_bytes(data)
+            # Same reason as /api/upload — and more so here: a 250-photo
+            # batch is on the order of a gigabyte of blocking writes.
+            await run_in_threadpool(
+                (orig / f"src_{i:03d}{suffix}").write_bytes, data)
     except OSError as exc:
         # Disk full / write failure — clean up the partial staging and report it
         # clearly instead of a raw 500. Old orphans are swept on restart.
@@ -2105,7 +2324,7 @@ async def bulk_upload(
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
-    })
+    }, uid=uid)
     threading.Thread(
         target=_run_bulk_job,
         args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
@@ -2117,12 +2336,19 @@ async def bulk_upload(
 
 
 @app.get("/api/bulk/status/{job_id}")
-def bulk_status(job_id: str) -> dict:
+def bulk_status(job_id: str, request: Request) -> dict:
     with _BULK_LOCK:
         job = _BULK_JOBS.get(job_id)
         if job is None:
             raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
-        return json.loads(json.dumps(job))  # deep copy, thread-safe snapshot
+        owner = job.get("_uid")
+        # Same rule as _assert_session_owner: an owned job is private to its
+        # owner (404, not 403 — don't confirm the id exists).
+        if owner and owner != _uid(request):
+            raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
+        snapshot = json.loads(json.dumps(job))  # deep copy, thread-safe
+    snapshot.pop("_uid", None)  # internal bookkeeping, not part of the API
+    return snapshot
 
 
 def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
@@ -2136,6 +2362,12 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         opt_dir = storage.optimized_dir(session_id)
         names = storage.list_optimized(session_id)
         if not names:
+            # No AI ran, so the up-front charge goes back. This fires when the
+            # session's photos disappear between the endpoint's check and this
+            # thread's read — a concurrent delete of the last photo, or the
+            # reclaim pass offloading the local copies — and it billed a full
+            # draft for an error message.
+            tokens.refund(spent)
             _bulk_set(job_id, done=True, error="No optimized images found for this session.")
             return
         result = claude_ai.identify([opt_dir / n for n in names], names,
@@ -2192,7 +2424,7 @@ def identify_async(session_id: str, request: Request) -> dict:
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
         "done": False, "error": None, "result": None,
-    })
+    }, uid=uid)
     threading.Thread(
         target=_run_identify_job, args=(job_id, session_id, uid, spent), daemon=True,
     ).start()
@@ -3167,12 +3399,13 @@ def _marketplace_or_404(marketplace: str):
 
 
 @app.get("/api/{marketplace}/connect")
-def marketplace_connect(marketplace: str, request: Request):
+def marketplace_connect(marketplace: str, request: Request,
+                        ticket: str = "", native: str = ""):
     provider = _marketplace_or_404(marketplace)
     if not provider.oauth_ready():
         raise HTTPException(400, f"{provider.label} OAuth not configured "
                                  f"(set {', '.join(provider.oauth_missing())}).")
-    uid = _uid(request)
+    uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, f"Log in before connecting {provider.label}.")
     import secrets as _secrets
@@ -3187,6 +3420,7 @@ def marketplace_connect(marketplace: str, request: Request):
                     json.dumps({"nonce": nonce, **flow}),
                     max_age=600, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https")
+    _mark_native_flow(resp, request, native)
     return resp
 
 
@@ -3196,7 +3430,7 @@ def marketplace_callback(marketplace: str, request: Request,
     provider = _marketplace_or_404(marketplace)
     verified = auth.verify_state(state)
     if not code or not verified:
-        return RedirectResponse(f"/?connect_error={marketplace}")
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     uid, nonce = verified
     try:
         flow = json.loads(request.cookies.get(_flow_cookie(marketplace), "") or "{}")
@@ -3207,14 +3441,14 @@ def marketplace_callback(marketplace: str, request: Request,
     # flow (blocks CSRF authorization-code injection).
     if not flow.get("nonce") or flow.get("nonce") != nonce:
         log.warning("%s callback: nonce mismatch (uid=%s)", marketplace, uid)
-        return RedirectResponse(f"/?connect_error={marketplace}")
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     try:
         fields = provider.exchange_code(code, flow)
     except Exception as exc:  # noqa: BLE001 - the redirect is the error surface
         log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
-        return RedirectResponse(f"/?connect_error={marketplace}")
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     db.save_marketplace_account(uid, marketplace, **fields)
-    resp = RedirectResponse(f"/?connected={marketplace}")
+    resp = _finish_connect(request, f"/?connected={marketplace}")
     resp.delete_cookie(_flow_cookie(marketplace))
     return resp
 
