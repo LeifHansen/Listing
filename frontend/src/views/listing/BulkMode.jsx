@@ -292,7 +292,7 @@ function BulkItemCard({
   );
 }
 
-export function BulkQueue({ jobId, mode, onExit, onSettled }) {
+export function BulkQueue({ jobId, onExit, onSettled }) {
   const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
 
@@ -612,7 +612,7 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
                 : <>
                     <CheckCircle2 size={17} className="text-success" aria-hidden />
                     <span title="Also saved in Drafts — review below or come back anytime.">
-                      {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}
+                      {items.length} item{items.length === 1 ? "" : "s"} queued as drafts
                     </span>
                   </>}
             </p>

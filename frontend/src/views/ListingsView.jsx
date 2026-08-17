@@ -105,9 +105,13 @@ export function ListingsView({ search = "" }) {
       return;
     }
     const fresh = r.imported || 0;
+    // Duplicates from before the sync matched on eBay's item id: the sync
+    // folds each pair back onto the listing this app created.
+    const gone = r.deduped
+      ? ` ${r.deduped} duplicate${r.deduped === 1 ? "" : "s"} merged.` : "";
     toast(
-      fresh || r.updated
-        ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.`
+      fresh || r.updated || r.deduped
+        ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.${gone}`
         : "Everything's already in sync with eBay.",
       { kind: "success" },
     );

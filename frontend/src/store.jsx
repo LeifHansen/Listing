@@ -287,7 +287,7 @@ export function AppProvider({ children }) {
   }, [toast]);
 
   // ---------- active bulk job (survives navigation + reload) ----------
-  // { jobId, mode } — persisted so leaving the progress screen (or a reload)
+  // { jobId } — persisted so leaving the progress screen (or a reload)
   // never strands a running batch. Completed items also auto-save to Drafts.
   const [activeBulk, setActiveBulk] = useState(() => {
     try {
@@ -295,8 +295,8 @@ export function AppProvider({ children }) {
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   });
-  const startBulk = useCallback((jobId, mode) => {
-    const b = { jobId, mode };
+  const startBulk = useCallback((jobId) => {
+    const b = { jobId };
     setActiveBulk(b);
     try { localStorage.setItem("quickflip-bulk", JSON.stringify(b)); } catch (e) {}
     setView("new");
