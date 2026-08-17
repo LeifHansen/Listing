@@ -35,9 +35,10 @@ from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
 from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (claude_ai, ebay, ebay_trading, image_import, images,
-                       listing_sync, metrics, orient, preflight, pricing,
-                       promotions, recommender, taxonomy, tokens)
+from .services import (claude_ai, ebay, ebay_orders, ebay_trading,
+                       image_import, images, listing_sync, metrics,
+                       notifications, orient, preflight, pricing, promotions,
+                       recommender, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -912,6 +913,9 @@ def ebay_status(request: Request) -> dict:
         "oauth_missing": oauth_missing,
         "connected": connected,
         "env": config.EBAY_ENV,
+        # eBay label purchasing (Logistics API) is limited-release; the
+        # shipping dialog leads with Pirate Ship until it's enabled.
+        "labels_enabled": config.EBAY_LOGISTICS_ENABLED,
         # Which eBay account is linked (empty for connections made before the
         # identity scope was added — reconnecting fills it in).
         "username": (acct.get("ebay_username") or "") if connected else "",
@@ -3025,6 +3029,8 @@ def sync_listings(request: Request) -> dict:
         if status == "sold":
             db.upsert_listing(it["id"], it.get("listing") or {},
                               status="sold", user_id=user["id"])
+            notifications.notify_sold(user["id"], it["id"],
+                                      it.get("listing") or {})
             _purge_session_images(it["id"])  # archived — reclaim the storage
             changed += 1
             archived += 1
@@ -3075,6 +3081,209 @@ def import_listings(request: Request) -> dict:
         log.warning("import-listings failed for user=%s: %s", user["id"], exc)
         raise HTTPException(502, f"Couldn't import your eBay listings: {exc}") from exc
     return result
+
+
+# --- notifications ----------------------------------------------------------
+
+@app.get("/api/notifications")
+def notifications_list(request: Request, limit: int = 50,
+                       unread_only: bool = False) -> dict:
+    """The signed-in user's notifications (newest first) + unread count.
+    Empty for logged-out users — the bell just stays quiet."""
+    uid = _uid(request)
+    if not uid:
+        return {"notifications": [], "unread": 0}
+    return {
+        "notifications": db.list_notifications(
+            uid, limit=max(1, min(limit, 200)), unread_only=unread_only),
+        "unread": db.unread_notification_count(uid),
+    }
+
+
+@app.post("/api/notifications/read")
+def notifications_mark_read(request: Request, payload: dict) -> dict:
+    """Mark notifications read: {"ids": [...]} for specific ones, or
+    {"all": true} for everything unread."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    if payload.get("all"):
+        return {"marked": db.mark_notifications_read(uid)}
+    ids = [str(i) for i in (payload.get("ids") or []) if i]
+    return {"marked": db.mark_notifications_read(uid, ids)}
+
+
+# --- sold orders + shipping labels ------------------------------------------
+
+def _orders_creds(request: Request) -> dict:
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first — Settings → Connect eBay.")
+    return creds
+
+
+def _listing_map_by_item_id(uid: str) -> dict:
+    """{ebay item id: (our record id, package fields)} from the user's listing
+    records, so order exports/quotes can pre-fill the weight the seller
+    already entered and link an order back to its listing."""
+    out = {}
+    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+        listing = rec.get("listing") or {}
+        item_id = str(listing.get("ebay_listing_id") or "")
+        if not item_id:
+            continue
+        pkg = {k: listing.get(f"package_{k}") or 0
+               for k in ("weight_lb", "weight_oz", "length_in", "width_in",
+                         "height_in")}
+        out[item_id] = (rec["id"], pkg if any(pkg.values()) else None)
+    return out
+
+
+def _attach_packages(uid: str, orders: list[dict]) -> list[dict]:
+    """Ride each order with the matching listing's package + our record id."""
+    by_item = _listing_map_by_item_id(uid)
+    for order in orders:
+        for li in order.get("line_items") or []:
+            rid, pkg = by_item.get(li.get("legacy_item_id") or "", (None, None))
+            if pkg and "package" not in order:
+                order["package"] = pkg
+            if rid and "listing_record_id" not in order:
+                order["listing_record_id"] = rid
+    return orders
+
+
+@app.get("/api/ebay/orders")
+def ebay_orders_awaiting(request: Request) -> dict:
+    """Orders still waiting to ship, with ship-to addresses and (when the
+    matching listing recorded one) the package weight/dims pre-filled."""
+    creds = _orders_creds(request)
+    try:
+        orders = ebay_orders.awaiting_shipment(creds["access_token"])
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"orders": _attach_packages(creds["_uid"], orders)}
+
+
+@app.get("/api/ebay/orders/for-listing/{listing_id}")
+def ebay_order_for_listing(listing_id: str, request: Request) -> dict:
+    """The awaiting-shipment order for one of OUR listing records (matched by
+    its eBay item id) — how a sold notification jumps straight to shipping.
+    {"order": null} when it's already shipped or not found."""
+    creds = _orders_creds(request)
+    rec = db.get_listing(listing_id)
+    if not rec or (rec.get("user_id") and rec["user_id"] != creds["_uid"]):
+        raise HTTPException(404, "Listing not found")
+    item_id = str((rec.get("listing") or {}).get("ebay_listing_id") or "")
+    if not item_id:
+        return {"order": None}
+    try:
+        order = ebay_orders.order_for_item(creds["access_token"], item_id)
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if order:
+        _attach_packages(creds["_uid"], [order])
+    return {"order": order}
+
+
+@app.post("/api/ebay/shipping-quote")
+def ebay_shipping_quote(request: Request, payload: dict) -> dict:
+    """Live eBay label rates for one order: {order_id, package{weight_lb,
+    weight_oz, length_in, width_in, height_in}, ship_from{...}}. The ship-from
+    address is remembered in prefs so it's a one-time entry."""
+    creds = _orders_creds(request)
+    order_id = str(payload.get("order_id") or "").strip()
+    if not order_id:
+        raise HTTPException(400, "No order id given.")
+    ship_from = dict(payload.get("ship_from") or {})
+    saved = db.get_prefs(creds["_uid"]).get("ship_from") or {}
+    for key, val in saved.items():  # payload wins; saved fills the gaps
+        ship_from.setdefault(key, val)
+    ship_from.setdefault("postal_code", creds.get("ship_from_postal") or "")
+    if payload.get("ship_from"):
+        db.save_prefs(creds["_uid"], {"ship_from": ship_from})
+    try:
+        order = ebay_orders.get_order(creds["access_token"], order_id)
+        quote = ebay_orders.create_shipping_quote(
+            creds["access_token"], order, payload.get("package") or {}, ship_from)
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return quote
+
+
+@app.post("/api/ebay/shipping-label")
+def ebay_shipping_label(request: Request, payload: dict) -> dict:
+    """Buy the chosen rate: {shipping_quote_id, rate_id}. eBay generates the
+    label (returned as a download URL + our proxy path) and uploads the
+    tracking number to the order itself."""
+    creds = _orders_creds(request)
+    try:
+        res = ebay_orders.purchase_label(
+            creds["access_token"],
+            str(payload.get("shipping_quote_id") or ""),
+            str(payload.get("rate_id") or ""))
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if res.get("shipment_id"):
+        res["download_path"] = f"/api/ebay/shipping-label/{res['shipment_id']}"
+    return res
+
+
+@app.get("/api/ebay/shipping-label/{shipment_id}")
+def ebay_shipping_label_download(shipment_id: str, request: Request):
+    """Proxy the purchased label PDF so the browser can just open/print it
+    (the raw eBay URL needs the API auth header a browser can't send)."""
+    creds = _orders_creds(request)
+    try:
+        pdf = ebay_orders.download_label(creds["access_token"], shipment_id)
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition":
+            f'inline; filename="ebay-label-{shipment_id[:24]}.pdf"'})
+
+
+@app.post("/api/ebay/mark-shipped")
+def ebay_mark_shipped(request: Request, payload: dict) -> dict:
+    """Attach an outside tracking number (e.g. from a Pirate Ship label) to an
+    order: {order_id, tracking_number, carrier}. Flips the order to shipped on
+    eBay and emails the buyer."""
+    creds = _orders_creds(request)
+    try:
+        return ebay_orders.mark_shipped(
+            creds["access_token"],
+            str(payload.get("order_id") or "").strip(),
+            str(payload.get("tracking_number") or "").strip(),
+            str(payload.get("carrier") or "USPS").strip())
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/shipping/pirateship.csv")
+def pirate_ship_export(request: Request, order_id: str = ""):
+    """Awaiting-shipment orders as a Pirate Ship-importable CSV (recipient
+    address + per-row weight/dims from the matching listings). Upload it at
+    pirateship.com → Ship → Import, buy the labels there, then paste each
+    tracking number back via mark-shipped. `order_id` narrows it to one."""
+    creds = _orders_creds(request)
+    try:
+        orders = ebay_orders.awaiting_shipment(creds["access_token"])
+    except ebay_orders.OrdersError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if order_id:
+        orders = [o for o in orders if o["order_id"] == order_id]
+        if not orders:
+            raise HTTPException(404, "That order isn't awaiting shipment.")
+    by_item = _listing_map_by_item_id(creds["_uid"])
+    packages = {}
+    for order in orders:
+        for li in order.get("line_items") or []:
+            _rid, pkg = by_item.get(li.get("legacy_item_id") or "", (None, None))
+            if pkg:
+                packages[order["order_id"]] = pkg
+                break
+    csv_text = ebay_orders.pirate_ship_csv(orders, packages)
+    return Response(content=csv_text, media_type="text/csv", headers={
+        "Content-Disposition": 'attachment; filename="pirate-ship-orders.csv"'})
 
 
 @app.get("/media/{session_id}/optimized/{name}")

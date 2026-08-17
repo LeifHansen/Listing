@@ -8,6 +8,7 @@ import { TopBar } from "@/components/shell/TopBar";
 import { AuthDialog } from "@/components/AuthDialog";
 import { TokensDialog } from "@/components/TokensDialog";
 import { AiConsentDialog } from "@/components/AiConsentDialog";
+import { ShippingDialog } from "@/components/ShippingDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
@@ -75,6 +76,7 @@ function Main() {
       <AuthDialog />
       <TokensDialog />
       <AiConsentDialog />
+      <ShippingDialog />
     </div>
   );
 }

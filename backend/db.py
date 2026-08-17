@@ -130,6 +130,31 @@ class TokenLedger(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class Notification(Base):
+    """An in-app alert for one user — today that means "your item sold".
+
+    `dedupe_key` is unique across the whole table so the same event can be
+    reported by several code paths (the store import, the status sweep, a
+    manual sync) without ever producing two rows: the DB settles it, not the
+    order the syncs happen to run in."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(32), default="")  # sold | ...
+    title: Mapped[str] = mapped_column(String(255), default="")
+    body: Mapped[str] = mapped_column(String(512), default="")
+    # The listing this is about, so the UI can open it in one tap ("" if none).
+    listing_id: Mapped[str] = mapped_column(String(64), default="")
+    data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(160), unique=True,
+                                                      nullable=True)
+    read_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 def enabled() -> bool:
     return bool(config.DATABASE_URL)
 
@@ -450,6 +475,7 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             # legally required to keep, independently of this table.
             s.execute(delete(TokenLedger).where(TokenLedger.user_id == user_id))
             s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
+            s.execute(delete(Notification).where(Notification.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             s.commit()
             return listing_ids
@@ -844,6 +870,114 @@ def token_history(user_id: str, limit: int = 50) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: token_history failed: {exc}")
         return []
+
+
+# --- notifications ---------------------------------------------------------
+
+def _notification_to_dict(n: Notification) -> dict:
+    return {
+        "id": n.id,
+        "kind": n.kind,
+        "title": n.title,
+        "body": n.body,
+        "listing_id": n.listing_id or "",
+        "data": n.data or {},
+        "read": n.read_at is not None,
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+    }
+
+
+def add_notification(user_id: str, kind: str, title: str, body: str = "",
+                     listing_id: str = "", data: Optional[dict] = None,
+                     dedupe_key: Optional[str] = None) -> Optional[dict]:
+    """Record one notification. Returns the new row, or None when nothing was
+    written — either a row with the same `dedupe_key` already exists (the
+    normal, expected case for a re-sync) or there's no DB. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id:
+            return None
+        with Session(eng) as s:
+            if dedupe_key:
+                seen = s.execute(
+                    select(Notification).where(Notification.dedupe_key == dedupe_key)
+                ).scalar_one_or_none()
+                if seen is not None:
+                    return None
+            row = Notification(
+                id=_uuid.uuid4().hex, user_id=user_id, kind=kind[:32],
+                title=title[:255], body=body[:512], listing_id=listing_id[:64],
+                data=data or {}, dedupe_key=dedupe_key, created_at=_now())
+            s.add(row)
+            try:
+                s.commit()
+            except Exception:  # noqa: BLE001 - lost the dedupe race; fine
+                s.rollback()
+                return None
+            return _notification_to_dict(row)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: add_notification failed: {exc}")
+        return None
+
+
+def list_notifications(user_id: str, limit: int = 50,
+                       unread_only: bool = False) -> list[dict]:
+    """Newest first. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id:
+            return []
+        with Session(eng) as s:
+            q = select(Notification).where(Notification.user_id == user_id)
+            if unread_only:
+                q = q.where(Notification.read_at.is_(None))
+            q = q.order_by(Notification.created_at.desc()).limit(limit)
+            return [_notification_to_dict(n) for n in s.execute(q).scalars().all()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: list_notifications failed: {exc}")
+        return []
+
+
+def unread_notification_count(user_id: str) -> int:
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id:
+            return 0
+        with Session(eng) as s:
+            rows = s.execute(
+                select(Notification.id)
+                .where(Notification.user_id == user_id,
+                       Notification.read_at.is_(None))
+            ).scalars().all()
+            return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: unread_notification_count failed: {exc}")
+        return 0
+
+
+def mark_notifications_read(user_id: str,
+                            ids: Optional[list[str]] = None) -> int:
+    """Mark some (or, with ids=None, all) of a user's notifications read.
+    Returns how many changed. Always scoped to the owner. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id:
+            return 0
+        with Session(eng) as s:
+            q = select(Notification).where(Notification.user_id == user_id,
+                                           Notification.read_at.is_(None))
+            if ids is not None:
+                if not ids:
+                    return 0
+                q = q.where(Notification.id.in_(list(ids)[:200]))
+            rows = s.execute(q).scalars().all()
+            for row in rows:
+                row.read_at = _now()
+            s.commit()
+            return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: mark_notifications_read failed: {exc}")
+        return 0
 
 
 # db_status() round-trips to the DB, and several hot paths call it per

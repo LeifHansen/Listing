@@ -91,7 +91,7 @@ export function AppProvider({ children }) {
   // ---------- eBay connection ----------
   const [ebay, setEbay] = useState({
     connected: false, env: "", username: "", email: "", oauth_ready: false,
-    oauth_missing: [],
+    oauth_missing: [], labels_enabled: false,
   });
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
 
@@ -105,6 +105,7 @@ export function AppProvider({ children }) {
         email: s.email || "",
         oauth_ready: !!s.oauth_ready,
         oauth_missing: s.oauth_missing || [],
+        labels_enabled: !!s.labels_enabled,
       });
     } catch (e) { /* keep previous */ }
   }, []);
@@ -128,6 +129,43 @@ export function AppProvider({ children }) {
   const connectedMarketplaces = useMemo(
     () => marketplaces.filter((m) => m.connected),
     [marketplaces]);
+
+  // ---------- notifications (sold alerts) ----------
+  // Polled while logged in so "your item sold" reaches the seller without a
+  // refresh. The bell in the TopBar renders items + the unread badge; a sold
+  // notification's primary action opens the shipping dialog for that listing.
+  const [notifications, setNotifications] = useState({ items: [], unread: 0 });
+  const loadNotifications = useCallback(async () => {
+    if (!user) { setNotifications({ items: [], unread: 0 }); return; }
+    try {
+      const res = await api("/api/notifications");
+      setNotifications({ items: res.notifications || [], unread: res.unread || 0 });
+    } catch (e) { /* keep previous */ }
+  }, [user]);
+  useEffect(() => {
+    loadNotifications();
+    if (!user) return undefined;
+    const t = setInterval(loadNotifications, 60000);
+    return () => clearInterval(t);
+  }, [user, loadNotifications]);
+  const markNotificationsRead = useCallback(async (ids) => {
+    // Optimistic: the badge clears instantly, the server catches up.
+    setNotifications((n) => ({
+      items: n.items.map((i) => (
+        !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
+      unread: ids ? Math.max(0, n.unread - ids.length) : 0,
+    }));
+    try {
+      await postJson("/api/notifications/read", ids ? { ids } : { all: true });
+    } catch (e) { /* the next poll re-syncs */ }
+  }, []);
+
+  // ---------- shipping dialog (sold → label) ----------
+  // null = closed; { listingId } = one listing's order; {} = all awaiting.
+  const [shipping, setShipping] = useState(null);
+  const openShipping = useCallback(
+    (listingId) => setShipping({ listingId: listingId || null }), []);
+  const closeShipping = useCallback(() => setShipping(null), []);
 
   // ---------- saved listings cache ----------
   const [listingsState, setListingsState] = useState({
@@ -370,6 +408,8 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
+    notifications, loadNotifications, markNotificationsRead,
+    shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
     listingsState, loadListings, metricsById,
     storeSync, syncStore,
@@ -381,6 +421,8 @@ export function AppProvider({ children }) {
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
+    notifications, loadNotifications, markNotificationsRead,
+    shipping, openShipping, closeShipping,
     listingsState, loadListings, metricsById, storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,

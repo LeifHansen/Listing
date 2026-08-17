@@ -324,15 +324,28 @@ EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.
 # Listings, and read the connected seller's identity (so we can show WHICH eBay
 # account is linked). sell.marketing was added later: a seller who connected
 # before it must reconnect once to grant it (their existing refresh token only
-# carries the scopes they originally approved).
+# carries the scopes they originally approved). Same for sell.fulfillment
+# (reading sold orders + posting tracking numbers for the shipping workflow).
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
     "https://api.ebay.com/oauth/api_scope/sell.account",
     "https://api.ebay.com/oauth/api_scope/sell.marketing",
     "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
     "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ]
+
+# eBay label purchasing (Sell Logistics API) is a LIMITED-RELEASE API: eBay
+# enables it per application keyset, and requesting its scope from a keyset
+# that hasn't been approved fails the whole OAuth consent screen. So the
+# sell.logistics scope is opt-in — set EBAY_LOGISTICS_ENABLED once eBay has
+# approved the app, and the connect flow starts requesting it (existing
+# sellers reconnect once to grant it, same as every scope addition).
+EBAY_LOGISTICS_ENABLED = (os.getenv("EBAY_LOGISTICS_ENABLED", "").strip().lower()
+                          in ("1", "true", "yes", "on"))
+if EBAY_LOGISTICS_ENABLED:
+    EBAY_OAUTH_SCOPES.append("https://api.ebay.com/oauth/api_scope/sell.logistics")
 
 
 def ebay_oauth_ready() -> bool:
