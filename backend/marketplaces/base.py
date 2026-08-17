@@ -58,6 +58,13 @@ class MarketplaceProvider(Protocol):
     key: str      # short id used in routes, DB rows, JSON and the UI ("ebay")
     label: str    # display name ("eBay")
 
+    # Optional, read off the provider with getattr defaults: set coming_soon
+    # True (plus a one-sentence seller-facing coming_soon_note) while the
+    # integration is finished but gated on something outside the deployment —
+    # a partner-API application still under review. The roster passes both to
+    # the UI, which then says "coming soon" instead of showing the operator's
+    # missing-credentials explainer. Ignored once oauth_ready() is true.
+
     # --- configuration / connection ---
     def oauth_ready(self) -> bool:
         """Operator-side credentials present (the config.py predicate)."""

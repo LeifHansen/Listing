@@ -3,7 +3,7 @@ import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
   PackageOpen, Truck, Plus, TrendingUp, Megaphone, Store, BadgeCheck,
-  Trash2,
+  Trash2, Clock,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/utils";
@@ -407,13 +407,19 @@ export function SettingsView() {
 
 // Cross-posting marketplaces — every registered marketplace except eBay
 // (which keeps its own card above). One section per marketplace: connected →
-// account + Disconnect; configured but not connected → Connect button; not
-// configured on the server → the same missing-env explainer the eBay card
-// uses. Renders nothing while eBay is the only marketplace registered.
+// account + Disconnect; configured but not connected → Connect button;
+// coming soon (access pending on the marketplace's side) → a "Coming soon"
+// pill and the wait explained; not configured on the server → the same
+// missing-env explainer the eBay card uses. Renders nothing while eBay is
+// the only marketplace registered.
 function MarketplaceConnections() {
   const { marketplaces, loadMarketplaces } = useApp();
   const { toast, confirm } = useToast();
-  const others = marketplaces.filter((m) => m.key !== "ebay");
+  // Coming-soon marketplaces sink below the ones you can actually connect.
+  const others = marketplaces
+    .filter((m) => m.key !== "ebay")
+    .slice()
+    .sort((a, b) => (a.coming_soon ? 1 : 0) - (b.coming_soon ? 1 : 0));
   if (!others.length) return null;
 
   const disconnect = async (m) => {
@@ -444,7 +450,14 @@ function MarketplaceConnections() {
           <div key={m.key} className={i > 0 ? "mt-6 pt-6 border-t border-line" : ""}>
             <div className="flex flex-wrap items-center gap-3">
               <div className="min-w-0 flex-1">
-                <p className="font-semibold text-ink">{m.label}</p>
+                <p className="font-semibold text-ink flex items-center gap-2">
+                  {m.label}
+                  {!m.connected && m.coming_soon && (
+                    <TagPill tone="blue">
+                      <Clock size={11} aria-hidden /> Coming soon
+                    </TagPill>
+                  )}
+                </p>
                 {m.connected ? (
                   <p className="text-sm text-ink-secondary">
                     Connected{m.username ? (
@@ -454,6 +467,11 @@ function MarketplaceConnections() {
                 ) : m.oauth_ready ? (
                   <p className="text-sm text-ink-secondary">
                     Not connected yet — link your {m.label} account to cross-post listings.
+                  </p>
+                ) : m.coming_soon ? (
+                  <p className="text-sm text-ink-secondary">
+                    {m.coming_soon_note
+                      || `${m.label} access is pending — cross-posting turns on as soon as it's approved.`}
                   </p>
                 ) : (
                   <p className="text-sm text-ink-secondary">
@@ -473,9 +491,13 @@ function MarketplaceConnections() {
                 >
                   <Link2 aria-hidden /> Connect {m.label}
                 </Button>
+              ) : m.coming_soon ? (
+                <Button variant="secondary" disabled>
+                  <Clock aria-hidden /> Connect {m.label}
+                </Button>
               ) : null}
             </div>
-            {!m.connected && !m.oauth_ready && (
+            {!m.connected && !m.oauth_ready && !m.coming_soon && (
               <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 flex gap-3 mt-3">
                 <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
                 <div className="text-sm min-w-0">

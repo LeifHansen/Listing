@@ -54,3 +54,17 @@ def available() -> list[MarketplaceProvider]:
     """Providers whose operator-side OAuth credentials are configured — the
     only ones the UI offers to connect or publish to."""
     return [p for p in all_providers() if p.oauth_ready()]
+
+
+def coming_soon(provider: MarketplaceProvider) -> tuple[bool, str]:
+    """(should the UI say "coming soon", seller-facing note).
+
+    True while a provider declares `coming_soon` and its credentials aren't
+    in place: access is pending on the marketplace's side (a partner-API
+    application under review), which is a different story from a deployment
+    that simply hasn't set its env vars — and a very different thing to show
+    a seller. Self-clears the moment oauth_ready() flips.
+    """
+    if not getattr(provider, "coming_soon", False) or provider.oauth_ready():
+        return False, ""
+    return True, getattr(provider, "coming_soon_note", "")

@@ -3319,11 +3319,17 @@ def marketplace_roster(request: Request) -> dict:
     out = []
     for p in marketplaces.all_providers():
         status = p.account_status(uid)
+        # "Coming soon": integration built, access still pending on the
+        # marketplace's side (Depop's partner review). Self-clears once the
+        # credentials land, so the UI needs no second deploy.
+        soon, soon_note = marketplaces.coming_soon(p)
         out.append({
             "key": p.key,
             "label": p.label,
             "oauth_ready": p.oauth_ready(),
             "oauth_missing": p.oauth_missing(),
+            "coming_soon": soon,
+            "coming_soon_note": soon_note,
             "connected": bool(status.get("connected")),
             "username": status.get("username", ""),
             "env": status.get("env", "production"),
