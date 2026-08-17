@@ -3,6 +3,7 @@ import { Search, Plus, Link2, CheckCircle2, Coins } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
+import { NotificationsBell } from "@/components/NotificationsBell";
 import { useToast } from "@/components/ui/Toaster";
 
 // TopBar — search, eBay connection state, Quick Add. No clutter.
@@ -50,6 +51,7 @@ export function TopBar({ onSearch, onManageEbay }) {
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        <NotificationsBell />
         {tokens.enabled && (
           <Button
             variant="soft"

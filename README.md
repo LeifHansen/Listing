@@ -350,6 +350,34 @@ imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
 repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
 default 6) so a big store doesn't outlive the request.
 
+## Sold notifications & shipping labels
+
+When a sync notices a listing flipped to **sold**, the seller gets an in-app
+notification (the bell in the top bar, polled every minute) with a one-tap
+jump into the shipping dialog. Notifications are deduplicated in the database
+(one per sale, no matter how many sync paths spot it), and backfilling an
+existing store's historical sales stays silent.
+
+The shipping dialog (also reachable via **Ship orders** on the Listings page)
+reads the orders still awaiting shipment through the Fulfillment API — buyer
+address included — pre-fills the package weight/dims from the matching
+listing, and offers two label workflows:
+
+- **eBay labels** (Logistics API): live eBay-negotiated rates → buy → print,
+  with tracking uploaded to the order automatically. The Logistics API is
+  **limited-release** — eBay must enable it for your keyset; set
+  `EBAY_LOGISTICS_ENABLED=1` once approved and its scope joins the connect
+  flow. Until then the option explains itself and defers to Pirate Ship.
+- **Pirate Ship**: no public API exists, so the app exports the order(s) as a
+  CSV shaped for Pirate Ship's spreadsheet importer (recipient address +
+  per-row weight/dims), links the seller there, and takes the tracking number
+  back — marking the order shipped on eBay via `createShippingFulfillment`,
+  which emails the buyer.
+
+Reading orders and posting tracking needs the `sell.fulfillment` OAuth scope;
+sellers who connected eBay before it was added reconnect once to grant it
+(same as every scope addition).
+
 ## Notes & limitations
 
 - The AI never invents serial numbers, authenticity guarantees, or unverifiable
