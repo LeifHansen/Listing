@@ -27,7 +27,7 @@ from typing import Optional
 from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from . import ebay_trading, taxonomy
+from . import ebay_trading, notifications, taxonomy
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
 # live/market facts from eBay but keep everything else the record already has,
@@ -258,6 +258,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
             continue
         db.upsert_listing(rid, data, status=status, user_id=user_id,
                           when=_started_at(data))
+        # A listing we already knew flipping to sold IS the sale event. A
+        # first-time import of an old sold listing stays silent — backfilling
+        # a store must not fire a notification per historical sale.
+        if prior and status == "sold" and prior.get("status") != "sold":
+            notifications.notify_sold(user_id, rid, data,
+                                      sold_quantity=data.get("sold_quantity") or 0)
         if prior:
             updated += 1
         else:
@@ -305,6 +311,9 @@ def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
         if status != rec.get("status") or updates != data:
             db.upsert_listing(rec["id"], updates, status=status, user_id=user_id)
             if status == "sold":
+                if rec.get("status") != "sold":
+                    notifications.notify_sold(user_id, rec["id"], updates,
+                                              sold_quantity=sold)
                 # Archived — reclaim the volume space its working copies held,
                 # matching what the app-listing sync path already does.
                 storage.purge_session(rec["id"])

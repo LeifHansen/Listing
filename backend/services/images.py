@@ -121,6 +121,24 @@ _INFER_LOCK = threading.Lock()
 # Disable with BG_SHADOW=off.
 _BG_SHADOW = os.getenv("BG_SHADOW", "on").strip().lower() not in (
     "off", "0", "false", "no", "none", "")
+# Re-attach interior holes the matte punches through the middle of the item
+# (see _fill_interior_holes). Off switch: BG_FILL_HOLES=off.
+_FILL_HOLES = os.getenv("BG_FILL_HOLES", "on").strip().lower() not in (
+    "off", "0", "false", "no", "none", "")
+# How far (RGB euclidean distance) an enclosed removed region has to sit from
+# the backdrop we actually removed before we call it item rather than a real
+# see-through gap. ~26 per channel: comfortably above JPEG noise and backdrop
+# vignetting, well below a printed graphic or a glossy panel.
+_HOLE_BG_TOL = float(os.getenv("BG_HOLE_TOLERANCE", "45") or "45")
+# Hole analysis runs on a downscaled copy: the regions we're looking for are
+# blobs, not hairlines, and 512px keeps a 1600px photo at a few milliseconds.
+# Scaling down can only bridge a thin subject wall (which makes a hole read as
+# ordinary background and simply not get filled), so it never invents a fill.
+_HOLE_SCAN_SIDE = 512
+# Safety valve on the flood: each sweep propagates in straight lines, so a
+# region needing more than this many direction changes to reach the frame is
+# treated as enclosed. Real photos converge in a handful.
+_FLOOD_SWEEPS = 24
 
 
 def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.Image:
@@ -177,10 +195,155 @@ def _refine_alpha(alpha: Image.Image) -> Image.Image:
     return refined
 
 
+def _flood_sweep(bg, reached, axis: int):
+    """One straight-line propagation pass of `reached` through `bg` along
+    `axis` (1 = across rows, 0 = down columns).
+
+    Every uninterrupted run of background pixels is one segment; a segment that
+    already contains a reached pixel becomes reached end to end. Done as two
+    whole-image numpy passes rather than a per-pixel flood, which is what keeps
+    this affordable on every photo."""
+    import numpy as np
+
+    b = bg if axis == 1 else bg.T
+    r = reached if axis == 1 else reached.T
+    rows, cols = b.shape
+    # A sentinel non-background column so runs can't wrap from one row's end
+    # into the next row's start once flattened.
+    stop = np.zeros((rows, 1), dtype=bool)
+    flat_bg = np.concatenate([b, stop], axis=1).ravel()
+    flat_reached = np.concatenate([r, stop], axis=1).ravel()
+    seg = np.cumsum(~flat_bg)  # constant within a run of background
+    hit = np.zeros(int(seg[-1]) + 2, dtype=bool)
+    hit[seg[flat_reached]] = True
+    out = (flat_bg & hit[seg]).reshape(rows, cols + 1)[:, :cols]
+    return out if axis == 1 else out.T
+
+
+def _border_connected(bg):
+    """Background pixels reachable from the frame border (4-connected) — i.e.
+    the real backdrop, as opposed to background-labelled regions sealed inside
+    the subject."""
+    import numpy as np
+
+    reached = np.zeros_like(bg)
+    reached[0, :] = bg[0, :]
+    reached[-1, :] = bg[-1, :]
+    reached[:, 0] = bg[:, 0]
+    reached[:, -1] = bg[:, -1]
+    for _ in range(_FLOOD_SWEEPS):
+        before = int(reached.sum())
+        reached = _flood_sweep(bg, reached, axis=1)
+        reached = _flood_sweep(bg, reached, axis=0)
+        if int(reached.sum()) == before:
+            break
+    return reached
+
+
+def _interior_fill_mask(alpha: Image.Image,
+                        source: Image.Image) -> Optional[Image.Image]:
+    """Mask (mode L) of the pixels an alpha matte punched out of the middle of
+    the subject and that should be put back — None when there's nothing to fix.
+
+    This is the failure sellers describe as "it removed the inside of my item":
+    the model calls a printed graphic, a bright panel, a glossy patch or a
+    reflective face INSIDE the product 'background', so the composite shows
+    white holes straight through the item.
+
+    A removed region completely sealed in by subject is one of exactly two
+    things:
+      * a genuine see-through gap (a mug handle, the space between shoe
+        straps, the hole in a doughnut) — which shows the SAME backdrop we just
+        removed, or
+      * item the matte ate — which does not.
+    So: flood the background inward from the frame border, and put back every
+    stranded leftover whose pixels don't look like the backdrop. Keeping the
+    backdrop-coloured ones removed is what stops mug handles filling in — and
+    when the call is wrong there, the region matched white-ish backdrop anyway,
+    so on the white canvas it's invisible either way."""
+    if not _FILL_HOLES:
+        return None
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime; if it's
+        # somehow absent, skip the repair rather than fail a photo.
+        return None
+
+    w, h = alpha.size
+    if w < 8 or h < 8:
+        return None
+    scale = min(1.0, _HOLE_SCAN_SIDE / max(w, h))
+    sw, sh = max(4, round(w * scale)), max(4, round(h * scale))
+    small = alpha if (sw, sh) == (w, h) else alpha.resize((sw, sh), Image.BILINEAR)
+    bg = np.asarray(small, dtype=np.uint8) < 128
+    if not bg.any() or bg.all():
+        return None  # nothing removed, or nothing kept — no interior to repair
+    reached = _border_connected(bg)
+    holes = bg & ~reached
+    if not holes.any():
+        return None
+
+    src = source.convert("RGB")
+    if src.size != (sw, sh):
+        src = src.resize((sw, sh), Image.BILINEAR)
+    rgb = np.asarray(src, dtype=np.int16)
+    # The backdrop we actually removed, not a guess: the median colour of the
+    # border-connected background (median, so a dark table edge or a shadow in
+    # the corner doesn't drag the reference).
+    backdrop = (np.median(rgb[reached], axis=0) if reached.any()
+                else np.array([255, 255, 255], dtype=np.int16))
+    off_backdrop = np.sqrt(((rgb - backdrop) ** 2).sum(axis=2))
+    keep = holes & (off_backdrop > _HOLE_BG_TOL)
+    if not keep.any():
+        return None
+
+    fill = Image.fromarray(np.where(keep, 255, 0).astype(np.uint8), "L")
+    # Median: drop isolated speckle so we restore regions, not confetti.
+    # MaxFilter: grow a pixel outward so the restored region meets the
+    # surrounding subject instead of leaving a hairline seam at the hole's rim.
+    fill = fill.filter(ImageFilter.MedianFilter(5)).filter(ImageFilter.MaxFilter(3))
+    grown = (np.asarray(fill, dtype=np.uint8) >= 128) & ~reached  # never spill
+    if not grown.any():                                          # into the backdrop
+        return None
+    log.info("bg-removal: restored %.1f%% of the frame the matte had punched out "
+             "of the item's interior", 100.0 * grown.sum() / grown.size)
+    out = Image.fromarray(np.where(grown, 255, 0).astype(np.uint8), "L")
+    return out if out.size == alpha.size else out.resize(alpha.size, Image.BILINEAR)
+
+
+def _fill_interior_holes(alpha: Image.Image,
+                         source: Image.Image) -> tuple[Image.Image, Optional[Image.Image]]:
+    """Alpha with interior holes re-attached, plus the mask of what was put
+    back (None when the matte had no interior holes worth fixing) so callers
+    can source those pixels from the original photo."""
+    added = _interior_fill_mask(alpha, source)
+    if added is None:
+        return alpha, None
+    from PIL import ImageChops
+    return ImageChops.lighter(alpha, added), added
+
+
 def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
-                      shadow: bool = True) -> Image.Image:
+                      shadow: bool = True, source: Optional[Image.Image] = None,
+                      fill_holes: bool = True) -> Image.Image:
     """Composite the subject (given by `alpha`) onto pure white, optionally
-    with a soft drop shadow drawn from the subject silhouette."""
+    with a soft drop shadow drawn from the subject silhouette.
+
+    Interior holes in `alpha` are repaired first (see _fill_interior_holes)
+    unless the caller already did it. `source` is the original photo, used both
+    to judge those holes and to supply their pixels — a remote engine's cutout
+    can carry anything under its transparent areas, so restored regions come
+    from the photo itself. Pass fill_holes=False when the alpha is already
+    repaired."""
+    if fill_holes:
+        src = source if source is not None else rgb
+        alpha, added = _fill_interior_holes(alpha, src)
+        if added is not None and source is not None and source is not rgb:
+            patch = source.convert("RGB")
+            if patch.size != rgb.size:
+                patch = patch.resize(rgb.size, Image.LANCZOS)
+            rgb = rgb.copy()
+            rgb.paste(patch, (0, 0), added)
     w, h = rgb.size
     canvas = Image.new("RGB", (w, h), WHITE)
     if shadow:
@@ -213,6 +376,11 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
 
     rgb = img.convert("RGB")
     alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side))
+    # Put back anything the matte punched out of the item's middle BEFORE the
+    # guards below: a matte that ate the interior and left a rim reads as
+    # "subject nearly erased" (or as a big dark removed area), and bailing out
+    # there would throw away a cutout that's fine once repaired.
+    alpha, _ = _fill_interior_holes(alpha, rgb)
     total = max(1, alpha.width * alpha.height)
     opaque = sum(alpha.histogram()[128:])
     if opaque / total < _MIN_FG_COVERAGE:
@@ -232,7 +400,7 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
             log.warning("bg-removal: removed area large & dark (mean L=%.0f) — likely ate a "
                         "dark item, keeping original", stat.mean[0])
             return None
-    return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW)
+    return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW, fill_holes=False)
 
 
 def _apply_studio(img: Image.Image) -> tuple[Image.Image, bool, Optional[str]]:
@@ -266,7 +434,7 @@ def _adobe_cutout(img: Image.Image) -> Optional[Image.Image]:
     alpha = cut.split()[3]
     if alpha.getbbox() is None:  # nothing kept — no subject found
         raise adobe.AdobeError("Adobe couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
 
 
 class PhotoroomError(ValueError):
@@ -380,7 +548,7 @@ def _pixian_cutout(img: Image.Image) -> Optional[Image.Image]:
     alpha = cut.split()[3]
     if alpha.getbbox() is None:  # nothing kept — no subject found
         raise PixianError("Pixian couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
 
 
 def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
@@ -422,7 +590,7 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
     alpha = cut.split()[3]
     if alpha.getbbox() is None:  # nothing kept — no subject found
         raise PhotoroomError("Photoroom couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW)
+    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
 
 
 # The remote engines a chain entry can name (adobe and local are special-cased
@@ -951,8 +1119,14 @@ SUBJECT_GROW_PX = 9
 
 
 def _subject_mask(img: Image.Image) -> Image.Image:
-    """Soft alpha mask (mode L, same size as img) of the detected subject."""
-    return _alpha_mask(img.convert("RGB"))
+    """Soft alpha mask (mode L, same size as img) of the detected subject,
+    with interior holes re-attached — otherwise a graphic or a bright panel the
+    model mistakes for background makes auto-clean whiten a chunk out of the
+    middle of the item (and makes the residue highlight flag the item's own
+    interior as leftover background)."""
+    rgb = img.convert("RGB")
+    mask, _ = _fill_interior_holes(_alpha_mask(rgb), rgb)
+    return mask
 
 
 def analyze_cleanup(img: Image.Image) -> dict:

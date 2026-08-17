@@ -195,6 +195,33 @@ body {
   color: transparent;
 }
 
+/* Brand progress — the chunky logo-palette progress bar (see BrandProgress).
+   The fill flows through coral → gold → teal → cornflower on a seamless loop,
+   with a soft shine pinned to the leading edge, so it reads "alive" between
+   poll updates. The tile is a fixed 240px (not a % of the fill) so the full
+   color combo shows even in a narrow just-started fill; first & last stop
+   match and the keyframes shift by exactly one tile, so the loop is seamless. */
+@keyframes brand-flow {
+  from { background-position: 0 0; }
+  to { background-position: 240px 0; }
+}
+.brand-progress-fill {
+  background: linear-gradient(
+    90deg,
+    var(--brand-red), var(--brand-yellow), var(--brand-green),
+    var(--brand-blue), var(--brand-red)
+  );
+  background-size: 240px 100%;
+  animation: brand-flow 3s linear infinite;
+}
+.brand-progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent 65%, rgb(255 255 255 / 0.28));
+}
+
 @keyframes sparkle-pulse {
   0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
   50% { transform: scale(1.25) rotate(12deg); opacity: 0.75; }
@@ -205,6 +232,6 @@ body {
 
 /* Reduced motion: kill the ambient animations. */
 @media (prefers-reduced-motion: reduce) {
-  .ai-shimmer, .ai-shimmer-text, .ai-sparkle { animation: none; }
+  .ai-shimmer, .ai-shimmer-text, .ai-sparkle, .brand-progress-fill { animation: none; }
   * { transition-duration: 0.01ms !important; }
 }
