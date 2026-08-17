@@ -19,7 +19,6 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import Listing
-from . import claude_ai
 
 
 def _headers(access_token: str) -> dict:
@@ -177,6 +176,12 @@ def suggest_taxonomy(listing: Listing) -> dict:
     """Pick the best Etsy category for this listing: cheap keyword filter down
     to a shortlist, then one small Claude call to choose (the same shape as
     the eBay taxonomy suggestion flow). Returns {taxonomy_id, path}."""
+    # Imported here, not at module scope: this is the only function that needs
+    # the Anthropic SDK, and hoisting it made the whole Etsy transport layer
+    # unimportable wherever that dependency isn't installed (CI's minimal
+    # install, which exists to unit-test exactly these pure request bodies).
+    from . import claude_ai
+
     paths = taxonomy_paths()
     text = " ".join(filter(None, [
         listing.title, listing.brand, listing.category_suggestion,
