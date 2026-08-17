@@ -45,15 +45,25 @@ export function usePublishTargets() {
   return { selected, toggle, otherConnected, effectiveTargets };
 }
 
-// The fields eBay requires to publish — the cheap client-side gate for
-// one-click Publish buttons (a guaranteed-to-fail publish wastes the click).
-export function missingRequired(l = {}) {
+// The cheap client-side gate for one-click Publish buttons (a
+// guaranteed-to-fail publish wastes the click). Title and price are required
+// everywhere; package weight and an eBay category ONLY matter when eBay is one
+// of the targets. Gating an Etsy-only publish on them disabled the button for
+// listings the backend would have accepted — /api/publish and the preflight
+// both only run the providers they were given.
+//
+// `targets` is the effectiveTargets array (null = the legacy single-eBay path).
+export function missingRequired(l = {}, targets = null) {
   const miss = [];
   if (!(l.title || "").trim()) miss.push("title");
   if (!(Number(l.price) > 0)) miss.push("price");
-  const oz = (parseFloat(l.package_weight_lb) || 0) * 16 + (parseFloat(l.package_weight_oz) || 0);
-  if (!(oz > 0)) miss.push("weight");
-  if (!(l.category_id || "").toString().trim()) miss.push("category");
+  const wantsEbay = !targets || !targets.length || targets.includes("ebay");
+  if (wantsEbay) {
+    const oz = (parseFloat(l.package_weight_lb) || 0) * 16
+      + (parseFloat(l.package_weight_oz) || 0);
+    if (!(oz > 0)) miss.push("weight");
+    if (!(l.category_id || "").toString().trim()) miss.push("category");
+  }
   return miss;
 }
 

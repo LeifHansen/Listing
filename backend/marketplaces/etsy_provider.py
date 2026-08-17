@@ -138,6 +138,13 @@ class EtsyProvider:
         db.disconnect_marketplace_account(uid, "etsy")
         _ACCESS_CACHE.pop(uid, None)
 
+    def forget_cached_creds(self, uid: str) -> None:
+        """Reconnect invalidates the cache: the entry is keyed by user id, so
+        connecting a DIFFERENT Etsy shop without disconnecting first would
+        otherwise pair the new shop_id with the previous shop's cached token
+        (403s, or worse, writes aimed at the wrong shop) until it expired."""
+        _ACCESS_CACHE.pop(uid, None)
+
     # --- listing lifecycle -----------------------------------------------
     def supports(self) -> dict:
         return {"draft": True, "edit": True, "end": True, "auction": False,

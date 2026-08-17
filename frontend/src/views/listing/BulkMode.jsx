@@ -97,13 +97,13 @@ function ShippingServiceSelect({ value, onChange }) {
 
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
-  onDelete, deleting,
+  onDelete, deleting, targets,
 }) {
   const l = item.listing || {};
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
   const isAuction = fmt.startsWith("AUCTION");
-  const missing = item.status === "draft" ? missingRequired(l) : [];
+  const missing = item.status === "draft" ? missingRequired(l, targets) : [];
   return (
     <motion.div
       layout
@@ -559,7 +559,8 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
     return 95;
   })());
   const drafts = items.filter((it) => it.status === "draft");
-  const needInfo = drafts.filter((it) => missingRequired(it.listing).length > 0);
+  const needInfo = drafts.filter(
+    (it) => missingRequired(it.listing, effectiveTargets).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
   // in a card, and the pairwise scan is quadratic in the size of the batch.
   const dupes = useMemo(() => duplicateSuspects(drafts),
@@ -698,6 +699,7 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
               publishing={!!publishing[it.session_id]}
               onDelete={() => deleteOne(it)}
               deleting={!!deleting[it.session_id]}
+              targets={effectiveTargets}
             />
           ))}
         </AnimatePresence>

@@ -57,6 +57,25 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
     return data
 
 
+def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, str]:
+    """The server-owned publish state a client round-trip must not overwrite.
+
+    Returns (marketplaces map, ebay_listing_id) to apply onto an incoming
+    listing: the stored map always wins, and the legacy top-level eBay id is
+    only filled in when the client didn't carry one.
+
+    Why the client's copy can't be trusted: `marketplaces` is written solely
+    by publish/end/sync, but every save round-trips the whole listing. A
+    second browser tab — or the editor's image-edit auto-save, whose in-memory
+    copy predates a publish — sends a map that is missing entries. Honoring it
+    erases live listing ids, and the next publish then CREATES a duplicate
+    live listing instead of revising the one that exists.
+    """
+    states = stored.get("marketplaces") or {}
+    ebay_id = str(incoming_ebay_id or stored.get("ebay_listing_id") or "")
+    return {key: dict(value or {}) for key, value in states.items()}, ebay_id
+
+
 def derive_top_status(prev_status: str, outcomes: dict[str, PublishOutcome],
                       mode: str) -> str:
     """The top-level status column after a multi-marketplace publish.

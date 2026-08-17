@@ -5,7 +5,7 @@ so they run under CI's minimal install.
 """
 from backend.marketplaces.base import PublishOutcome
 from backend.marketplaces.state import (STICKY_STATUSES, derive_top_status,
-                                        merge_state)
+                                        merge_state, owned_state_from)
 
 
 def _ok(status="published", listing_id="123", url="https://x/123", message="ok"):
@@ -84,3 +84,43 @@ def test_top_status_all_dry_run():
 def test_top_status_draft_save_stays_draft():
     outcomes = {"ebay": PublishOutcome(ok=True, status="draft")}
     assert derive_top_status("draft", outcomes, "draft") == "draft"
+
+
+# --- server-owned state (what a client save must not be able to erase) -------
+
+def test_owned_state_replaces_client_map():
+    """A stale client map (missing etsy) must not win over the stored one."""
+    stored = {"marketplaces": {
+        "ebay": {"listing_id": "111", "status": "published"},
+        "etsy": {"listing_id": "222", "status": "published"}}}
+    states, _ = owned_state_from(stored)
+    assert set(states) == {"ebay", "etsy"}
+    assert states["etsy"]["listing_id"] == "222"
+
+
+def test_owned_state_is_a_copy_not_the_stored_dict():
+    """Callers mutate the result; that must not write through to the record."""
+    inner = {"listing_id": "222"}
+    stored = {"marketplaces": {"etsy": inner}}
+    states, _ = owned_state_from(stored)
+    states["etsy"]["listing_id"] = "changed"
+    assert inner["listing_id"] == "222"
+
+
+def test_owned_state_fills_missing_ebay_id_from_record():
+    stored = {"ebay_listing_id": "999"}
+    _, ebay_id = owned_state_from(stored, "")
+    assert ebay_id == "999"
+
+
+def test_owned_state_keeps_the_client_ebay_id_when_present():
+    """A relist mints a new id; the incoming one is authoritative."""
+    stored = {"ebay_listing_id": "999"}
+    _, ebay_id = owned_state_from(stored, "1000")
+    assert ebay_id == "1000"
+
+
+def test_owned_state_on_a_brand_new_listing():
+    states, ebay_id = owned_state_from({}, "")
+    assert states == {}
+    assert ebay_id == ""

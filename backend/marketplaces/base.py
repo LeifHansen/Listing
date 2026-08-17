@@ -88,6 +88,16 @@ class MarketplaceProvider(Protocol):
 
     def disconnect(self, uid: str) -> None: ...
 
+    def forget_cached_creds(self, uid: str) -> None:
+        """Drop any cached access token for this user.
+
+        Called on reconnect: a provider whose cache is keyed by user id (Etsy,
+        Depop) would otherwise pair the NEW account's shop id with the OLD
+        account's still-unexpired access token. Optional — providers whose
+        cache key already changes with the credentials (eBay keys on the
+        refresh token) inherit this no-op.
+        """
+
     # --- listing lifecycle ---
     def supports(self) -> dict:
         """Capabilities: {draft, edit, end, auction: bool, max_photos: int}."""

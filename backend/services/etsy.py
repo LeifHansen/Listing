@@ -3,6 +3,10 @@
 Publish flow (etsy_provider drives it): createDraftListing -> upload each
 image -> PATCH state=active. Etsy has no sandbox, so the provider's dry-run
 mode (no connection) returns the exact payload this module would send.
+
+Transport note: the v3 listing endpoints take x-www-form-urlencoded bodies,
+not JSON (form_body does the conversion). Image upload is the exception —
+that one is genuinely multipart.
 """
 from __future__ import annotations
 
@@ -22,6 +26,30 @@ def _headers(access_token: str) -> dict:
     return {"Authorization": f"Bearer {access_token}",
             "x-api-key": config.ETSY_CLIENT_ID,
             "Accept": "application/json"}
+
+
+def form_body(payload: dict) -> dict:
+    """Etsy's listing payload as x-www-form-urlencoded fields.
+
+    The v3 listing endpoints declare their request bodies as
+    application/x-www-form-urlencoded, NOT JSON — posting JSON gets a 400 on
+    every call. Repeated-value fields (tags, materials) go as one
+    comma-joined string, booleans as "true"/"false", and None is dropped
+    rather than sent as the literal "None".
+    """
+    out: dict[str, str] = {}
+    for key, value in (payload or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            out[key] = "true" if value else "false"
+        elif isinstance(value, (list, tuple)):
+            joined = ",".join(str(v).strip() for v in value if str(v).strip())
+            if joined:
+                out[key] = joined
+        else:
+            out[key] = str(value)
+    return out
 
 
 def etsy_error_issues(resp: Optional[httpx.Response], fallback: str) -> list[dict]:
@@ -56,7 +84,7 @@ def _raise_for_status(resp: httpx.Response, doing: str) -> None:
 def create_draft_listing(access_token: str, shop_id: str, payload: dict) -> dict:
     resp = httpx.post(
         f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings",
-        headers=_headers(access_token), json=payload, timeout=60)
+        headers=_headers(access_token), data=form_body(payload), timeout=60)
     _raise_for_status(resp, "creating the Etsy listing")
     body = resp.json()
     return {"listing_id": str(body.get("listing_id", "")),
@@ -67,7 +95,7 @@ def update_listing(access_token: str, shop_id: str, listing_id: str,
                    patch: dict) -> dict:
     resp = httpx.patch(
         f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings/{listing_id}",
-        headers=_headers(access_token), json=patch, timeout=60)
+        headers=_headers(access_token), data=form_body(patch), timeout=60)
     _raise_for_status(resp, "updating the Etsy listing")
     body = resp.json()
     return {"listing_id": str(body.get("listing_id", listing_id)),

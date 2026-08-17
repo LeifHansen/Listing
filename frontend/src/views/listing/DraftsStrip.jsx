@@ -233,7 +233,7 @@ export function DraftsStrip({ search = "" }) {
       />
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {drafts.map((item, i) => {
-          const missing = missingRequired(item.listing || {});
+          const missing = missingRequired(item.listing || {}, effectiveTargets);
           return (
             <motion.div
               key={item.id}

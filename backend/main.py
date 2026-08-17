@@ -866,15 +866,27 @@ def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dic
 @app.post("/api/publish-preflight")
 async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     """The full 'ready to publish?' checklist, without touching the listing.
-    The legacy shape ({ok, issues}) is always the eBay checklist; when the
+    The legacy shape ({ok, issues}) carries the eBay checklist; when the
     request targets more marketplaces, their checklists ride along under
-    by_marketplace so the editor can jump to marketplace-specific fixes."""
-    issues = await run_in_threadpool(
-        _preflight_issues, request, req.listing, req.mode or "live")
+    by_marketplace so the editor can jump to marketplace-specific fixes.
+
+    `issues` is empty when the request deselects eBay. Reporting eBay's
+    checklist for an Etsy-only publish blocked sellers on fields Etsy never
+    wants (package weight, an eBay category) — a publish the /api/publish
+    fan-out would have accepted, since it only runs the providers it was
+    given.
+    """
+    targets = [k for k in dict.fromkeys(
+        (key or "").strip().lower() for key in req.marketplaces) if k]
+    mode = req.mode or "live"
+    # No selection at all = the legacy single-eBay client.
+    ebay_targeted = not targets or "ebay" in targets
+    issues: list[dict] = []
+    if ebay_targeted:
+        issues = await run_in_threadpool(
+            _preflight_issues, request, req.listing, mode)
     out = {"ok": not preflight.errors_only(issues), "issues": issues}
-    others = [k for k in dict.fromkeys(
-        (key or "").strip().lower() for key in req.marketplaces)
-        if k and k != "ebay"]
+    others = [k for k in targets if k != "ebay"]
     if others:
         uid = _uid(request)
         by: dict = {}
@@ -883,7 +895,7 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
             if provider is None:
                 continue
             by[key] = await run_in_threadpool(
-                provider.preflight, uid, req.listing, req.mode or "live")
+                provider.preflight, uid, req.listing, mode)
         out["by_marketplace"] = by
         out["ok"] = out["ok"] and not any(
             preflight.errors_only(v) for v in by.values())
@@ -1774,10 +1786,34 @@ def price_suggestions(payload: dict, request: Request) -> dict:
 _STICKY_STATUSES = STICKY_STATUSES
 
 
-def _preserved_status(session_id: str, default: str = "draft") -> str:
-    prev = db.get_listing(session_id) or {}
-    cur = prev.get("status")
+def _sticky_status(rec: Optional[dict], default: str = "draft") -> str:
+    """The status to persist on a save/refine: never demote a listing that is
+    already live/sold/ended (see _STICKY_STATUSES). Takes the record the
+    caller already read — each db.get_listing is a cross-region round trip."""
+    cur = (rec or {}).get("status")
     return cur if cur in _STICKY_STATUSES else default
+
+
+def _restore_server_state(session_id: str, listing: Listing,
+                          prev_rec: Optional[dict] = None) -> dict:
+    """Replace the client's per-marketplace publish state with the stored one.
+
+    The server owns `marketplaces` and its legacy `ebay_listing_id` mirror:
+    only publish/end/sync write them. Any client round-trip can be stale — a
+    second browser tab, or the editor's image-edit auto-save whose copy was
+    loaded before a publish — and honoring a stale copy ERASES live listing
+    ids. The damage is silent and expensive: the next publish finds no
+    existing id and creates a DUPLICATE live listing instead of revising, and
+    End listing can no longer find the remote item.
+
+    Returns the record it read so callers don't have to re-query.
+    """
+    rec = prev_rec if prev_rec is not None else (db.get_listing(session_id) or {})
+    states, ebay_id = marketplace_state.owned_state_from(
+        rec.get("listing") or {}, listing.ebay_listing_id)
+    listing.marketplaces = {k: MarketplaceState(**v) for k, v in states.items()}
+    listing.ebay_listing_id = ebay_id
+    return rec
 
 
 @app.post("/api/refine")
@@ -1794,18 +1830,21 @@ def refine(req: RefineRequest, request: Request) -> dict:
         code, message = claude_ai.ai_error_message(exc)
         log.warning("refine failed (session=%s): %s", req.session_id, exc)
         raise HTTPException(code, message) from exc
+    # One read serves both the server-owned state and the sticky status.
+    prev = _restore_server_state(req.session_id, updated)
     storage.save_listing(req.session_id, updated)
     db.upsert_listing(req.session_id, updated.model_dump(),
-                      status=_preserved_status(req.session_id), user_id=_uid(request))
+                      status=_sticky_status(prev), user_id=_uid(request))
     return updated.model_dump()
 
 
 @app.post("/api/save/{session_id}")
 def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     _assert_session_owner(session_id, request)
+    prev = _restore_server_state(session_id, listing)
     storage.save_listing(session_id, listing)
     db.upsert_listing(session_id, listing.model_dump(),
-                      status=_preserved_status(session_id), user_id=_uid(request))
+                      status=_sticky_status(prev), user_id=_uid(request))
     return {"saved": True}
 
 
@@ -2607,16 +2646,15 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
     _assert_session_owner(req.session_id, request)
-    storage.save_listing(req.session_id, req.listing)
     uid = _uid(request)
     prev_rec = db.get_listing(req.session_id) or {}
 
     # The server owns per-marketplace state: whatever map the client sent is
-    # replaced with the stored record's before anything reads it, so a stale
-    # browser tab can never wipe another marketplace's listing id.
-    stored_states = ((prev_rec.get("listing") or {}).get("marketplaces") or {})
-    req.listing.marketplaces = {
-        k: MarketplaceState(**(v or {})) for k, v in stored_states.items()}
+    # replaced with the stored record's before anything reads it (or gets
+    # mirrored to disk), so a stale browser tab can never wipe another
+    # marketplace's listing id.
+    _restore_server_state(req.session_id, req.listing, prev_rec)
+    storage.save_listing(req.session_id, req.listing)
 
     targets: list[str] = []
     for key in req.marketplaces:
@@ -2655,15 +2693,24 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
             outcomes[key] = PublishOutcome(
                 ok=False, message=f"{provider.label} publish failed: {exc}")
 
-    # Fold every outcome into the record. Re-read first: providers (eBay
-    # especially) upsert internally, and their writes must not be lost.
-    fresh = db.get_listing(req.session_id) or {}
-    data = fresh.get("listing") or req.listing.model_dump()
-    for key, outcome in outcomes.items():
-        marketplace_state.merge_state(data, key, outcome)
+    # Fold every outcome into the record under the row lock. The read and the
+    # write have to be one critical section: providers (eBay especially) write
+    # the same row from inside publish, including from a background thread that
+    # can still be running here — a plain re-read-then-upsert loses whichever
+    # side commits first.
     top = marketplace_state.derive_top_status(
         prev_rec.get("status") or "", outcomes, req.mode)
-    db.upsert_listing(req.session_id, data, status=top, user_id=uid)
+
+    def _fold(data: dict) -> dict:
+        for key, outcome in outcomes.items():
+            marketplace_state.merge_state(data, key, outcome)
+        return data
+
+    data = db.mutate_listing_data(req.session_id, _fold, status=top, user_id=uid)
+    if data is None:
+        # No row yet (or no DB): fall back to creating one from the request.
+        data = _fold(req.listing.model_dump())
+        db.upsert_listing(req.session_id, data, status=top, user_id=uid)
 
     live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
     failed = [k for k, o in outcomes.items() if not o.ok]
@@ -3038,6 +3085,11 @@ def marketplace_callback(marketplace: str, request: Request,
         log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
         return RedirectResponse(f"/?connect_error={marketplace}")
     db.save_marketplace_account(uid, marketplace, **fields)
+    # Connecting a different account of the same marketplace must not leave the
+    # previous account's access token cached against this user id.
+    forget = getattr(provider, "forget_cached_creds", None)
+    if callable(forget):
+        forget(uid)
     resp = RedirectResponse(f"/?connected={marketplace}")
     resp.delete_cookie(_flow_cookie(marketplace))
     return resp
