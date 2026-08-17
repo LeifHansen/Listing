@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw,
+  PlusCircle, Store, LogIn, RefreshCw, Truck,
 } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -79,7 +79,7 @@ export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     ebay, loadListings, metricsById, skippedDraftIds, storeSync, syncStore,
-    listingsTab, setListingsTab,
+    listingsTab, setListingsTab, openShipping,
   } = useApp();
   const { confirm, toast } = useToast();
 
@@ -240,6 +240,11 @@ export function ListingsView({ search = "" }) {
           <InfoTip text={tab.sub} />
         </div>
         <div className="flex items-center gap-2">
+          {user && ebay.connected && (
+            <Button variant="soft" onClick={() => openShipping()}>
+              <Truck aria-hidden /> Ship orders
+            </Button>
+          )}
           {user && ebay.connected && (
             <Button variant="soft" onClick={importFromEbay} loading={storeSync.syncing}>
               <RefreshCw aria-hidden /> Sync with eBay
