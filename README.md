@@ -316,6 +316,18 @@ resize to 1600px, identify, draft, publish. A failed pro-engine call never
 loses a photo: the original is kept and the reason is surfaced in the API
 response (`optimize_results`) and the photo studio.
 
+**Interior-hole repair.** Every engine's matte goes through the same fix-up
+before it's composited: matting models regularly call a printed graphic, a
+bright panel or a glossy face *inside* the item "background", which is what
+punches white holes through the middle of a product. A removed region that is
+completely sealed in by subject is either a genuine see-through gap (a mug
+handle) — which shows the very backdrop we just removed — or item the model
+ate, which doesn't. So the backdrop is flooded inward from the frame border and
+every stranded region that doesn't match it is put back, with the pixels taken
+from the original photo. The same repaired mask drives the photo studio's
+auto-clean, residue highlight, and smart crop. Tunable with
+`BG_HOLE_TOLERANCE` (default 45) and `BG_FILL_HOLES=off`.
+
 ## Bi-directional eBay sync
 
 The Sell Inventory API that publishes listings can only see listings created
