@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
+  ArrowRight,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
@@ -11,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
+import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
 import {
   MarketTargetChips, missingRequired, publishListing, usePublishTargets,
@@ -388,9 +390,10 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
       it.session_id === sid ? { ...it, listing } : it));
   };
 
+  // Open one item in the full editor. The batch stays in memory (no onExit)
+  // so the editor's "Back to batch" button can bring this queue straight back.
   const openItem = (it) => {
     setSession({ sessionId: it.session_id, listing: it.listing, confidence: null });
-    onExit();
   };
 
   const publishOne = useCallback(async (it) => {
@@ -580,30 +583,38 @@ export function BulkQueue({ jobId, mode, onExit, onSettled }) {
       {busy && (
         <div className="flex flex-col gap-3">
           <AIStatusCard messages={(PHASE_MESSAGES[phase] || ["Working…"]).map((m) => m + progressDetail)} />
-          <div className="px-1">
-            <div className="h-2.5 rounded-full bg-bg-sunken border border-line overflow-hidden"
-              role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-              <div className="h-full rounded-full bg-blue transition-all duration-700"
-                style={{ width: `${Math.max(pct, 3)}%` }} />
-            </div>
-            <p className="mt-1.5 text-xs text-ink-secondary tabular-nums text-center">
-              {pct}%{items.length ? ` · ${items.length} item${items.length === 1 ? "" : "s"} drafted so far` : ""}
-            </p>
-          </div>
+          <BrandProgress
+            className="px-1"
+            value={pct}
+            caption={items.length
+              ? `${items.length} item${items.length === 1 ? "" : "s"} drafted so far`
+              : null}
+          />
         </div>
       )}
       {job?.done && (
         <Card className={cn("py-4", job.error ? "border-warning/40" : "border-success/30")}>
-          <p className="text-sm font-semibold text-ink flex items-center gap-2">
-            {job.error
-              ? <><AlertTriangle size={17} className="text-warning" aria-hidden /> {job.error}</>
-              : <>
-                  <CheckCircle2 size={17} className="text-success" aria-hidden />
-                  <span title="Also saved in Drafts — review below or come back anytime.">
-                    {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}
-                  </span>
-                </>}
-          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm font-semibold text-ink flex items-center gap-2 flex-1 min-w-0">
+              {job.error
+                ? <><AlertTriangle size={17} className="text-warning" aria-hidden /> {job.error}</>
+                : <>
+                    <CheckCircle2 size={17} className="text-success" aria-hidden />
+                    <span title="Also saved in Drafts — review below or come back anytime.">
+                      {items.length} item{items.length === 1 ? "" : "s"} {mode === "live" ? "processed" : "queued as drafts"}
+                    </span>
+                  </>}
+            </p>
+            {/* The guided path: step through each draft in the full editor —
+                preview, tweak, publish — and the post-publish screen's "Next
+                Draft" keeps the assembly line moving through the batch. */}
+            {drafts.length > 0 && (
+              <Button variant="primary" onClick={() => openItem(drafts[0])}
+                title="Review each draft in the full editor and publish as you go.">
+                Preview &amp; list <ArrowRight aria-hidden />
+              </Button>
+            )}
+          </div>
         </Card>
       )}
 
