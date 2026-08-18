@@ -1,7 +1,7 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, downscaleAllForUpload } from "@/lib/api";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -307,6 +307,22 @@ export function AppProvider({ children }) {
     try { localStorage.setItem("quickflip-bulk", JSON.stringify(b)); } catch (e) {}
     setView("new");
   }, []);
+  // A batch begins when the seller hits the button, not when the server hands
+  // back a job id: uploading a big pile takes seconds, and until now those
+  // seconds were spent still sitting on the Sell tab with the listings in
+  // view. Parking a job-less entry flips straight to the batch screen, which
+  // shows "Uploading your photo pile…" until the id arrives. Not persisted —
+  // there is no job to resume yet.
+  const beginBulk = useCallback(() => {
+    setActiveBulk({ jobId: null });
+    setView("new");
+  }, []);
+  // The pile of a batch whose upload never got off the ground. The uploader
+  // unmounts the moment the batch screen takes over, so without handing the
+  // photos back the seller would return to an empty drop zone and have to
+  // pick every one of them again.
+  const [bulkRetry, setBulkRetry] = useState(null); // { files, removeBg }
+  const clearBulkRetry = useCallback(() => setBulkRetry(null), []);
   // Job finished: stop persisting (a reload shouldn't restore a done batch) but
   // keep it in memory so the results stay on screen until the user moves on.
   const bulkSettled = useCallback(() => {
@@ -316,6 +332,26 @@ export function AppProvider({ children }) {
     setActiveBulk(null);
     try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
   }, []);
+  // The whole bulk upload — screen flip first, then the slow part. It lives
+  // here rather than in the uploader because that flip unmounts the uploader
+  // while the downscale + POST are still running.
+  const runBulkUpload = useCallback(async (files, removeBg) => {
+    beginBulk();
+    try {
+      const prepped = await downscaleAllForUpload(files.map((f) => f.file));
+      const fd = new FormData();
+      prepped.forEach((f) => fd.append("files", f));
+      fd.append("remove_bg", removeBg ? "true" : "false");
+      const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
+      files.forEach((f) => URL.revokeObjectURL(f.url));
+      startBulk(job_id);
+    } catch (e) {
+      // Back to the uploader with the pile intact, so retrying is one click.
+      setBulkRetry({ files, removeBg });
+      clearBulk();
+      toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
+    }
+  }, [beginBulk, startBulk, clearBulk, toast]);
 
   // ---------- OAuth redirect landing (eBay + generic marketplaces) ----------
   useEffect(() => {
@@ -428,7 +464,8 @@ export function AppProvider({ children }) {
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
-    activeBulk, startBulk, bulkSettled, clearBulk,
+    activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
+    bulkRetry, clearBulkRetry,
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
@@ -439,7 +476,8 @@ export function AppProvider({ children }) {
     listingsState, loadListings, metricsById, metricsStatus, storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
-    activeBulk, startBulk, bulkSettled, clearBulk,
+    activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
+    bulkRetry, clearBulkRetry,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
