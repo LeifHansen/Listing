@@ -72,12 +72,105 @@ function RecRow({ rec, promoting, promoteOne, openListing }) {
   );
 }
 
+// The group-level verbs. A suggestion category earns an entry here when the
+// same edit makes sense across every listing in it — repeating one edit a dozen
+// times by hand is the whole problem. `amount` marks the ones that need a
+// number first (lower prices by HOW much); the rest fire on click.
+//
+// Photos, specifics, finish and relist are deliberately absent: the first two
+// need a human looking at each item, and the last two create listings, which is
+// not something to hand a single button.
+const BULK_ACTIONS = {
+  promote: {
+    verb: "Promote all",
+    icon: Megaphone,
+    run: (ctx) => ctx.promoteAll(),
+  },
+  lower_price: {
+    verb: "Lower all…",
+    icon: TrendingDown,
+    amount: {
+      unit: "%", initial: 10, min: 1, max: 75, step: 1,
+      label: "Lower every price in this group by",
+      submit: (n, value) => `Lower ${n} price${n === 1 ? "" : "s"} by ${value}%`,
+      note: "New prices go straight to eBay. Anything that has sold or ended is skipped.",
+    },
+    run: (ctx, value) => ctx.lowerAll(ctx.group, value),
+  },
+};
+
+// "Lower every price in this group by [ 10 ]%" — the amount an action needs
+// before it can run, with its own submit. Rendered in normal flow under the
+// group header rather than as a floating panel: the suggestions Card clips
+// overflow, so anything absolutely positioned inside it gets cut off.
+function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
+  const { unit, initial, min, max, step, label, submit, note } = amount;
+  const [value, setValue] = useState(initial);
+  const valid = Number(value) >= min && Number(value) <= max;
+  const apply = () => { if (valid) onSubmit(Number(value)); };
+  return (
+    <motion.div
+      initial={{ height: 0, opacity: 0 }}
+      animate={{ height: "auto", opacity: 1 }}
+      exit={{ height: 0, opacity: 0 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
+      className="overflow-hidden"
+    >
+      <div className="mx-4 mb-4 rounded-[13px] border border-line bg-bg-sunken p-3.5">
+        <label className="flex flex-wrap items-center gap-2 text-[13px] font-semibold text-ink">
+          {label}
+          <span className="inline-flex items-center gap-1">
+            <input
+              type="number" inputMode="decimal"
+              min={min} max={max} step={step} value={value}
+              autoFocus
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") apply();
+                if (e.key === "Escape") onCancel();
+              }}
+              className={cn(
+                "w-20 rounded-lg border bg-bg px-2 py-1 text-sm font-bold tabular-nums text-ink",
+                "focus:outline-none focus:ring-2 focus:ring-blue/40",
+                valid ? "border-line" : "border-error",
+              )}
+            />
+            <span className="text-ink-secondary">{unit}</span>
+          </span>
+        </label>
+        <p className="mt-2 text-[12px] text-ink-secondary">{note}</p>
+        {!valid && (
+          <p className="mt-1 text-[12px] font-semibold text-error">
+            Enter a number between {min} and {max}.
+          </p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button variant="primary" size="sm" loading={busy}
+            disabled={busy || !valid} onClick={apply}>
+            {submit(count, value)}
+          </Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, promoting, promoteAll, promoteOne, openListing }) {
+function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
+                    lowerAll, busy }) {
   const [open, setOpen] = useState(false);
+  const [amountOpen, setAmountOpen] = useState(false);
   const Icon = REC_ICON[group.type] || Lightbulb;
+  const action = BULK_ACTIONS[group.type];
+  // Promote's spinner is the shared `promoting` latch (its rows share it);
+  // parameterized actions get the per-group one.
+  const actionBusy = action?.amount ? busy : !!promoting;
+  const ActionIcon = action?.icon;
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
@@ -108,14 +201,28 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing }) {
           </motion.span>
         </button>
         {/* Sibling of the toggle, never nested inside it (invalid HTML). */}
-        {group.type === "promote" && (
+        {action && (
           <Button variant="soft" size="sm" className="shrink-0"
-            loading={promoting === "all"} disabled={!!promoting}
-            onClick={promoteAll}>
-            <Megaphone aria-hidden /> Promote all
+            loading={actionBusy} disabled={actionBusy}
+            aria-expanded={action.amount ? amountOpen : undefined}
+            onClick={() => (action.amount
+              ? setAmountOpen((o) => !o)
+              : action.run({ group, promoteAll, lowerAll }))}>
+            <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
       </div>
+      <AnimatePresence initial={false}>
+        {action?.amount && amountOpen && (
+          <BulkAmountPanel
+            amount={action.amount} count={group.recs.length} busy={busy}
+            onCancel={() => setAmountOpen(false)}
+            onSubmit={(value) => {
+              setAmountOpen(false);
+              action.run({ group, promoteAll, lowerAll }, value);
+            }} />
+        )}
+      </AnimatePresence>
       <AnimatePresence initial={false}>
         {open && (
           <motion.div
@@ -248,6 +355,33 @@ export function Dashboard() {
     } catch (e) {
       toast(`Couldn't promote all: ${e.message}`, { kind: "error" });
     } finally { setPromoting(null); }
+  };
+
+  // Bulk price drop across one suggestion group. Reports per-listing outcomes
+  // rather than a bare success: over a dozen listings some will have sold or
+  // ended since the suggestion was computed, and "lowered 11, skipped 1" is
+  // the honest answer.
+  const [bulkBusy, setBulkBusy] = useState(null); // group type, or null
+  const lowerAll = async (group, percent) => {
+    const ids = group.recs.map((r) => r.listing_id);
+    setBulkBusy(group.type);
+    try {
+      const res = await postJson("/api/ebay/lower-prices",
+        { percent, listing_ids: ids });
+      const parts = [];
+      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${percent}%`);
+      if (res.skipped) parts.push(`${res.skipped} skipped`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      // The server caps one run so the request can't outlive the gateway.
+      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
+      toast(parts.join(" · ") || "Nothing to change.", {
+        kind: res.changed ? "success" : res.failed ? "error" : "info",
+      });
+      refreshInsights();
+      loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
+    } finally { setBulkBusy(null); }
   };
 
   const askDelete = async (item) => {
@@ -453,7 +587,8 @@ export function Dashboard() {
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} promoting={promoting}
                   promoteAll={promoteAll} promoteOne={promoteOne}
-                  openListing={openListing} />
+                  openListing={openListing} lowerAll={lowerAll}
+                  busy={bulkBusy === g.type} />
               ));
             })()}
           </Card>

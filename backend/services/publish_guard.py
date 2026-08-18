@@ -1,0 +1,90 @@
+"""One listing, one live listing — the guard against publishing twice.
+
+Creating an eBay listing is the only step in the publish pipeline that isn't
+naturally idempotent. Everything else keys off something stable (the Inventory
+API keys off the session's SKU, a revise keys off the item id), but
+AddFixedPriceItem has no natural key: call it twice and the seller has two live
+listings for one item. That is exactly what sellers were seeing — a pair of
+identical cards, one created here and one "imported", because the store sync
+faithfully pulled back the second listing the app had created without knowing.
+
+Two independent things had to line up for that:
+
+  * Publishing was decided from the listing the BROWSER sent. A payload from
+    before the first publish carries no ebay_listing_id and no source, so it
+    reads as "never listed" no matter what the stored record says.
+  * Nothing serialized publishes of the same listing. A publish takes tens of
+    seconds (eBay ingests every photo), which is long enough for a seller to
+    reload and press the button again — and a reload resets the browser's own
+    double-submit guard. Both requests then read the pre-publish record and
+    both create.
+
+This module supplies the two pieces that close it: `session_lock` so publishes
+of one listing run one at a time, and `idempotency_key` so eBay itself refuses
+the second create even when the two attempts don't share a process — a second
+Fly machine, a retried request, or a record whose write was lost.
+"""
+from __future__ import annotations
+
+import threading
+from typing import Optional
+
+# One lock per listing, created on demand. Publishes of DIFFERENT listings must
+# still run concurrently (bulk publish leans on that), so this can't be a
+# single global lock.
+#
+# Entries are never evicted: a lock is ~50 bytes, one per listing the process
+# has published, and a stale one is harmless. Evicting them safely would mean
+# proving nobody is about to take the lock, which is the same race this exists
+# to prevent.
+_locks: dict[str, threading.Lock] = {}
+_registry_lock = threading.Lock()
+
+
+def session_lock(session_id: str) -> threading.Lock:
+    """The publish lock for one listing. Hold it around the read-decide-create
+    sequence so two publishes of the same listing can't both decide to create.
+
+    The lock is process-local, so it can't be the only defence — a second
+    machine has its own. It handles the common case (one server, a seller
+    pressing publish twice) cheaply, and `idempotency_key` covers the rest.
+    """
+    with _registry_lock:
+        lock = _locks.get(session_id)
+        if lock is None:
+            lock = _locks[session_id] = threading.Lock()
+        return lock
+
+
+def idempotency_key(session_id: str, replacing_item_id: str = "") -> str:
+    """The key that makes creating THIS listing safe to repeat.
+
+    Deterministic, so a retry of the same publish computes the same key and
+    eBay can recognise it. It travels as both UUID and (fixed-price)
+    InventoryTrackingNumber; see ebay_trading.create_listing.
+
+    `replacing_item_id` distinguishes a relist from the publish that came
+    before it. A relist is a genuinely new listing — the seller ended the old
+    one and asked for a fresh item id — so it must NOT collide with the
+    original key. Deriving it from the item being replaced keeps a *retried*
+    relist idempotent while letting an intentional one through.
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return ""
+    key = f"qf-{session_id}"
+    if replacing_item_id:
+        key += f"-r{str(replacing_item_id).strip()}"
+    return key[:50]  # InventoryTrackingNumber's ceiling
+
+
+def stored_item_id(record: Optional[dict]) -> str:
+    """The eBay item id the SERVER has for this listing, ignoring the browser.
+
+    The decision to create rather than revise has to be made from this, not
+    from the submitted payload: a stale tab, a resumed draft, or a client that
+    simply doesn't round-trip the field all look like "never published"
+    otherwise, and the cost of believing them is a duplicate live listing.
+    """
+    listing = ((record or {}).get("listing") or {})
+    return str(listing.get("ebay_listing_id") or "").strip()

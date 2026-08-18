@@ -154,6 +154,9 @@ Without them, you can still type a category ID manually in the preview.
 | `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `GET`  | `/api/insights` | Ranked "what to do next" actions across the user's listings |
+| `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
+| `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 | `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |
@@ -358,6 +361,69 @@ an in-app edit. Sold and ended listings are reconciled on the same pass. One run
 imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
 repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
 default 6) so a big store doesn't outlive the request.
+
+The sync matches on the **eBay item id**, not just its own `ebay-<itemId>` rows,
+so a listing the app published (which lives under its session id) is updated in
+place instead of imported again as a second card. The read that feeds that match
+covers the seller's whole store — `EBAY_SYNC_KNOWN_LIMIT`, default 10000 rows,
+deliberately far above any real store, because a record the read misses is one
+the dedupe can't match.
+
+### One listing, one live listing
+
+Creating a listing is the only step in the publish pipeline that isn't naturally
+idempotent: call `AddFixedPriceItem` twice and the seller has two live listings
+and an eBay policy problem. A publish takes tens of seconds (eBay ingests every
+photo), which is long enough for a seller to reload and press the button again —
+and a reload resets the browser's own double-submit guard. Three defences, in
+`services/publish_guard.py`:
+
+- **Publishes of one listing are serialized** (a per-listing lock), so two
+  overlapping requests can't both decide to create.
+- **The item id comes from the stored record, never the submitted payload.** A
+  payload assembled before the first publish carries no `ebay_listing_id` and no
+  `source`, and believing it reads as "never listed".
+- **The create carries an idempotency key** — as `UUID`, and (fixed-price) as
+  `InventoryTrackingNumber`, which is separately queryable. eBay refuses a
+  second create under the same key even when the two attempts never meet in one
+  process, and the app then adopts the listing that already exists rather than
+  posting a twin. A relist keys on the item it replaces, so an intentional
+  relist still goes through while a retried one doesn't double-list.
+
+## Suggested actions (and applying them in bulk)
+
+The Dashboard's **Suggested actions** card is `services/recommender.py` over the
+signals the app already has — listing status, age, price, photo count, promotion
+state, plus eBay views/watchers when the scope is granted. Rules turn a store
+into a short ranked list: finish a draft, relist an ended item, promote a live
+one, drop a stale price, add photos, fill in specifics. Suggestions are grouped
+by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
+listing so the list spans the portfolio instead of piling onto one item.
+
+A group whose edit makes sense across every listing in it gets a **bulk action**
+in its header, because repeating one edit twelve times by hand is the whole
+problem:
+
+- **Lower prices → "Lower all…"** opens an amount field (*lower every price in
+  this group by X %*) with its own submit. Each listing is repriced and pushed to
+  eBay through the same revise path a single edit uses.
+- **Promote listings → "Promote all"** promotes every live, unpromoted listing at
+  eBay's recommended ad rate.
+
+Photos, specifics, finish and relist deliberately have none: the first two need a
+human looking at each item, and the last two create listings, which isn't
+something to put behind a single button. The rules bulk runs follow —
+`services/bulk_actions.py`:
+
+- **Scope is never implicit.** The client sends the group's own listing ids, so a
+  group of twelve can't turn into the whole store.
+- **A listing that can't take the change is skipped with a reason**, not failed —
+  a group computed a while ago will contain items that have since sold or ended.
+- **One listing's failure never stops the run**, and the response reports per
+  listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
+- **The run is bounded** (`BULK_PRICE_CAP`, default 40) because each listing is
+  its own serial eBay revise; the remainder comes back as `deferred` for another
+  pass instead of the request outliving the gateway.
 
 ## Sold notifications & shipping labels
 
