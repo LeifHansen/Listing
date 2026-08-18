@@ -151,8 +151,10 @@ export function DuplicateListings({ onChanged }) {
     }))) return;
     setEnding(item.listing_id);
     try {
-      await postJson("/api/ebay/end-listing", { session_id: item.listing_id });
-      toast("Listing ended — find it under Inactive.", { kind: "success" });
+      const res = await postJson("/api/ebay/end-listing", { session_id: item.listing_id });
+      toast(res.status === "sold"
+        ? "Turns out this one sold on eBay — it's filed under Sold. 🎉"
+        : "Listing ended — find it under Inactive.", { kind: "success" });
       await load();
       onChanged?.();
     } catch (e) {

@@ -461,6 +461,9 @@ export function useListingForm() {
         ? states.ebay.status === "published"
         : !!session?.listing?.ebay_listing_id;
       let message = "";
+      // Where the record actually landed: "ended" (Inactive) unless eBay
+      // reveals the listing had already SOLD — then it files under Sold.
+      let endedAs = "ended";
       for (const key of others) {
         try {
           const res = await postJson(`/api/${key}/end-listing`, { session_id: sessionId });
@@ -472,9 +475,10 @@ export function useListingForm() {
       if (ebayLive || !others.length) {
         const res = await postJson("/api/ebay/end-listing", { session_id: sessionId });
         message = res.message || message;
+        if (res.status === "sold") endedAs = "sold";
       }
       toast(message || "Listing ended.", { kind: "success" });
-      setSession((s) => (s ? { ...s, status: "ended" } : s));
+      setSession((s) => (s ? { ...s, status: endedAs } : s));
       setPublishResult(null);
       loadListings({ quiet: true });
     } catch (e) {

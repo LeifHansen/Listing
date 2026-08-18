@@ -144,9 +144,13 @@ export function ListingsView({ search = "" }) {
     }))) return;
     setEndingId(item.id);
     try {
-      await postJson("/api/ebay/end-listing", { session_id: item.id });
+      const res = await postJson("/api/ebay/end-listing", { session_id: item.id });
       await loadListings({ quiet: true });
-      toast("Listing ended — find it under Inactive.", { kind: "success" });
+      // Ending can discover the listing already finished on eBay — say where
+      // it actually went (a sale files under Sold, not Inactive).
+      toast(res.status === "sold"
+        ? "Turns out this one sold on eBay — it's filed under Sold. 🎉"
+        : "Listing ended — find it under Inactive.", { kind: "success" });
     } catch (e) {
       toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
     } finally {
