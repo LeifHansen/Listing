@@ -86,13 +86,7 @@ export function ProgressChip({ state = "todo", className }) {
 // ---------------------------------------------------------------------------
 
 export function originOf(item) {
-  const l = item.listing || {};
   if (String(item.id || "").startsWith("ebay-")) return "imported";
-  const live = item.status === "published" || item.status === "live";
-  // Live but NOT Trading-routed and carrying an eBay id = published back when
-  // the app used the Inventory API. eBay locks those out of Seller Hub's own
-  // editors, so the seller needs to know edits belong here.
-  if (live && (l.source || "") !== "ebay" && l.ebay_listing_id) return "app_classic";
   return "app";
 }
 
@@ -101,11 +95,6 @@ export const ORIGIN_META = {
     label: "Thryft",
     tone: "blue",
     tip: "Created with Thryft Shop. Fully editable here and in eBay Seller Hub — no restrictions.",
-  },
-  app_classic: {
-    label: "Thryft · app-managed",
-    tone: "yellow",
-    tip: "Created with Thryft Shop before the Seller Hub upgrade. eBay doesn't let its own Seller Hub edit this kind of listing — make changes here and they go live. Ending and relisting it converts it to a fully unrestricted listing.",
   },
   imported: {
     label: "eBay import",
