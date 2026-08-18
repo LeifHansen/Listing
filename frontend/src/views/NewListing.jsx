@@ -412,7 +412,7 @@ function Workflow() {
 // The merged Sell screen: upload box on top, then the drafts strip (one
 // click from Publish or Review & List), then the rest of the store below.
 function SellHome({ search }) {
-  const { startBulk, listingsJumpRef } = useApp();
+  const { listingsJumpRef } = useApp();
   const managerRef = useRef(null);
 
   // A deep link (dashboard tile, "View all") asked for a listings tab:
@@ -436,7 +436,7 @@ function SellHome({ search }) {
             Start with photos — the AI handles the boring parts.
           </p>
         </div>
-        <UploadPhase onBulkStarted={startBulk} />
+        <UploadPhase />
       </div>
       <DraftsStrip search={search} />
       <div ref={managerRef} className="scroll-mt-4">
