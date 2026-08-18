@@ -1490,24 +1490,25 @@ async def upload_more(
         staged.append((idx, src))
     rotations = await run_in_threadpool(
         orient.detect_rotations, [src for _idx, src in staged])
+    # One batched call so added photos share the same worker pool as the main
+    # upload path, instead of one serial threadpool round-trip per photo.
+    results = await run_in_threadpool(
+        images.optimize_batch,
+        [(src, opt_dir / f"img_{idx:03d}.jpg", rotations.get(src.name, 0))
+         for idx, src in staged],
+        strip_bg)
     new_names: list[str] = []
     # Photos whose cutout failed (engine down / out of credits) kept their
     # background, so they owe nothing — counted the same way /api/upload does.
     bg_failed = 0
-    for idx, src in staged:
-        try:
-            res = await run_in_threadpool(
-                images.optimize, src, opt_dir / f"img_{idx:03d}.jpg", strip_bg,
-                rotations.get(src.name, 0))
-            new_names.append(f"img_{idx:03d}.jpg")
-            if res.get("bg_error"):
-                bg_failed += 1
-        except OSError as exc:
-            tokens.refund(spent)
-            raise HTTPException(
-                507, "The server is out of storage space — try again shortly.") from exc
-        except Exception as exc:  # noqa: BLE001 - skip a bad file, keep the rest
-            log.warning("upload-more: couldn't process %s: %s", src.name, exc)
+    for (idx, src), res in zip(staged, results):
+        if res.get("error"):  # skip a bad file, keep the rest
+            log.warning("upload-more: couldn't process %s: %s",
+                        src.name, res["error"])
+            bg_failed += 1
+            continue
+        new_names.append(f"img_{idx:03d}.jpg")
+        if res.get("bg_error"):
             bg_failed += 1
     if not new_names:
         tokens.refund(spent)

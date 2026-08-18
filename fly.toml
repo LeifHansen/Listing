@@ -22,6 +22,10 @@ primary_region = 'sjc'
   # download and no volume dependency.
   REMBG_MODEL = 'isnet-general-use'
   REMBG_MAX_SIDE = '1024'
+  # Photos in flight per batch with the local engine. Inference stays
+  # single-flight (in-process lock); this overlaps the mask/crop/encode work
+  # around it. 3 is sized for the 4GB VM below — drop with the memory.
+  PHOTO_LOCAL_WORKERS = '3'
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...

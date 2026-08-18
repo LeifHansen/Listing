@@ -309,8 +309,9 @@ def _grow_within(seed, allowed, reach: int):
         return cur
 
 
-def _solidify_border(alpha: Image.Image,
-                     source: Image.Image) -> Optional[Image.Image]:
+def _solidify_border(alpha: Image.Image, source: Image.Image,
+                     out_size: Optional[tuple[int, int]] = None,
+                     ) -> Optional[Image.Image]:
     """Consolidate a raw matte into one solid silhouette whose border sits on
     the item's actual edge. Returns None when it can't run (disabled, no numpy,
     degenerate mask) so the caller falls back to the plain erode.
@@ -344,6 +345,7 @@ def _solidify_border(alpha: Image.Image,
     except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime
         return None
 
+    out_size = out_size or alpha.size
     w, h = alpha.size
     if min(w, h) < 32:
         return None
@@ -365,7 +367,7 @@ def _solidify_border(alpha: Image.Image,
         img = Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), "L")
         # BILINEAR back up: the ramp it leaves across the edge IS the cutout's
         # anti-aliasing, and unlike LANCZOS it can't overshoot a halo back in.
-        return img if img.size == alpha.size else img.resize(alpha.size, Image.BILINEAR)
+        return img if img.size == out_size else img.resize(out_size, Image.BILINEAR)
 
     reach = max(2, round(side * _EDGE_SNAP_FRAC))
     solid = Image.fromarray(np.where(arr, 255, 0).astype(np.uint8), "L")
@@ -405,12 +407,6 @@ def _solidify_border(alpha: Image.Image,
     item_luma, item_chroma = _colour_split(item.reshape(1, 1, 3))
     contrast = float(_colour_gap(item_luma, item_chroma, backdrop)[0, 0])
     tol = max(10.0, min(_EDGE_SNAP_TOL, 0.35 * contrast))
-    # Item, per the photo: clearly off the backdrop's colour, at least as close
-    # to the item's, and not on the far side of a real edge. The border only
-    # ever advances through these, which is what keeps recovering a hem from
-    # turning into a land-grab across the whole photo.
-    itemish = ((d_bg > tol) & (d_bg * 1.15 > d_item)
-               & (_edge_strength(src) < max(12.0, _EDGE_BLOCK_FRAC * contrast)))
     if busy > _BUSY_BACKDROP_STD:
         # A cluttered scene: "not the backdrop colour" no longer means "item",
         # so don't grow at all. Trimming below still runs.
@@ -418,6 +414,14 @@ def _solidify_border(alpha: Image.Image,
                  "into — trimming only", busy)
         grown = arr
     else:
+        # Item, per the photo: clearly off the backdrop's colour, at least as
+        # close to the item's, and not on the far side of a real edge. The
+        # border only ever advances through these, which is what keeps
+        # recovering a hem from turning into a land-grab across the whole
+        # photo. (Built only on this branch — the busy-backdrop path never
+        # grows, so it never needs the edge field.)
+        itemish = ((d_bg > tol) & (d_bg * 1.15 > d_item)
+                   & (_edge_strength(src) < max(12.0, _EDGE_BLOCK_FRAC * contrast)))
         # Shade: the backdrop's own colour with some light taken out — same
         # hue, dimmer, but not dramatically dimmer (a cast shadow keeps most of
         # the backdrop's brightness; a genuinely dark item does not). The
@@ -456,10 +460,16 @@ def _solidify_border(alpha: Image.Image,
                     max(1.0, side * _EDGE_CLOSE_FRAC * 0.5)), dtype=np.uint8) >= 128)
 
 
-def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.Image:
-    """rembg subject alpha (mode L, same size as img_rgb), computed on a copy
-    capped to `max_side` (defaults to the fast bulk size) then upscaled back.
-    A larger max_side feeds the model more detail = crisper edges."""
+def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
+                upscale: bool = True) -> Image.Image:
+    """rembg subject alpha (mode L), computed on a copy capped to `max_side`
+    (defaults to the fast bulk size) then upscaled back to img_rgb's size.
+    A larger max_side feeds the model more detail = crisper edges.
+
+    `upscale=False` returns the matte at the resolution the model actually
+    produced. The refinement passes make their decisions at or below that
+    scale anyway, so working on the pre-upscale matte does the same work on
+    ~10x fewer pixels; _refine_alpha upscales once at the end instead."""
     global _rembg_session
     from rembg import new_session, remove
 
@@ -473,7 +483,7 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.I
         if _rembg_session is None:
             _rembg_session = new_session(_REMBG_MODEL)
         alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
-    if alpha.size != img_rgb.size:
+    if upscale and alpha.size != img_rgb.size:
         # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
         # high-contrast edges, ringing a faint halo of the old background back
         # in — exactly the "ghost background" the cutout is meant to remove.
@@ -482,7 +492,8 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.I
 
 
 def _refine_alpha(alpha: Image.Image,
-                  source: Optional[Image.Image] = None) -> Image.Image:
+                  source: Optional[Image.Image] = None,
+                  out_size: Optional[tuple[int, int]] = None) -> Image.Image:
     """Clean the matte into a natural cutout: despeckle, kill the faint
     background ghost, solidify the item's border against the photo, then
     lightly feather the edge so it blends instead of looking stickered-on.
@@ -499,20 +510,32 @@ def _refine_alpha(alpha: Image.Image,
     the item (the 'bleeds off frame' artifact). We restore the hardened,
     un-feathered alpha in a thin band along the frame so an edge-touching
     subject stays solid to the border. Where the subject doesn't reach an edge
-    the hardened alpha is 0 there, so those borders are unchanged."""
-    w, h = alpha.size
+    the hardened alpha is 0 there, so those borders are unchanged.
+
+    `out_size` is the size the refined matte must come back at (defaults to
+    alpha's own size). Passing the matte at the model's native resolution with
+    out_size set to the photo's size runs the despeckle/harden work on ~10x
+    fewer pixels; the final edge is the same BILINEAR ramp the full-size path
+    produced, since that upscale always happened somewhere in the chain."""
+    out_size = out_size or alpha.size
+    w, h = out_size
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
     span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
     hardened = alpha.point(lambda a: 0 if a < _ALPHA_LOW
                            else 255 if a > _ALPHA_HIGH
                            else round((a - _ALPHA_LOW) * 255 / span))
-    solid = _solidify_border(hardened, source) if source is not None else None
+    solid = (_solidify_border(hardened, source, out_size=out_size)
+             if source is not None else None)
     if solid is not None:
         # The solidified border already decided, per pixel, where the item
         # stops — eroding on top of that would only walk it back inside again.
         hardened = solid
         refined = hardened.filter(ImageFilter.GaussianBlur(0.6))
     else:
+        if hardened.size != out_size:
+            # Upscale BEFORE the erode so the fallback trims the same ~1px at
+            # output scale it always has, not 1px at matte scale (~3px here).
+            hardened = hardened.resize(out_size, Image.BILINEAR)
         # Erode 1px to cut the residual background fringe, then a sub-pixel
         # feather so the composited edge is smooth rather than jagged.
         refined = hardened.filter(ImageFilter.MinFilter(3)).filter(
@@ -680,10 +703,20 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
     if shadow:
         # Shadow = the silhouette, blurred, nudged down/right, at low opacity —
         # a subtle contact shadow that grounds the item on the white backdrop.
+        # It's low-frequency by construction (a ~1.5%-of-frame blur), so render
+        # it on a small copy and upscale — visually identical at ~1/10 the cost
+        # of blurring the full-size mask.
         blur = max(4, round(min(w, h) * 0.015))
         off = max(2, round(min(w, h) * 0.010))
-        shadow_a = alpha.filter(ImageFilter.GaussianBlur(blur)).point(
-            lambda a: int(a * 0.40))
+        scale = min(1.0, 800 / max(w, h))
+        if scale < 1.0:
+            sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
+            shadow_a = alpha.resize((sw, sh), Image.BILINEAR).filter(
+                ImageFilter.GaussianBlur(max(1.0, blur * scale))).point(
+                lambda a: int(a * 0.40)).resize((w, h), Image.BILINEAR)
+        else:
+            shadow_a = alpha.filter(ImageFilter.GaussianBlur(blur)).point(
+                lambda a: int(a * 0.40))
         shifted = Image.new("L", (w, h), 0)
         shifted.paste(shadow_a, (off, off))
         canvas.paste(Image.new("RGB", (w, h), (55, 55, 55)), (0, 0), shifted)
@@ -706,7 +739,12 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     from PIL import ImageStat
 
     rgb = img.convert("RGB")
-    alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side), source=rgb)
+    # Refine the matte at the resolution the model produced it (upscale=False):
+    # every decision in _refine_alpha/_solidify_border happens at or below that
+    # scale anyway, so the old full-size median/harden was ~10x the pixels for
+    # the same answer. out_size brings the finished matte back to photo size.
+    alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side, upscale=False),
+                          source=rgb, out_size=rgb.size)
     # Put back anything the matte punched out of the item's middle BEFORE the
     # guards below: a matte that ate the interior and left a rim reads as
     # "subject nearly erased" (or as a big dark removed area), and bailing out
@@ -1377,18 +1415,21 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
 # per-call with retry/backoff, so a bigger pool degrades to pacing, not
 # failures.
 _PHOTO_BATCH_WORKERS = int(os.getenv("PHOTO_BATCH_WORKERS", "8") or "8")
+# Concurrency when the LOCAL engine (or no cutout at all) does the work.
+# Model inference stays single-flight behind _INFER_LOCK regardless, but
+# everything around it — mask refinement, hole fill, compose, crop, tone,
+# encode, roughly half of each photo's wall clock — is ordinary Pillow/numpy
+# work that releases the GIL. A couple of photos in flight let one photo's
+# post-processing overlap the next photo's inference. Kept small because each
+# in-flight photo holds a few full-size working buffers; PHOTO_LOCAL_WORKERS=1
+# restores the old strictly-serial behavior.
+_LOCAL_BATCH_WORKERS = int(os.getenv("PHOTO_LOCAL_WORKERS", "2") or "2")
 
 
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
                  progress=None) -> list[dict]:
     """Optimize every image in src_dir. `progress(done, total)` (optional) is
-    called after each photo so long bulk jobs can show a live count.
-
-    When the engine chain leads with a remote API (Pixian/Photoroom/Adobe),
-    the set is processed a few photos at a time (each one is a call we mostly
-    just wait on). With the local engine, photos run one at a time — all the
-    work is local CPU/RAM then, and concurrent model inference would stack
-    peak memory."""
+    called after each photo so long bulk jobs can show a live count."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
@@ -1397,12 +1438,27 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     jobs = [(i, src) for i, src
             in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
             if src.suffix.lower() in exts]
-    total = len(jobs)
     # One batched vision pass over the whole set decides which photos were shot
     # with the ITEM lying sideways or upside-down — something EXIF can't tell
     # us. Done up front so each photo is straightened before its cutout and
     # square crop, not after.
     rotations = orient.detect_rotations([src for _i, src in jobs])
+    return optimize_batch(
+        [(src, dst_dir / f"img_{i:03d}.jpg", rotations.get(src.name, 0))
+         for i, src in jobs],
+        remove_bg=remove_bg, progress=progress)
+
+
+def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
+                   progress=None) -> list[dict]:
+    """Optimize (src, dst, clockwise-rotation) jobs, pooled to fit the engine.
+
+    A chain led by a remote API (Pixian/Photoroom/Adobe) gets a wide pool —
+    each photo is mostly a network call we wait on. The local engine (and the
+    no-cutout path) gets a small pool: inference is serialized by _INFER_LOCK
+    either way, but the pipeline around it overlaps. Results come back in job
+    order; a failed photo yields {"file", "error"} instead of raising."""
+    total = len(jobs)
     done = 0
     done_lock = threading.Lock()
 
@@ -1417,22 +1473,19 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
             except Exception:  # noqa: BLE001 - progress is display-only
                 pass
 
-    def _one(job: tuple[int, Path]) -> dict:
-        i, src = job
+    def _one(job: tuple[Path, Path, int]) -> dict:
+        src, dst, rotate = job
         try:
-            result = optimize(src, dst_dir / f"img_{i:03d}.jpg", remove_bg,
-                              rotate=rotations.get(src.name, 0))
+            result = optimize(src, dst, remove_bg, rotate=rotate)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         _tick()
         return result
 
-    # Pool only when photos will actually hit a remote engine; plain local
-    # optimization (no cutout, or the local model) is CPU/RAM-bound and must
-    # stay serial — inference is lock-serialized anyway.
     chain = config.bg_engine_chain() if remove_bg else []
     remote_first = bool(chain) and chain[0] != "local"
-    workers = min(_PHOTO_BATCH_WORKERS, total) if remote_first else 1
+    workers = min(_PHOTO_BATCH_WORKERS if remote_first else _LOCAL_BATCH_WORKERS,
+                  total)
     if workers > 1:
         from concurrent.futures import ThreadPoolExecutor
 
