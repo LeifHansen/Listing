@@ -7,6 +7,13 @@ The pipeline (per photo): auto-orient -> background removal + studio effect
 (the cutout composited on white with our soft contact shadow, then the studio
 enhancement pass) -> subject-aware square crop -> resize to target -> save.
 
+Whatever engine produces the matte, the local one's silhouette is solidified
+before anything is composited (_solidify_border): the border is closed into one
+continuous outline, floating crumbs are dropped, and the outline is then snapped
+onto the item's real edge using the photo itself. A cutout is only ever as good
+as that boundary — every visible failure (bites out of a hem, a fringe of the
+old backdrop, an item shedding fragments) lives there.
+
 Which remover runs is config.bg_engine_chain() (BG_ENGINE): by default the
 budget Pixian.ai API when its keys are present, otherwise the in-house rembg
 model — so the module works with no external service at all. The pricey
@@ -140,6 +147,314 @@ _HOLE_SCAN_SIDE = 512
 # treated as enclosed. Real photos converge in a handful.
 _FLOOD_SWEEPS = 24
 
+# --- border solidification --------------------------------------------------
+# Before anything gets composited, the raw matte's boundary is consolidated
+# into one solid, continuous silhouette that follows the item's real edge (see
+# _solidify_border). This is what stops the "chewed" cutouts: denim hems, thin
+# straps and low-contrast edges come back from the model as a ragged, pitted
+# outline, and compositing that straight onto white saws visible bites out of
+# the product. Off switch: BG_SOLIDIFY=off (falls back to the old plain erode).
+_SOLIDIFY = os.getenv("BG_SOLIDIFY", "on").strip().lower() not in (
+    "off", "0", "false", "no", "none", "")
+# Border work runs on a downscaled copy — the decisions are shape-scale, not
+# pixel-scale, and 768px keeps a 1600px photo at a few milliseconds. The mask
+# comes back up bilinearly, which also gives the edge its anti-aliasing.
+_SOLIDIFY_SCAN_SIDE = int(os.getenv("BG_SOLIDIFY_SCAN_SIDE", "768") or "768")
+# Gap-bridging radius as a fraction of the short side: a morphological close
+# with this sigma seals notches and pinholes up to ~2x its width and smooths
+# the staircase left by upscaling a small matte. 0.6% of 1600px ~ 10px, which
+# is a frayed hem — well under any real gap between, say, two shoes.
+_EDGE_CLOSE_FRAC = float(os.getenv("BG_EDGE_CLOSE", "0.006") or "0.006")
+# How far the border may travel, in or out, as a fraction of the short side
+# (4% of 1600px = 64px). Every step is gated on the photo's own colours, so
+# this is a ceiling on how much of a mangled edge can be rebuilt, not a
+# distance the border will actually move.
+_EDGE_SNAP_FRAC = float(os.getenv("BG_EDGE_SNAP", "0.04") or "0.04")
+# Colour distance from the measured backdrop at which a pixel stops being
+# backdrop and starts being item, in the luma-damped space below.
+_EDGE_SNAP_TOL = float(os.getenv("BG_EDGE_TOLERANCE", "24") or "24")
+# Brightness counts less than colour when deciding backdrop vs item: a contact
+# shadow is the backdrop's own colour turned down, so weighting luma equally
+# would read it as "not the backdrop" and grow the item into its own shadow.
+_LUMA_WEIGHT = float(os.getenv("BG_LUMA_WEIGHT", "0.35") or "0.35")
+# Refuse a snap that inflates the silhouette by more than this share of itself
+# — that is the item leaking into scenery, not a border being recovered.
+_MAX_GROWTH = float(os.getenv("BG_MAX_GROWTH", "0.35") or "0.35")
+# Growth stops at any edge in the photo stronger than this share of the
+# backdrop-to-item contrast. The item's own outline is the strongest edge
+# around it, so the border lands on it instead of wandering past — and the
+# soft edge where a cast shadow meets the item stops the border there too,
+# which is what keeps the item from dragging its shadow onto the white canvas.
+_EDGE_BLOCK_FRAC = float(os.getenv("BG_EDGE_BLOCK", "0.4") or "0.4")
+# How many pixels the border may reclaim through backdrop-coloured shade.
+_SHADE_REACH = int(os.getenv("BG_SHADE_REACH", "2") or "2")
+# ...and how dim a pixel can get before it's too dark to be the backdrop in
+# shadow at all, as a fraction of the backdrop's brightness. Below this it's
+# treated as item, so black jeans on a white sweep still get their border back.
+_SHADE_FLOOR = float(os.getenv("BG_SHADE_FLOOR", "0.5") or "0.5")
+# A backdrop this varied (mean per-channel std) is a cluttered scene, not a
+# sweep — there the "off-backdrop means item" inference doesn't hold, so the
+# border is only trimmed inward, never grown.
+_BUSY_BACKDROP_STD = float(os.getenv("BG_BUSY_BACKDROP", "34") or "34")
+# Detached crumbs smaller than this share of the biggest kept region are matte
+# noise (dust, a shadow edge, a speck of backdrop texture), not a second item.
+# Generous by design: a shoe next to its pair, or a tag beside a garment, is
+# tens of percent of the main blob and always survives.
+_SPECK_FRAC = float(os.getenv("BG_SPECK_FRAC", "0.02") or "0.02")
+
+
+def _blur_threshold(mask: Image.Image, sigma: float, cut: int) -> Image.Image:
+    """Binary morphology via blur + threshold: cut < 128 dilates the mask by
+    about `sigma`, cut > 128 erodes it by about the same, and both smooth the
+    contour on the way. Far cheaper than a rank filter at these radii, and the
+    radius is a float so it can scale with the photo."""
+    if sigma <= 0:
+        return mask
+    return mask.filter(ImageFilter.GaussianBlur(sigma)).point(
+        lambda a: 255 if a >= cut else 0)
+
+
+def _close_mask(mask: Image.Image, sigma: float) -> Image.Image:
+    """Morphological close: grow then shrink, which fills gaps, notches and
+    pinholes up to ~2*sigma across while leaving the silhouette's size and its
+    convex corners essentially where they were."""
+    return _blur_threshold(_blur_threshold(mask, sigma, 40), sigma, 215)
+
+
+def _drop_specks(arr):
+    """Delete detached crumbs from a boolean subject mask, keeping every region
+    big enough to be a real part of the listing. No-op without scipy (it rides
+    in with rembg) or when there's only one region."""
+    import numpy as np
+
+    try:
+        from scipy import ndimage
+    except Exception:  # noqa: BLE001 - cleanup is a bonus, never a requirement
+        return arr
+    labels, count = ndimage.label(arr)
+    if count <= 1:
+        return arr
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    keep = sizes >= max(_SPECK_FRAC * sizes.max(), 0.0008 * arr.size)
+    keep[0] = False
+    return keep[labels]
+
+
+def _colour_gap(luma, chroma, reference, luma_weight: Optional[float] = None):
+    """Distance from every pixel to one reference colour, given the pixels
+    already split into brightness and colour (see _colour_split), with
+    brightness damped by `luma_weight` (_LUMA_WEIGHT by default; 0 compares
+    colour alone, ignoring how light or dark the pixel is).
+
+    Plain RGB distance can't tell a shadow from a different material: a contact
+    shadow is the backdrop's own colour with the light taken out, and at full
+    luma weight it reads as far from the backdrop as the item does. Comparing
+    mostly on colour and only a little on brightness keeps shadows, vignetting
+    and uneven lighting on the backdrop's side of the line."""
+    import numpy as np
+
+    weight = _LUMA_WEIGHT if luma_weight is None else luma_weight
+    ref_luma = float(np.mean(reference))
+    ref_chroma = np.asarray(reference, dtype=np.float32) - ref_luma
+    return np.sqrt(weight * (luma - ref_luma) ** 2
+                   + ((chroma - ref_chroma) ** 2).sum(axis=-1))
+
+
+def _colour_split(rgb):
+    """Split pixels into (brightness, colour-without-brightness) once, so the
+    several comparisons a border decision needs don't each redo it."""
+    luma = rgb.mean(axis=-1)
+    return luma, rgb - luma[..., None]
+
+
+def _edge_strength(src: Image.Image):
+    """Per-pixel edge magnitude of a photo, mildly blurred first so fabric
+    weave and sensor noise don't register as boundaries."""
+    import numpy as np
+
+    sm = np.asarray(src.filter(ImageFilter.GaussianBlur(1.2)), dtype=np.float32)
+    gy, gx = np.zeros_like(sm), np.zeros_like(sm)
+    gy[1:-1] = (sm[2:] - sm[:-2]) * 0.5
+    gx[:, 1:-1] = (sm[:, 2:] - sm[:, :-2]) * 0.5
+    return np.sqrt((gx ** 2 + gy ** 2).sum(axis=-1))
+
+
+def _grow_within(seed, allowed, reach: int):
+    """Flood `seed` outward through `allowed` for at most `reach` pixels — a
+    constrained dilation, so the silhouette can only expand across pixels the
+    photo agrees are item, and only near where it already was.
+
+    scipy does this in C; the numpy fallback is the same 4-connected expansion
+    written out, which at scan resolution is a few milliseconds."""
+    import numpy as np
+
+    try:
+        from scipy import ndimage
+        return ndimage.binary_dilation(seed, np.ones((3, 3), bool),
+                                       iterations=reach, mask=allowed)
+    except Exception:  # noqa: BLE001 - fall back to plain numpy
+        cur = seed.copy()
+        for _ in range(reach):
+            nxt = cur.copy()
+            nxt[1:, :] |= cur[:-1, :]
+            nxt[:-1, :] |= cur[1:, :]
+            nxt[:, 1:] |= cur[:, :-1]
+            nxt[:, :-1] |= cur[:, 1:]
+            nxt &= allowed
+            nxt |= seed
+            if nxt.sum() == cur.sum():
+                break
+            cur = nxt
+        return cur
+
+
+def _solidify_border(alpha: Image.Image,
+                     source: Image.Image) -> Optional[Image.Image]:
+    """Consolidate a raw matte into one solid silhouette whose border sits on
+    the item's actual edge. Returns None when it can't run (disabled, no numpy,
+    degenerate mask) so the caller falls back to the plain erode.
+
+    Three passes, in order:
+
+    1. **Close** the mask: bridge the notches, pinholes and hairline splits the
+       model leaves along fabric edges, and smooth the staircase that upscaling
+       a 640-1024px matte to 1600px bakes into the contour. This alone is most
+       of the "solid border" — a cutout can only look clean if its outline is
+       continuous.
+    2. **Drop detached crumbs** so the result is the item, not the item plus a
+       confetti of speckles floating on the white canvas.
+    3. **Snap the border to the photo.** The matte's edge is only approximate,
+       so measure the two colours that actually meet there — the backdrop (well
+       outside the mask) and the item (well inside it) — and let the border
+       travel, in both directions, through whichever pixels resemble which.
+       Item the matte shaved off comes back; backdrop fringe it left behind is
+       eaten away. This is what fixes a light-wash garment on a white sweep,
+       where the model's edge wanders around inside the item and the old
+       blanket 1px erode only ever pushed it further in.
+
+    Growing is skipped on a cluttered backdrop, where "not the backdrop colour"
+    stops meaning "item"; trimming still runs. Growth also stops at real edges
+    in the photo and is capped in total, and if any of it somehow eats the
+    subject we return the merely-closed mask rather than a mangled one."""
+    if not _SOLIDIFY:
+        return None
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime
+        return None
+
+    w, h = alpha.size
+    if min(w, h) < 32:
+        return None
+    scale = min(1.0, _SOLIDIFY_SCAN_SIDE / max(w, h))
+    sw, sh = max(16, round(w * scale)), max(16, round(h * scale))
+    small = alpha if (sw, sh) == (w, h) else alpha.resize((sw, sh), Image.BILINEAR)
+    side = min(sw, sh)
+
+    closed = _close_mask(small.point(lambda a: 255 if a >= 128 else 0),
+                         max(1.0, side * _EDGE_CLOSE_FRAC))
+    arr = np.asarray(closed, dtype=np.uint8) >= 128
+    if not arr.any() or arr.all():
+        return None  # nothing kept, or nothing removed — no border to solidify
+    arr = _drop_specks(arr)
+    if not arr.any():
+        return None
+
+    def _out(mask) -> Image.Image:
+        img = Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), "L")
+        # BILINEAR back up: the ramp it leaves across the edge IS the cutout's
+        # anti-aliasing, and unlike LANCZOS it can't overshoot a halo back in.
+        return img if img.size == alpha.size else img.resize(alpha.size, Image.BILINEAR)
+
+    reach = max(2, round(side * _EDGE_SNAP_FRAC))
+    solid = Image.fromarray(np.where(arr, 255, 0).astype(np.uint8), "L")
+    outer = (np.asarray(_blur_threshold(solid, reach, 40), dtype=np.uint8) >= 128) & ~arr
+    far_bg = ~arr & ~outer  # backdrop well clear of the edge, so it is backdrop
+    if arr.sum() < 64 or far_bg.sum() < 64:
+        return _out(arr)  # subject fills the frame — no backdrop to compare to
+
+    src = source.convert("RGB")
+    if src.size != (sw, sh):
+        src = src.resize((sw, sh), Image.BILINEAR)
+    rgb = np.asarray(src, dtype=np.float32)
+    luma, chroma = _colour_split(rgb)
+    backdrop = np.median(rgb[far_bg], axis=0)
+    # Sample the item well inside its own edge. Reading it at the rim looks
+    # tempting (it is the most local sample) but a matte that overshoots puts
+    # leftover backdrop there, and the item would end up "measured" as the very
+    # colour we're removing — after which nothing gets trimmed. Step in far
+    # enough to clear that overshoot, and back off on a thin item that erodes
+    # away at that depth.
+    core = arr
+    for inset in (reach, reach * 0.5):
+        eroded = (np.asarray(_blur_threshold(solid, max(2.0, inset), 215),
+                             dtype=np.uint8) >= 128)
+        if eroded.sum() > max(64, 0.02 * arr.sum()):
+            core = eroded
+            break
+    item = np.median(rgb[core], axis=0)
+    d_bg = _colour_gap(luma, chroma, backdrop)
+    d_item = _colour_gap(luma, chroma, item)
+    busy = float(rgb[far_bg].std(axis=0).mean())
+
+    # How far apart those two colours actually are decides how picky we can
+    # be: on a strong separation, demand a clear difference from the backdrop;
+    # on a pale item against a white sweep there is no clear difference to be
+    # had, so scale the bar down rather than give up on the border entirely.
+    item_luma, item_chroma = _colour_split(item.reshape(1, 1, 3))
+    contrast = float(_colour_gap(item_luma, item_chroma, backdrop)[0, 0])
+    tol = max(10.0, min(_EDGE_SNAP_TOL, 0.35 * contrast))
+    # Item, per the photo: clearly off the backdrop's colour, at least as close
+    # to the item's, and not on the far side of a real edge. The border only
+    # ever advances through these, which is what keeps recovering a hem from
+    # turning into a land-grab across the whole photo.
+    itemish = ((d_bg > tol) & (d_bg * 1.15 > d_item)
+               & (_edge_strength(src) < max(12.0, _EDGE_BLOCK_FRAC * contrast)))
+    if busy > _BUSY_BACKDROP_STD:
+        # A cluttered scene: "not the backdrop colour" no longer means "item",
+        # so don't grow at all. Trimming below still runs.
+        log.info("bg-removal: backdrop too varied (std=%.0f) to grow the border "
+                 "into — trimming only", busy)
+        grown = arr
+    else:
+        # Shade: the backdrop's own colour with some light taken out — same
+        # hue, dimmer, but not dramatically dimmer (a cast shadow keeps most of
+        # the backdrop's brightness; a genuinely dark item does not). The
+        # border may creep a couple of pixels into shade, since a grey item
+        # reads the same way and still needs its edge back, but never far
+        # enough to drag a whole cast shadow onto the white canvas.
+        bg_luma = float(np.mean(backdrop))
+        shade = ((_colour_gap(luma, chroma, backdrop, luma_weight=0.0)
+                  < 0.3 * contrast)
+                 & (luma < bg_luma) & (luma > _SHADE_FLOOR * bg_luma))
+        room = outer | arr
+        grown = _grow_within(arr, itemish & ~shade & room, reach)
+        grown = _grow_within(grown, (itemish & room) | grown, _SHADE_REACH)
+        if grown.sum() > arr.sum() * (1.0 + _MAX_GROWTH):
+            log.warning("bg-removal: border snap tried to grow the subject by "
+                        "%.0f%% — leaking into the scene, keeping the plain mask",
+                        100.0 * (grown.sum() / max(1, arr.sum()) - 1))
+            grown = arr
+    # Trim the other way, symmetrically: let the backdrop eat back into the
+    # silhouette wherever the mask is still covering backdrop-coloured pixels
+    # that connect to the outside. That clears the halo of old background a
+    # generous matte leaves around the item — the job the old unconditional 1px
+    # erode was doing, except it shaved the item everywhere, fringe or not.
+    backdropish = (d_bg <= tol) & (d_bg < d_item)
+    outside = ~grown
+    eaten = _grow_within(outside, backdropish | outside, reach) & grown
+    snapped = grown & ~eaten
+    if snapped.sum() < 0.5 * arr.sum():
+        log.warning("bg-removal: border snap would have cut the subject in half "
+                    "— keeping the plain solid mask")
+        return _out(arr)
+    # A last hairline close so the snap's per-pixel decisions read as one edge
+    # rather than a dotted one.
+    return _out(np.asarray(
+        _close_mask(Image.fromarray(np.where(snapped, 255, 0).astype(np.uint8), "L"),
+                    max(1.0, side * _EDGE_CLOSE_FRAC * 0.5)), dtype=np.uint8) >= 128)
+
 
 def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.Image:
     """rembg subject alpha (mode L, same size as img_rgb), computed on a copy
@@ -166,26 +481,42 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None) -> Image.I
     return alpha
 
 
-def _refine_alpha(alpha: Image.Image) -> Image.Image:
+def _refine_alpha(alpha: Image.Image,
+                  source: Optional[Image.Image] = None) -> Image.Image:
     """Clean the matte into a natural cutout: despeckle, kill the faint
-    background ghost, trim the ~1px background halo around the subject, then
+    background ghost, solidify the item's border against the photo, then
     lightly feather the edge so it blends instead of looking stickered-on.
+
+    `source` is the photo the matte came from. With it, the border is
+    consolidated and snapped onto the item's real edge (_solidify_border) —
+    which is what a background remover has to get right, since every visible
+    failure (bites out of a hem, a fringe of old backdrop, floating crumbs)
+    lives on that boundary. Without it we fall back to the old blanket 1px
+    erode, which trims background fringe at the cost of shaving the item.
 
     Border-aware: where the subject runs off the frame it has no background
     fringe to trim, so eroding + feathering there just eats a white gutter into
     the item (the 'bleeds off frame' artifact). We restore the hardened,
-    un-eroded alpha in a thin band along the frame so an edge-touching subject
-    stays solid to the border. Where the subject doesn't reach an edge the
-    hardened alpha is 0 there, so those borders are unchanged."""
+    un-feathered alpha in a thin band along the frame so an edge-touching
+    subject stays solid to the border. Where the subject doesn't reach an edge
+    the hardened alpha is 0 there, so those borders are unchanged."""
     w, h = alpha.size
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
     span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
     hardened = alpha.point(lambda a: 0 if a < _ALPHA_LOW
                            else 255 if a > _ALPHA_HIGH
                            else round((a - _ALPHA_LOW) * 255 / span))
-    # Erode 1px to cut the residual background fringe, then a sub-pixel feather
-    # so the composited edge is smooth rather than jagged.
-    refined = hardened.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.6))
+    solid = _solidify_border(hardened, source) if source is not None else None
+    if solid is not None:
+        # The solidified border already decided, per pixel, where the item
+        # stops — eroding on top of that would only walk it back inside again.
+        hardened = solid
+        refined = hardened.filter(ImageFilter.GaussianBlur(0.6))
+    else:
+        # Erode 1px to cut the residual background fringe, then a sub-pixel
+        # feather so the composited edge is smooth rather than jagged.
+        refined = hardened.filter(ImageFilter.MinFilter(3)).filter(
+            ImageFilter.GaussianBlur(0.6))
     band = 3
     if w > 2 * band and h > 2 * band:
         refined.paste(hardened.crop((0, 0, w, band)), (0, 0))               # top
@@ -375,7 +706,7 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     from PIL import ImageStat
 
     rgb = img.convert("RGB")
-    alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side))
+    alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side), source=rgb)
     # Put back anything the matte punched out of the item's middle BEFORE the
     # guards below: a matte that ate the interior and left a rim reads as
     # "subject nearly erased" (or as a big dark removed area), and bailing out
@@ -722,7 +1053,12 @@ def warm() -> None:
         # cutout: a synthetic solid-color square has no subject to keep, and
         # the cutout's failure guard rightly cried "subject nearly erased
         # (0.0% kept)" on it every single boot.
-        _refine_alpha(_alpha_mask(Image.new("RGB", (32, 32), (200, 100, 50))))
+        # A small subject on a backdrop, not a flat tile: the border pass only
+        # engages when there's an edge to work on, and warming it here is what
+        # keeps scipy's import off the first real photo.
+        tile = Image.new("RGB", (64, 64), (235, 235, 235))
+        tile.paste(Image.new("RGB", (30, 30), (200, 100, 50)), (17, 17))
+        _refine_alpha(_alpha_mask(tile), source=tile)
         log.info("images: background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
