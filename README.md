@@ -161,6 +161,14 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/tokens/confirm` | Post-redirect purchase credit (idempotent) |
 | `POST` | `/api/tokens/webhook` | Stripe `checkout.session.completed` webhook |
 | `GET`  | `/api/tokens/history` | Recent token ledger entries |
+| `GET`  | `/api/forum/meta` | Board sections, composer limits, and totals |
+| `GET`  | `/api/forum/posts` | Board page (`category`, `q`, `sort`, `mine`, `limit`, `offset`) |
+| `POST` | `/api/forum/posts` | Start a thread (optionally attaching one of your listings) |
+| `GET`  | `/api/forum/posts/{id}` | One thread with its replies |
+| `PATCH`/`DELETE` | `/api/forum/posts/{id}` | Edit / delete your own thread |
+| `POST` | `/api/forum/posts/{id}/replies` | Reply to a thread |
+| `PATCH`/`DELETE` | `/api/forum/replies/{id}` | Edit / delete your own reply |
+| `POST` | `/api/forum/{posts\|replies}/{id}/vote` | Cast or withdraw one upvote (idempotent) |
 
 ## Monetization: AI tokens
 
@@ -282,11 +290,12 @@ backend/
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
     ebay.py          Inventory API payloads + publish/dry-run
+    forum.py         community board: sections + what a post may say
 frontend/            React + Vite + Tailwind app (built to frontend/dist)
   src/
     styles/tokens.css  design tokens (colors, radii, shadows, dark mode)
     components/        reusable UI library (buttons, cards, dialogs, badges…)
-    views/             dashboard, listing workflow, shop mode, settings
+    views/             dashboard, listing workflow, shop mode, community, settings
     store.jsx          app state (auth, eBay connection, listings)
 ```
 
@@ -358,6 +367,32 @@ an in-app edit. Sold and ended listings are reconciled on the same pass. One run
 imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
 repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
 default 6) so a big store doesn't outlive the request.
+
+## Community forum
+
+A board where sellers answer the questions the AI can't: what's this worth,
+does this brand move, who ships a 40lb mirror. Six sections (General, Price
+checks, Sourcing, Shipping, Platforms, Wins), threads with replies, and one
+upvote per person per item.
+
+- **Reading is open to everyone**; posting, replying, and voting need an
+  account. A community nobody can read until they sign up never gets its
+  first post.
+- **Price checks can carry a listing.** Attaching one of your own listings
+  posts a *snapshot* — title, price, one photo, as they are right now — so
+  the thread still reads correctly after the item is edited or sold. The
+  server refuses any listing you don't own.
+- **Votes are idempotent**: the client sends the state it wants, not a
+  toggle, and a unique constraint on `(user_id, target_type, target_id)`
+  makes a double tap or a retried request settle rather than double-count.
+- **Deleting your account erases your forum footprint** — threads, replies,
+  votes, and the counts your votes propped up (see `db.delete_user`).
+- **Needs `DATABASE_URL`.** Threads are rows or they are nothing, so with no
+  database configured the API reports `available: false` and the UI says so
+  plainly instead of showing an empty board.
+
+Posting is free (unlike the AI paths, which the token gate meters), so writes
+are rate-limited per client — see `FORUM_WRITE_LIMIT` in `backend/main.py`.
 
 ## Sold notifications & shipping labels
 

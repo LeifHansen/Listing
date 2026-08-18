@@ -27,7 +27,16 @@ export function AppProvider({ children }) {
   }, []);
 
   // ---------- navigation ----------
-  const [view, setView] = useState("dashboard");
+  const [view, setViewState] = useState("dashboard");
+  // Every nav press bumps this, including a press on the tab you're already
+  // on. A view that keeps its own inner state (the forum's open thread) reads
+  // it to reset: without it, tapping "Community" from inside a thread looks
+  // broken, because the view never unmounts.
+  const [navTick, setNavTick] = useState(0);
+  const setView = useCallback((next) => {
+    setViewState(next);
+    setNavTick((n) => n + 1);
+  }, []);
   // Which tab of the listings pipeline is showing. Deep links (a dashboard
   // tile, a task row) set it and jump: openListings("drafts"). The pipeline
   // lives on the merged Sell screen now, so opening it clears any open
@@ -402,7 +411,7 @@ export function AppProvider({ children }) {
 
   const value = useMemo(() => ({
     dark, toggleDark,
-    view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
+    view, setView, navTick, listingsTab, setListingsTab, openListings, listingsJumpRef,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
@@ -417,7 +426,8 @@ export function AppProvider({ children }) {
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk,
   }), [
-    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
+    dark, toggleDark, view, setView, navTick, listingsTab, openListings, health, loadHealth,
+    user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,

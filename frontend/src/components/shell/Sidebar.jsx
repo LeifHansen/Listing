@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Settings,
+  LayoutDashboard, PlusCircle, Store, Settings, MessagesSquare,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,7 @@ const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
   { id: "shop", label: "Shop Mode", icon: Store },
+  { id: "community", label: "Community", short: "Forum", icon: MessagesSquare },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -191,7 +192,7 @@ export function Sidebar() {
 export function BottomNav() {
   const { view, setView, startNew } = useApp();
   // Reference by id (not index) so reordering NAV never scrambles the bar.
-  const items = ["dashboard", "shop", "new", "settings"].map(byId);
+  const items = ["dashboard", "shop", "new", "community", "settings"].map(byId);
   return (
     <nav
       aria-label="Main"

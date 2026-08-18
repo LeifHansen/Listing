@@ -50,3 +50,13 @@ export function formatMoney(n, currency = "USD") {
     return `$${Number(n).toFixed(2)}`;
   }
 }
+
+// "2h ago" / "3d ago" — coarse on purpose; the exact time is in the tooltip.
+export function timeAgo(iso) {
+  if (!iso) return "";
+  const mins = Math.max(0, (Date.now() - Date.parse(iso)) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${Math.floor(mins)}m ago`;
+  if (mins < 60 * 24) return `${Math.floor(mins / 60)}h ago`;
+  return `${Math.floor(mins / 1440)}d ago`;
+}

@@ -40,6 +40,7 @@ from .services import (claude_ai, ebay, ebay_orders, ebay_trading,
                        notifications, orient, preflight, pricing, promotions,
                        recommender, taxonomy, tokens)
 from .services import etsy as etsy_service
+from .services import forum as forum_service
 from .services.background import run_in_background
 
 app = FastAPI(title="eBay Listing Generator")
@@ -3078,6 +3079,241 @@ def notifications_mark_read(request: Request, payload: dict) -> dict:
         return {"marked": db.mark_notifications_read(uid)}
     ids = [str(i) for i in (payload.get("ids") or []) if i]
     return {"marked": db.mark_notifications_read(uid, ids)}
+
+
+# --- community forum ---------------------------------------------------------
+# Sellers ask each other the questions the AI can't answer: is this worth
+# what I think it is, does this brand move, who ships a 40lb mirror. The board
+# is plain Postgres — no AI, no tokens, no marketplace calls.
+
+# Posting is free (unlike every AI path, which the token gate meters), so it
+# is the one write an abuser can run at no cost. This ceiling is far above a
+# real conversation and far below a spam run.
+FORUM_WRITE_LIMIT = 30  # posts + replies per client per 15-minute window
+
+
+def _forum_db_or_503() -> None:
+    """The board is the one feature with no filesystem fallback: threads are
+    rows or they are nothing. Say so plainly instead of accepting a post and
+    dropping it."""
+    if not db.enabled():
+        raise HTTPException(
+            503, "The community board isn't available on this server yet "
+                 "(no database configured).")
+
+
+def _forum_uid(request: Request) -> str:
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to post in the community.")
+    return uid
+
+
+def _forum_write_limit(request: Request) -> None:
+    ip = _client_ip(request)
+    if not ratelimit.check(f"forum:{ip}", max_attempts=FORUM_WRITE_LIMIT):
+        log.warning("forum: rate limited %s", ip)
+        raise HTTPException(
+            429, "You're posting faster than the board allows. "
+                 "Take a few minutes and try again.")
+
+
+def _forum_attachment(uid: str, listing_id: str) -> Optional[dict]:
+    """Snapshot the listing a post is asking about — title, price, one photo.
+
+    Only the poster's OWN listing can be attached: without that check any id
+    guessed or copied from a URL would republish someone else's draft (and its
+    purchase price) onto a public board."""
+    if not listing_id:
+        return None
+    rec = db.get_listing(listing_id)
+    if not rec or rec.get("user_id") != uid:
+        raise HTTPException(403, "You can only attach one of your own listings.")
+    listing = rec.get("listing") or {}
+    images = listing.get("images") or []
+    image_urls = listing.get("image_urls") or []
+    if image_urls:
+        image = str(image_urls[0])
+    elif images:
+        image = f"/media/{listing_id}/optimized/{images[0]}"
+    else:
+        image = ""
+    return {
+        "listing_id": listing_id,
+        "title": str(listing.get("title") or rec.get("title") or "")[:140],
+        "price": listing.get("price"),
+        "currency": str(listing.get("currency") or "USD")[:8],
+        "image": image,
+    }
+
+
+@app.get("/api/forum/meta")
+def forum_meta(request: Request) -> dict:
+    """What the board looks like before any thread loads: its sections, the
+    limits the composer enforces, and whether posting works at all here."""
+    return {
+        "available": db.enabled(),
+        "categories": forum_service.CATEGORIES,
+        "stats": db.forum_stats(),
+        "limits": {
+            "title_max": forum_service.TITLE_MAX,
+            "title_min": forum_service.TITLE_MIN,
+            "body_max": forum_service.BODY_MAX,
+            "reply_max": forum_service.REPLY_MAX,
+        },
+        "signed_in": bool(_uid(request)),
+    }
+
+
+@app.get("/api/forum/posts")
+def forum_list(request: Request, category: str = "", q: str = "",
+               sort: str = "recent", limit: int = 25, offset: int = 0,
+               mine: bool = False) -> dict:
+    """A page of the board. Open to logged-out readers — a community nobody
+    can read until they sign up never gets its first post."""
+    uid = _uid(request)
+    if mine and not uid:
+        return {"posts": [], "total": 0, "available": db.enabled()}
+    if sort not in db.FORUM_SORTS:
+        sort = "recent"
+    page = db.list_forum_posts(
+        viewer_id=uid,
+        category=forum_service.normalize_category(category) if category else None,
+        query=q or None, sort=sort, limit=limit, offset=offset,
+        author_id=uid if mine else None)
+    return {**page, "available": db.enabled(), "sort": sort}
+
+
+@app.post("/api/forum/posts")
+def forum_create(request: Request, payload: dict) -> dict:
+    """Start a thread: {category, title, body, listing_id?}."""
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    _forum_write_limit(request)
+    try:
+        title = forum_service.clean_title(payload.get("title"))
+        body = forum_service.clean_body(payload.get("body"))
+    except forum_service.ForumError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    listing_id = str(payload.get("listing_id") or "")[:64]
+    post = db.create_forum_post(
+        uid, forum_service.normalize_category(payload.get("category")),
+        title, body, listing_id=listing_id,
+        attachment=_forum_attachment(uid, listing_id))
+    if post is None:
+        raise HTTPException(503, "Couldn't save your post — try again.")
+    return {"post": post}
+
+
+@app.get("/api/forum/posts/{post_id}")
+def forum_thread(request: Request, post_id: str) -> dict:
+    """One thread and every reply on it."""
+    post = db.get_forum_post(post_id, viewer_id=_uid(request))
+    if post is None:
+        raise HTTPException(404, "That post is gone.")
+    replies = post.pop("replies_list", [])
+    return {"post": post, "replies": replies}
+
+
+@app.patch("/api/forum/posts/{post_id}")
+def forum_edit(request: Request, post_id: str, payload: dict) -> dict:
+    """Rewrite your own thread: {title?, body?, category?}."""
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    existing = db.get_forum_post(post_id, with_replies=False)
+    if existing is None:
+        raise HTTPException(404, "That post is gone.")
+    if existing["user_id"] != uid:
+        raise HTTPException(403, "You can only edit your own posts.")
+    try:
+        title = (forum_service.clean_title(payload["title"])
+                 if "title" in payload else None)
+        body = (forum_service.clean_body(payload["body"])
+                if "body" in payload else None)
+    except forum_service.ForumError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    category = (forum_service.normalize_category(payload["category"])
+                if "category" in payload else None)
+    post = db.edit_forum_post(post_id, uid, title=title, body=body,
+                              category=category)
+    if post is None:
+        raise HTTPException(503, "Couldn't save that edit — try again.")
+    return {"post": post}
+
+
+@app.delete("/api/forum/posts/{post_id}")
+def forum_delete(request: Request, post_id: str) -> dict:
+    """Delete your own thread, and with it every reply and vote on it."""
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    existing = db.get_forum_post(post_id, with_replies=False)
+    if existing is None:
+        raise HTTPException(404, "That post is gone.")
+    if existing["user_id"] != uid:
+        raise HTTPException(403, "You can only delete your own posts.")
+    if not db.delete_forum_post(post_id, uid):
+        raise HTTPException(503, "Couldn't delete that post — try again.")
+    return {"deleted": post_id}
+
+
+@app.post("/api/forum/posts/{post_id}/replies")
+def forum_reply(request: Request, post_id: str, payload: dict) -> dict:
+    """Answer a thread: {body}."""
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    _forum_write_limit(request)
+    try:
+        body = forum_service.clean_reply(payload.get("body"))
+    except forum_service.ForumError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    reply = db.add_forum_reply(post_id, uid, body)
+    if reply is None:
+        # The post is either gone (someone deleted it while this was being
+        # typed) or the write failed; a 404 is the honest read of both from
+        # the client's side, and the toast tells them to reload.
+        raise HTTPException(404, "That post is gone — reload the board.")
+    return {"reply": reply}
+
+
+@app.patch("/api/forum/replies/{reply_id}")
+def forum_reply_edit(request: Request, reply_id: str, payload: dict) -> dict:
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    try:
+        body = forum_service.clean_reply(payload.get("body"))
+    except forum_service.ForumError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    reply = db.edit_forum_reply(reply_id, uid, body)
+    if reply is None:
+        raise HTTPException(404, "That reply is gone, or it isn't yours.")
+    return {"reply": reply}
+
+
+@app.delete("/api/forum/replies/{reply_id}")
+def forum_reply_delete(request: Request, reply_id: str) -> dict:
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    if not db.delete_forum_reply(reply_id, uid):
+        raise HTTPException(404, "That reply is gone, or it isn't yours.")
+    return {"deleted": reply_id}
+
+
+@app.post("/api/forum/{target_type}/{target_id}/vote")
+def forum_vote(request: Request, target_type: str, target_id: str,
+               payload: dict) -> dict:
+    """Upvote or un-upvote a post or a reply: {"on": true|false}.
+
+    Idempotent on purpose — the client sends the state it wants, not a
+    toggle, so a double tap and a retried request settle the same way."""
+    _forum_db_or_503()
+    uid = _forum_uid(request)
+    if target_type not in ("posts", "replies"):
+        raise HTTPException(404, "Nothing to vote on there.")
+    kind = "post" if target_type == "posts" else "reply"
+    result = db.set_forum_vote(uid, kind, target_id, on=bool(payload.get("on", True)))
+    if result is None:
+        raise HTTPException(404, "That's gone — reload the board.")
+    return result
 
 
 # --- sold orders + shipping labels ------------------------------------------

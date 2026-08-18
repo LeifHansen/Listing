@@ -16,8 +16,9 @@ import time as _time
 import uuid as _uuid
 from typing import Optional
 
-from sqlalchemy import (DateTime, JSON, String, create_engine, delete, select,
-                        text)
+from sqlalchemy import (Boolean, DateTime, Integer, JSON, String, Text,
+                        UniqueConstraint, create_engine, delete, func, or_,
+                        select, text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -152,6 +153,74 @@ class Notification(Base):
                                                       nullable=True)
     read_at: Mapped[Optional[_dt.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ForumPost(Base):
+    """One thread in the seller community.
+
+    Counts (`reply_count`, `vote_count`) are denormalized onto the row and
+    maintained in the same transaction as the write that changes them: the
+    board lists 25 threads at a time and a per-row COUNT(*) subquery on every
+    page would be the most expensive read in the app for numbers that are
+    only ever off by whatever a crashed transaction rolls back.
+
+    `last_activity_at` is what "recent" sorts by, so a thread rises when it
+    gets an answer, not only when it was written.
+    """
+
+    __tablename__ = "forum_posts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str] = mapped_column(String(32), default="general", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    # An optional listing the thread is about ("" for most posts) — "is this
+    # priced right?" is the single most common question sellers ask. The
+    # attachment is a SNAPSHOT (title, price, one photo) taken when the post
+    # was written, not a live join: the thread has to stay readable after the
+    # listing sells, is edited, or is deleted, and a price check that silently
+    # rewrites itself to a later price is worse than useless to read back.
+    listing_id: Mapped[str] = mapped_column(String(64), default="")
+    attachment: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    reply_count: Mapped[int] = mapped_column(Integer, default=0)
+    vote_count: Mapped[int] = mapped_column(Integer, default=0)
+    edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_activity_at: Mapped[_dt.datetime] = mapped_column(
+        DateTime(timezone=True), index=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ForumReply(Base):
+    __tablename__ = "forum_replies"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    post_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    body: Mapped[str] = mapped_column(Text, default="")
+    vote_count: Mapped[int] = mapped_column(Integer, default=0)
+    edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ForumVote(Base):
+    """One person's upvote on one post or reply.
+
+    The unique constraint is the whole feature: votes arrive from double taps,
+    retried requests, and two open tabs, and the DB — not the order the
+    requests happen to land in — is what makes a second one a no-op."""
+
+    __tablename__ = "forum_votes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "target_type", "target_id",
+                         name="uq_forum_vote"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str] = mapped_column(String(8))  # post | reply
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -426,6 +495,36 @@ def get_password_hash(user_id: str) -> Optional[str]:
         return None
 
 
+def _recount_replies(s: Session, post_ids) -> None:
+    """Reset `reply_count` from the replies that actually remain, for every
+    post in `post_ids` that still exists. Recount rather than decrement: the
+    caller has just deleted an unknown number of rows per post."""
+    for post_id in post_ids:
+        post = s.get(ForumPost, post_id)
+        if post is None:
+            continue
+        post.reply_count = int(s.execute(
+            select(func.count()).select_from(ForumReply)
+            .where(ForumReply.post_id == post_id)
+        ).scalar_one())
+
+
+def _rescore_after_vote_purge(s: Session, user_id: str) -> None:
+    """Take this user's upvotes back out of the counts they propped up, for
+    every target that still exists. Called from delete_user before the votes
+    themselves are deleted — otherwise a deleted account would leave its
+    score behind on other people's posts forever."""
+    rows = s.execute(
+        select(ForumVote.target_type, ForumVote.target_id)
+        .where(ForumVote.user_id == user_id)
+    ).all()
+    for target_type, target_id in rows:
+        target = (s.get(ForumPost, target_id) if target_type == "post"
+                  else s.get(ForumReply, target_id))
+        if target is not None:
+            target.vote_count = max(0, int(target.vote_count or 0) - 1)
+
+
 def delete_user(user_id: str) -> Optional[list[str]]:
     """Erase a user and everything keyed to them, in one transaction.
 
@@ -476,6 +575,43 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(delete(TokenLedger).where(TokenLedger.user_id == user_id))
             s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(Notification).where(Notification.user_id == user_id))
+            # The forum: their threads, their replies, and their votes. Their
+            # threads take the replies OTHER people wrote on them with them —
+            # a conversation whose question is gone is unreadable anyway, and
+            # leaving it would keep publishing content attributed to a person
+            # who asked to be forgotten.
+            post_ids = list(s.execute(
+                select(ForumPost.id).where(ForumPost.user_id == user_id)
+            ).scalars().all())
+            if post_ids:
+                orphan_reply_ids = list(s.execute(
+                    select(ForumReply.id).where(ForumReply.post_id.in_(post_ids))
+                ).scalars().all())
+                if orphan_reply_ids:
+                    s.execute(delete(ForumVote).where(
+                        ForumVote.target_type == "reply",
+                        ForumVote.target_id.in_(orphan_reply_ids)))
+                s.execute(delete(ForumReply)
+                          .where(ForumReply.post_id.in_(post_ids)))
+                s.execute(delete(ForumVote).where(
+                    ForumVote.target_type == "post",
+                    ForumVote.target_id.in_(post_ids)))
+            own_replies = s.execute(
+                select(ForumReply.id, ForumReply.post_id)
+                .where(ForumReply.user_id == user_id)
+            ).all()
+            if own_replies:
+                s.execute(delete(ForumVote).where(
+                    ForumVote.target_type == "reply",
+                    ForumVote.target_id.in_([r_id for r_id, _ in own_replies])))
+            s.execute(delete(ForumReply).where(ForumReply.user_id == user_id))
+            s.execute(delete(ForumPost).where(ForumPost.user_id == user_id))
+            # Their replies on OTHER people's surviving threads leave holes in
+            # those threads' counts — recount them from what's actually left.
+            _recount_replies(s, {pid for _, pid in own_replies})
+            # Votes they cast elsewhere, and the counts those votes propped up.
+            _rescore_after_vote_purge(s, user_id)
+            s.execute(delete(ForumVote).where(ForumVote.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             s.commit()
             return listing_ids
@@ -978,6 +1114,406 @@ def mark_notifications_read(user_id: str,
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: mark_notifications_read failed: {exc}")
         return 0
+
+
+# --- forum ------------------------------------------------------------------
+# The seller community: threads, replies, and one upvote per person per item.
+# Everything here follows the module rule — a DB problem returns empty/None
+# rather than raising — with one deliberate exception in the read/verify/write
+# split the routes use: they read a post first, authorize against its author,
+# and only then call the scoped delete/edit below, which re-scopes the SQL to
+# the owner so a stale read can never widen access.
+
+FORUM_SORTS = ("recent", "top", "new", "unanswered")
+
+
+def _author_name(display_name: Optional[str], email: Optional[str]) -> str:
+    """Who to show as the author. Real name if they set one, else the local
+    part of their email — never the full address, which would turn the board
+    into a scraped mailing list."""
+    if display_name:
+        return display_name
+    if email:
+        return email.split("@")[0]
+    return "Former member"
+
+
+def _post_to_dict(p: ForumPost, display_name: Optional[str] = None,
+                  email: Optional[str] = None, voted: bool = False) -> dict:
+    return {
+        "id": p.id,
+        "user_id": p.user_id,
+        "author": _author_name(display_name, email),
+        "category": p.category,
+        "title": p.title,
+        "body": p.body,
+        "listing_id": p.listing_id or "",
+        "attachment": p.attachment or None,
+        "replies": p.reply_count,
+        "votes": p.vote_count,
+        "voted": voted,
+        "edited": bool(p.edited),
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "last_activity_at": (p.last_activity_at.isoformat()
+                             if p.last_activity_at else None),
+    }
+
+
+def _reply_to_dict(r: ForumReply, display_name: Optional[str] = None,
+                   email: Optional[str] = None, voted: bool = False) -> dict:
+    return {
+        "id": r.id,
+        "post_id": r.post_id,
+        "user_id": r.user_id,
+        "author": _author_name(display_name, email),
+        "body": r.body,
+        "votes": r.vote_count,
+        "voted": voted,
+        "edited": bool(r.edited),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+def _voted_ids(s: Session, viewer_id: Optional[str], target_type: str,
+               ids: list[str]) -> set[str]:
+    """Which of `ids` this viewer has already upvoted — one query for the
+    whole page, so the board doesn't issue a vote lookup per row."""
+    if not viewer_id or not ids:
+        return set()
+    rows = s.execute(
+        select(ForumVote.target_id).where(
+            ForumVote.user_id == viewer_id,
+            ForumVote.target_type == target_type,
+            ForumVote.target_id.in_(ids))
+    ).scalars().all()
+    return set(rows)
+
+
+def _like_term(query: str) -> str:
+    """A LIKE pattern that treats the user's % and _ as literal characters
+    (paired with escape="\\\\" at the call site) — otherwise a search for
+    "50%" matches every thread on the board."""
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def create_forum_post(user_id: str, category: str, title: str, body: str,
+                      listing_id: str = "",
+                      attachment: Optional[dict] = None) -> Optional[dict]:
+    """Start a thread. Returns the new post, or None when there's no DB or
+    the write failed (the route turns that into a 503, because unlike a
+    background sync a person is waiting on this one)."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id:
+            return None
+        with Session(eng) as s:
+            now = _now()
+            row = ForumPost(
+                id=_uuid.uuid4().hex, user_id=user_id, category=category[:32],
+                title=title[:200], body=body, listing_id=(listing_id or "")[:64],
+                attachment=attachment or None,
+                reply_count=0, vote_count=0, edited=False,
+                created_at=now, last_activity_at=now)
+            s.add(row)
+            s.commit()
+            u = s.get(User, user_id)
+            return _post_to_dict(row, getattr(u, "display_name", ""),
+                                 getattr(u, "email", ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: create_forum_post failed: {exc}")
+        return None
+
+
+def list_forum_posts(viewer_id: Optional[str] = None,
+                     category: Optional[str] = None,
+                     query: Optional[str] = None, sort: str = "recent",
+                     limit: int = 25, offset: int = 0,
+                     author_id: Optional[str] = None) -> dict:
+    """A page of the board: {"posts": [...], "total": n}. Never raises.
+
+    `total` is the count for the same filters, so the UI can page without
+    guessing from a short final page."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return {"posts": [], "total": 0}
+        limit = max(1, min(limit, 100))
+        offset = max(0, offset)
+        with Session(eng) as s:
+            filters = []
+            if category:
+                filters.append(ForumPost.category == category)
+            if author_id:
+                filters.append(ForumPost.user_id == author_id)
+            if query and query.strip():
+                term = _like_term(query.strip())
+                filters.append(or_(ForumPost.title.ilike(term, escape="\\"),
+                                   ForumPost.body.ilike(term, escape="\\")))
+            if sort == "unanswered":
+                filters.append(ForumPost.reply_count == 0)
+
+            total = s.execute(
+                select(func.count()).select_from(ForumPost).where(*filters)
+            ).scalar_one()
+
+            q = select(ForumPost, User.display_name, User.email).outerjoin(
+                User, User.id == ForumPost.user_id).where(*filters)
+            if sort == "top":
+                q = q.order_by(ForumPost.vote_count.desc(),
+                               ForumPost.last_activity_at.desc())
+            elif sort == "new":
+                q = q.order_by(ForumPost.created_at.desc())
+            else:  # recent (and unanswered) — a thread rises when it's answered
+                q = q.order_by(ForumPost.last_activity_at.desc())
+            rows = s.execute(q.limit(limit).offset(offset)).all()
+
+            voted = _voted_ids(s, viewer_id, "post", [r[0].id for r in rows])
+            return {
+                "posts": [_post_to_dict(p, name, email, p.id in voted)
+                          for p, name, email in rows],
+                "total": int(total),
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: list_forum_posts failed: {exc}")
+        return {"posts": [], "total": 0}
+
+
+def get_forum_post(post_id: str, viewer_id: Optional[str] = None,
+                   with_replies: bool = True) -> Optional[dict]:
+    """One thread, with its replies oldest-first (a conversation reads down).
+    None when it doesn't exist. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None or not post_id:
+            return None
+        with Session(eng) as s:
+            row = s.execute(
+                select(ForumPost, User.display_name, User.email)
+                .outerjoin(User, User.id == ForumPost.user_id)
+                .where(ForumPost.id == post_id)
+            ).first()
+            if row is None:
+                return None
+            post, name, email = row
+            voted = _voted_ids(s, viewer_id, "post", [post.id])
+            out = _post_to_dict(post, name, email, post.id in voted)
+            if not with_replies:
+                return out
+            reply_rows = s.execute(
+                select(ForumReply, User.display_name, User.email)
+                .outerjoin(User, User.id == ForumReply.user_id)
+                .where(ForumReply.post_id == post_id)
+                .order_by(ForumReply.created_at.asc())
+            ).all()
+            rvoted = _voted_ids(s, viewer_id, "reply",
+                                [r[0].id for r in reply_rows])
+            out["replies_list"] = [
+                _reply_to_dict(r, rname, remail, r.id in rvoted)
+                for r, rname, remail in reply_rows]
+            return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_forum_post failed: {exc}")
+        return None
+
+
+def add_forum_reply(post_id: str, user_id: str, body: str) -> Optional[dict]:
+    """Answer a thread. Bumps the post's reply count and last activity in the
+    same transaction, so the board can never show a thread as unanswered
+    while its answer is already on screen."""
+    try:
+        eng = _get_engine()
+        if eng is None or not post_id or not user_id:
+            return None
+        with Session(eng) as s:
+            post = s.get(ForumPost, post_id)
+            if post is None:
+                return None
+            now = _now()
+            row = ForumReply(id=_uuid.uuid4().hex, post_id=post_id,
+                             user_id=user_id, body=body, vote_count=0,
+                             edited=False, created_at=now)
+            s.add(row)
+            post.reply_count = int(post.reply_count or 0) + 1
+            post.last_activity_at = now
+            s.commit()
+            u = s.get(User, user_id)
+            return _reply_to_dict(row, getattr(u, "display_name", ""),
+                                  getattr(u, "email", ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: add_forum_reply failed: {exc}")
+        return None
+
+
+def edit_forum_post(post_id: str, user_id: str, title: Optional[str] = None,
+                    body: Optional[str] = None,
+                    category: Optional[str] = None) -> Optional[dict]:
+    """Rewrite one's own post. Scoped to the author in SQL as well as by the
+    route's check. Returns the updated post, or None."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            post = s.get(ForumPost, post_id)
+            if post is None or post.user_id != user_id:
+                return None
+            if title is not None:
+                post.title = title[:200]
+            if body is not None:
+                post.body = body
+            if category is not None:
+                post.category = category[:32]
+            post.edited = True
+            s.commit()
+            u = s.get(User, user_id)
+            return _post_to_dict(post, getattr(u, "display_name", ""),
+                                 getattr(u, "email", ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: edit_forum_post failed: {exc}")
+        return None
+
+
+def edit_forum_reply(reply_id: str, user_id: str,
+                     body: str) -> Optional[dict]:
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            row = s.get(ForumReply, reply_id)
+            if row is None or row.user_id != user_id:
+                return None
+            row.body = body
+            row.edited = True
+            s.commit()
+            u = s.get(User, user_id)
+            return _reply_to_dict(row, getattr(u, "display_name", ""),
+                                  getattr(u, "email", ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: edit_forum_reply failed: {exc}")
+        return None
+
+
+def delete_forum_post(post_id: str, user_id: str) -> bool:
+    """Delete one's own thread and everything hanging off it — replies and
+    the votes cast on all of them. Nothing here cascades on its own."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            post = s.get(ForumPost, post_id)
+            if post is None or post.user_id != user_id:
+                return False
+            reply_ids = list(s.execute(
+                select(ForumReply.id).where(ForumReply.post_id == post_id)
+            ).scalars().all())
+            if reply_ids:
+                s.execute(delete(ForumVote).where(
+                    ForumVote.target_type == "reply",
+                    ForumVote.target_id.in_(reply_ids)))
+            s.execute(delete(ForumReply).where(ForumReply.post_id == post_id))
+            s.execute(delete(ForumVote).where(ForumVote.target_type == "post",
+                                              ForumVote.target_id == post_id))
+            s.execute(delete(ForumPost).where(ForumPost.id == post_id))
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_forum_post failed: {exc}")
+        return False
+
+
+def delete_forum_reply(reply_id: str, user_id: str) -> bool:
+    """Delete one's own reply, its votes, and decrement the thread's count."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            row = s.get(ForumReply, reply_id)
+            if row is None or row.user_id != user_id:
+                return False
+            post = s.get(ForumPost, row.post_id)
+            s.execute(delete(ForumVote).where(ForumVote.target_type == "reply",
+                                              ForumVote.target_id == reply_id))
+            s.delete(row)
+            if post is not None:
+                post.reply_count = max(0, int(post.reply_count or 0) - 1)
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_forum_reply failed: {exc}")
+        return False
+
+
+def set_forum_vote(user_id: str, target_type: str, target_id: str,
+                   on: bool = True) -> Optional[dict]:
+    """Cast or withdraw one upvote. Idempotent in both directions: voting
+    twice leaves one vote, un-voting twice leaves none.
+
+    The stored count is recomputed from the votes table rather than nudged by
+    ±1, so a lost race self-heals on the next vote instead of drifting."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id or target_type not in ("post", "reply"):
+            return None
+        with Session(eng) as s:
+            target = (s.get(ForumPost, target_id) if target_type == "post"
+                      else s.get(ForumReply, target_id))
+            if target is None:
+                return None
+            existing = s.execute(
+                select(ForumVote).where(ForumVote.user_id == user_id,
+                                        ForumVote.target_type == target_type,
+                                        ForumVote.target_id == target_id)
+            ).scalar_one_or_none()
+            if on and existing is None:
+                s.add(ForumVote(id=_uuid.uuid4().hex, user_id=user_id,
+                                target_type=target_type, target_id=target_id,
+                                created_at=_now()))
+                try:
+                    s.flush()
+                except IntegrityError:  # two tabs, one vote — the DB decides
+                    s.rollback()
+            elif not on and existing is not None:
+                s.delete(existing)
+                s.flush()
+            count = s.execute(
+                select(func.count()).select_from(ForumVote).where(
+                    ForumVote.target_type == target_type,
+                    ForumVote.target_id == target_id)
+            ).scalar_one()
+            target.vote_count = int(count)
+            s.commit()
+            return {"votes": int(count), "voted": bool(on)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: set_forum_vote failed: {exc}")
+        return None
+
+
+def forum_stats() -> dict:
+    """Board-wide totals for the header. Never raises."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return {"posts": 0, "replies": 0, "members": 0}
+        with Session(eng) as s:
+            posts = s.execute(
+                select(func.count()).select_from(ForumPost)).scalar_one()
+            replies = s.execute(
+                select(func.count()).select_from(ForumReply)).scalar_one()
+            # "Members" means people who have actually said something —
+            # asked or answered — not everyone who ever signed up.
+            voices = select(ForumPost.user_id).union(
+                select(ForumReply.user_id)).subquery()
+            members = s.execute(
+                select(func.count()).select_from(voices)).scalar_one()
+            return {"posts": int(posts), "replies": int(replies),
+                    "members": int(members)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: forum_stats failed: {exc}")
+        return {"posts": 0, "replies": 0, "members": 0}
 
 
 # db_status() round-trips to the DB, and several hot paths call it per
