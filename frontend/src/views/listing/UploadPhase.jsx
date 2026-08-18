@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, FolderOpen, Trash2, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
@@ -38,16 +38,20 @@ const MAX_BATCH_FILES = 250;
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
-export function UploadPhase({ onBulkStarted }) {
-  const { setSession } = useApp();
+export function UploadPhase() {
+  const { setSession, runBulkUpload, bulkRetry, clearBulkRetry } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
-  const [files, setFiles] = useState([]); // { file, url }
-  const [removeBg, setRemoveBg] = useState(false);
-  const [bulk, setBulk] = useState(false);
+  // A bulk upload that failed hands its pile back here — this component was
+  // unmounted while it ran, so the photos would otherwise be gone.
+  const [files, setFiles] = useState(() => bulkRetry?.files || []); // { file, url }
+  const [removeBg, setRemoveBg] = useState(() => !!bulkRetry?.removeBg);
+  const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Taken once, on mount — a later retry must not re-seed the drop zone.
+  useEffect(() => { clearBulkRetry(); }, [clearBulkRetry]);
   // Past the single-listing cap the pile can only be a bulk batch.
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
@@ -79,23 +83,12 @@ export function UploadPhase({ onBulkStarted }) {
     });
   };
 
+  // The batch screen takes over on the click — no waiting on the upload with
+  // the Sell tab still on screen — which unmounts this component, so the
+  // upload itself runs from the store (see runBulkUpload).
   const startBulk = once("bulk", async () => {
     if (!files.length) return;
-    setBusy(true);
-    try {
-      const prepped = await downscaleAllForUpload(files.map((f) => f.file));
-      const fd = new FormData();
-      prepped.forEach((f) => fd.append("files", f));
-      fd.append("remove_bg", removeBg ? "true" : "false");
-      const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
-      files.forEach((f) => URL.revokeObjectURL(f.url));
-      setFiles([]);
-      onBulkStarted(job_id);
-    } catch (e) {
-      toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
-    } finally {
-      setBusy(false);
-    }
+    await runBulkUpload(files, removeBg);
   });
 
   const process = once("process", async () => {
@@ -137,9 +130,6 @@ export function UploadPhase({ onBulkStarted }) {
     }
   });
 
-  if (busy && bulkOn) {
-    return <AIStatusCard messages={["Uploading your photo pile…", "This may take a moment…"]} />;
-  }
   if (busy) {
     return (
       <div className="flex flex-col gap-5">

@@ -318,6 +318,9 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const [publishing, setPublishing] = useState({});
   const [deleting, setDeleting] = useState({});
   const [merging, setMerging] = useState(false);
+  // Watching was given up on (job gone, or too many failed polls). Without it
+  // the pre-first-poll "Uploading…" state below would spin forever.
+  const [unwatched, setUnwatched] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
   const notFound = useRef(0);
@@ -329,9 +332,13 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // poll failures — a busy server (heavy batch) can blip a request even though
   // the job is still running, so we retry instead of abandoning the batch.
   useEffect(() => {
+    // No job id yet — the batch is still uploading from the store, and the
+    // screen shows the upload phase until the id lands.
+    if (!jobId) return;
     stopped.current = false;
     fails.current = 0;
     notFound.current = 0;
+    setUnwatched(false);
     let timer;
     const poll = async () => {
       try {
@@ -390,7 +397,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           // died at, with no result, no error, and no way out of the screen.
           stopped.current = true;
           onSettled?.();
+          setUnwatched(true);
           loadListings({ quiet: true });  // whatever it did finish is in Drafts
+          // A finished job, so the queue renders the outcome card with this
+          // reason and a way off the screen. Clearing `busy` alone (unwatched)
+          // stops the spinner but leaves nothing behind it: no explanation,
+          // and no exit at all for a batch that died before drafting anything.
           setJob((j) => ({
             ...(j || {}),
             done: true,
@@ -398,9 +410,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               + "was working, and no record of it survived. Anything it "
               + "finished is saved in Drafts; the rest need another run.",
           }));
+          toast("This batch was interrupted (the server restarted). Any items it finished are saved in Drafts.",
+            { kind: "warning" });
         } else if (fails.current < 6) {
           timer = setTimeout(poll, 3000);  // transient — the job is likely still running
         } else {
+          setUnwatched(true);
           // Give up watching but KEEP it persisted — the batch may still be
           // finishing server-side, so the banner lets the user reopen and resume.
           toast("Lost the connection while watching this batch — it may still be finishing. Reopen New Listing to check, and see Drafts for completed items.",
@@ -592,7 +607,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       { kind: failed ? "warning" : "success" });
   };
 
-  const busy = job && !job.done;
+  // Busy from the very first frame: the batch screen goes up on the click, so
+  // it opens on "Uploading your photo pile…" while the photos are still going
+  // out — before there is a job id, let alone a status to poll.
+  const busy = !unwatched && (!job || !job.done);
   const phase = job?.phase || "uploading";
   // Phase-weighted % for the progress bar shown while the job runs; the
   // cards stream in below it as each item is drafted.
