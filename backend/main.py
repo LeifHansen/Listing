@@ -2506,14 +2506,17 @@ def _live_ebay_id_map(items: list) -> dict:
     return out
 
 
-def _metrics_by_record_id(creds: Optional[dict], items: list) -> dict:
+def _metrics_by_record_id(creds: Optional[dict], items: list,
+                          status: Optional[dict] = None) -> dict:
     """eBay views/watchers for the user's live listings, keyed by OUR listing
-    record id. Best-effort — {} when eBay isn't connected / scope not granted."""
+    record id. Best-effort — {} when eBay isn't connected / scope not granted.
+    Pass a `status` dict to also learn whether the traffic report was readable
+    ({traffic_ok, needs_reconnect}), so blank numbers can be explained."""
     id_by_ebay = _live_ebay_id_map(items)
     if not creds or not id_by_ebay:
         return {}
     try:
-        raw = metrics.listing_metrics(creds, list(id_by_ebay))
+        raw = metrics.listing_metrics(creds, list(id_by_ebay), status)
     except Exception as exc:  # noqa: BLE001 - metrics never break a request
         log.info("listing metrics unavailable: %s", exc)
         return {}
@@ -2563,7 +2566,11 @@ def listing_metrics_route(request: Request) -> dict:
     if not user:
         return {"metrics": {}}
     items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
-    return {"metrics": _metrics_by_record_id(_ebay_creds_for(request), items)}
+    status: dict = {}
+    by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status)
+    return {"metrics": by_id,
+            "traffic_ok": bool(status.get("traffic_ok")),
+            "needs_reconnect": bool(status.get("needs_reconnect"))}
 
 
 @app.get("/api/ebay/duplicates")

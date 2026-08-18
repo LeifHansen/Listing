@@ -312,7 +312,7 @@ function MirrorStatus() {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
 
@@ -526,31 +526,42 @@ export function Dashboard() {
       </motion.div>
 
       {/* Traffic — real eBay numbers for the live listings (Sell Analytics
-          views/impressions over 30 days + watchers), with the top performer. */}
+          views/impressions over 30 days + watchers), with the top performer.
+          Views/impressions need eBay's Sell Analytics permission: a seller who
+          connected before the app asked for it keeps the original grant
+          through every token refresh, so the report 401/403s. Say that plainly
+          rather than printing a 0 the seller would read as "nobody looked". */}
       {(() => {
         const withMetrics = live.filter((i) => metricsById[i.id]);
-        if (!withMetrics.length) return null;
+        const trafficOk = metricsStatus.trafficOk;
+        const needsReconnect = ebay.connected && live.length > 0
+          && metricsStatus.needsReconnect;
+        if (!withMetrics.length && !needsReconnect) return null;
         const views = withMetrics.reduce((s, i) => s + (metricsById[i.id].views || 0), 0);
         const impressions = withMetrics.reduce((s, i) => s + (metricsById[i.id].impressions || 0), 0);
         const top = [...withMetrics].sort((a, b) =>
           (metricsById[b.id].views || 0) - (metricsById[a.id].views || 0))[0];
-        const topViews = metricsById[top.id].views || 0;
+        const topViews = top ? (metricsById[top.id].views || 0) : 0;
         return (
           <motion.div variants={rise}>
             <Card className="py-3.5 px-5 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[13px] text-ink-secondary">
               <span className="inline-flex items-center gap-1.5 font-semibold text-ink">
                 <BarChart3 size={15} className="text-blue" aria-hidden /> Traffic · 30 days
               </span>
-              <span className="inline-flex items-center gap-1 tabular-nums">
-                <Eye size={14} aria-hidden /> {views.toLocaleString()} views
-              </span>
-              {impressions > 0 && (
+              {trafficOk && (
+                <span className="inline-flex items-center gap-1 tabular-nums">
+                  <Eye size={14} aria-hidden /> {views.toLocaleString()} views
+                </span>
+              )}
+              {trafficOk && impressions > 0 && (
                 <span className="tabular-nums">{impressions.toLocaleString()} search impressions</span>
               )}
-              <span className="inline-flex items-center gap-1 tabular-nums">
-                <Heart size={14} aria-hidden /> {watcherTotal.toLocaleString()} watchers
-              </span>
-              {topViews > 0 && (
+              {withMetrics.length > 0 && (
+                <span className="inline-flex items-center gap-1 tabular-nums">
+                  <Heart size={14} aria-hidden /> {watcherTotal.toLocaleString()} watchers
+                </span>
+              )}
+              {trafficOk && topViews > 0 && (
                 <button
                   type="button"
                   onClick={() => openListing(top.id)}
@@ -561,6 +572,18 @@ export function Dashboard() {
                   </span>
                   <span className="shrink-0 tabular-nums">({topViews.toLocaleString()})</span>
                 </button>
+              )}
+              {needsReconnect && (
+                <span className="inline-flex flex-wrap items-center gap-1.5">
+                  eBay won’t share your views and impressions with this app yet.
+                  <button
+                    type="button"
+                    onClick={() => setView("settings")}
+                    className="text-blue font-semibold cursor-pointer hover:underline"
+                  >
+                    Reconnect eBay to see them
+                  </button>
+                </span>
               )}
             </Card>
           </motion.div>
