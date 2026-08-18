@@ -13,6 +13,7 @@ import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
 import { ListingCard } from "@/components/ListingCard";
+import { DuplicateListings } from "@/components/DuplicateListings";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
@@ -565,6 +566,17 @@ export function Dashboard() {
           </motion.div>
         );
       })()}
+
+      {/* Possible duplicates — leftovers of the publish race the app now
+          prevents. Above the suggestions because a duplicate live listing
+          costs money and risks eBay's duplicate-listing policy, and because
+          the card hides itself entirely when there's nothing to report. */}
+      <motion.div variants={rise}>
+        <DuplicateListings onChanged={() => {
+          loadListings({ quiet: true });
+          refreshInsights();
+        }} />
+      </motion.div>
 
       {/* Suggested actions — the recommendation engine's picks, one collapsed
           group per category (expand for the per-listing rows). */}

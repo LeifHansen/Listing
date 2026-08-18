@@ -35,10 +35,10 @@ from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
 from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, ebay, ebay_orders, ebay_trading,
-                       image_import, images, listing_sync, metrics,
-                       notifications, orient, preflight, pricing, promotions,
-                       recommender, taxonomy, tokens)
+from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
+                       ebay_trading, image_import, images, listing_sync,
+                       metrics, notifications, orient, preflight, pricing,
+                       promotions, recommender, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -2564,6 +2564,30 @@ def listing_metrics_route(request: Request) -> dict:
         return {"metrics": {}}
     items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
     return {"metrics": _metrics_by_record_id(_ebay_creds_for(request), items)}
+
+
+@app.get("/api/ebay/duplicates")
+def duplicate_listings(request: Request) -> dict:
+    """Live listings that look like the same item listed more than once.
+
+    Cleanup for the duplicates the old publish race left behind: those are two
+    real eBay listings, so the app can't merge them — only the seller can
+    decide which to end. This finds the likely pairs and hands over the
+    evidence. Nothing is ended here; see /api/ebay/end-listing, one at a time.
+
+    Never raises — a failure here must not take the Dashboard with it.
+    """
+    user = auth.current_user(request)
+    if not user:
+        return {"groups": [], "total": 0}
+    try:
+        groups = duplicates.find(
+            db.list_listings(limit=LIST_CAP, user_id=user["id"]))
+    except Exception as exc:  # noqa: BLE001 - advisory feature, never fatal
+        log.warning("duplicate scan failed for user=%s: %s", user["id"], exc)
+        return {"groups": [], "total": 0}
+    return {"groups": groups, "total": len(groups),
+            "listings": sum(len(g["listings"]) for g in groups)}
 
 
 @app.get("/api/insights")
