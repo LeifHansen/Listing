@@ -155,6 +155,7 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
 | `GET`  | `/api/insights` | Ranked "what to do next" actions across the user's listings |
+| `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
@@ -389,6 +390,28 @@ and a reload resets the browser's own double-submit guard. Three defences, in
   process, and the app then adopts the listing that already exists rather than
   posting a twin. A relist keys on the item it replaces, so an intentional
   relist still goes through while a retried one doesn't double-list.
+
+### Finding the duplicates already out there
+
+The guard above stops new ones; it can't undo the pairs an earlier race left on
+the account, because those are two real eBay listings and only the seller can
+say which to end. `services/duplicates.py` finds the likely ones — live
+listings sharing a normalized title but holding **different** eBay item ids —
+and ranks them by the evidence:
+
+- **Listed seconds apart** is the strongest tell. A seller listing two copies of
+  something does it deliberately; a double-publish mints both at once.
+- **Same price**, and **one row created here alongside one pulled back from the
+  store** — the exact shape the publish race left behind.
+
+It is deliberately called *possible*. A reseller can legitimately have two live
+listings with the same title, so the reasons it might be fine (listed months
+apart, different prices, one auction and one Buy It Now) are shown with equal
+weight, an auction/Buy-It-Now pair is never ranked high, and two rows for the
+SAME item id are never flagged — that's a sync artifact, and telling a seller to
+end it would cost them their only listing. The Dashboard card hides itself when
+there's nothing to report, and nothing is ever ended automatically: each End is
+one listing, behind a confirm, through the usual `/api/ebay/end-listing`.
 
 ## Suggested actions (and applying them in bulk)
 
