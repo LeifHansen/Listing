@@ -7,7 +7,8 @@
     "min_retention": 0.974,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.954
+    "raw_retention": 0.954,
+    "raw_spill": 0.0
   },
   {
     "name": "black_on_dark/fringed",
@@ -17,7 +18,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0061,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0208
   },
   {
     "name": "black_on_dark/soft",
@@ -27,7 +29,19 @@
     "min_retention": 0.979,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "black_on_dark/scrappy",
+    "builder": "black_on_dark",
+    "matte": "scrappy",
+    "note": "black hoodie on a dark floor",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0174,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0661
   },
   {
     "name": "white_on_white/chewed",
@@ -37,7 +51,8 @@
     "min_retention": 0.971,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.954
+    "raw_retention": 0.954,
+    "raw_spill": 0.0
   },
   {
     "name": "white_on_white/fringed",
@@ -47,7 +62,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0102,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0208
   },
   {
     "name": "white_on_white/soft",
@@ -57,7 +73,19 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "white_on_white/scrappy",
+    "builder": "white_on_white",
+    "matte": "scrappy",
+    "note": "cream blouse on a white sweep",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.017,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0661
   },
   {
     "name": "printed_multicolor/chewed",
@@ -67,7 +95,8 @@
     "min_retention": 0.949,
     "max_hole": 0.051,
     "max_spill": 0.005,
-    "raw_retention": 0.954
+    "raw_retention": 0.954,
+    "raw_spill": 0.0
   },
   {
     "name": "printed_multicolor/fringed",
@@ -77,7 +106,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0055,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0208
   },
   {
     "name": "printed_multicolor/soft",
@@ -87,7 +117,19 @@
     "min_retention": 0.979,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "printed_multicolor/scrappy",
+    "builder": "printed_multicolor",
+    "matte": "scrappy",
+    "note": "printed tee: four unrelated colours",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0065,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0661
   },
   {
     "name": "thin_strap/chewed",
@@ -97,7 +139,8 @@
     "min_retention": 0.883,
     "max_hole": 0.084,
     "max_spill": 0.005,
-    "raw_retention": 0.921
+    "raw_retention": 0.921,
+    "raw_spill": 0.0
   },
   {
     "name": "thin_strap/fringed",
@@ -107,7 +150,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0202
   },
   {
     "name": "thin_strap/soft",
@@ -117,7 +161,19 @@
     "min_retention": 0.972,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.996
+    "raw_retention": 0.996,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "thin_strap/scrappy",
+    "builder": "thin_strap",
+    "matte": "scrappy",
+    "note": "shoulder bag whose strap is 8px of fabric",
+    "min_retention": 0.976,
+    "max_hole": 0.02,
+    "max_spill": 0.0108,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0489
   },
   {
     "name": "shoe_pair/chewed",
@@ -127,7 +183,8 @@
     "min_retention": 0.946,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.938
+    "raw_retention": 0.938,
+    "raw_spill": 0.0
   },
   {
     "name": "shoe_pair/fringed",
@@ -137,7 +194,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.022
   },
   {
     "name": "shoe_pair/soft",
@@ -147,7 +205,19 @@
     "min_retention": 0.977,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.999
+    "raw_retention": 0.999,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "shoe_pair/scrappy",
+    "builder": "shoe_pair",
+    "matte": "scrappy",
+    "note": "two shoes: two components, both real",
+    "min_retention": 0.978,
+    "max_hole": 0.02,
+    "max_spill": 0.0115,
+    "raw_retention": 1.0,
+    "raw_spill": 0.06
   },
   {
     "name": "hanging_tag/chewed",
@@ -157,7 +227,8 @@
     "min_retention": 0.946,
     "max_hole": 0.031,
     "max_spill": 0.005,
-    "raw_retention": 0.943
+    "raw_retention": 0.943,
+    "raw_spill": 0.0
   },
   {
     "name": "hanging_tag/fringed",
@@ -167,7 +238,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0195
   },
   {
     "name": "hanging_tag/soft",
@@ -177,7 +249,19 @@
     "min_retention": 0.968,
     "max_hole": 0.031,
     "max_spill": 0.005,
-    "raw_retention": 0.999
+    "raw_retention": 0.999,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "hanging_tag/scrappy",
+    "builder": "hanging_tag",
+    "matte": "scrappy",
+    "note": "jacket with the size tag still on a string",
+    "min_retention": 0.975,
+    "max_hole": 0.02,
+    "max_spill": 0.0115,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0794
   },
   {
     "name": "edge_touching/chewed",
@@ -187,7 +271,8 @@
     "min_retention": 0.972,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.979
+    "raw_retention": 0.979,
+    "raw_spill": 0.0
   },
   {
     "name": "edge_touching/fringed",
@@ -197,7 +282,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0213
   },
   {
     "name": "edge_touching/soft",
@@ -207,7 +293,19 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "edge_touching/scrappy",
+    "builder": "edge_touching",
+    "matte": "scrappy",
+    "note": "coat running off the bottom and right of the frame",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.005,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
   },
   {
     "name": "fringe/chewed",
@@ -217,7 +315,8 @@
     "min_retention": 0.943,
     "max_hole": 0.022,
     "max_spill": 0.0096,
-    "raw_retention": 0.895
+    "raw_retention": 0.895,
+    "raw_spill": 0.0
   },
   {
     "name": "fringe/fringed",
@@ -227,7 +326,8 @@
     "min_retention": 0.976,
     "max_hole": 0.02,
     "max_spill": 0.0141,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0287
   },
   {
     "name": "fringe/soft",
@@ -237,7 +337,19 @@
     "min_retention": 0.969,
     "max_hole": 0.02,
     "max_spill": 0.0117,
-    "raw_retention": 0.989
+    "raw_retention": 0.989,
+    "raw_spill": 0.0053
+  },
+  {
+    "name": "fringe/scrappy",
+    "builder": "fringe",
+    "matte": "scrappy",
+    "note": "fur collar / fringed hem",
+    "min_retention": 0.976,
+    "max_hole": 0.02,
+    "max_spill": 0.0202,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0651
   },
   {
     "name": "reflective/chewed",
@@ -247,7 +359,8 @@
     "min_retention": 0.955,
     "max_hole": 0.024,
     "max_spill": 0.005,
-    "raw_retention": 0.954
+    "raw_retention": 0.954,
+    "raw_spill": 0.0
   },
   {
     "name": "reflective/fringed",
@@ -257,7 +370,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0181,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0208
   },
   {
     "name": "reflective/soft",
@@ -267,7 +381,19 @@
     "min_retention": 0.979,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "reflective/scrappy",
+    "builder": "reflective",
+    "matte": "scrappy",
+    "note": "patent leather with a blown-out specular band",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0188,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0661
   },
   {
     "name": "transparent_panel/chewed",
@@ -277,7 +403,8 @@
     "min_retention": 0.952,
     "max_hole": 0.027,
     "max_spill": 0.005,
-    "raw_retention": 0.954
+    "raw_retention": 0.954,
+    "raw_spill": 0.0
   },
   {
     "name": "transparent_panel/fringed",
@@ -287,7 +414,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0106,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0208
   },
   {
     "name": "transparent_panel/soft",
@@ -297,7 +425,107 @@
     "min_retention": 0.979,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "transparent_panel/scrappy",
+    "builder": "transparent_panel",
+    "matte": "scrappy",
+    "note": "see-through panel in the middle of the product",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0147,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0661
+  },
+  {
+    "name": "cast_shadow/chewed",
+    "builder": "cast_shadow",
+    "matte": "chewed",
+    "note": "item on a table throwing a soft shadow",
+    "min_retention": 0.961,
+    "max_hole": 0.02,
+    "max_spill": 0.005,
+    "raw_retention": 0.955,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "cast_shadow/fringed",
+    "builder": "cast_shadow",
+    "matte": "fringed",
+    "note": "item on a table throwing a soft shadow",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0095,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0192
+  },
+  {
+    "name": "cast_shadow/soft",
+    "builder": "cast_shadow",
+    "matte": "soft",
+    "note": "item on a table throwing a soft shadow",
+    "min_retention": 0.979,
+    "max_hole": 0.02,
+    "max_spill": 0.005,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "cast_shadow/scrappy",
+    "builder": "cast_shadow",
+    "matte": "scrappy",
+    "note": "item on a table throwing a soft shadow",
+    "min_retention": 0.979,
+    "max_hole": 0.02,
+    "max_spill": 0.0084,
+    "raw_retention": 1.0,
+    "raw_spill": 0.063
+  },
+  {
+    "name": "table_edge/chewed",
+    "builder": "table_edge",
+    "matte": "chewed",
+    "note": "counter edge running behind the item",
+    "min_retention": 0.935,
+    "max_hole": 0.065,
+    "max_spill": 0.005,
+    "raw_retention": 0.951,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "table_edge/fringed",
+    "builder": "table_edge",
+    "matte": "fringed",
+    "note": "counter edge running behind the item",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0095,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0169
+  },
+  {
+    "name": "table_edge/soft",
+    "builder": "table_edge",
+    "matte": "soft",
+    "note": "counter edge running behind the item",
+    "min_retention": 0.979,
+    "max_hole": 0.02,
+    "max_spill": 0.005,
+    "raw_retention": 0.999,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "table_edge/scrappy",
+    "builder": "table_edge",
+    "matte": "scrappy",
+    "note": "counter edge running behind the item",
+    "min_retention": 0.979,
+    "max_hole": 0.02,
+    "max_spill": 0.0064,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0593
   },
   {
     "name": "busy_background/chewed",
@@ -307,7 +535,8 @@
     "min_retention": 0.936,
     "max_hole": 0.064,
     "max_spill": 0.005,
-    "raw_retention": 0.953
+    "raw_retention": 0.953,
+    "raw_spill": 0.0
   },
   {
     "name": "busy_background/fringed",
@@ -317,7 +546,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0152,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0145
   },
   {
     "name": "busy_background/soft",
@@ -327,7 +557,19 @@
     "min_retention": 0.978,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.999
+    "raw_retention": 0.999,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "busy_background/scrappy",
+    "builder": "busy_background",
+    "matte": "scrappy",
+    "note": "shot on a rug, backdrop is not one colour",
+    "min_retention": 0.979,
+    "max_hole": 0.02,
+    "max_spill": 0.0064,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0557
   },
   {
     "name": "small_subject/chewed",
@@ -337,7 +579,8 @@
     "min_retention": 0.942,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.867
+    "raw_retention": 0.867,
+    "raw_spill": 0.0
   },
   {
     "name": "small_subject/fringed",
@@ -347,7 +590,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0046
   },
   {
     "name": "small_subject/soft",
@@ -357,7 +601,19 @@
     "min_retention": 0.969,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.997
+    "raw_retention": 0.997,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "small_subject/scrappy",
+    "builder": "small_subject",
+    "matte": "scrappy",
+    "note": "a ring: a few percent of the frame",
+    "min_retention": 0.977,
+    "max_hole": 0.02,
+    "max_spill": 0.045,
+    "raw_retention": 1.0,
+    "raw_spill": 0.0402
   },
   {
     "name": "large_subject/chewed",
@@ -367,7 +623,8 @@
     "min_retention": 0.967,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 0.973
+    "raw_retention": 0.973,
+    "raw_spill": 0.0
   },
   {
     "name": "large_subject/fringed",
@@ -377,7 +634,8 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.0051,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.1285
   },
   {
     "name": "large_subject/soft",
@@ -387,6 +645,18 @@
     "min_retention": 0.98,
     "max_hole": 0.02,
     "max_spill": 0.005,
-    "raw_retention": 1.0
+    "raw_retention": 1.0,
+    "raw_spill": 0.0
+  },
+  {
+    "name": "large_subject/scrappy",
+    "builder": "large_subject",
+    "matte": "scrappy",
+    "note": "a rug filling the frame, almost no backdrop to sample",
+    "min_retention": 0.98,
+    "max_hole": 0.02,
+    "max_spill": 0.0194,
+    "raw_retention": 1.0,
+    "raw_spill": 0.119
   }
 ]

@@ -565,6 +565,21 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
             snapped = snapped | starved
             if result is not None:
                 result.metrics["parts_restored_px"] = int(starved.sum())
+    # 2c. Scraps: a lump of background the matte swallowed whole — a cast
+    #     shadow, a wedge of table, a hand. The depth cap above can never
+    #     reach one, by design, so this uses confidence instead of distance
+    #     and is safe by construction (see matte.uncertain_scraps).
+    if raw_small is not None:
+        # Restricted to `arr`, the mask the MODEL produced. The grow pass adds
+        # pixels the raw matte never had — recovering a hem the model shaved —
+        # and those read as "the model was unsure" for the trivial reason that
+        # the model never saw them as subject at all. Judging them here would
+        # undo the grow pass's work on exactly the photos that needed it.
+        scrap = matte.uncertain_scraps(raw_small, snapped & arr, core)
+        if scrap.any():
+            snapped = snapped & ~scrap
+            if result is not None:
+                result.metrics["scrap_removed_px"] = int(scrap.sum())
     # 3. And the backstop: whatever survived, it still has to contain what the
     #    model was confident about — in substance, not in total. A few px
     #    shaved evenly off the rim is this pass working; a chunk out of a hem
