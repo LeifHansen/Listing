@@ -38,9 +38,10 @@ from .marketplaces.state import STICKY_STATUSES
 from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
-                       ebay_trading, image_import, images, listing_sync,
-                       metrics, notifications, orient, preflight, pricing,
-                       promotions, recommender, sync_guard, taxonomy, tokens)
+                       ebay_trading, image_import, images, jobstore,
+                       listing_sync, metrics, notifications, orient, preflight,
+                       pricing, promotions, recommender, sync_guard, taxonomy,
+                       tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -2233,47 +2234,25 @@ def delete_image(payload: dict, request: Request) -> dict:
 
 
 # ---------- Bulk mode: one photo dump -> many listings ----------
-# Jobs are in-memory: the app runs a single always-on machine (fly.toml), and a
-# lost job only means re-running the upload — listings themselves persist.
-_BULK_JOBS: dict[str, dict] = {}
-_BULK_LOCK = threading.Lock()
 # Claude vision accepts at most 100 images per request; bigger piles (bulk
 # takes up to MAX_BULK_FILES photos) are grouped in chunks of this size.
 BULK_GROUP_CHUNK = 100
-# Bound the in-memory job store. identify runs as a job on EVERY upload, so
-# without eviction this dict would grow monotonically until restart. Dicts keep
-# insertion order, so we drop the oldest past this cap — a client polls a job
-# only briefly, and the resulting listings persist to the DB regardless.
-_BULK_JOBS_MAX = 200
+
+# Job status lives in services/jobstore: in memory, mirrored to disk so a
+# machine that goes away mid-batch (an OOM-kill during background removal, a
+# deploy) leaves a record saying so, instead of a status id that 404s forever
+# while the client sits on a progress bar. Aliased under the names the workers
+# below have always used.
+_register_bulk_job = jobstore.register
+_bulk_set = jobstore.update
 
 
-# Serialized job snapshots keyed by job id: (rev, json body). Polls re-serve
-# the cached JSON until the job actually changes — a 30-item bulk job is a
-# ~1MB dict that was deep-copied via json.dumps+loads on EVERY 1.5s poll, on
-# the same shared CPUs running inference.
-_BULK_SNAPSHOTS: dict[str, tuple[int, str]] = {}
-
-
-def _register_bulk_job(job_id: str, data: dict, uid: Optional[str] = None) -> None:
-    """Register a background job. `uid` is the account that started it; job
-    status carries drafted titles and prices, so a logged-in user's job is
-    readable only by them (see _assert_job_owner). Anonymous jobs have no
-    owner and stay readable by whoever holds the id, matching how the rest of
-    the app treats logged-out sessions."""
-    with _BULK_LOCK:
-        _BULK_JOBS[job_id] = {**data, "_uid": uid, "_rev": 0}
-        while len(_BULK_JOBS) > _BULK_JOBS_MAX:
-            oldest = next(iter(_BULK_JOBS))
-            _BULK_JOBS.pop(oldest)
-            _BULK_SNAPSHOTS.pop(oldest, None)
-
-
-def _bulk_set(job_id: str, **fields) -> None:
-    with _BULK_LOCK:
-        job = _BULK_JOBS.get(job_id)
-        if job is not None:
-            job.update(fields)
-            job["_rev"] = job.get("_rev", 0) + 1
+@app.on_event("startup")
+def _adopt_job_mirrors() -> None:
+    """Re-adopt mirrored jobs before the first request is served, so a client
+    that polls straight through a restart is told its batch was interrupted
+    rather than being handed a 404 for a job that once existed."""
+    jobstore.adopt_mirrors()
 
 
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
@@ -2543,25 +2522,20 @@ async def bulk_upload(
 
 @app.get("/api/bulk/status/{job_id}")
 def bulk_status(job_id: str, request: Request) -> Response:
-    caller = _uid(request)  # resolved before the lock — it may hit the DB
-    with _BULK_LOCK:
-        job = _BULK_JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
-        owner = job.get("_uid")
-        # Same rule as _assert_session_owner: an owned job is private to its
-        # owner (404, not 403 — don't confirm the id exists).
-        if owner and owner != caller:
-            raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
-        rev = job.get("_rev", 0)
-        snap = _BULK_SNAPSHOTS.get(job_id)
-        if snap is None or snap[0] != rev:
-            # Serialize once per CHANGE, not once per poll; underscore keys
-            # are internal bookkeeping, not part of the API.
-            public = {k: v for k, v in job.items() if not k.startswith("_")}
-            snap = (rev, json.dumps(public))
-            _BULK_SNAPSHOTS[job_id] = snap
-    return Response(content=snap[1], media_type="application/json")
+    """A job's live status — or, for one the server no longer has running, the
+    mirrored record of how it ended (see services/jobstore). A batch cut short
+    by a restart reports itself done with the reason, so the client can settle
+    instead of polling an id that will never answer.
+
+    None from the store means "no such job" OR "not yours"; both answer 404, so
+    the reply never confirms that someone else's id exists. The body is served
+    pre-serialized: a 30-item batch is a ~1MB dict and every client polls this
+    every 1.5s, on the same shared CPUs running photo inference.
+    """
+    body = jobstore.snapshot_json(job_id, _uid(request))
+    if body is None:
+        raise HTTPException(404, "Unknown bulk job.")
+    return Response(content=body, media_type="application/json")
 
 
 def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],

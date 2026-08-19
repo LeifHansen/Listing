@@ -325,6 +325,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const [unwatched, setUnwatched] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
+  const notFound = useRef(0);
   // Items merged away client-side — the still-running job's status would
   // otherwise resurrect them on the next poll.
   const removed = useRef(new Set());
@@ -338,6 +339,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     if (!jobId) return;
     stopped.current = false;
     fails.current = 0;
+    notFound.current = 0;
     setUnwatched(false);
     let timer;
     const poll = async () => {
@@ -345,6 +347,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         const j = await api(`/api/bulk/status/${jobId}`);
         if (stopped.current) return;
         fails.current = 0;
+        notFound.current = 0;
         setJob(j);
         if (j.items?.length) {
           // Merge WITHOUT clobbering the user's inline edits: the server never
@@ -373,18 +376,42 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         if (!j.done) {
           timer = setTimeout(poll, 1500);
         } else {
+          stopped.current = true;  // nothing left to watch — don't re-poll on focus
           loadListings({ quiet: true });
           onSettled?.();  // stop persisting; a reload shouldn't restore a done batch
         }
       } catch (e) {
         if (stopped.current) return;
         fails.current += 1;
-        // A 404 = the job is genuinely gone (server restarted/evicted). Any
-        // other error (network blip, server busy) is transient — keep retrying.
+        // A 404 means the server has no record of this job at all. Confirm it
+        // with a second poll before believing it: a status check can 404 on a
+        // blip (an auth hiccup mid-batch does it) while the batch itself is
+        // still running, and declaring it dead is not something we can undo.
         const gone = (e.message || "").includes("(404)");
-        if (gone) {
+        notFound.current = gone ? notFound.current + 1 : 0;
+        if (gone && notFound.current < 2) {
+          timer = setTimeout(poll, 3000);
+        } else if (gone) {
+          // Terminal. Stop polling for good — including the visibility/focus
+          // handler below, which otherwise re-ran this on every tab switch —
+          // and mark the batch finished so the queue shows what happened.
+          // Without this the progress bar sat spinning on the photo the batch
+          // died at, with no result, no error, and no way out of the screen.
+          stopped.current = true;
           onSettled?.();
           setUnwatched(true);
+          loadListings({ quiet: true });  // whatever it did finish is in Drafts
+          // A finished job, so the queue renders the outcome card with this
+          // reason and a way off the screen. Clearing `busy` alone (unwatched)
+          // stops the spinner but leaves nothing behind it: no explanation,
+          // and no exit at all for a batch that died before drafting anything.
+          setJob((j) => ({
+            ...(j || {}),
+            done: true,
+            error: "This batch stopped early — the server restarted while it "
+              + "was working, and no record of it survived. Anything it "
+              + "finished is saved in Drafts; the rest need another run.",
+          }));
           toast("This batch was interrupted (the server restarted). Any items it finished are saved in Drafts.",
             { kind: "warning" });
         } else if (fails.current < 6) {
@@ -656,11 +683,18 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             </p>
             {/* The guided path: step through each draft in the full editor —
                 preview, tweak, publish — and the post-publish screen's "Next
-                Draft" keeps the assembly line moving through the batch. */}
-            {drafts.length > 0 && (
+                Draft" keeps the assembly line moving through the batch.
+                With no drafts to step through (a batch that failed before it
+                identified anything) this is the only way off the screen — the
+                queue's own toolbar renders only alongside drafts. */}
+            {drafts.length > 0 ? (
               <Button variant="primary" onClick={() => openItem(drafts[0])}
                 title="Review each draft in the full editor and publish as you go.">
                 Preview &amp; list <ArrowRight aria-hidden />
+              </Button>
+            ) : (
+              <Button variant="secondary" onClick={onExit}>
+                <PenLine aria-hidden /> Start another batch
               </Button>
             )}
           </div>
