@@ -34,16 +34,98 @@ export function apiUrl(path) {
 // fetch from the shell never carries. The auth endpoints already return a
 // bearer token for exactly this case; it's stored only in the native build
 // (API_BASE set) so the web app keeps its cookie-only posture.
+//
+// That token used to live in localStorage, which on a native shell is an
+// ordinary file inside the app container: readable by anything with access to
+// a device backup, and not protected by the device passcode. A long-lived
+// credential to someone's eBay-connected account does not belong there. It
+// now lives in the Keychain (iOS) / EncryptedSharedPreferences over the
+// Keystore (Android) via capacitor-secure-storage-plugin.
+//
+// The plugin is reached through Capacitor's global registry rather than an
+// import, so the WEB bundle neither grows nor changes behaviour, and a native
+// build whose plugin hasn't been synced yet still works — it falls back to
+// localStorage rather than logging everyone out.
 
 const TOKEN_KEY = "thryft-session-token";
 
+function securePlugin() {
+  try {
+    return isNative() ? window.Capacitor?.Plugins?.SecureStoragePlugin || null : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// The synchronous answer for the request wrapper. Hydrated by loadToken()
+// before the first authenticated call (see tokenReady).
+let memoryToken = null;
+let readyPromise = null;
+
+function localToken() {
+  try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+}
+
+async function loadToken() {
+  const secure = securePlugin();
+  if (!secure) {
+    memoryToken = localToken();
+    return;
+  }
+  try {
+    const { value } = await secure.get({ key: TOKEN_KEY });
+    if (value) {
+      memoryToken = value;
+      // Anything left in localStorage from a build that predates this is a
+      // copy of the same credential sitting in the clear. Now that the
+      // Keychain has it, that copy is pure liability.
+      try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+      return;
+    }
+  } catch (e) { /* nothing stored yet — the plugin rejects on a missing key */ }
+  // Migrate a token from the old location, then delete it from there. Doing
+  // this instead of ignoring it is what keeps the upgrade from signing
+  // everyone out.
+  const legacy = localToken();
+  if (legacy) {
+    memoryToken = legacy;
+    try {
+      await secure.set({ key: TOKEN_KEY, value: legacy });
+      localStorage.removeItem(TOKEN_KEY);
+    } catch (e) { /* keep using it from memory this session */ }
+  }
+}
+
+// Resolves once the token has been read out of secure storage. `api()` awaits
+// this before every request: it settles once, and without it the first call
+// after a cold start would race the (asynchronous) Keychain read and go out
+// unauthenticated.
+export function tokenReady() {
+  if (!API_BASE) return Promise.resolve();
+  if (!readyPromise) readyPromise = loadToken();
+  return readyPromise;
+}
+
 export function storedToken() {
   if (!API_BASE) return null;
-  try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+  return memoryToken;
 }
 
 export function storeToken(token) {
   if (!API_BASE) return;
+  memoryToken = token || null;
+  const secure = securePlugin();
+  if (secure) {
+    // Fire-and-forget: the in-memory copy is already live, and a Keychain
+    // write that fails costs this session's persistence, not the session.
+    const done = token
+      ? secure.set({ key: TOKEN_KEY, value: token })
+      : secure.remove({ key: TOKEN_KEY });
+    Promise.resolve(done).catch(() => {});
+    // Never leave a copy behind in the clear.
+    try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
+    return;
+  }
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);

@@ -18,7 +18,7 @@ import { useToast } from "@/components/ui/Toaster";
 // Shop Mode — scan items while thrifting: instant ID + typical resale price,
 // then one tap drops it into inventory to finish later.
 export function ShopMode() {
-  const { user, openAuth, health, setView, openListings, loadListings } = useApp();
+  const { user, openAuth, health, openListings, loadListings } = useApp();
   const { toast } = useToast();
   const itemRef = useRef(null);
   const shelfRef = useRef(null);

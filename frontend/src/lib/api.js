@@ -1,4 +1,4 @@
-import { API_BASE, apiUrl, storedToken } from "@/lib/platform";
+import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
 
 // Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
 // same-origin navigation, exactly as before. In the native shell the
@@ -65,7 +65,10 @@ export const UPLOAD_TIMEOUT_MS = 300000;
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
-  // stored bearer token instead (no-op on the web build).
+  // stored bearer token instead (no-op on the web build). tokenReady settles
+  // once — reading the Keychain is asynchronous, and without waiting for it
+  // the first call after a cold start would go out unauthenticated.
+  await tokenReady();
   const token = storedToken();
   if (token && !(opts.headers && opts.headers.Authorization)) {
     opts = { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } };
@@ -86,9 +89,11 @@ export async function api(path, opts = {}) {
     if (e?.name === "AbortError") {
       throw new Error(
         `That took longer than ${Math.round(timeoutMs / 1000)}s and was given up on. `
-        + "Nothing was lost — try again.");
+        + "Nothing was lost — try again.", { cause: e });
     }
-    throw new Error("Network error — the server may be starting up. Try again in a few seconds.");
+    throw new Error(
+      "Network error — the server may be starting up. Try again in a few seconds.",
+      { cause: e });
   } finally {
     if (timer) clearTimeout(timer);
   }
