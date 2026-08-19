@@ -31,3 +31,10 @@ frontend/dist/
 # (see MOBILE.md); never committed.
 frontend/ios/
 frontend/android/
+
+# Private cutout regression photos. Same manifest format as
+# backend/tests/fixtures/cutout, pointed at by CUTOUT_FIXTURES_DIR. Real
+# seller photos are not ours to publish, and a regression suite is not a
+# reason to try — so the directory is ignored, by name and anywhere it sits.
+backend/tests/fixtures/cutout-private/
+**/cutout-private/

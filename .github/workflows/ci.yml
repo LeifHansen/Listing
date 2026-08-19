@@ -29,6 +29,27 @@ jobs:
       - name: Tests
         run: pytest backend/tests -q
 
+  # The image gate. The fast job above deliberately skips the image stack, so
+  # the rules that decide whether a cutout deleted the product would run
+  # nowhere — and "the background remover ate my item" is the failure that
+  # actually reaches sellers. Pillow/NumPy/SciPy only: no rembg, no
+  # onnxruntime, no model download. The suite works on synthetic mattes with
+  # known ground truth, which is what makes that possible.
+  cutout:
+    name: Cutout safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install pytest pillow numpy scipy python-dotenv pydantic
+      - name: Mask-safety rules
+        run: pytest backend/tests/test_matte.py -q
+      - name: Cutout regression suite
+        run: pytest backend/tests/test_cutout_regression.py backend/tests/test_bg_border.py -q
+
   # The Vite build is the only thing that type-checks the JSX. Without it a
   # broken import or syntax error in the frontend only surfaced during the
   # production Docker build, i.e. after merge.

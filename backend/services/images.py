@@ -34,6 +34,7 @@ from PIL import (Image, ImageEnhance, ImageFile, ImageFilter, ImageOps,
 
 from .. import config
 from ..config import log
+from . import matte
 from ..storage import natural_key
 from . import orient
 
@@ -318,6 +319,8 @@ def _grow_within(seed, allowed, reach: int):
 
 def _solidify_border(alpha: Image.Image, source: Image.Image,
                      out_size: Optional[tuple[int, int]] = None,
+                     raw: Optional[Image.Image] = None,
+                     result: Optional[matte.CutoutResult] = None,
                      ) -> Optional[Image.Image]:
     """Consolidate a raw matte into one solid silhouette whose border sits on
     the item's actual edge. Returns None when it can't run (disabled, no numpy,
@@ -344,7 +347,12 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
     Growing is skipped on a cluttered backdrop, where "not the backdrop colour"
     stops meaning "item"; trimming still runs. Growth also stops at real edges
     in the photo and is capped in total, and if any of it somehow eats the
-    subject we return the merely-closed mask rather than a mangled one."""
+    subject we return the merely-closed mask rather than a mangled one.
+
+    `raw` is the model's own matte, before hardening. It is the reference every
+    pass here is measured against (see services/matte.py): the parts the model
+    was confident about are not this function's to delete, whatever the colour
+    maths concludes. `result` collects the warnings and metrics."""
     if not _SOLIDIFY:
         return None
     try:
@@ -366,9 +374,22 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
     arr = np.asarray(closed, dtype=np.uint8) >= 128
     if not arr.any() or arr.all():
         return None  # nothing kept, or nothing removed — no border to solidify
-    arr = _drop_specks(arr)
+    # The model's own matte at scan scale: the reference for every decision
+    # below, and the thing that tells a shoelace apart from a JPEG crumb.
+    raw_small = None
+    if raw is not None:
+        raw_small = np.asarray(
+            raw if raw.size == (sw, sh) else raw.resize((sw, sh), Image.BILINEAR),
+            dtype=np.uint8)
+    # Detached blobs: drop crumbs, keep parts. Area alone can't tell a strap
+    # from a speck, so confidence and shape get a vote (see matte.py).
+    arr = matte.keep_components(arr, confidence=raw_small)
     if not arr.any():
         return None
+    # What this function is forbidden to delete. Empty when there is no raw
+    # matte to consult, which simply disables the rollbacks.
+    core = (matte.confident_core(raw_small) & arr if raw_small is not None
+            else np.zeros_like(arr))
 
     def _out(mask) -> Image.Image:
         img = Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), "L")
@@ -395,23 +416,31 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
     # colour we're removing — after which nothing gets trimmed. Step in far
     # enough to clear that overshoot, and back off on a thin item that erodes
     # away at that depth.
-    core = arr
+    inner = arr
     for inset in (reach, reach * 0.5):
         eroded = (np.asarray(_blur_threshold(solid, max(2.0, inset), 215),
                              dtype=np.uint8) >= 128)
         if eroded.sum() > max(64, 0.02 * arr.sum()):
-            core = eroded
+            inner = eroded
             break
-    item = np.median(rgb[core], axis=0)
+    # The item's colours — plural. Describing a product with one median is the
+    # assumption that breaks every printed tee, two-tone sneaker and patterned
+    # dress: the median lands between the garment and its print, so both
+    # measure as "not the item", and whichever also sits near the backdrop's
+    # colour gets trimmed away. A small palette costs one histogram.
+    item_colours = matte.palette(rgb, inner)
     d_bg = _colour_gap(luma, chroma, backdrop)
-    d_item = _colour_gap(luma, chroma, item)
+    d_item = matte.nearest_gap(
+        lambda colour: _colour_gap(luma, chroma, colour), item_colours)
     busy = float(rgb[far_bg].std(axis=0).mean())
 
     # How far apart those two colours actually are decides how picky we can
     # be: on a strong separation, demand a clear difference from the backdrop;
     # on a pale item against a white sweep there is no clear difference to be
     # had, so scale the bar down rather than give up on the border entirely.
-    item_luma, item_chroma = _colour_split(item.reshape(1, 1, 3))
+    # Contrast against the item's DOMINANT colour (palette entries come back
+    # busiest-first) — the one the backdrop actually abuts most of the time.
+    item_luma, item_chroma = _colour_split(item_colours[0].reshape(1, 1, 3))
     contrast = float(_colour_gap(item_luma, item_chroma, backdrop)[0, 0])
     tol = max(10.0, min(_EDGE_SNAP_TOL, 0.35 * contrast))
     if busy > _BUSY_BACKDROP_STD:
@@ -447,18 +476,87 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
                         "%.0f%% — leaking into the scene, keeping the plain mask",
                         100.0 * (grown.sum() / max(1, arr.sum()) - 1))
             grown = arr
+            if result is not None:
+                result.metrics["grow_rolled_back"] = True
     # Trim the other way, symmetrically: let the backdrop eat back into the
     # silhouette wherever the mask is still covering backdrop-coloured pixels
     # that connect to the outside. That clears the halo of old background a
     # generous matte leaves around the item — the job the old unconditional 1px
     # erode was doing, except it shaved the item everywhere, fringe or not.
+    # The item's whole palette judges the trim too, not a filtered subset.
+    # Excluding item colours that happen to match the backdrop (a patent bag's
+    # specular band, a white logo on a white sweep) does clean up a faint halo
+    # on those photos — and costs a pale garment a 13px rim of itself all the
+    # way round, because "pale" and "matches the backdrop" are the same
+    # measurement. A 1% halo is a cosmetic flaw the seller can see and fix;
+    # a shaved hem is a ruined photo. So: full palette, keep the item.
     backdropish = (d_bg <= tol) & (d_bg < d_item)
     outside = ~grown
     eaten = _grow_within(outside, backdropish | outside, reach) & grown
+    # Four brakes on the trim, in the order they should apply.
+    # 0. Depth. The trim exists to remove a rim of leftover backdrop, so it
+    #    only gets to reach a rim's distance inside the silhouette. Without
+    #    this the flood can run the full snap radius and hollow out a sleeve
+    #    on one bad colour reading — and a depth cap, unlike an area cap,
+    #    doesn't punish a strap for being mostly edge.
+    eaten &= matte.rim(grown, matte.trim_depth_for(side))
+    # 1. Never eat a thin part of the CONFIDENT matte. A halo of leftover
+    #    backdrop is thin too, which is exactly why this looks at what the
+    #    model was sure of and not at the grown silhouette: a halo is never
+    #    confident, a shoelace always is.
+    if core.any():
+        protected = matte.thin_structures(core)
+        if protected.any():
+            eaten &= ~protected
+            if result is not None:
+                result.metrics["thin_protected_px"] = int(protected.sum())
     snapped = grown & ~eaten
+    # 2. A hard ceiling on how much of the silhouette the trim may remove, no
+    #    matter what the colour maths concluded. Past that it misread the
+    #    photo, and the first 6% of a misreading is no more trustworthy than
+    #    the rest — so the trim is dropped whole.
+    snapped, capped = matte.cap_trim(grown, snapped)
+    if capped:
+        log.warning("bg-removal: inward trim wanted to remove %.0f%% of the "
+                    "subject — over the cap, keeping the untrimmed border",
+                    100.0 * (grown & eaten).sum() / max(1, grown.sum()))
+        if result is not None:
+            result.metrics["trim_capped"] = True
+            result.warn("Some background may still show around the edges — "
+                        "the cleanup stopped rather than risk cutting into "
+                        "the item.")
+    # 2b. Per-part: an absolute depth is a rim on a coat and most of a size
+    #     tag, so also ask whether each confident piece kept enough of itself.
+    if core.any():
+        starved = matte.undersized_parts(core, snapped)
+        if starved.any():
+            log.warning("bg-removal: inward trim was removing %d px of a part "
+                        "rather than trimming it — putting the part back",
+                        int(starved.sum()))
+            snapped = snapped | starved
+            if result is not None:
+                result.metrics["parts_restored_px"] = int(starved.sum())
+    # 3. And the backstop: whatever survived, it still has to contain what the
+    #    model was confident about — in substance, not in total. A few px
+    #    shaved evenly off the rim is this pass working; a chunk out of a hem
+    #    is not, and only structural_loss can tell those apart (a trimmed halo
+    #    is one big connected ring, so counting area or blobs cannot).
+    if core.any():
+        bite = matte.structural_loss_mask(core, snapped)
+        lost = float(bite.sum()) / float(max(1, int(core.sum())))
+        if result is not None:
+            result.metrics["border_core_loss"] = round(lost, 4)
+        if lost > matte.MAX_CORE_LOSS:
+            log.warning("bg-removal: border snap bit %.1f%% out of the confident "
+                        "subject — putting it back", 100 * lost)
+            snapped = snapped | bite
+            if result is not None:
+                result.metrics["border_rolled_back"] = True
     if snapped.sum() < 0.5 * arr.sum():
         log.warning("bg-removal: border snap would have cut the subject in half "
                     "— keeping the plain solid mask")
+        if result is not None:
+            result.metrics["border_rolled_back"] = True
         return _out(arr)
     # A last hairline close so the snap's per-pixel decisions read as one edge
     # rather than a dotted one.
@@ -500,7 +598,8 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
 
 def _refine_alpha(alpha: Image.Image,
                   source: Optional[Image.Image] = None,
-                  out_size: Optional[tuple[int, int]] = None) -> Image.Image:
+                  out_size: Optional[tuple[int, int]] = None,
+                  result: Optional[matte.CutoutResult] = None) -> Image.Image:
     """Clean the matte into a natural cutout: despeckle, kill the faint
     background ghost, solidify the item's border against the photo, then
     lightly feather the edge so it blends instead of looking stickered-on.
@@ -527,11 +626,15 @@ def _refine_alpha(alpha: Image.Image,
     out_size = out_size or alpha.size
     w, h = out_size
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
+    # The model's matte, kept as-is. Everything below is measured against it —
+    # a refinement is only an improvement if it did not delete product.
+    raw = alpha
     span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
     hardened = alpha.point(lambda a: 0 if a < _ALPHA_LOW
                            else 255 if a > _ALPHA_HIGH
                            else round((a - _ALPHA_LOW) * 255 / span))
-    solid = (_solidify_border(hardened, source, out_size=out_size)
+    solid = (_solidify_border(hardened, source, out_size=out_size, raw=raw,
+                              result=result)
              if source is not None else None)
     if solid is not None:
         # The solidified border already decided, per pixel, where the item
@@ -553,7 +656,49 @@ def _refine_alpha(alpha: Image.Image,
         refined.paste(hardened.crop((0, h - band, w, h)), (0, h - band))    # bottom
         refined.paste(hardened.crop((0, 0, band, h)), (0, 0))               # left
         refined.paste(hardened.crop((w - band, 0, w, h)), (w - band, 0))    # right
-    return refined
+    return _guard_refinement(raw, refined, result)
+
+
+def _guard_refinement(raw: Image.Image, refined: Image.Image,
+                      result: Optional[matte.CutoutResult] = None) -> Image.Image:
+    """Last line of defence: the finished matte still has to contain what the
+    model was confident about.
+
+    Every individual pass already checks itself, but they compose — a legal
+    trim after a legal close after a legal despeckle can still add up to a
+    missing strap. So the whole chain gets measured once against the raw matte
+    it started from, and anything the model was sure of is painted back in
+    rather than shipped missing. Roughness here is cosmetic; absence is not.
+    """
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime
+        return refined
+    ref = raw if raw.size == refined.size else raw.resize(refined.size,
+                                                          Image.BILINEAR)
+    core = matte.confident_core(np.asarray(ref, dtype=np.uint8))
+    if not core.any():
+        return refined
+    final = np.asarray(refined, dtype=np.uint8) >= 128
+    bite = matte.structural_loss_mask(core, final)
+    lost = float(bite.sum()) / float(max(1, int(core.sum())))
+    if result is not None:
+        result.metrics["core_retention"] = round(1.0 - matte.core_loss(core, final), 4)
+        result.metrics["structural_loss"] = round(lost, 4)
+    if lost <= matte.MAX_CORE_LOSS:
+        return refined
+    log.warning("bg-removal: refinement bit %.1f%% out of the confident subject "
+                "— restoring it", 100 * lost)
+    # Restore the BITE, not the whole core: putting the core back wholesale
+    # would also undo the legitimate rim trim and hand back the halo.
+    restored = np.maximum(np.asarray(refined, dtype=np.uint8),
+                          np.where(bite, 255, 0).astype(np.uint8))
+    if result is not None:
+        result.metrics["refinement_rolled_back"] = True
+        result.warn("Part of the item was about to be cut away, so the "
+                    "cleanup was pulled back — check the edges before "
+                    "publishing.")
+    return Image.fromarray(restored, "L")
 
 
 def _flood_sweep(bg, reached, axis: int):
@@ -732,7 +877,9 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
 
 
 def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
-                     dark_guard: bool = True) -> Optional[Image.Image]:
+                     dark_guard: bool = True,
+                     result: Optional[matte.CutoutResult] = None,
+                     ) -> Optional[Image.Image]:
     """In-house rembg cutout composited on pure white (with a soft drop shadow
     unless BG_SHADOW=off) — or None when the result is clearly a failure
     (subject erased), so callers keep the original photo instead of saving a
@@ -743,26 +890,51 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     silently save a mangled cutout. The photo studio passes dark_guard=False:
     the seller is reviewing the result and can Revert, so it's better to SHOW
     the cutout than to hard-fail with an error."""
-    from PIL import ImageStat
-
+    result = result if result is not None else matte.CutoutResult()
+    result.engine = result.engine or f"rembg:{_REMBG_MODEL}"
     rgb = img.convert("RGB")
     # Refine the matte at the resolution the model produced it (upscale=False):
     # every decision in _refine_alpha/_solidify_border happens at or below that
     # scale anyway, so the old full-size median/harden was ~10x the pixels for
     # the same answer. out_size brings the finished matte back to photo size.
     alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side, upscale=False),
-                          source=rgb, out_size=rgb.size)
+                          source=rgb, out_size=rgb.size, result=result)
     # Put back anything the matte punched out of the item's middle BEFORE the
     # guards below: a matte that ate the interior and left a rim reads as
     # "subject nearly erased" (or as a big dark removed area), and bailing out
     # there would throw away a cutout that's fine once repaired.
     alpha, _ = _fill_interior_holes(alpha, rgb)
+    if not _subject_survived(alpha, rgb, result, dark_guard=dark_guard):
+        return None
+    # Warnings raised along the way mean the cutout is usable but wants a look
+    # before it goes on a listing.
+    result.status = matte.NEEDS_REVIEW if result.warnings else matte.APPLIED
+    return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW, fill_holes=False)
+
+
+def _subject_survived(alpha: Image.Image, rgb: Image.Image,
+                      result: matte.CutoutResult,
+                      dark_guard: bool = True) -> bool:
+    """Did the product survive this cutout? Records the verdict on `result`.
+
+    Runs for EVERY engine, local or remote. A paid API is better at edges, not
+    immune to deciding a black hoodie on a dark floor is background — and a
+    remote cutout that erases the item is worse than a local one, because it
+    also cost money and arrived with an air of authority.
+    """
+    from PIL import ImageStat
+
     total = max(1, alpha.width * alpha.height)
     opaque = sum(alpha.histogram()[128:])
+    result.metrics["kept_fraction"] = round(opaque / total, 4)
     if opaque / total < _MIN_FG_COVERAGE:
         log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
                     100 * opaque / total)
-        return None
+        result.status = matte.KEPT_ORIGINAL
+        result.error_code = matte.ERR_SUBJECT_ERASED
+        result.warn("The cutout removed almost the whole photo, so the "
+                    "original was kept.")
+        return False
     # Dark-background guard: a dark garment that fills the frame gets called
     # 'background', leaving only its bright printed graphic. A removed region
     # that's both LARGE and DARK is almost never a real backdrop (those are
@@ -772,11 +944,16 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     if dark_guard and (total - opaque) / total > 0.5:
         bg_mask = alpha.point(lambda a: 255 if a < 128 else 0)
         stat = ImageStat.Stat(rgb.convert("L"), mask=bg_mask)
+        result.metrics["removed_luma"] = round(stat.mean[0], 1) if stat.count[0] else None
         if stat.count[0] and stat.mean[0] < _DARK_BG_LUMA:
             log.warning("bg-removal: removed area large & dark (mean L=%.0f) — likely ate a "
                         "dark item, keeping original", stat.mean[0])
-            return None
-    return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW, fill_holes=False)
+            result.status = matte.KEPT_ORIGINAL
+            result.error_code = matte.ERR_DARK_SUBJECT
+            result.warn("The item looked like the background (dark item, dark "
+                        "photo), so the original was kept.")
+            return False
+    return True
 
 
 def _apply_studio(img: Image.Image) -> tuple[Image.Image, bool, Optional[str]]:
@@ -887,7 +1064,9 @@ def _jpeg_payload(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def _pixian_cutout(img: Image.Image) -> Optional[Image.Image]:
+def _pixian_cutout(img: Image.Image,
+                   result: Optional[matte.CutoutResult] = None,
+                   ) -> Optional[Image.Image]:
     """Cut out the subject via Pixian.ai — the budget engine, around a tenth
     of Photoroom's per-image price — and composite it on white with our soft
     shadow. Returns None only when no credentials are configured; a real
@@ -924,10 +1103,22 @@ def _pixian_cutout(img: Image.Image) -> Optional[Image.Image]:
     alpha = cut.split()[3]
     if alpha.getbbox() is None:  # nothing kept — no subject found
         raise PixianError("Pixian couldn't find a subject in this photo.")
+    # Paid engines get the same survival check as the local one. Better edges
+    # is not the same as never mistaking a black hoodie on a dark floor for
+    # background, and a remote cutout that erases the item is worse — it also
+    # cost money and arrived looking authoritative.
+    result = result if result is not None else matte.CutoutResult()
+    result.engine = "pixian"
+    if not _subject_survived(alpha, img.convert("RGB"), result):
+        raise PixianError(result.warnings[-1] if result.warnings
+                    else "Pixian removed the item instead of the background.")
+    result.status = matte.NEEDS_REVIEW if result.warnings else matte.APPLIED
     return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
 
 
-def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
+def _photoroom_cutout(img: Image.Image,
+                   result: Optional[matte.CutoutResult] = None,
+                   ) -> Optional[Image.Image]:
     """Cut out the subject via Photoroom's API and composite it on white (with
     our soft shadow). Returns None only when no key is configured; when a key
     IS set, a failure raises PhotoroomError with the actual reason — silent
@@ -966,6 +1157,16 @@ def _photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
     alpha = cut.split()[3]
     if alpha.getbbox() is None:  # nothing kept — no subject found
         raise PhotoroomError("Photoroom couldn't find a subject in this photo.")
+    # Paid engines get the same survival check as the local one. Better edges
+    # is not the same as never mistaking a black hoodie on a dark floor for
+    # background, and a remote cutout that erases the item is worse — it also
+    # cost money and arrived looking authoritative.
+    result = result if result is not None else matte.CutoutResult()
+    result.engine = "photoroom"
+    if not _subject_survived(alpha, img.convert("RGB"), result):
+        raise PhotoroomError(result.warnings[-1] if result.warnings
+                    else "Photoroom removed the item instead of the background.")
+    result.status = matte.NEEDS_REVIEW if result.warnings else matte.APPLIED
     return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
 
 
@@ -1038,6 +1239,20 @@ def _studio_and_cutout(
             studio_applied, studio_error)
 
 
+def _matte_ladder() -> tuple[int, ...]:
+    """Matte resolutions to try, largest first, each one only once.
+
+    A retry only earns its wait if it does something different: a smaller
+    inference is the recovery from an out-of-memory kill, and re-running the
+    identical size is pure delay on the path where someone is watching a
+    spinner."""
+    ladder: list[int] = []
+    for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
+        if side > 0 and side not in ladder:
+            ladder.append(side)
+    return tuple(ladder or (_REMBG_MAX_SIDE,))
+
+
 def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     """Photo-studio 'Remove background'. Returns (image, engine) so the editor
     can name the remover that actually ran. Raises when the cutout genuinely
@@ -1054,7 +1269,11 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     for i, engine in enumerate(chain):
         final = i == len(chain) - 1
         if engine == "local":
-            for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
+            # Distinct sizes only, largest first. _STUDIO_MAX_SIDE defaults to
+            # _REMBG_MAX_SIDE, so the naive tuple ran the SAME inference twice
+            # on the default config — doubling the wait on the one path where
+            # a seller is sitting there watching it, for an identical result.
+            for side in _matte_ladder():
                 try:
                     # dark_guard off: the seller reviews the result and can
                     # Revert, so show the cutout rather than hard-failing on a
