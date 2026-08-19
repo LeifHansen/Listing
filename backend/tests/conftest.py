@@ -31,6 +31,11 @@ from backend import config, objstore  # noqa: E402
 _SCRUBBED = (
     "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
     "R2_BUCKET", "R2_PUBLIC_BASE_URL",
+    # Billing: these decide whether the paid tier reports itself as ready, so
+    # a value inherited from the developer's own environment would make the
+    # readiness tests pass or fail for reasons unrelated to the code.
+    "TOKENS_ENABLED", "DATABASE_URL", "NEON_PRODUCTION_DATABASE_URL",
+    "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
 )
 
 

@@ -286,13 +286,89 @@ def verify_stripe_signature(payload: bytes, sig_header: str, secret: str,
     return hmac.compare_digest(expected, sig)
 
 
+# Events that mean the buyer's money went back to them. A refund is usually
+# the operator's own doing; a dispute is the card network's. Either way the
+# tokens have to follow the money, or a refund becomes a way to buy AI for
+# free — and a chargeback becomes that plus a fee.
+_REVERSAL_EVENTS = (
+    "charge.refunded",
+    "charge.dispute.created",
+    "charge.dispute.closed",
+)
+
+
+def _session_id_for_payment_intent(payment_intent: str) -> str:
+    """The Checkout session that produced a payment — the id purchases are
+    credited under, and so the handle a reversal needs.
+
+    Refund and dispute events carry the charge and its payment_intent, never
+    the session, so this asks Stripe to map back. Returns "" when it can't.
+    """
+    if not payment_intent or not config.stripe_ready():
+        return ""
+    try:
+        res = _stripe_get(
+            f"/checkout/sessions?payment_intent={quote(payment_intent, safe='')}&limit=1")
+        rows = res.get("data") or []
+        return str(rows[0].get("id") or "") if rows else ""
+    except Exception as exc:  # noqa: BLE001 - reported by the caller
+        log.warning("tokens: couldn't map payment_intent %s to a session: %s",
+                    payment_intent, exc)
+        return ""
+
+
+def _handle_reversal(event_type: str, charge: dict) -> dict:
+    """Debit the tokens from a purchase whose money was returned."""
+    # A dispute that closed in OUR favour returns the money to us, so the
+    # tokens stay where they are — only a lost dispute is a reversal.
+    if event_type == "charge.dispute.closed":
+        if (charge.get("status") or "").lower() != "lost":
+            return {"handled": False, "reason": "dispute not lost"}
+        payment_intent = str(charge.get("payment_intent") or "")
+    else:
+        payment_intent = str(charge.get("payment_intent") or "")
+        # A partial refund is not a full reversal; treat only a full one as
+        # cancelling the purchase rather than silently over-debiting.
+        if event_type == "charge.refunded":
+            amount = int(charge.get("amount") or 0)
+            refunded = int(charge.get("amount_refunded") or 0)
+            if amount and refunded and refunded < amount:
+                log.info("tokens: partial refund (%d/%d) on %s — tokens left in "
+                         "place, adjust by hand if needed",
+                         refunded, amount, payment_intent)
+                return {"handled": False, "reason": "partial refund"}
+
+    session_id = _session_id_for_payment_intent(payment_intent)
+    if not session_id:
+        # Non-2xx so Stripe retries: a transient API failure here would
+        # otherwise silently let the tokens stay bought.
+        raise RuntimeError(f"Couldn't resolve session for {payment_intent}; retry")
+    res = db.token_reverse_purchase(session_id, reason=event_type)
+    if res is None:
+        # Either the DB is down (retry is right) or this payment was never a
+        # token purchase — which is normal if Stripe is used for anything else.
+        log.info("tokens: no reversible purchase for session %s (%s)",
+                 session_id, event_type)
+        return {"handled": False, "reason": "no matching purchase"}
+    if not res.get("already"):
+        log.warning("tokens: reversed %d token(s) from %s after %s%s",
+                    res.get("reversed", 0), res.get("user_id"), event_type,
+                    f" ({res['shortfall']} already spent)" if res.get("shortfall") else "")
+    return {"handled": True, "reversed": res.get("reversed", 0),
+            "shortfall": res.get("shortfall", 0)}
+
+
 def handle_webhook(payload: bytes, sig_header: str) -> dict:
-    """Process a Stripe webhook delivery. Credits checkout.session.completed
-    events; everything else is acknowledged and ignored."""
+    """Process a Stripe webhook delivery. Credits checkout.session.completed,
+    reverses refunds and lost disputes; everything else is acknowledged and
+    ignored."""
     if not verify_stripe_signature(payload, sig_header, config.STRIPE_WEBHOOK_SECRET):
         raise PermissionError("Invalid Stripe signature")
     event = json.loads(payload)
-    if event.get("type") != "checkout.session.completed":
+    event_type = event.get("type")
+    if event_type in _REVERSAL_EVENTS:
+        return _handle_reversal(event_type, (event.get("data") or {}).get("object") or {})
+    if event_type != "checkout.session.completed":
         return {"handled": False}
     session = (event.get("data") or {}).get("object") or {}
     meta = session.get("metadata") or {}

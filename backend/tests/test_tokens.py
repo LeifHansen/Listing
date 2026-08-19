@@ -257,3 +257,72 @@ def test_get_listing_distinguishes_absent_from_unavailable(tokens_db, monkeypatc
     # The lenient wrapper keeps its old contract for callers that just want
     # the record.
     assert tokens_db.get_listing("nope") is None
+
+
+# --- purchase reversal (refunds & chargebacks) ------------------------------
+
+def test_reversal_debits_the_purchase(tokens_db):
+    uid = "rev-1"
+    tokens_db.token_credit(uid, 50, ref="cs_ref_1")
+    assert tokens_db.token_status(uid, "2026-08", 0)["purchased"] == 50
+
+    res = tokens_db.token_reverse_purchase("cs_ref_1", reason="charge.refunded")
+    assert res["ok"] and not res["already"]
+    assert (res["reversed"], res["shortfall"]) == (50, 0)
+    assert tokens_db.token_status(uid, "2026-08", 0)["purchased"] == 0
+
+
+def test_reversal_is_idempotent(tokens_db):
+    """Stripe redelivers events; a second delivery must not debit again."""
+    uid = "rev-2"
+    tokens_db.token_credit(uid, 50, ref="cs_ref_2")
+    tokens_db.token_reverse_purchase("cs_ref_2")
+    again = tokens_db.token_reverse_purchase("cs_ref_2")
+    assert again["already"] is True
+    assert tokens_db.token_status(uid, "2026-08", 0)["purchased"] == 0
+
+
+def test_reversal_floors_at_zero_and_reports_the_shortfall(tokens_db):
+    """Tokens already spent can't be taken back. The balance must not go
+    negative — that would silently eat the buyer's next purchase — but the
+    operator still needs to see what the refund actually cost."""
+    uid, period = "rev-3", "2026-08"
+    tokens_db.token_credit(uid, 50, ref="cs_ref_3")
+    tokens_db.token_spend(uid, 30, free_quota=0, period=period, feature="identify")
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 20
+
+    res = tokens_db.token_reverse_purchase("cs_ref_3", reason="dispute lost")
+    assert (res["reversed"], res["shortfall"]) == (20, 30)
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 0
+
+
+def test_reversal_only_touches_the_refunded_purchase(tokens_db):
+    """A buyer with two packs who refunds one keeps the other."""
+    uid, period = "rev-4", "2026-08"
+    tokens_db.token_credit(uid, 50, ref="cs_keep")
+    tokens_db.token_credit(uid, 120, ref="cs_drop")
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 170
+
+    tokens_db.token_reverse_purchase("cs_drop")
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 50
+
+
+def test_reversal_of_unknown_or_non_purchase_ref_is_a_noop(tokens_db):
+    uid, period = "rev-5", "2026-08"
+    tokens_db.token_credit(uid, 50, ref="cs_ref_5")
+    spend = tokens_db.token_spend(uid, 5, free_quota=0, period=period)
+    assert tokens_db.token_reverse_purchase("no-such-session") is None
+    # A spend entry is not a purchase and must never be reversible this way.
+    assert tokens_db.token_reverse_purchase(spend["entry_id"]) is None
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 45
+
+
+def test_reversal_leaves_the_free_allowance_alone(tokens_db):
+    """Free tokens were never bought, so a refund can't claw them back."""
+    uid, period = "rev-6", "2026-08"
+    tokens_db.token_credit(uid, 50, ref="cs_ref_6")
+    tokens_db.token_spend(uid, 10, free_quota=20, period=period)  # free first
+    tokens_db.token_reverse_purchase("cs_ref_6")
+    snap = tokens_db.token_status(uid, period, 20)
+    assert snap["purchased"] == 0
+    assert snap["free_used"] == 10 and snap["free_remaining"] == 10
