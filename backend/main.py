@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import threading
 import time
@@ -3046,8 +3047,19 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     if res.get("ended") or res.get("not_live"):
-        db.upsert_listing(req.session_id, rec.get("listing") or {},
-                          status="ended", user_id=_uid(request))
+        # Ending can discover the listing already finished on eBay — and how.
+        # A sale files it under Sold (with the same notification + storage
+        # reclaim as every other sold path); anything else lands in Inactive.
+        new_status = "sold" if res.get("status") == "sold" else "ended"
+        data = rec.get("listing") or {}
+        db.upsert_listing(req.session_id, data,
+                          status=new_status, user_id=_uid(request))
+        if new_status == "sold" and rec.get("status") != "sold":
+            notifications.notify_sold(
+                _uid(request) or rec.get("user_id"), req.session_id, data,
+                sold_quantity=data.get("sold_quantity") or 0)
+            _purge_session_images(req.session_id)
+        res = {**res, "status": new_status}
     return res
 
 
@@ -3063,18 +3075,37 @@ def sync_listings(request: Request) -> dict:
         return {"checked": 0, "changed": 0, "archived": 0}
     live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
             if i.get("status") in ("published", "live")]
+    changed = 0
+    archived = 0
+    # First, the cheap sweep that scales to any store: eBay's own sold/unsold
+    # lists name every item that finished recently, so a listing that ended
+    # (or sold) ON eBay moves off Active on this very sync — it never has to
+    # wait for its turn under the per-item caps below.
+    handled: set[str] = set()
+    if live and creds:
+        try:
+            got, handled = listing_sync.reconcile_recent(
+                creds["access_token"], user["id"], live)
+            changed += got
+        except Exception as exc:  # noqa: BLE001 - sync is best-effort
+            log.info("ebay sync: finished-list reconcile failed: %s", exc)
+    live = [i for i in live if i["id"] not in handled]
     # Imported listings are reconciled through the Trading API (the Inventory
     # API can't see them at all); app-created ones keep the offer check below.
     # EVERY imported listing must be excluded from `items` — not just the ones
     # this run refreshes — or the offer check would call an eBay listing it
     # can't see "ended". Each side is capped so one sync click can't fan out
-    # into hundreds of eBay calls; the rest are picked up by the next sync.
+    # into hundreds of eBay calls — SAMPLED, not sliced, so on a store bigger
+    # than the cap every record still gets its turn across a few syncs instead
+    # of the same first N being re-checked forever.
     imported_ids = {i["id"] for i in live
                     if listing_sync.is_imported(i.get("listing") or {})}
-    imported = [i for i in live if i["id"] in imported_ids][:60]
-    items = [i for i in live if i["id"] not in imported_ids][:40]
-    changed = 0
-    archived = 0
+    imported = [i for i in live if i["id"] in imported_ids]
+    items = [i for i in live if i["id"] not in imported_ids]
+    if len(imported) > 60:
+        imported = random.sample(imported, 60)
+    if len(items) > 40:
+        items = random.sample(items, 40)
     if imported and creds:
         try:
             changed += listing_sync.refresh_statuses(
@@ -3117,8 +3148,8 @@ def sync_listings(request: Request) -> dict:
     if changed:
         log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
                  changed, archived, user["id"])
-    return {"checked": len(items) + len(imported), "changed": changed,
-            "archived": archived}
+    return {"checked": len(items) + len(imported) + len(handled),
+            "changed": changed, "archived": archived}
 
 
 # Bounds one import run. A store bigger than this imports across repeated

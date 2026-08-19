@@ -206,6 +206,7 @@ export function AppProvider({ children }) {
     syncing: false, lastSynced: null, error: null,
   });
   const syncedOnce = useRef(false);
+  const lastReconcile = useRef(0); // ms — throttles the quiet status re-checks
   const syncStore = useCallback(async ({ force = false } = {}) => {
     if (!user || !ebay.connected) return null;
     if (syncedOnce.current && !force) return null;
@@ -214,6 +215,7 @@ export function AppProvider({ children }) {
     try {
       const res = await postJson("/api/ebay/import-listings", {});
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
+      lastReconcile.current = Date.now();
       postJson("/api/ebay/sync-listings", {})
         .then((r) => { if (r.changed) loadListings({ quiet: true }); })
         .catch(() => {});
@@ -226,6 +228,32 @@ export function AppProvider({ children }) {
     }
   }, [user, ebay.connected, loadListings]);
   useEffect(() => { syncStore(); }, [syncStore]);
+
+  // The mirror import runs once per app session — but a tab (or the native
+  // shell) can stay open for days, and a listing that ends or sells ON eBay
+  // in that time would sit under Active until a manual sync. Quietly re-check
+  // live statuses whenever the app comes back into focus, and on a slow
+  // heartbeat while it stays visible, so those records slide into
+  // Inactive/Sold on their own. Throttled: each check fans out real eBay
+  // calls server-side.
+  const reconcileStatuses = useCallback(async () => {
+    if (!user || !ebay.connected || document.hidden) return;
+    if (Date.now() - lastReconcile.current < 5 * 60000) return;
+    lastReconcile.current = Date.now();
+    try {
+      const r = await postJson("/api/ebay/sync-listings", {});
+      if (r.changed) loadListings({ quiet: true });
+    } catch (e) { /* best-effort — the next pass tries again */ }
+  }, [user, ebay.connected, loadListings]);
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) reconcileStatuses(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const t = setInterval(reconcileStatuses, 10 * 60000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(t);
+    };
+  }, [reconcileStatuses]);
 
   // ---------- the listing being worked on ----------
   // session: { sessionId, listing, confidence } — null until AI identify runs

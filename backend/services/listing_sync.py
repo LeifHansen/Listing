@@ -337,6 +337,37 @@ def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
     return changed
 
 
+def reconcile_recent(token: str, user_id: str,
+                     records: list[dict]) -> tuple[int, set[str]]:
+    """Correct still-marked-live records whose items eBay says recently
+    finished. Returns (records changed, record ids this pass covered).
+
+    The per-record sweeps above are capped (each check is its own eBay round
+    trip), so on a big store a listing that ended ON eBay could stay under
+    Active for many syncs before its turn came up. This pass stays cheap at
+    any store size: one paged GetMyeBaySelling call per list names every item
+    that sold or ended in eBay's ~90-day window, and only the records matching
+    those ids get the per-item probe — which is what rules out the false
+    positive (a multi-quantity listing appears in the sold list while still
+    live) and files each record as sold vs ended with fresh counters.
+    A list that can't be fetched contributes nothing rather than failing."""
+    def _ids(fetch, what: str) -> set[str]:
+        try:
+            return set(fetch(token, limit=_INACTIVE_LIMIT))
+        except Exception as exc:  # noqa: BLE001 - reconcile is best-effort
+            log.info("sync: couldn't list %s items: %s", what, exc)
+            return set()
+
+    finished = (_ids(ebay_trading.sold_listing_ids, "sold")
+                | _ids(ebay_trading.unsold_listing_ids, "ended"))
+    candidates = [r for r in records
+                  if _item_id_of(r.get("listing") or {}) in finished]
+    if not candidates:
+        return 0, set()
+    changed = refresh_statuses(token, user_id, candidates)
+    return changed, {r["id"] for r in candidates}
+
+
 def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                    creds: Optional[dict] = None,
                    idempotency_key: str = "") -> dict:
@@ -427,5 +458,27 @@ def push_edit(token: str, listing: Listing,
 
 
 def end(token: str, listing: Listing) -> dict:
-    """End an imported listing on eBay."""
-    return ebay_trading.end_listing(token, listing.ebay_listing_id)
+    """End an imported listing on eBay.
+
+    EndItem refuses a listing that already finished — which is exactly the
+    state a seller hits when the listing ended (or sold) on eBay first and
+    they click End here before a sync catches up. Failing then would strand
+    the record under Active with no way to move it. So on a refusal, ask eBay
+    what actually became of the listing: a definitive "it already finished"
+    comes back as not_live (with how it finished, so the caller can file it
+    under Inactive or Sold); anything less definitive re-raises the refusal.
+    """
+    try:
+        return ebay_trading.end_listing(token, listing.ebay_listing_id)
+    except TradingError:
+        status = None
+        if listing.ebay_listing_id:
+            status, _sold, _watch = ebay_trading.listing_status(
+                token, listing.ebay_listing_id)
+        if status in ("ended", "sold"):
+            return {"ended": False, "not_live": True, "status": status,
+                    "message": ("This one already sold on eBay — filing it "
+                                "under Sold." if status == "sold" else
+                                "This listing had already ended on eBay — "
+                                "moving it to Inactive.")}
+        raise
