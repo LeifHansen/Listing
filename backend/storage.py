@@ -149,6 +149,25 @@ def disk_free_bytes() -> int:
         return 0
 
 
+def writable() -> bool:
+    """Can the session store actually be written to right now?
+
+    Existence is not the question — a read-only remount or a full volume both
+    leave the directory sitting there looking fine, and the first thing to
+    notice is a seller's upload failing halfway through a batch. So this
+    writes a byte and deletes it.
+    """
+    try:
+        config.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        probe = config.SESSIONS_DIR / ".write-probe"
+        probe.write_bytes(b"1")
+        probe.unlink()
+        return True
+    except Exception as exc:  # noqa: BLE001 - a probe failure IS the answer
+        log.warning(f"storage: not writable: {exc}")
+        return False
+
+
 def prune_originals(max_age_seconds: int) -> int:
     """Delete source uploads (session original/ dirs) older than the cutoff.
 

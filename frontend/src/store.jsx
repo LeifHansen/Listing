@@ -1,7 +1,7 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api, postJson, downscaleAllForUpload } from "@/lib/api";
+import { api, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -400,7 +400,9 @@ export function AppProvider({ children }) {
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
-      const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
+      const { job_id } = await api("/api/bulk/upload",
+        // A whole batch of photos over a phone connection: minutes, legitimately.
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       files.forEach((f) => URL.revokeObjectURL(f.url));
       startBulk(job_id);
     } catch (e) {

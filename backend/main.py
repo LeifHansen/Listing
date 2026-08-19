@@ -315,6 +315,45 @@ def health() -> dict:
     }
 
 
+# Disk below this and photo work will start failing mid-upload. Reporting it
+# as "not ready" is what lets a deploy or a load balancer act on it before a
+# seller loses a batch.
+READY_MIN_DISK_MB = int(os.getenv("READY_MIN_DISK_MB", "200") or 200)
+
+
+@app.get("/api/ready")
+def ready(response: Response) -> dict:
+    """Readiness, as distinct from /api/health's liveness.
+
+    /api/health answers "is this process up and what is configured"; it says
+    200 while the machine is out of disk and the image model has never
+    loaded. This answers the question that actually matters to a deploy or a
+    client about to send a 12MB photo: can it do the work right now. Anything
+    false here returns 503, so it is usable as an orchestrator probe rather
+    than something a human has to read.
+
+    Deliberately cheap and side-effect free — no model load, no inference, no
+    outbound call. A probe that does real work is a probe that falls over
+    under the load it is meant to detect.
+    """
+    free_mb = round(storage.disk_free_bytes() / 1e6)
+    database = db.db_status()
+    checks = {
+        # The volume photos are written to. Everything else is moot without it.
+        "storage_writable": storage.writable(),
+        "disk_space": free_mb >= READY_MIN_DISK_MB,
+        # A configured DB that is unreachable means drafts silently do not
+        # persist; no DB configured at all is a valid (filesystem-only) setup.
+        "database": (not database.get("configured")) or bool(database.get("connected")),
+    }
+    engine = images.engine_state()
+    ok = all(checks.values())
+    if not ok:
+        response.status_code = 503
+    return {"ready": ok, "checks": checks, "disk_free_mb": free_mb,
+            "image_engine": engine}
+
+
 def _category_query(listing) -> str:
     parts = [listing.brand, listing.title, listing.category_suggestion]
     return " ".join(p for p in parts if p).strip()
@@ -1940,6 +1979,13 @@ async def image_remove_bg(
     spent = _charge_ai(request, "image_ai")
     try:
         return await run_in_threadpool(_run)
+    except images.CutoutBusy as exc:
+        # 503, not 500 and not 422: nothing is wrong with the photo or the
+        # server, the one inference slot was occupied. Retry-After makes that
+        # machine-readable instead of leaving the client to guess.
+        tokens.refund(spent)
+        raise HTTPException(503, str(exc),
+                            headers={"Retry-After": "20"}) from exc
     except ValueError as exc:
         # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
         # of credits / rate limit) — the message tells the user exactly which.

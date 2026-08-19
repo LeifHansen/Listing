@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
@@ -348,7 +348,8 @@ export function useListingForm() {
     try {
       const fd = new FormData();
       files.forEach((f) => fd.append("files", f));
-      const res = await api(`/api/upload-more/${sessionId}`, { method: "POST", body: fd });
+      const res = await api(`/api/upload-more/${sessionId}`,
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       const added = res.added || [];
       if (added.length) {
         const next = [...(form.images || []), ...added];

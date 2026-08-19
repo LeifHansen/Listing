@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, FolderOpen, Trash2, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
-import { api, pollJob, downscaleAllForUpload, IMAGE_EXT_RE } from "@/lib/api";
+import {
+  api, pollJob, downscaleAllForUpload, IMAGE_EXT_RE, UPLOAD_TIMEOUT_MS,
+} from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Toggle } from "@/components/ui/fields";
@@ -109,7 +111,8 @@ export function UploadPhase() {
       // real per-stage progress instead of a request that blocks silently
       // through the photo pass.
       fd.append("pipeline", "true");
-      const up = await api("/api/upload", { method: "POST", body: fd });
+      const up = await api("/api/upload",
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       let last = null;
       const result = await pollJob(up.job_id, {
         onUpdate: (j) => { last = j; setStage(j); },

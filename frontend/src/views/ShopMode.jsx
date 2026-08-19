@@ -2,7 +2,9 @@ import { useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Camera, Video, Plus, RotateCcw, MapPin, Eye } from "lucide-react";
 import { once, mediaUrl } from "@/lib/utils";
-import { api, postJson, downscaleForUpload, extractFrames } from "@/lib/api";
+import {
+  api, postJson, downscaleForUpload, extractFrames, UPLOAD_TIMEOUT_MS,
+} from "@/lib/api";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { InfoTip } from "@/components/ui/fields";
@@ -34,7 +36,8 @@ export function ShopMode() {
       const fd = new FormData();
       fd.append("files", prepped);
       fd.append("remove_bg", "false");
-      const up = await api("/api/upload", { method: "POST", body: fd });
+      const up = await api("/api/upload",
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       const res = await api(`/api/identify/${up.session_id}`, { method: "POST" });
 
       // Best-effort market price (never block the scan on it).

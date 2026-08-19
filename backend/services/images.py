@@ -133,6 +133,33 @@ _STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", str(_REMBG_MAX_SIDE))
 # Serialize model inference: two isnet runs at once (e.g. a studio cutout during
 # a bulk background-removal batch) would double peak memory and OOM the machine.
 _INFER_LOCK = threading.Lock()
+# ...and never wait on that lock forever. A serialized queue plus an unbounded
+# wait is precisely how "remove background" comes to APPEAR HUNG: the request
+# is alive and doing nothing, behind a bulk job that has forty photos to get
+# through. A bounded wait turns that into an answer — "busy, try again" — which
+# the seller can act on, instead of a spinner that never resolves.
+INFER_WAIT_SECONDS = float(os.getenv("REMBG_WAIT_SECONDS", "25") or 25)
+
+
+class CutoutBusy(RuntimeError):
+    """The inference slot didn't free up in time. Retryable — 503, not 500:
+    nothing is broken, the machine is just full."""
+
+
+# How long one inference may take before it is reported as pathological. ONNX
+# cannot be interrupted mid-run, so this does not abort anything; it makes a
+# slow model visible in the logs instead of leaving "it felt slow" as the only
+# evidence anyone ever has.
+INFER_SLOW_SECONDS = float(os.getenv("REMBG_SLOW_SECONDS", "20") or 20)
+_last_infer_seconds: float = 0.0
+_model_ready = False
+
+
+def engine_state() -> dict:
+    """What the readiness probe needs to know about the local model."""
+    return {"model": _REMBG_MODEL, "loaded": _model_ready,
+            "busy": _INFER_LOCK.locked(),
+            "last_inference_seconds": round(_last_infer_seconds, 2)}
 # Draw a soft contact shadow under the cut-out subject so the white-background
 # result still reads like a studio product shot. Pure Pillow, no external API.
 # Disable with BG_SHADOW=off.
@@ -578,18 +605,35 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
     scale anyway, so working on the pre-upscale matte does the same work on
     ~10x fewer pixels; _refine_alpha upscales once at the end instead."""
     global _rembg_session
-    from rembg import new_session, remove
-
     cap = max_side or _REMBG_MAX_SIDE
     scale = min(1.0, cap / max(img_rgb.size))
     small = (img_rgb.resize((max(1, round(img_rgb.width * scale)),
                              max(1, round(img_rgb.height * scale))), Image.LANCZOS)
              if scale < 1 else img_rgb)
-    # One inference at a time — concurrent runs would stack peak memory and OOM.
-    with _INFER_LOCK:
+    # One inference at a time — concurrent runs would stack peak memory and OOM
+    # — but with a deadline on the wait, so a queue behind a bulk job answers
+    # "busy" instead of hanging.
+    global _last_infer_seconds, _model_ready
+    if not _INFER_LOCK.acquire(timeout=INFER_WAIT_SECONDS):
+        raise CutoutBusy(
+            "The background remover is working through another batch. "
+            "Give it a moment and try again.")
+    started = time.monotonic()
+    try:
+        # Imported inside the lock, after the wait: a machine that is already
+        # full answers "busy" without paying to pull in onnxruntime first.
+        from rembg import new_session, remove
         if _rembg_session is None:
             _rembg_session = new_session(_REMBG_MODEL)
+            _model_ready = True
         alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+    finally:
+        _last_infer_seconds = time.monotonic() - started
+        _INFER_LOCK.release()
+    if _last_infer_seconds > INFER_SLOW_SECONDS:
+        log.warning("bg-removal: inference took %.1fs at %dpx (model=%s) — "
+                    "slow enough that callers will have given up",
+                    _last_infer_seconds, cap, _REMBG_MODEL)
     if upscale and alpha.size != img_rgb.size:
         # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
         # high-contrast edges, ringing a faint halo of the old background back
@@ -1200,6 +1244,12 @@ def _studio_and_cutout(
         if engine == "local":
             try:
                 out = _cutout_on_white(img)
+            except CutoutBusy as exc:
+                # The automatic path never fails a photo — it keeps the
+                # original and says why, which is the right trade in a batch.
+                log.warning("bg-removal: %s", exc)
+                last_err = str(exc)
+                out = None
             except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
                 log.warning("bg-removal: local cutout failed (%s)", exc)
                 out = None
@@ -1281,6 +1331,11 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
                     # Revert, so show the cutout rather than hard-failing on a
                     # borderline shot.
                     out = _cutout_on_white(img, max_side=side, dark_guard=False)
+                except CutoutBusy:
+                    # Not a model problem and not fixable by trying smaller —
+                    # the queue was full. Retrying here would just spend
+                    # another wait to learn the same thing.
+                    raise
                 except Exception as exc:  # noqa: BLE001 - retry smaller on OOM/model error
                     log.warning("bg-removal: matte at %dpx failed (%s) — retrying smaller",
                                 side, exc)
