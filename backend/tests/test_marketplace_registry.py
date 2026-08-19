@@ -56,3 +56,22 @@ def test_available_filters_on_oauth_ready(clean_registry):
 
 def test_unknown_key_returns_none(clean_registry):
     assert mp.get("nope") is None
+
+
+def test_coming_soon_off_for_plain_providers(clean_registry):
+    assert mp.coming_soon(_Fake("alpha", "Alpha", False)) == (False, "")
+    assert mp.coming_soon(_Fake("beta", "Beta", True)) == (False, "")
+
+
+def test_coming_soon_reports_note_while_credentials_pending():
+    pending = _Fake("gamma", "Gamma", False)
+    pending.coming_soon = True
+    pending.coming_soon_note = "Waiting on approval."
+    assert mp.coming_soon(pending) == (True, "Waiting on approval.")
+
+
+def test_coming_soon_clears_once_credentials_land():
+    approved = _Fake("gamma", "Gamma", True)
+    approved.coming_soon = True
+    approved.coming_soon_note = "Waiting on approval."
+    assert mp.coming_soon(approved) == (False, "")

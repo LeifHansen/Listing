@@ -26,6 +26,18 @@ class DepopProvider:
     key = "depop"
     label = "Depop"
 
+    # Partner-gated: the Depop developer account is in review, so the DEPOP_*
+    # credentials can't exist yet. Until they do the roster reports this
+    # marketplace as "coming soon" so a seller sees a pending integration
+    # instead of the operator's missing-env explainer. Both flags stop
+    # mattering the moment oauth_ready() is true — delete them then.
+    coming_soon = True
+    coming_soon_note = (
+        "We're waiting on Depop to approve our developer account. "
+        "Cross-posting to Depop switches on here as soon as they do — "
+        "nothing for you to set up."
+    )
+
     # --- configuration / connection -------------------------------------
     def oauth_ready(self) -> bool:
         return config.depop_oauth_ready()
