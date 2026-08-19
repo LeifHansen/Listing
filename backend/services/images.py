@@ -36,7 +36,6 @@ from .. import config
 from ..config import log
 from . import matte
 from ..storage import natural_key
-from . import orient
 
 # Phone uploads over flaky connections arrive missing their last few bytes
 # surprisingly often ("image file is truncated (N bytes not processed)").
@@ -1705,6 +1704,12 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     # with the ITEM lying sideways or upside-down — something EXIF can't tell
     # us. Done up front so each photo is straightened before its cutout and
     # square crop, not after.
+    # Imported here, not at module scope: orient reaches the Anthropic SDK,
+    # and everything else in this file is pure Pillow/NumPy. Keeping the AI
+    # dependency inside the one function that needs it is what lets the cutout
+    # safety suite run in CI without installing an LLM client to check that a
+    # mask kept a shoelace.
+    from . import orient
     rotations = orient.detect_rotations([src for _i, src in jobs])
     return optimize_batch(
         [(src, dst_dir / f"img_{i:03d}.jpg", rotations.get(src.name, 0))
