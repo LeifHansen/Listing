@@ -215,8 +215,11 @@ export function AppProvider({ children }) {
     try {
       const res = await postJson("/api/ebay/import-listings", {});
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
+      // force: this is the deliberate "Sync with eBay" path (or first load),
+      // so it may run the full per-item sweep; the background heartbeat below
+      // deliberately does not.
       lastReconcile.current = Date.now();
-      postJson("/api/ebay/sync-listings", {})
+      postJson("/api/ebay/sync-listings", { force: true })
         .then((r) => { if (r.changed) loadListings({ quiet: true }); })
         .catch(() => {});
       await loadListings({ quiet: true });
@@ -232,13 +235,21 @@ export function AppProvider({ children }) {
   // The mirror import runs once per app session — but a tab (or the native
   // shell) can stay open for days, and a listing that ends or sells ON eBay
   // in that time would sit under Active until a manual sync. Quietly re-check
-  // live statuses whenever the app comes back into focus, and on a slow
-  // heartbeat while it stays visible, so those records slide into
-  // Inactive/Sold on their own. Throttled: each check fans out real eBay
-  // calls server-side.
+  // live statuses when the app comes back into focus and on a slow heartbeat
+  // while it stays visible, so those records slide into Inactive/Sold on
+  // their own.
+  //
+  // Cadence is a QUOTA decision, not a UI one: every check fans out real eBay
+  // calls server-side, and eBay's Trading API is capped per DAY for the whole
+  // app. At the original 10-minute beat one open tab spent the entire daily
+  // allowance by itself, and once it ran out every call failed — including
+  // the one that publishes a listing. Half-hourly (and never inside 20
+  // minutes) keeps a day's background checks in the dozens; the server also
+  // skips the expensive per-item sweeps for these unforced calls, so what
+  // runs here is the cheap finished-list pass that actually moves records.
   const reconcileStatuses = useCallback(async () => {
     if (!user || !ebay.connected || document.hidden) return;
-    if (Date.now() - lastReconcile.current < 5 * 60000) return;
+    if (Date.now() - lastReconcile.current < 20 * 60000) return;
     lastReconcile.current = Date.now();
     try {
       const r = await postJson("/api/ebay/sync-listings", {});
@@ -248,7 +259,7 @@ export function AppProvider({ children }) {
   useEffect(() => {
     const onVisible = () => { if (!document.hidden) reconcileStatuses(); };
     document.addEventListener("visibilitychange", onVisible);
-    const t = setInterval(reconcileStatuses, 10 * 60000);
+    const t = setInterval(reconcileStatuses, 30 * 60000);
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
       clearInterval(t);

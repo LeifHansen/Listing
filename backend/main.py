@@ -3309,16 +3309,47 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     return res
 
 
+# The per-item probe sweeps below are the expensive half of a sync: up to 60
+# imported + 40 app listings, each its own eBay round trip. The cheap half
+# (eBay's own sold/unsold lists, 2 calls) already catches anything that
+# finished, so the sweeps only exist to correct records those lists miss —
+# which does not need to happen on every poll. Without this cooldown a single
+# open tab's status heartbeat spends ~100 eBay calls every few minutes and
+# burns the app's DAILY Trading API quota, after which every call fails —
+# including the AddFixedPriceItem that publishes a listing.
+_SWEEP_COOLDOWN = float(os.getenv("EBAY_SWEEP_COOLDOWN_SECONDS", "21600") or 21600)
+_last_sweep: dict[str, float] = {}
+_sweep_lock = threading.Lock()
+
+
+def _sweep_due(user_id: str, force: bool) -> bool:
+    """True when the per-item probe sweeps may run for this user. A manual
+    sync (force) always may; the background heartbeat waits out the cooldown."""
+    now = time.time()
+    with _sweep_lock:
+        if not force and now - _last_sweep.get(user_id, 0.0) < _SWEEP_COOLDOWN:
+            return False
+        _last_sweep[user_id] = now
+        return True
+
+
 @app.post("/api/ebay/sync-listings")
-def sync_listings(request: Request) -> dict:
+def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     """Reconcile our 'live' listings with eBay: a sold item is auto-archived
     (status 'sold', its photos purged to reclaim storage), a listing that
     otherwise disappeared flips to 'ended', and missing eBay item ids are
-    backfilled. Definitive answers only — an API blip changes nothing."""
+    backfilled. Definitive answers only — an API blip changes nothing.
+
+    `force` (body) runs the full sweep — that's the manual "Sync store"
+    button. Without it the per-item sweeps are rate-limited per account (see
+    _SWEEP_COOLDOWN); the cheap finished-list reconcile always runs, so an
+    item that ended or sold on eBay still moves on the very next sync.
+    """
     creds = _ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0, "archived": 0}
+    force = bool((payload or {}).get("force"))
     live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
             if i.get("status") in ("published", "live")]
     changed = 0
@@ -3348,6 +3379,14 @@ def sync_listings(request: Request) -> dict:
                     if listing_sync.is_imported(i.get("listing") or {})}
     imported = [i for i in live if i["id"] in imported_ids]
     items = [i for i in live if i["id"] not in imported_ids]
+    if not _sweep_due(user["id"], force):
+        # Cooled down: the finished-list reconcile above already ran (and is
+        # what actually moves ended/sold records), so skip the ~100-call
+        # per-item sweeps rather than spending the account's daily eBay quota
+        # on a background poll.
+        log.debug("ebay sync: per-item sweeps skipped (cooldown) for user=%s",
+                  user["id"])
+        imported, items = [], []
     if len(imported) > 60:
         imported = random.sample(imported, 60)
     if len(items) > 40:
