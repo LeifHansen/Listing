@@ -125,13 +125,17 @@ def refresh_eps_urls(listing_id: str, token: str, item_id: str,
     urls = fresh.get("image_urls") or []
     if not urls:
         return
-    rec = db.get_listing(listing_id)
-    if not rec:
+
+    def _set_urls(data: dict) -> dict:
+        data["image_urls"] = urls
+        return data
+
+    # Locked merge of just this field: this runs on a background thread while
+    # the publish request is still folding the OTHER marketplaces' outcomes
+    # into the same row. Rewriting the whole blob from a stale read here used
+    # to drop whichever side wrote second.
+    if db.mutate_listing_data(listing_id, _set_urls, user_id=uid) is None:
         return
-    listing = rec.get("listing") or {}
-    listing["image_urls"] = urls
-    db.upsert_listing(listing_id, listing, status=rec.get("status") or "published",
-                      user_id=uid or rec.get("user_id"))
     log.info("EPS refresh: %s now references %d eBay-hosted photos",
              listing_id, len(urls))
 

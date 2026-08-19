@@ -262,6 +262,51 @@ def upsert_listing(
         log.warning(f"db: upsert_listing failed: {exc}")
 
 
+def mutate_listing_data(
+    listing_id: str, mutate, status: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Read-modify-write the listing's JSON blob with the row LOCKED.
+
+    `mutate(data)` receives the stored dict and returns the dict to persist
+    (mutating in place is fine). The lock is the point: the plain
+    get_listing -> edit -> upsert_listing sequence is a lost-update race
+    whenever two writers touch one listing, and this app has a guaranteed
+    concurrent writer — publishing kicks off a background thread that
+    rewrites the same blob (the eBay EPS URL refresh) while the request
+    keeps working through the other marketplaces. Whichever plain write
+    landed second silently erased the other's fields: freshly-recorded Etsy
+    or Depop listing ids, or the refreshed eBay photo URLs.
+
+    Returns the persisted dict, or None when there is no DB / the row is
+    missing / the write failed (callers keep their existing fallbacks).
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            rec = s.get(ListingRecord, listing_id, with_for_update=True)
+            if rec is None:
+                return None
+            data = mutate(dict(rec.data or {}))
+            if data is None:
+                return None
+            rec.data = data
+            rec.title = (data.get("title") or "")[:255]
+            if status is not None:
+                rec.status = status
+            # Claim ownership only if unowned — same rule as upsert_listing.
+            if user_id is not None and rec.user_id in (None, user_id):
+                rec.user_id = user_id
+            rec.updated_at = _now()
+            s.commit()
+            return data
+    except Exception as exc:  # noqa: BLE001 - DB must never break a request
+        log.warning(f"db: mutate_listing_data failed: {exc}")
+        return None
+
+
 def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
     try:
         eng = _get_engine()

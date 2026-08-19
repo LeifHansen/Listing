@@ -101,13 +101,15 @@ function ShippingServiceSelect({ value, onChange }) {
 
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
-  onDelete, deleting,
+  onDelete, deleting, targets,
 }) {
   const l = item.listing || {};
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
   const isAuction = fmt.startsWith("AUCTION");
-  const missing = item.status === "draft" ? missingRequired(l) : [];
+  // Target-aware: an Etsy-only publish must not be gated on eBay-only
+  // fields (package weight, eBay category).
+  const missing = item.status === "draft" ? missingRequired(l, targets) : [];
   // All of the item's photos, not just the first. An item that failed before
   // a listing existed still has the server-picked `thumb`.
   const photos = (l.images?.length
@@ -611,7 +613,8 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     return 95;
   })());
   const drafts = items.filter((it) => it.status === "draft");
-  const needInfo = drafts.filter((it) => missingRequired(it.listing).length > 0);
+  const needInfo = drafts.filter(
+    (it) => missingRequired(it.listing, effectiveTargets).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
   // in a card, and the pairwise scan is quadratic in the size of the batch.
   const dupes = useMemo(() => duplicateSuspects(drafts),
@@ -757,6 +760,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               publishing={!!publishing[it.session_id]}
               onDelete={() => deleteOne(it)}
               deleting={!!deleting[it.session_id]}
+              targets={effectiveTargets}
             />
           ))}
         </AnimatePresence>
