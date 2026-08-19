@@ -8,6 +8,7 @@ publishes are save-only, and photos ride as public URLs from the existing
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -20,6 +21,13 @@ from .base import PublishContext, PublishOutcome
 from . import mapping_depop
 
 _ACCESS_CACHE: dict[str, tuple[float, str]] = {}   # uid -> (expiry, token)
+_REFRESH_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(uid: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _REFRESH_LOCKS.setdefault(uid, threading.Lock())
 
 
 class DepopProvider:
@@ -83,22 +91,38 @@ class DepopProvider:
         hit = _ACCESS_CACHE.get(uid)
         if hit and time.time() < hit[0]:
             return {"access_token": hit[1], "_uid": uid}
-        try:
-            fresh = depop_auth.refresh_access_token(acct["refresh_token"])
-        except Exception as exc:  # noqa: BLE001 - dry-run, but log it
-            log.warning(f"depop: token refresh failed for user {uid}: {exc}")
-            return None
-        if fresh.get("refresh_token") and fresh["refresh_token"] != acct["refresh_token"]:
-            db.save_marketplace_account(uid, "depop",
-                                        refresh_token=fresh["refresh_token"])
-        if len(_ACCESS_CACHE) > 50:
-            _ACCESS_CACHE.clear()
-        _ACCESS_CACHE[uid] = (max(time.time() + 60, fresh["expires_at"] - 90),
-                              fresh["access_token"])
-        return {"access_token": fresh["access_token"], "_uid": uid}
+        # Serialize refreshes per user, exactly like the Etsy provider: Depop
+        # rotates refresh tokens, so two concurrent requests refreshing the
+        # same stored token can invalidate each other's — whichever save lands
+        # last persists a dead token and the connection silently breaks.
+        with _lock_for(uid):
+            hit = _ACCESS_CACHE.get(uid)   # a racing request refreshed first?
+            if hit and time.time() < hit[0]:
+                return {"access_token": hit[1], "_uid": uid}
+            # Re-read inside the lock: the stored token may have rotated since
+            # the check above, and refreshing a stale one kills the connection.
+            acct = db.get_marketplace_account(uid, "depop") or acct
+            try:
+                fresh = depop_auth.refresh_access_token(acct["refresh_token"])
+            except Exception as exc:  # noqa: BLE001 - dry-run, but log it
+                log.warning(f"depop: token refresh failed for user {uid}: {exc}")
+                return None
+            if (fresh.get("refresh_token")
+                    and fresh["refresh_token"] != acct["refresh_token"]):
+                db.save_marketplace_account(uid, "depop",
+                                            refresh_token=fresh["refresh_token"])
+            if len(_ACCESS_CACHE) > 50:
+                _ACCESS_CACHE.clear()
+            _ACCESS_CACHE[uid] = (max(time.time() + 60, fresh["expires_at"] - 90),
+                                  fresh["access_token"])
+            return {"access_token": fresh["access_token"], "_uid": uid}
 
     def disconnect(self, uid: str) -> None:
         db.disconnect_marketplace_account(uid, "depop")
+        _ACCESS_CACHE.pop(uid, None)
+
+    def forget_cached_creds(self, uid: str) -> None:
+        """Reconnect invalidates the uid-keyed cache — see the Etsy provider."""
         _ACCESS_CACHE.pop(uid, None)
 
     # --- listing lifecycle -----------------------------------------------

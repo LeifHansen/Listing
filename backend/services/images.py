@@ -96,8 +96,15 @@ _rembg_session = None
 # above _ALPHA_HIGH to solid subject; the thin band between keeps a 1-2px
 # anti-aliased edge. A soft matte (mid-alpha everywhere) is what leaves a
 # "ghost" of the old background compositing through as gray fuzz.
-_ALPHA_LOW = 90
-_ALPHA_HIGH = 170
+# Env-tunable (REMBG_ALPHA_LOW / REMBG_ALPHA_HIGH) so cutout sensitivity can
+# be re-dialed on a deployment without a code change: RAISE LOW toward ~120 if
+# leftover background ghosting shows up, LOWER it toward ~60 if the cutout eats
+# parts of the item. The defaults stay where the border-solidify pass
+# (_solidify_border) was tuned against them — that pass now rebuilds edges the
+# old thresholds used to shave, so loosening them by default is no longer the
+# fix it once was.
+_ALPHA_LOW = int(os.getenv("REMBG_ALPHA_LOW", "90") or 90)
+_ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "170") or 170)
 # If the cutout keeps less than this fraction of the frame as opaque subject,
 # the model ate the item (dark denim, close-up textures, low contrast) — keep
 # the original photo rather than saving a destroyed one.

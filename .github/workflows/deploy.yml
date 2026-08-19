@@ -14,8 +14,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The same lint + unit tests CI runs on pull requests, repeated here as a
+  # deploy gate. ci.yml only triggers on `pull_request`, so a direct push to
+  # the deploy branch (or a manual dispatch) previously shipped to production
+  # with no check having run at all.
+  checks:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx
+      - name: Ruff
+        run: ruff check backend
+      - name: Tests
+        run: pytest backend/tests -q
+
   deploy:
     name: Deploy app
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

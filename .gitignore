@@ -10,9 +10,10 @@ env/
 .env
 *.local
 
-# Runtime data (uploaded images, generated listings, sessions)
+# Runtime data (uploaded images, generated listings, sessions, job status)
 data/sessions/
 data/exports/
+data/jobs/
 data/.secret_key
 *.log
 
