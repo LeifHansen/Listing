@@ -6,7 +6,7 @@ import { useToast } from "@/components/ui/Toaster";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { TagPill } from "@/components/ui/badges";
-import { cn, formatMoney } from "@/lib/utils";
+import { formatMoney } from "@/lib/utils";
 
 /* Possible duplicate listings — two live eBay listings that look like one
    item listed twice.

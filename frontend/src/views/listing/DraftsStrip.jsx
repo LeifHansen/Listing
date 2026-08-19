@@ -160,6 +160,15 @@ export function DraftsStrip({ search = "" }) {
   };
 
   const publishOne = async (item) => {
+    // Publishing two drafts asks first; publishing one used to post a real,
+    // fee-incurring listing on a single tap from the card — the more
+    // dangerous action had the weaker gate. Same question, same wording.
+    const name = item.listing?.title || item.title || "this draft";
+    if (!(await confirm({
+      title: "Publish this draft live?",
+      message: `"${name}" goes straight to ${targetNames}.`,
+      confirmLabel: "Publish live",
+    }))) return false;
     const { published, res, error } = await publishItem(item);
     if (error) {
       toast(`Publish error: ${error}`, { kind: "error" });

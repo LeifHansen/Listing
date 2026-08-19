@@ -142,8 +142,11 @@ Without them, you can still type a category ID manually in the preview.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET`  | `/api/health` | Config status (AI / eBay) |
-| `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id` |
-| `POST` | `/api/identify/{session_id}` | Claude vision → listing draft |
+| `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id` |
+| `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
+| `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
+| `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id` |
+| `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
@@ -192,12 +195,14 @@ free — the right default for local dev and self-hosters.
 Plus 120/$11.99 · Pro 300/$24.99 · Power 1000/$69.99 — $0.12 down to
 $0.07/token as packs grow.
 
-**Why these numbers are profitable.** A full draft runs 4–6 vision calls over
-up to 8 photos; on the default Opus-tier vision model ($5/M input, $25/M
-output) that's ~$0.25 of API spend for a typical 3-photo listing and ~$0.80
-worst-case at 8 photos. At 5 tokens, a draft brings in $0.35–$0.60 → roughly
-40–60% gross margin in the typical case, still positive at worst case on the
-mid packs. The lighter features cost cents against 1–2 tokens. The free
+**Why these numbers are profitable.** A full draft runs 2–3 vision calls over
+up to 8 photos (the consolidated `IDENTIFY_CHAIN=v2` chain — it was 4–6 before
+the tag-read, specifics and maker passes were folded together, and the photos
+now ride as ~1092px copies at roughly half the image tokens); on the default
+Opus-tier vision model ($5/M input, $25/M output) that's ~$0.10 of API spend
+for a typical 3-photo listing and ~$0.30 worst-case at 8 photos. At 5 tokens,
+a draft brings in $0.35–$0.60 → a wider margin than the 40–60% these prices
+were originally set for. The lighter features cost cents against 1–2 tokens. The free
 allowance caps the operator's giveaway at ~$2.50/user/month. Pointing
 `VISION_MODEL` at a cheaper tier widens every margin; re-tune the
 `TOKENS_COST_*` numbers if you do.

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -219,10 +220,20 @@ class EtsyProvider:
                     creds["access_token"], creds["shop_id"], payload)
                 listing_id = res["listing_id"]
                 images = self._image_batches(ctx)
-                for rank, (name, data) in enumerate(images, start=1):
-                    etsy.upload_listing_image(
-                        creds["access_token"], creds["shop_id"], listing_id,
-                        data, name, rank)
+                # Photos upload CONCURRENTLY (bounded to stay well under
+                # Etsy's rate limits): rank is explicit per photo, so display
+                # order is preserved no matter which upload lands first, and
+                # 8 photos cost ~2 round trips of wall clock instead of 8.
+                # map() re-raises the first failure, aborting the publish the
+                # same way the serial loop did.
+                if images:
+                    def _push(job) -> None:
+                        rank, (name, data) = job
+                        etsy.upload_listing_image(
+                            creds["access_token"], creds["shop_id"],
+                            listing_id, data, name, rank)
+                    with ThreadPoolExecutor(max_workers=min(4, len(images))) as pool:
+                        list(pool.map(_push, enumerate(images, start=1)))
                 if mode == "live":
                     res = etsy.update_listing(
                         creds["access_token"], creds["shop_id"], listing_id,

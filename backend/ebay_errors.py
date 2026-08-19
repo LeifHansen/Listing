@@ -164,6 +164,26 @@ def explain(err: dict) -> dict:
         issue.update(target="generic",
                      title="This item already has an eBay offer",
                      fix="Just press Publish Live again — we’ll update the existing offer.")
+    # The two "limit" rejections that stop a publish for reasons the listing
+    # itself can't fix. They used to fall through to the generic branch, which
+    # reads as "eBay rejected the listing" and sends the seller hunting through
+    # fields that were never the problem.
+    elif has("call limit", "exceeded the number of calls", "maximum number of calls",
+             "application-level", "too many requests", "throttl"):
+        issue.update(target="generic",
+                     title="eBay’s API limit for the app was reached",
+                     fix="Nothing is wrong with this listing. eBay caps how "
+                         "many API calls the app may make per day, and today’s "
+                         "allowance is spent — it resets at midnight Pacific. "
+                         "Try publishing again after the reset.")
+    elif has("listing limit", "selling limit", "monthly limit",
+             "exceeded your limit", "sell more items"):
+        issue.update(target="generic",
+                     title="Your eBay selling limit is reached",
+                     fix="eBay caps how many items (or how much value) your "
+                         "account may list per month. Ask eBay to raise the "
+                         "limit from Seller Hub → Overview → Monthly limits, "
+                         "or publish this once something else sells or ends.")
     else:
         issue.update(target="generic",
                      title="eBay rejected the listing",

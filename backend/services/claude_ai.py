@@ -17,6 +17,7 @@ from typing import Optional
 from anthropic import Anthropic
 
 from .. import config
+from ..config import log
 from . import taxonomy
 from ..models import IdentifyResult, ItemSpecific, Listing
 
@@ -54,7 +55,8 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "item_specifics": [{"name": "string", "value": "string", "confidence": "high|medium"}],
   "missing_info": ["names of ITEM details a human should verify/fill, e.g. 'exact model number', 'size'. NEVER list where the item ships from, its location, shipping/return/payment policies, or handling time — the seller's account settles those once, not per listing"],
   "confidence": "low|medium|high",
-  "raw_observations": "brief notes on what you actually see in the photos"
+  "raw_observations": "brief notes on what you actually see in the photos",
+  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|other"} ]
 }
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
@@ -91,6 +93,14 @@ Rules:
   literally read/see it or it's unambiguous, "medium" for a reasonable
   inference (fill those too — the seller sees a review flag on them). Never
   invent identifiers (UPC/EAN/ISBN/MPN/serial) you cannot actually read.
+- tags: while examining the photos, note every TAG, LABEL, STAMP, or PRINTED
+  MARKING worth reading up close: neck labels, waistband tags, care tags,
+  shoe tongue/heel labels, hang tags, box text, model plates, barcodes.
+  box is the tag's bounding region as FRACTIONS of that photo's width/height
+  (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is cut
+  off. Include a tag even when you can't read it at this size — it will be
+  zoomed in on later. At most 6 entries, best candidates first; no tags at
+  all -> [].
 """ % ", ".join(EBAY_CONDITIONS)
 
 
@@ -150,12 +160,31 @@ def ai_error_message(exc: Exception) -> tuple[int, str]:
 
 
 def _image_block(path: Path) -> dict:
+    # Whole-frame vision payloads ride as ~1092px cached copies: identical
+    # reads at roughly half the image tokens and upload bytes of the full
+    # 1600px listing photo (see images.vision_copy). Tag close-ups don't come
+    # through here — they crop from the full-size photo.
+    from . import images
+    path = images.vision_copy(path)
     media_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
     data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
     return {
         "type": "image",
         "source": {"type": "base64", "media_type": media_type, "data": data},
     }
+
+
+def _log_usage(tag: str, resp) -> None:
+    """One line of token accounting per call — cache_read > 0 is the proof the
+    prompt-cache breakpoints are landing (zero across repeated calls means a
+    silent invalidator crept into the system blocks)."""
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return
+    log.info("ai %s: in=%s out=%s cache_read=%s cache_write=%s", tag,
+             getattr(u, "input_tokens", None), getattr(u, "output_tokens", None),
+             getattr(u, "cache_read_input_tokens", None),
+             getattr(u, "cache_creation_input_tokens", None))
 
 
 def _extract_json(text: str) -> dict:
@@ -296,11 +325,27 @@ _PRICING_STRATEGY_HINTS = {
 }
 
 
+# The static half of the identify prompt, kept byte-identical across calls so
+# it prompt-caches: identical system blocks are served from cache (~10x cheaper,
+# faster time-to-first-token) on every identify within the cache TTL — which is
+# every item of a bulk batch. Volatile content (the photos, the per-account
+# pricing strategy) rides in the user message, after the cached prefix.
+_IDENTIFY_SYSTEM = (
+    "You are an expert eBay reseller and product cataloguer. Examine the "
+    "product photos and produce a complete, accurate eBay listing draft.\n\n"
+    + _LISTING_SCHEMA)
+
+
 def identify(image_paths: list[Path], image_names: list[str],
              strategy: str = "") -> IdentifyResult:
     """Identify the item(s) in the images and draft a full listing.
     `strategy` (optional): quick_flip | median | long_sale — tilts the
-    suggested price toward that end of the market range."""
+    suggested price toward that end of the market range.
+
+    The result also carries `tags`: bounding boxes of tags/labels the model
+    spotted while examining the photos, for the zoom-and-transcribe pass —
+    free here, where a separate locate call used to pay for its own look at
+    every photo."""
     client = _client()
     content: list[dict] = []
     for p in image_paths[:8]:  # cap images per request
@@ -309,11 +354,8 @@ def identify(image_paths: list[Path], image_names: list[str],
         {
             "type": "text",
             "text": (
-                "You are an expert eBay reseller and product cataloguer. "
-                "Examine these product photos and produce a complete, accurate "
-                "eBay listing draft."
+                "These are the product photos for one listing. Draft it."
                 + _PRICING_STRATEGY_HINTS.get(strategy, "")
-                + "\n\n" + _LISTING_SCHEMA
             ),
         }
     )
@@ -321,8 +363,11 @@ def identify(image_paths: list[Path], image_names: list[str],
     resp = client.messages.create(
         model=config.VISION_MODEL,
         max_tokens=4096,
+        system=[{"type": "text", "text": _IDENTIFY_SYSTEM,
+                 "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content}],
     )
+    _log_usage("identify", resp)
     if resp.stop_reason == "max_tokens":
         raise RuntimeError("the AI response was too long and got cut off; "
                            "try again or use fewer photos")
@@ -342,6 +387,8 @@ def identify(image_paths: list[Path], image_names: list[str],
         listing=listing,
         confidence=conf,
         raw_observations=str(data.get("raw_observations", "")),
+        # Raw tag boxes; tag_crops() validates each entry when cropping.
+        tags=[t for t in (data.get("tags") or []) if isinstance(t, dict)][:6],
     )
 
 
@@ -650,6 +697,42 @@ def _pil_block(img) -> dict:
         "data": base64.standard_b64encode(buf.getvalue()).decode("ascii")}}
 
 
+def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
+    """Zoomed-in image blocks for tag bounding boxes ({photo, box, kind} with
+    1-based photo numbers into image_paths, box as width/height fractions).
+
+    CPU-only — no API call. Each box is cropped from the FULL-SIZE photo (plus
+    a margin) and upscaled so small print reads at presentation size. Invalid
+    entries are dropped, never guessed at."""
+    from PIL import Image
+    paths = [p for p in image_paths[:8] if p.is_file()]
+    crops: list[dict] = []
+    for t in (tags or [])[:6]:
+        if not isinstance(t, dict):
+            continue
+        try:
+            idx = int(t.get("photo", 0)) - 1
+            x0, y0, x1, y1 = [float(v) for v in (t.get("box") or [])[:4]]
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < len(paths)) or not (x0 < x1 and y0 < y1):
+            continue
+        with Image.open(paths[idx]) as im:
+            w, h = im.size
+            mx, my = (x1 - x0) * 0.08, (y1 - y0) * 0.08
+            box = (max(0, int((x0 - mx) * w)), max(0, int((y0 - my) * h)),
+                   min(w, int((x1 + mx) * w)), min(h, int((y1 + my) * h)))
+            if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+                continue
+            crop = im.crop(box)
+            if max(crop.size) < 1100:
+                scale = 1100 / max(crop.size)
+                crop = crop.resize((round(crop.width * scale),
+                                    round(crop.height * scale)), Image.LANCZOS)
+            crops.append(_pil_block(crop))
+    return crops
+
+
 def read_tag_text(image_paths: list[Path]) -> str:
     """Locate tags/labels across the photos, zoom into each, and transcribe.
 
@@ -685,30 +768,8 @@ def read_tag_text(image_paths: list[Path]) -> str:
     if not tags:
         return ""
 
-    # Pass 2 — zoom in and transcribe. Crop each box from the full-size photo
-    # (plus a margin) and upscale so small print reads at presentation size.
-    crops: list[dict] = []
-    for t in tags:
-        try:
-            idx = int(t.get("photo", 0)) - 1
-            x0, y0, x1, y1 = [float(v) for v in (t.get("box") or [])[:4]]
-        except (TypeError, ValueError):
-            continue
-        if not (0 <= idx < len(paths)) or not (x0 < x1 and y0 < y1):
-            continue
-        with Image.open(paths[idx]) as im:
-            w, h = im.size
-            mx, my = (x1 - x0) * 0.08, (y1 - y0) * 0.08
-            box = (max(0, int((x0 - mx) * w)), max(0, int((y0 - my) * h)),
-                   min(w, int((x1 + mx) * w)), min(h, int((y1 + my) * h)))
-            if box[2] - box[0] < 8 or box[3] - box[1] < 8:
-                continue
-            crop = im.crop(box)
-            if max(crop.size) < 1100:
-                scale = 1100 / max(crop.size)
-                crop = crop.resize((round(crop.width * scale),
-                                    round(crop.height * scale)), Image.LANCZOS)
-            crops.append(_pil_block(crop))
+    # Pass 2 — zoom in and transcribe.
+    crops = tag_crops(paths, tags)
     if not crops:
         return ""
     crops.append({"type": "text", "text": (
@@ -785,18 +846,16 @@ Rules:
 """
 
 
-def fill_aspects(image_paths: list[Path], listing: Listing,
-                 aspects: list[dict], tag_text: str = "") -> list[ItemSpecific]:
-    """Fill eBay's category item specifics from the product photos. `aspects`
-    is the taxonomy list [{name, required, mode, values}]. Returns validated
-    ItemSpecifics — SELECTION_ONLY values are matched to eBay's allowed list so
-    the fixed-value ("checkbox") specifics actually populate on eBay.
-    `tag_text` (from read_tag_text) is passed as ground-truth context so Size/
-    Material/Country/MPN come off the actual tags."""
-    named = [a for a in aspects if a.get("name")]
-    if not named or not image_paths:
-        return []
-    client = _client()
+# Static role text for the specifics fill, cached with _ASPECTS_FILL_SCHEMA as
+# one system block; the per-category aspect list gets a second cached block so
+# same-category listings (a bulk batch's common case) reuse both.
+_ASPECTS_SYSTEM = (
+    "You are cataloguing an item for eBay. Using the product photos and the "
+    "context provided, fill in the given eBay item specifics as accurately as "
+    "possible.\n\n" + _ASPECTS_FILL_SCHEMA)
+
+
+def _aspect_lines(named: list[dict]) -> str:
     lines = []
     for a in named:
         dtype = (a.get("data_type") or "STRING").upper()
@@ -812,32 +871,17 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
             lines.append(f'- "{a["name"]}" (plain number)')
         else:
             lines.append(f'- "{a["name"]}" (free text){multi}')
-    context = (f"Title: {listing.title}\nBrand: {listing.brand}\n"
-               f"Category: {listing.category_suggestion}\n"
-               f"Description: {(listing.description or '')[:500]}")
-    if tag_text:
-        context += ("\nTAG TEXT (transcribed from zoomed close-ups of this "
-                    "item's tags/labels — treat as ground truth):\n" + tag_text)
-    content: list[dict] = [_image_block(p) for p in image_paths[:8]]
-    content.append({"type": "text", "text": (
-        "You are cataloguing an item for eBay. Using the product photos and the "
-        "context below, fill in these eBay item specifics as accurately as "
-        "possible.\n\nCONTEXT:\n" + context + "\n\nEBAY ITEM SPECIFICS TO FILL:\n"
-        + "\n".join(lines) + "\n\n" + _ASPECTS_FILL_SCHEMA)})
+    return "\n".join(lines)
 
-    # Big clothing categories run 30+ aspects; a tight cap used to cut the
-    # response off, which raised and silently skipped the WHOLE enrichment —
-    # the "eBay suggests way more specifics than we fill" gap.
-    resp = client.messages.create(
-        model=config.VISION_MODEL,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": content}],
-    )
-    if resp.stop_reason == "max_tokens":
-        raise RuntimeError("the item-specifics response was cut off; try again")
-    text = "".join(b.text for b in resp.content if b.type == "text")
-    data = _extract_json(text)
 
+def _listing_context(listing: Listing) -> str:
+    return (f"Title: {listing.title}\nBrand: {listing.brand}\n"
+            f"Category: {listing.category_suggestion}\n"
+            f"Description: {(listing.description or '')[:500]}")
+
+
+def _validate_specifics(data: dict, named: list[dict]) -> list[ItemSpecific]:
+    """The model's raw specifics, coerced to eBay-legal ItemSpecifics."""
     by_name = {a["name"].strip().lower(): a for a in named}
     out: list[ItemSpecific] = []
     seen: set[tuple[str, str]] = set()   # (name, value) — exact repeats only
@@ -872,6 +916,120 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
             # over-flag than to show an inference as read-off-the-tag fact.
             confidence="high" if conf == "high" else "medium"))
     return out
+
+
+def _aspects_system_blocks(named: list[dict]) -> list[dict]:
+    return [
+        {"type": "text", "text": _ASPECTS_SYSTEM,
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text",
+         "text": "EBAY ITEM SPECIFICS TO FILL:\n" + _aspect_lines(named),
+         "cache_control": {"type": "ephemeral"}},
+    ]
+
+
+def fill_aspects(image_paths: list[Path], listing: Listing,
+                 aspects: list[dict], tag_text: str = "") -> list[ItemSpecific]:
+    """Fill eBay's category item specifics from the product photos. `aspects`
+    is the taxonomy list [{name, required, mode, values}]. Returns validated
+    ItemSpecifics — SELECTION_ONLY values are matched to eBay's allowed list so
+    the fixed-value ("checkbox") specifics actually populate on eBay.
+    `tag_text` (from read_tag_text) is passed as ground-truth context so Size/
+    Material/Country/MPN come off the actual tags."""
+    named = [a for a in aspects if a.get("name")]
+    if not named or not image_paths:
+        return []
+    client = _client()
+    context = _listing_context(listing)
+    if tag_text:
+        context += ("\nTAG TEXT (transcribed from zoomed close-ups of this "
+                    "item's tags/labels — treat as ground truth):\n" + tag_text)
+    content: list[dict] = [_image_block(p) for p in image_paths[:8]]
+    content.append({"type": "text", "text": "CONTEXT:\n" + context})
+
+    # Big clothing categories run 30+ aspects; a tight cap used to cut the
+    # response off, which raised and silently skipped the WHOLE enrichment —
+    # the "eBay suggests way more specifics than we fill" gap.
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=4000,
+        system=_aspects_system_blocks(named),
+        messages=[{"role": "user", "content": content}],
+    )
+    _log_usage("fill_aspects", resp)
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the item-specifics response was cut off; try again")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    return _validate_specifics(_extract_json(text), named)
+
+
+# The maker ask appended to the consolidated enrichment call (chain v2). Kept
+# in the user text so the cached system blocks stay byte-identical whether or
+# not the maker hunt is needed.
+_MAKER_ASK = """
+ADDITIONALLY, identify the item's MAKER (brand/manufacturer). Inspect every
+photo for maker evidence — logos, embossed or printed marks, sewn tags,
+labels, stamps, hallmarks, signatures, serial/model plates, packaging text,
+and distinctive design signatures (typography, colorways, stitching,
+hardware, patterns) you recognize — and work like a reverse-image search,
+matching what you see against known makers in this product category. Add a
+top-level "maker" key to the SAME JSON object:
+"maker": {"maker": "<the exact maker name, or \\"\\" if none is identifiable>",
+          "evidence": "<concise: what in the photos supports this>",
+          "confidence": "low|medium|high"}
+Name the MOST SPECIFIC maker the evidence supports (e.g. "Fenton" not "a
+glass maker"). If the photos genuinely show no identifiable maker, return ""
+— a wrong maker is worse than a blank one.
+"""
+
+
+def fill_aspects_combined(
+        image_paths: list[Path], listing: Listing, aspects: list[dict],
+        tag_crop_blocks: Optional[list[dict]] = None,
+        want_maker: bool = False) -> tuple[list[ItemSpecific], Optional[dict]]:
+    """Chain v2's single enrichment call: item specifics + (optionally) a
+    maker candidate, with zoomed tag crops included as ground truth instead of
+    a separate transcription round-trip.
+
+    Returns (specifics, maker_candidate) where maker_candidate is
+    {"maker", "evidence", "confidence"} or None. The candidate is only a
+    proposal — verify_maker() must confirm it before anything is written."""
+    named = [a for a in aspects if a.get("name")]
+    if not named or not image_paths:
+        return [], None
+    client = _client()
+    content: list[dict] = [_image_block(p) for p in image_paths[:8]]
+    if tag_crop_blocks:
+        content.append({"type": "text", "text": (
+            "Zoomed-in crops of this item's tags/labels follow. Read them "
+            "closely and treat what they say as ground truth — values taken "
+            "from them are confidence \"high\".")})
+        content.extend(tag_crop_blocks)
+    tail = "CONTEXT:\n" + _listing_context(listing)
+    if want_maker:
+        tail += "\n" + _MAKER_ASK
+    content.append({"type": "text", "text": tail})
+
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=4500,  # fill_aspects' 4000 + headroom for the maker section
+        system=_aspects_system_blocks(named),
+        messages=[{"role": "user", "content": content}],
+    )
+    _log_usage("fill_aspects_combined", resp)
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the item-specifics response was cut off; try again")
+    data = _extract_json("".join(b.text for b in resp.content if b.type == "text"))
+    specifics = _validate_specifics(data, named)
+    maker = None
+    if want_maker and isinstance(data.get("maker"), dict):
+        m = data["maker"]
+        name = str(m.get("maker", "")).strip()
+        if name and len(name) <= 65:
+            maker = {"maker": name,
+                     "evidence": str(m.get("evidence", "")).strip(),
+                     "confidence": str(m.get("confidence", "low")).strip().lower()}
+    return specifics, maker
 
 
 # ---------------------------------------------------------------------------
@@ -924,14 +1082,45 @@ Rules:
 """
 
 
+def verify_maker(image_paths: list[Path], listing: Listing,
+                 maker: str, evidence: str = "") -> Optional[dict]:
+    """The adversarial second layer of the maker check: an independent look at
+    the photos that tries to knock the proposal down (lookalikes, licensed
+    reproductions, store brands, counterfeits all mean no). Returns
+    {"maker", "evidence", "confidence"} only when it confirms with at least
+    medium confidence; None otherwise. Raises on API errors."""
+    if not maker or not image_paths:
+        return None
+    client = _client()
+    imgs = [_image_block(p) for p in image_paths[:8]]
+    context = (f"Item: {listing.title}\n"
+               f"Category: {listing.category_suggestion or 'unknown'}")
+    verify = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=400,
+        messages=[{"role": "user", "content": imgs + [{"type": "text", "text": (
+            "An identification system proposed that this item's maker is "
+            f"\"{maker}\", based on: {evidence or 'unspecified evidence'}.\n"
+            "CONTEXT:\n" + context + "\n\nIndependently verify that proposal "
+            "against the photos." + _MAKER_VERIFY_SCHEMA)}]}],
+    )
+    _log_usage("verify_maker", verify)
+    vdata = _extract_json("".join(b.text for b in verify.content if b.type == "text"))
+    verdict = str(vdata.get("verdict", "")).strip().lower()
+    vconf = str(vdata.get("confidence", "low")).strip().lower()
+    if verdict != "confirm" or vconf not in ("medium", "high"):
+        return None
+    return {"maker": maker, "evidence": evidence, "confidence": vconf}
+
+
 def identify_maker(image_paths: list[Path], listing: Listing) -> Optional[dict]:
     """Double-layer maker/manufacturer identification from the photos.
 
-    Layer 1 hunts for a maker candidate with evidence; layer 2 independently
-    verifies it (adversarially — lookalikes and knockoffs mean no). Returns
-    {"maker", "evidence", "confidence"} only when the verifier confirms with
-    at least medium confidence; None otherwise. Raises on API errors — the
-    caller treats this enrichment as best-effort."""
+    Layer 1 hunts for a maker candidate with evidence; layer 2 (verify_maker)
+    independently verifies it. Returns {"maker", "evidence", "confidence"}
+    only when the verifier confirms with at least medium confidence; None
+    otherwise. Raises on API errors — the caller treats this enrichment as
+    best-effort."""
     if not image_paths:
         return None
     client = _client()
@@ -946,24 +1135,10 @@ def identify_maker(image_paths: list[Path], listing: Listing) -> Optional[dict]:
             "You are an expert product identifier and appraiser hunting for the "
             "maker of this item.\n\nCONTEXT:\n" + context + "\n" + _MAKER_HUNT_SCHEMA)}]}],
     )
+    _log_usage("maker_hunt", hunt)
     data = _extract_json("".join(b.text for b in hunt.content if b.type == "text"))
     maker = str(data.get("maker", "")).strip()
     evidence = str(data.get("evidence", "")).strip()
     if not maker or len(maker) > 65:
         return None
-
-    verify = client.messages.create(
-        model=config.VISION_MODEL,
-        max_tokens=400,
-        messages=[{"role": "user", "content": imgs + [{"type": "text", "text": (
-            "An identification system proposed that this item's maker is "
-            f"\"{maker}\", based on: {evidence or 'unspecified evidence'}.\n"
-            "CONTEXT:\n" + context + "\n\nIndependently verify that proposal "
-            "against the photos." + _MAKER_VERIFY_SCHEMA)}]}],
-    )
-    vdata = _extract_json("".join(b.text for b in verify.content if b.type == "text"))
-    verdict = str(vdata.get("verdict", "")).strip().lower()
-    vconf = str(vdata.get("confidence", "low")).strip().lower()
-    if verdict != "confirm" or vconf not in ("medium", "high"):
-        return None
-    return {"maker": maker, "evidence": evidence, "confidence": vconf}
+    return verify_maker(image_paths, listing, maker, evidence)

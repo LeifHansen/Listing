@@ -84,23 +84,6 @@ export function RobotIllustration(props) {
   );
 }
 
-// A clipboard with a big friendly check — done states, drafts.
-export function ClipboardIllustration(props) {
-  return (
-    <svg viewBox="0 0 160 130" width="160" height="130" role="img" aria-hidden {...props}>
-      <ellipse cx="80" cy="120" rx="46" ry="7" fill={soft} />
-      <rect x="44" y="22" width="72" height="92" rx="14" fill="var(--brand-green-soft)"
-        stroke={stroke} strokeWidth="4" />
-      <rect x="62" y="12" width="36" height="18" rx="8" fill="var(--card)"
-        stroke={stroke} strokeWidth="4" />
-      <path d="M62 68 L76 82 L100 52" stroke="var(--brand-green)" strokeWidth="7"
-        strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      <Sparkle x={30} y={34} s={0.8} color="var(--brand-blue)" />
-      <Sparkle x={132} y={80} s={0.7} />
-    </svg>
-  );
-}
-
 // A price tag with a barcode sticker — listings & pricing.
 export function TagIllustration(props) {
   return (

@@ -98,18 +98,34 @@ export function postJson(path, body) {
 // the client polls instead of a single long request that a gateway or the
 // browser would time out ("server taking too long to respond"). If we give up
 // waiting, the server keeps working and saves the draft anyway.
-export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
+export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000, onUpdate } = {}) {
+  // The timeout is per STAGE, not per job: the server heartbeats each phase
+  // change (optimizing -> identifying -> category -> specifics -> maker), and
+  // the deadline resets whenever the job visibly advances. A job is only
+  // declared stuck after timeoutMs with NO progress — a legitimately long
+  // multi-stage chain used to blow a fixed 240s budget while the server was
+  // still working. `onUpdate(status)` (optional) sees every raw status so
+  // callers can render live stage progress.
+  let deadline = Date.now() + timeoutMs;
+  let lastSeen = "";
   for (;;) {
     const j = await api(`/api/bulk/status/${jobId}`);
+    if (onUpdate) {
+      try { onUpdate(j); } catch { /* display-only */ }
+    }
     if (j.done) {
       if (j.error) throw new Error(j.error);
       return j.result;
     }
+    const seen = `${j.phase || ""}|${j.beat || ""}|${j.current || ""}`;
+    if (seen !== lastSeen) {
+      lastSeen = seen;
+      deadline = Date.now() + timeoutMs;
+    }
     if (Date.now() > deadline) {
       throw new Error(
         "The AI is taking longer than usual. Your photos are still here — "
-        + "tap Identify to try again, or check Drafts in a moment; it may have finished.",
+        + "tap Identify with AI to try again, or check Drafts in a moment; it may have finished.",
       );
     }
     await new Promise((r) => setTimeout(r, intervalMs));

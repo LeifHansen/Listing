@@ -49,13 +49,10 @@ class _ScopeError(Exception):
     """The token can't use the Marketing API — the seller must reconnect."""
 
 
-def _headers(token: str) -> dict:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Content-Language": "en-US",
-    }
+# Same JSON+language headers every Sell API call wants; ebay.py owns the one
+# definition so a change (an added header, a marketplace id) lands everywhere
+# instead of in whichever copy someone happened to edit.
+from .ebay import _headers  # noqa: E402  (kept next to its first use)
 
 
 def _is_scope_error(resp: httpx.Response) -> bool:

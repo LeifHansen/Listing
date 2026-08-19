@@ -56,7 +56,7 @@ function fromListing(l) {
 }
 
 export function useListingForm() {
-  const { session, setSession, health, loadListings } = useApp();
+  const { session, setSession, health, loadListings, openListings } = useApp();
   const { toast } = useToast();
 
   const [form, setForm] = useState(() => fromListing(session?.listing));
@@ -414,6 +414,11 @@ export function useListingForm() {
       }
       const result = await postJson("/api/publish", body);
       setPublishResult(result);
+      // A clean draft save is "done editing" — hand the seller back the Sell
+      // overview (drafts + listings grid) instead of leaving them parked in
+      // the editor. Saves with problems stay put so the fix-it highlight has
+      // a form to point at.
+      let savedClean = false;
       if (result.multi) {
         if (!result.published && mode === "draft") {
           toast(result.message || "Draft saved — find it anytime under Drafts.",
@@ -421,6 +426,8 @@ export function useListingForm() {
         }
         const issues = Object.values(result.results || {})
           .flatMap((res) => res.issues || []);
+        savedClean = mode === "draft" && !result.published && !issues.length
+          && !Object.values(result.results || {}).some((res) => !res.ok);
         if (!result.published && issues.length) {
           const first = issues.find((x) => x.target && x.target !== "generic");
           if (first) setFixTarget(first.target);
@@ -432,6 +439,7 @@ export function useListingForm() {
           toast(result.ebay_draft
             ? "Draft saved here and staged on your eBay account — publish it live when you're ready."
             : "Draft saved — find it anytime under Drafts.", { kind: "success" });
+          savedClean = true;
         }
         if (result.error && result.issues && result.issues.length) {
           const first = result.issues.find((x) => x.target && x.target !== "generic");
@@ -439,12 +447,13 @@ export function useListingForm() {
         }
       }
       loadListings({ quiet: true });
+      if (savedClean) openListings("drafts");
     } catch (e) {
       toast(`Publish error: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, loadListings, toast, chipTargets]);
+  }), [collect, sessionId, setSession, loadListings, openListings, toast, chipTargets]);
 
   // End (withdraw) the live listing everywhere it's live; it stays here as an
   // editable 'ended' record so it can be relisted later. eBay keeps its
@@ -517,11 +526,17 @@ export function useListingForm() {
   // confidence score), so listings come SEO-ready with no manual step. Runs
   // once per session, and NOT when reopening a saved listing or a bulk item
   // (confidence is null there) so we never re-spend on an already-filled item.
+  // Also NOT when the identify job already ran the server-side enrichment
+  // (specificsAutofilled) — re-running the same vision passes seconds later
+  // added nothing and charged the account a second time. The effect still
+  // fires when the server pass was skipped (no category resolved, taxonomy
+  // down), which is exactly when a client-side fill completes the listing.
   const autoFilledFor = useRef(null);
   useEffect(() => {
     const aspects = categoryMeta.aspects || [];
     const fresh = !!session?.confidence;
-    if (!fresh || !aspects.length || autoFilledFor.current === sessionId) return;
+    if (!fresh || session?.specificsAutofilled || !aspects.length
+      || autoFilledFor.current === sessionId) return;
     const missingRequired = aspects.some((a) => a.required && !getSpecific(a.name));
     if (!missingRequired) return;
     autoFilledFor.current = sessionId;

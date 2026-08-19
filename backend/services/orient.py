@@ -83,6 +83,16 @@ def _enabled() -> bool:
     return flag not in ("off", "0", "false", "no") and config.anthropic_ready()
 
 
+def _verify_enabled() -> bool:
+    # The verify pass is a second vision round-trip that only runs when the
+    # detect pass proposed at least one rotation. ORIENT_VERIFY=off trades
+    # that safety net for one less serial API wait per upload that proposes
+    # turns — the detect prompt is already tuned conservative ("DEFAULT IS 0"),
+    # and a wrong turn stays one tap of the editor's rotate button.
+    flag = os.getenv("ORIENT_VERIFY", "on").strip().lower()
+    return flag not in ("off", "0", "false", "no")
+
+
 def _model() -> str:
     # A small, fast model is plenty for "which way is up" — and keeps a
     # 250-photo batch cheap. Override with ORIENT_MODEL.
@@ -195,6 +205,10 @@ def detect_rotations(paths: list[Path]) -> dict[str, int]:
             proposed.update(part)
     if not proposed:
         return {}
+    if not _verify_enabled():
+        log.info("auto-orient: %d proposed, applied without verify "
+                 "(ORIENT_VERIFY=off), of %d photos", len(proposed), len(files))
+        return proposed
     by_name = {p.name: p for p in files}
     items = [(by_name[n], deg) for n, deg in proposed.items() if n in by_name]
     chunks = [items[i:i + _BATCH] for i in range(0, len(items), _BATCH)]

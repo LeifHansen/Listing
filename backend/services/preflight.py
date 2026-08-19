@@ -26,6 +26,9 @@ from ..models import Listing
 # substrings of eBay's shippingServiceCode. Only services with caps BELOW the
 # common 70 lb parcel ceiling matter here — anything unlisted is effectively
 # unconstrained for resale-sized packages.
+#
+# Mirrored by SERVICE_CAPS_OZ in frontend/src/views/listing/cards.jsx, which
+# warns as the seller types. This list is the authority; keep the two in step.
 SERVICE_WEIGHT_CAPS_OZ: list[tuple[str, float, str, str]] = [
     ("standardenvelope", 3.0, "eBay Standard Envelope",
      "flats only: cards, coins, stamps and similar — max 3 oz"),

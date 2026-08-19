@@ -10,7 +10,7 @@ import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Select, Toggle } from "@/components/ui/fields";
+import { Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { BrandProgress } from "@/components/ui/Progress";
@@ -391,7 +391,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           setUnwatched(true);
           // Give up watching but KEEP it persisted — the batch may still be
           // finishing server-side, so the banner lets the user reopen and resume.
-          toast("Lost the connection while watching this batch — it may still be finishing. Reopen New Listing to check, and see Drafts for completed items.",
+          toast("Lost the connection while watching this batch — it may still be finishing. Reopen the Sell tab to check, and see Drafts for completed items.",
             { kind: "warning" });
         }
       }
@@ -461,6 +461,19 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
   }, [effectiveTargets]);
+
+  // One card's Publish button. Asks first — it posts a real, fee-incurring
+  // listing; "Publish selected" asks once for its whole set instead, which is
+  // why the confirm lives here rather than inside publishOne.
+  const confirmPublishOne = useCallback(async (it) => {
+    const name = it.listing?.title || it.title || "this draft";
+    if (!(await confirm({
+      title: "Publish this draft live?",
+      message: `"${name}" goes straight to your store.`,
+      confirmLabel: "Publish live",
+    }))) return;
+    if (await publishOne(it)) loadListings({ quiet: true });
+  }, [confirm, publishOne, loadListings]);
 
   // Delete a draft straight from the queue — the counterpart to Merge for
   // duplicates you don't want to keep at all, and the way out for anything
@@ -740,7 +753,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               onCheck={(v) => setChecked((c) => ({ ...c, [it.session_id]: v }))}
               onChange={(l) => updateItem(it.session_id, l)}
               onOpen={() => openItem(it)}
-              onPublish={() => publishOne(it).then((ok) => ok && loadListings({ quiet: true }))}
+              onPublish={() => confirmPublishOne(it)}
               publishing={!!publishing[it.session_id]}
               onDelete={() => deleteOne(it)}
               deleting={!!deleting[it.session_id]}

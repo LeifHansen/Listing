@@ -134,6 +134,15 @@ class IdentifyResult(BaseModel):
     listing: Listing
     confidence: str = "medium"
     raw_observations: str = ""
+    # Tag/label bounding boxes the identify pass spotted ({photo, box, kind}),
+    # consumed by the zoom-and-transcribe step — not shown in the UI.
+    tags: list = []
+    # True when the server-side enrichment (category item specifics) already
+    # ran for this draft — the editor's auto-autofill effect checks this so it
+    # doesn't re-run (and re-charge) the same passes right after the preview
+    # opens. False when enrichment was skipped (no category, taxonomy down),
+    # which is exactly when the client-side fill still earns its keep.
+    specifics_autofilled: bool = False
 
 
 class RefineRequest(BaseModel):

@@ -95,7 +95,8 @@ export function ShopMode() {
       });
       setResult(null);
       loadListings({ quiet: true });
-      toast("Added to your inventory! Open Inventory to finish and publish it.", { kind: "success" });
+      toast("Added! It's under Finds on the Sell tab — open it there to finish and publish.",
+        { kind: "success" });
       openListings("finds");
     } catch (e) {
       toast(`Couldn't add to inventory: ${e.message}`, { kind: "error" });

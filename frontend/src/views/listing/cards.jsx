@@ -843,18 +843,28 @@ export function PricingCard({ w }) {
 
 // Weight caps (oz) for services that silently kill a publish, mirrored from
 // the backend preflight so the warning shows the moment the weight is typed.
+// Mirrors SERVICE_WEIGHT_CAPS_OZ in backend/services/preflight.py — keep the
+// two in step. This copy exists so the Shipping card can warn as you type,
+// but preflight (and eBay) are the authority, and a client list that quietly
+// falls behind the server's is worse than no warning: it says "looks fine"
+// about a package eBay will reject.
 const SERVICE_CAPS_OZ = [
   ["standardenvelope", 3, "eBay Standard Envelope"],
   ["firstclass", 15.9, "USPS First Class"],
+  ["uspsground", 70 * 16, "USPS Ground Advantage"],
+  ["mediamail", 70 * 16, "USPS Media Mail"],
 ];
 
 function capIssueFor(services, weightOz) {
   if (!weightOz) return null;
   for (const code of services || []) {
-    const c = code.toLowerCase().replaceAll("_", "");
+    // Same normalization as the server's service_cap(): underscores AND
+    // spaces out, so "USPS First Class" and "USPS_FirstClass" both match.
+    const c = code.toLowerCase().replaceAll("_", "").replaceAll(" ", "");
     for (const [frag, cap, name] of SERVICE_CAPS_OZ) {
       if (c.includes(frag) && weightOz > cap) {
-        return `${name} maxes out at ${cap} oz — this package is ${+weightOz.toFixed(1)} oz. Pick a different service or eBay will reject the publish.`;
+        const prettyCap = cap < 16 ? `${cap} oz` : `${+(cap / 16).toFixed(0)} lb`;
+        return `${name} maxes out at ${prettyCap} — this package is ${+weightOz.toFixed(1)} oz. Pick a different service or eBay will reject the publish.`;
       }
     }
   }
