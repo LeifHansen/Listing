@@ -179,7 +179,12 @@ export function AppProvider({ children }) {
     { trafficOk: false, needsReconnect: false });
 
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
-    setListingsState((s) => ({ ...s, loading: !quiet }));
+    // `quiet` suppresses the spinner for background refreshes — but the FIRST
+    // load is quiet too (the boot effect), and suppressing it there meant the
+    // skeletons never rendered and every visit flashed "No listings yet"
+    // before the store appeared. A load that has nothing to show yet always
+    // counts as loading.
+    setListingsState((s) => ({ ...s, loading: !quiet || !s.loaded }));
     try {
       const res = await api("/api/listings");
       setListingsState({

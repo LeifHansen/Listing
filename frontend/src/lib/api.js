@@ -125,7 +125,7 @@ export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000, on
     if (Date.now() > deadline) {
       throw new Error(
         "The AI is taking longer than usual. Your photos are still here — "
-        + "tap Identify to try again, or check Drafts in a moment; it may have finished.",
+        + "tap Identify with AI to try again, or check Drafts in a moment; it may have finished.",
       );
     }
     await new Promise((r) => setTimeout(r, intervalMs));

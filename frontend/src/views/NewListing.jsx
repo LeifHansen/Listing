@@ -373,10 +373,14 @@ function Workflow() {
           what the seller actually looks at; the AI-filled rest sits behind
           the More Details fold (which opens itself when it needs a human). */}
       <motion.div variants={rise} className="flex flex-col gap-4">
+        {/* Photo delete is confirmed: the button sits on every tile, always
+            visible, and the photo is gone from the server with no undo.
+            deleteImage has supported a confirm all along — the editor just
+            wasn't passing one. */}
         <PhotosCard
           w={w}
           onEdit={(name) => setEditing({ name })}
-          onDelete={(name) => w.deleteImage(name)}
+          onDelete={(name) => w.deleteImage(name, confirm)}
         />
         <TitleCard w={w} />
         <PricingCard w={w} />

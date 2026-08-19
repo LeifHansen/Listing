@@ -10,7 +10,7 @@ import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Select, Toggle } from "@/components/ui/fields";
+import { Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { BrandProgress } from "@/components/ui/Progress";
@@ -391,7 +391,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           setUnwatched(true);
           // Give up watching but KEEP it persisted — the batch may still be
           // finishing server-side, so the banner lets the user reopen and resume.
-          toast("Lost the connection while watching this batch — it may still be finishing. Reopen New Listing to check, and see Drafts for completed items.",
+          toast("Lost the connection while watching this batch — it may still be finishing. Reopen the Sell tab to check, and see Drafts for completed items.",
             { kind: "warning" });
         }
       }

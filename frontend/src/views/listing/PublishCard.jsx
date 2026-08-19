@@ -414,8 +414,12 @@ export function PublishBar({ w }) {
                 aria-label="Delete this listing">
                 <Trash2 aria-hidden /> <span className="hidden sm:inline">Delete</span>
               </Button>
-              <Button variant="ghost" size="md" onClick={w.runPreflight} className="hidden sm:inline-flex">
-                <ListChecks aria-hidden /> Check
+              {/* Reachable on a phone too: this is the safety net for the
+                  riskiest action in the app, and hiding it below the sm
+                  breakpoint left mobile sellers — most of them — with no way
+                  to check a listing before it goes live. */}
+              <Button variant="ghost" size="md" onClick={w.runPreflight}>
+                <ListChecks aria-hidden /> <span className="hidden sm:inline">Check</span>
               </Button>
               <Button variant="secondary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("draft")}>
                 <Save aria-hidden /> Save Draft

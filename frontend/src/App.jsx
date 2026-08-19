@@ -12,7 +12,6 @@ import { ShippingDialog } from "@/components/ShippingDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
-import { ListingsView } from "@/views/ListingsView";
 import { SettingsView } from "@/views/SettingsView";
 
 function Main() {

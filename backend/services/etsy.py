@@ -93,14 +93,6 @@ def upload_listing_image(access_token: str, shop_id: str, listing_id: str,
     _raise_for_status(resp, f"uploading photo {rank}")
 
 
-def list_listing_images(access_token: str, shop_id: str, listing_id: str) -> list[dict]:
-    resp = httpx.get(
-        f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings/{listing_id}/images",
-        headers=_headers(access_token), timeout=30)
-    _raise_for_status(resp, "reading the Etsy listing's photos")
-    return resp.json().get("results", [])
-
-
 # --- seller taxonomy --------------------------------------------------------
 # The full tree is ~3k nodes and changes rarely; cache it in-process for a
 # day. Fetching needs only the app keystring (no user OAuth).

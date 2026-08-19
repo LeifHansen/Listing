@@ -167,7 +167,17 @@ export function ListingsView({ search = "" }) {
       || (i.listing?.description || "").toLowerCase().includes(q))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
 
-  const go = () => (tab.empty.action?.go === "new" ? startNew() : setView(tab.empty.action.go));
+  // "Create Listing" from an empty tab used to look broken: this list now
+  // lives on the Sell screen, so startNew() lands you where you already are
+  // and nothing visibly happens. The uploader is at the top of this same
+  // screen — take them to it.
+  const go = () => {
+    if (tab.empty.action?.go !== "new") return setView(tab.empty.action.go);
+    startNew();
+    try {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) { window.scrollTo(0, 0); }
+  };
 
   let body;
   if (listingsState.loading && !listingsState.loaded) {

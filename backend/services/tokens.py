@@ -72,14 +72,6 @@ def _load_costs() -> dict:
 
 COSTS = _load_costs()
 
-FEATURE_LABELS = {
-    "identify": "AI listing draft",
-    "refine": "AI refine",
-    "specifics": "Autofill item specifics",
-    "shelf_scan": "Shelf scan",
-    "image_ai": "AI photo tool",
-}
-
 # --- Token packs (one-time purchases; tokens never expire) ------------------
 # Anchored so the effective per-token price falls with size ($0.12 -> $0.07)
 # while every pack stays comfortably above the API cost of the usage it buys.
