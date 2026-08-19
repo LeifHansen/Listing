@@ -7,22 +7,9 @@ cascades on its own — a regression here is silent data retention.)
 """
 from __future__ import annotations
 
-import importlib
 
-import pytest
 
 from backend import auth
-
-
-@pytest.fixture
-def dbmod(monkeypatch, tmp_path):
-    """A fresh db module bound to a scratch SQLite file."""
-    from backend import config, db
-
-    monkeypatch.setattr(config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
-    importlib.reload(db)
-    monkeypatch.setattr(db.config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
-    return db
 
 
 def _user(db, email="gone@example.com"):

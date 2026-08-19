@@ -85,7 +85,7 @@ const BULK_ACTIONS = {
   promote: {
     verb: "Promote all",
     icon: Megaphone,
-    run: (ctx) => ctx.promoteAll(),
+    run: (ctx) => ctx.promoteAll((ctx.group?.recs || []).length),
   },
   lower_price: {
     verb: "Lower all…",
@@ -346,7 +346,17 @@ export function Dashboard() {
       toast(`Couldn't promote: ${e.message}`, { kind: "error" });
     } finally { setPromoting(null); }
   };
-  const promoteAll = async () => {
+  const promoteAll = async (count = 0) => {
+    // Promoting costs money on every sale it touches, and this button reaches
+    // EVERY live listing at once — the one action in the app that spends
+    // across the whole store from a single tap. Say what it will do first.
+    if (!(await confirm({
+      title: count ? `Promote ${count} listings?` : "Promote every live listing?",
+      message: "Each gets eBay's recommended ad rate. Promoted Listings is "
+        + "pay-per-sale — you're charged that percentage only when a listing "
+        + "sells through its ad, but it applies to every listing this touches.",
+      confirmLabel: "Promote them",
+    }))) return;
     setPromoting("all");
     try {
       const res = await postJson("/api/ebay/promote-all", {});

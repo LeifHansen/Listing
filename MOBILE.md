@@ -34,7 +34,7 @@ and TestFlight upload must run on a Mac with Xcode.**
 - Your **Apple Developer account** ($99/yr, which you have)
 - Register an **App ID** in the Apple Developer portal (Certificates, IDs &
   Profiles → Identifiers) with bundle id **`com.thryftshop.app`** — or pick your
-  own and change `appId` in `frontend/capacitor.config.ts` to match.
+  own and change `appId` in `frontend/capacitor.config.json` to match.
 
 ---
 
@@ -138,24 +138,26 @@ $25 one-time account.)
 
 ## Iterating
 
-Because v1 loads the live site, **web changes deploy the moment you merge** —
-testers see them on next app launch with no new TestFlight build. You only need
-a new native build when you change the icon, permissions, native plugins, or the
-`server.url`.
+The shell **bundles** the web build (there is no `server.url` — see
+`frontend/capacitor.config.json`), so **a web change needs a new native build**
+to reach testers: rebuild the frontend, re-run `./scripts/ios-prepare.sh`, and
+push a new TestFlight build. Backend changes still deploy on merge and reach
+the app immediately, since the bundled UI talks to the deployed API.
 
-## Path to an App Store *release* (later)
+A new native build is likewise required for the icon, permissions, or native
+plugins.
 
-Apple's guideline 4.2 can reject apps that are a thin wrapper around a website.
-Before public release we should:
-- **Bundle the web assets** (remove `server.url` so it loads local `dist`), which
-  requires:
-  - Making the API base configurable — prefix requests with the production URL
-    when running natively (a small change in `frontend/src/lib/api.js` +
-    `mediaUrl` in `frontend/src/lib/utils`).
-  - Adding **CORS** on the backend (`fastapi.middleware.cors`) allowing
-    `capacitor://localhost` / `https://localhost` with `allow_credentials`, and
-    switching auth to a token header **or** `SameSite=None; Secure` cookies.
-- Add a couple of native touches (native share, haptics, push) so it's clearly
-  more than a website.
+## App Store readiness
 
-Ping me when you want that and I'll implement it.
+Guideline 4.2 (a thin wrapper around a website) is already addressed — all of
+the following shipped:
+- **The web assets are bundled** (no `server.url`; the shell loads local
+  `dist`).
+- **The API base is configurable** — `frontend/src/lib/platform.js` supplies it
+  and `apiUrl()` / `mediaUrl()` prefix every request when running natively.
+- **CORS** allows `capacitor://localhost` / `https://localhost`
+  (`backend/main.py`), and auth rides a bearer token rather than a cookie
+  (`frontend/src/lib/api.js`), since same-origin cookies never travel in the
+  shell.
+
+Still optional polish for a public release: native share, haptics, and push.

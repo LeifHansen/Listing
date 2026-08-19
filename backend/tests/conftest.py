@@ -62,3 +62,19 @@ def _reset_objstore() -> None:
     objstore._client = None
     objstore._error = None
     objstore._error_at = 0.0
+
+
+@pytest.fixture
+def dbmod(monkeypatch, tmp_path):
+    """A fresh db module bound to a scratch SQLite file.
+
+    Shared: the deletion-cascade and notification suites both need a real
+    database with real schema, and each carried its own byte-identical copy
+    of this until one of them would inevitably drift.
+    """
+    from backend import config, db
+
+    monkeypatch.setattr(config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    importlib.reload(db)
+    monkeypatch.setattr(db.config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    return db

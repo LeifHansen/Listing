@@ -142,8 +142,11 @@ Without them, you can still type a category ID manually in the preview.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET`  | `/api/health` | Config status (AI / eBay) |
-| `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id` |
-| `POST` | `/api/identify/{session_id}` | Claude vision → listing draft |
+| `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id` |
+| `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
+| `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
+| `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id` |
+| `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |

@@ -462,6 +462,19 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   }, [effectiveTargets]);
 
+  // One card's Publish button. Asks first — it posts a real, fee-incurring
+  // listing; "Publish selected" asks once for its whole set instead, which is
+  // why the confirm lives here rather than inside publishOne.
+  const confirmPublishOne = useCallback(async (it) => {
+    const name = it.listing?.title || it.title || "this draft";
+    if (!(await confirm({
+      title: "Publish this draft live?",
+      message: `"${name}" goes straight to your store.`,
+      confirmLabel: "Publish live",
+    }))) return;
+    if (await publishOne(it)) loadListings({ quiet: true });
+  }, [confirm, publishOne, loadListings]);
+
   // Delete a draft straight from the queue — the counterpart to Merge for
   // duplicates you don't want to keep at all, and the way out for anything
   // the AI shouldn't have drafted.
@@ -740,7 +753,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               onCheck={(v) => setChecked((c) => ({ ...c, [it.session_id]: v }))}
               onChange={(l) => updateItem(it.session_id, l)}
               onOpen={() => openItem(it)}
-              onPublish={() => publishOne(it).then((ok) => ok && loadListings({ quiet: true }))}
+              onPublish={() => confirmPublishOne(it)}
               publishing={!!publishing[it.session_id]}
               onDelete={() => deleteOne(it)}
               deleting={!!deleting[it.session_id]}

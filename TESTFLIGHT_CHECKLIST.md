@@ -22,6 +22,8 @@ the whole build; there is nothing to hand-configure.
 Run in Terminal, one block at a time:
 
 ```bash
+# The default branch — whatever production deploys from. If you're testing a
+# feature branch, check that out instead.
 cd ~/Listing && git checkout claude/ebay-listing-generator-se7lao && git pull
 cd frontend
 npm install

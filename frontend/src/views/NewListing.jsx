@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown, Loader2,
+  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
+import { BulkBanner } from "@/components/BulkBanner";
 import { ListingsView } from "./ListingsView";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
@@ -485,20 +486,7 @@ export function NewListing({ search = "" }) {
   if (!session) {
     return (
       <>
-        {activeBulk && (
-          <button
-            type="button"
-            onClick={() => setShowBulk(true)}
-            className="mb-4 w-full flex items-center gap-3 rounded-card bg-blue-soft border border-blue/30 p-4 text-left text-sm text-ink hover:border-blue/50 transition-colors cursor-pointer"
-          >
-            <Loader2 size={17} className="text-blue shrink-0 animate-spin" aria-hidden />
-            <span className="flex-1 min-w-0">
-              <strong className="font-semibold">A bulk batch is processing.</strong>{" "}
-              Finished items save to Drafts automatically — tap to watch or review it.
-            </span>
-            <span className="font-semibold text-blue shrink-0">Review →</span>
-          </button>
-        )}
+        {activeBulk && <BulkBanner onReview={() => setShowBulk(true)} />}
         <SellHome search={search} />
       </>
     );

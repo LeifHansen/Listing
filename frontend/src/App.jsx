@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { AppProvider, useApp } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
 import { Sidebar, BottomNav } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { AuthDialog } from "@/components/AuthDialog";
+import { BulkBanner } from "@/components/BulkBanner";
 import { TokensDialog } from "@/components/TokensDialog";
 import { AiConsentDialog } from "@/components/AiConsentDialog";
 import { ShippingDialog } from "@/components/ShippingDialog";
@@ -28,18 +29,7 @@ function Main() {
         <TopBar onSearch={setSearch} onManageEbay={() => setView("settings")} />
 
         {activeBulk && view !== "new" && (
-          <button
-            type="button"
-            onClick={() => setView("new")}
-            className="mb-4 w-full flex items-center gap-3 rounded-card bg-blue-soft border border-blue/30 p-4 text-left text-sm text-ink hover:border-blue/50 transition-colors cursor-pointer"
-          >
-            <Loader2 size={17} className="text-blue shrink-0 animate-spin" aria-hidden />
-            <span className="flex-1 min-w-0">
-              <strong className="font-semibold">A bulk batch is processing.</strong>{" "}
-              Finished items save to Drafts automatically — tap to watch or review it.
-            </span>
-            <span className="font-semibold text-blue shrink-0">Review →</span>
-          </button>
+          <BulkBanner onReview={() => setView("new")} />
         )}
 
         {health._loaded && !health.anthropic_configured && (

@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
+import { MarketTargetChips, usePublishTargets } from "./publishShared";
 import { Button } from "@/components/ui/Button";
 
 function nameFor(data, key, field) {
@@ -239,37 +240,20 @@ const GAP_META = {
   description: { label: "Description", target: "description" },
 };
 
-// Where this publish goes: one toggle chip per connected marketplace. Hidden
-// until a non-eBay marketplace is connected, so today's eBay-only sellers see
-// zero change. Selection is remembered (localStorage) across listings.
+// Where this publish goes: one toggle chip per connected marketplace. The
+// chips themselves are MarketTargetChips in publishShared — the drafts strip
+// and bulk queue already render that exact component, and this file used to
+// carry a byte-identical second copy. Both read the same remembered
+// selection, so a divergence between them could only ever be a bug.
 function MarketplaceChips({ w }) {
-  const { marketplaces } = useApp();
+  const { otherConnected } = usePublishTargets();
   if (!w.chipTargets) return null;
-  const options = marketplaces.filter((m) => m.connected || m.key === "ebay");
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <span className="text-[12px] font-semibold text-ink-faint mr-1">Post to</span>
-      {options.map((m) => {
-        const on = w.marketTargets.includes(m.key);
-        return (
-          <button
-            key={m.key}
-            type="button"
-            onClick={() => w.toggleMarketTarget(m.key)}
-            aria-pressed={on}
-            className={cn(
-              "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-bold cursor-pointer transition-colors",
-              on
-                ? "bg-blue-soft border-blue/45 text-blue"
-                : "bg-transparent border-line text-ink-faint hover:border-ink-faint",
-            )}
-          >
-            {on && <CheckCircle2 size={11} aria-hidden />}
-            {m.label}
-          </button>
-        );
-      })}
-    </div>
+    <MarketTargetChips
+      selected={w.marketTargets}
+      toggle={w.toggleMarketTarget}
+      otherConnected={otherConnected}
+    />
   );
 }
 
