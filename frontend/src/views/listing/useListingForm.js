@@ -56,7 +56,7 @@ function fromListing(l) {
 }
 
 export function useListingForm() {
-  const { session, setSession, health, loadListings } = useApp();
+  const { session, setSession, health, loadListings, openListings } = useApp();
   const { toast } = useToast();
 
   const [form, setForm] = useState(() => fromListing(session?.listing));
@@ -414,6 +414,11 @@ export function useListingForm() {
       }
       const result = await postJson("/api/publish", body);
       setPublishResult(result);
+      // A clean draft save is "done editing" — hand the seller back the Sell
+      // overview (drafts + listings grid) instead of leaving them parked in
+      // the editor. Saves with problems stay put so the fix-it highlight has
+      // a form to point at.
+      let savedClean = false;
       if (result.multi) {
         if (!result.published && mode === "draft") {
           toast(result.message || "Draft saved — find it anytime under Drafts.",
@@ -421,6 +426,8 @@ export function useListingForm() {
         }
         const issues = Object.values(result.results || {})
           .flatMap((res) => res.issues || []);
+        savedClean = mode === "draft" && !result.published && !issues.length
+          && !Object.values(result.results || {}).some((res) => !res.ok);
         if (!result.published && issues.length) {
           const first = issues.find((x) => x.target && x.target !== "generic");
           if (first) setFixTarget(first.target);
@@ -432,6 +439,7 @@ export function useListingForm() {
           toast(result.ebay_draft
             ? "Draft saved here and staged on your eBay account — publish it live when you're ready."
             : "Draft saved — find it anytime under Drafts.", { kind: "success" });
+          savedClean = true;
         }
         if (result.error && result.issues && result.issues.length) {
           const first = result.issues.find((x) => x.target && x.target !== "generic");
@@ -439,12 +447,13 @@ export function useListingForm() {
         }
       }
       loadListings({ quiet: true });
+      if (savedClean) openListings("drafts");
     } catch (e) {
       toast(`Publish error: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, loadListings, toast, chipTargets]);
+  }), [collect, sessionId, setSession, loadListings, openListings, toast, chipTargets]);
 
   // End (withdraw) the live listing everywhere it's live; it stays here as an
   // editable 'ended' record so it can be relisted later. eBay keeps its
