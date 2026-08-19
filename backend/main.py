@@ -2538,6 +2538,18 @@ def bulk_status(job_id: str, request: Request) -> Response:
     return Response(content=body, media_type="application/json")
 
 
+@app.get("/api/bulk/status/{job_id}/brief")
+def bulk_status_brief(job_id: str, request: Request) -> Response:
+    """Just "is this batch finished?" — the same status without the drafted
+    items. The app shell watches a running batch from every screen so its
+    "a bulk batch is processing" banner stops the moment the batch ends; the
+    full body is ~1MB and is for the queue screen that actually renders it."""
+    body = jobstore.brief_json(job_id, _uid(request))
+    if body is None:
+        raise HTTPException(404, "Unknown bulk job.")
+    return Response(content=body, media_type="application/json")
+
+
 def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
                       spent: Optional[dict] = None) -> None:
     """Background worker for a single-item identify. Claude vision over several
@@ -3447,14 +3459,48 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
 IMPORT_LIMIT = listing_sync.ACTIVE_LIMIT
 
 
+# The store mirror runs as a background job, one per account at a time.
+# user id -> job id of the import currently running for them.
+_IMPORT_JOBS: dict[str, str] = {}
+_IMPORT_LOCK = threading.Lock()
+
+
+def _run_import_job(job_id: str, token: str, uid: str) -> None:
+    """Background worker for the store mirror. One GetItem per listing means a
+    real store takes minutes — far longer than a browser (or the proxy in
+    front of us) will hold a request open, which is why this is a job the
+    client polls rather than the response to the POST."""
+    def _progress(phase: str, done: int, total: int) -> None:
+        jobstore.update(job_id, phase=phase, current=done, total_items=total)
+    try:
+        result = listing_sync.import_active(
+            token, uid, limit=IMPORT_LIMIT, on_progress=_progress)
+        jobstore.update(job_id, done=True, phase="done", error=None, **result)
+    except ebay_trading.TradingError as exc:
+        jobstore.update(job_id, done=True, phase="failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - surface a clear reason
+        log.warning("import-listings failed for user=%s: %s", uid, exc)
+        jobstore.update(job_id, done=True, phase="failed",
+                        error=f"Couldn't import your eBay listings: {exc}")
+    finally:
+        with _IMPORT_LOCK:
+            if _IMPORT_JOBS.get(uid) == job_id:
+                _IMPORT_JOBS.pop(uid, None)
+
+
 @app.post("/api/ebay/import-listings")
 def import_listings(request: Request) -> dict:
-    """Pull the seller's ENTIRE active eBay store into the app.
+    """Start pulling the seller's ENTIRE active eBay store into the app.
 
     The Inventory API only knows about listings this app published, so listings
     created on eBay directly (or with another tool) are fetched through the
     Trading API instead. Imported listings become normal records the seller can
     open, edit, and push back — see services/listing_sync.
+
+    Returns {"job_id"} immediately; poll /api/ebay/import-status/{job_id} for
+    progress and the final counts. A second call while one is still running
+    hands back the SAME job rather than starting a parallel import — two tabs
+    (or a reload mid-sync) would otherwise double the eBay calls this spends.
     """
     user = auth.current_user(request)
     creds = _ebay_creds_for(request)
@@ -3465,15 +3511,37 @@ def import_listings(request: Request) -> dict:
     if not db.enabled():
         raise HTTPException(503, "No database configured — imported listings need "
                                  "DATABASE_URL set.")
-    try:
-        result = listing_sync.import_active(
-            creds["access_token"], user["id"], limit=IMPORT_LIMIT)
-    except ebay_trading.TradingError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - surface a clear reason
-        log.warning("import-listings failed for user=%s: %s", user["id"], exc)
-        raise HTTPException(502, f"Couldn't import your eBay listings: {exc}") from exc
-    return result
+    uid = user["id"]
+    with _IMPORT_LOCK:
+        running = _IMPORT_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                return {"job_id": running, "running": True}
+            _IMPORT_JOBS.pop(uid, None)
+        job_id = storage.new_session_id()
+        _IMPORT_JOBS[uid] = job_id
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "ebay-import", "phase": "listing", "done": False,
+        "error": None, "current": 0, "total_items": 0,
+    }, uid=uid)
+    threading.Thread(
+        target=_run_import_job, args=(job_id, creds["access_token"], uid),
+        daemon=True,
+    ).start()
+    log.info("import-listings %s: started for user=%s", job_id, uid)
+    return {"job_id": job_id, "running": True}
+
+
+@app.get("/api/ebay/import-status/{job_id}")
+def import_status(job_id: str, request: Request) -> Response:
+    """A store import's live progress, or the mirrored record of how it ended
+    (see services/jobstore) — an import cut short by a restart reports itself
+    done with the reason, so the client settles instead of polling forever."""
+    body = jobstore.snapshot_json(job_id, _uid(request))
+    if body is None:
+        raise HTTPException(404, "Unknown import job.")
+    return Response(content=body, media_type="application/json")
 
 
 # --- notifications ----------------------------------------------------------

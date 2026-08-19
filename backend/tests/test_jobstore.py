@@ -329,3 +329,41 @@ def test_a_reused_job_id_does_not_serve_the_old_body():
     jobstore.snapshot_json("j1")
     jobstore.register("j1", {"phase": "uploading"})  # fresh job, same id
     assert json.loads(jobstore.snapshot_json("j1"))["phase"] == "uploading"
+
+
+# The app shell watches a running batch from every screen so its "processing"
+# banner can stop the moment the batch ends. That poll only needs "is it done",
+# and the full body is ~1MB of drafted items.
+
+def test_brief_leaves_the_items_out():
+    jobstore.reset()
+    jobstore.register("j1", {"phase": "identifying", "done": False, "current": 2,
+                             "items": [{"session_id": "s1"}, {"session_id": "s2"}]})
+    body = json.loads(jobstore.brief_json("j1"))
+    assert "items" not in body
+    assert body["phase"] == "identifying" and body["current"] == 2
+    assert len(jobstore.brief_json("j1")) < len(jobstore.snapshot_json("j1"))
+
+
+def test_brief_still_answers_the_question_it_exists_for():
+    jobstore.reset()
+    jobstore.register("j1", {"phase": "identifying", "done": False})
+    assert json.loads(jobstore.brief_json("j1"))["done"] is False
+    jobstore.update("j1", done=True, phase="done")
+    assert json.loads(jobstore.brief_json("j1"))["done"] is True
+
+
+def test_brief_keeps_the_ownership_rule():
+    jobstore.reset()
+    jobstore.register("j1", {"phase": "grouping"}, uid="owner")
+    assert jobstore.brief_json("j1", "owner") is not None
+    assert jobstore.brief_json("j1", "someone-else") is None
+    assert jobstore.brief_json("nope", "owner") is None
+
+
+def test_a_reused_job_id_does_not_serve_the_old_brief():
+    jobstore.reset()
+    jobstore.register("j1", {"phase": "optimizing", "done": True})
+    jobstore.brief_json("j1")
+    jobstore.register("j1", {"phase": "uploading", "done": False})
+    assert json.loads(jobstore.brief_json("j1"))["done"] is False

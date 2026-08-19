@@ -208,17 +208,66 @@ export function AppProvider({ children }) {
   // Runs once per app session; `syncStore({ force: true })` re-runs it (the
   // "Sync with eBay" button).
   const [storeSync, setStoreSync] = useState({
-    syncing: false, lastSynced: null, error: null,
+    syncing: false, lastSynced: null, error: null, progress: null,
   });
   const syncedOnce = useRef(false);
   const lastReconcile = useRef(0); // ms — throttles the quiet status re-checks
+  // The import is a background job now (one eBay GetItem per listing takes
+  // minutes on a real store, which no browser will hold a request open for),
+  // so the spinner follows the JOB, not one fetch. Polling ends on done, on a
+  // job the server has no record of, or after a run of failed polls — the
+  // "Syncing your eBay store…" line can no longer hang forever waiting on a
+  // request that will never answer.
+  const watchImport = useCallback(async (jobId) => {
+    let fails = 0;
+    let missing = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let job;
+      try {
+        job = await api(`/api/ebay/import-status/${jobId}`);
+      } catch (e) {
+        const gone = (e.message || "").includes("(404)");
+        // A 404 twice over means the server really has no such job (a restart
+        // that predates the mirror, say). Anything else is a blip worth
+        // retrying — the import itself is still running server-side.
+        missing = gone ? missing + 1 : 0;
+        fails += 1;
+        if (missing >= 2) {
+          throw new Error("The sync stopped — the server lost track of it. "
+                          + "Try Sync with eBay again.");
+        }
+        if (fails >= 8) {
+          throw new Error("Lost the connection while syncing your store. "
+                          + "Anything imported already is in Listings.");
+        }
+        continue;
+      }
+      fails = 0;
+      missing = 0;
+      setStoreSync((s) => ({
+        ...s,
+        progress: job.total_items
+          ? { phase: job.phase, done: job.current || 0, total: job.total_items }
+          : null,
+      }));
+      if (job.done) {
+        if (job.error) throw new Error(job.error);
+        return {
+          found: job.found || 0, imported: job.imported || 0,
+          updated: job.updated || 0, deduped: job.deduped || 0,
+          failed: job.failed || 0,
+        };
+      }
+    }
+  }, []);
   const syncStore = useCallback(async ({ force = false } = {}) => {
     if (!user || !ebay.connected) return null;
     if (syncedOnce.current && !force) return null;
     syncedOnce.current = true;
-    setStoreSync((s) => ({ ...s, syncing: true, error: null }));
+    setStoreSync((s) => ({ ...s, syncing: true, error: null, progress: null }));
     try {
-      const res = await postJson("/api/ebay/import-listings", {});
+      const started = await postJson("/api/ebay/import-listings", {});
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
       // force: this is the deliberate "Sync with eBay" path (or first load),
       // so it may run the full per-item sweep; the background heartbeat below
@@ -227,14 +276,24 @@ export function AppProvider({ children }) {
       postJson("/api/ebay/sync-listings", { force: true })
         .then((r) => { if (r.changed) loadListings({ quiet: true }); })
         .catch(() => {});
+      // job_id: the import runs in the background and we watch it. A body with
+      // the counts already in it is a server that still imports inline.
+      const res = started?.job_id ? await watchImport(started.job_id) : started;
       await loadListings({ quiet: true });
-      setStoreSync({ syncing: false, lastSynced: Date.now(), error: null });
+      setStoreSync({
+        syncing: false, lastSynced: Date.now(), error: null, progress: null,
+      });
       return res;
     } catch (e) {
-      setStoreSync({ syncing: false, lastSynced: null, error: e.message });
+      setStoreSync({
+        syncing: false, lastSynced: null, error: e.message, progress: null,
+      });
+      // Failed for a reason worth retrying: let a later deliberate sync (or the
+      // next app load) start a fresh one instead of latching "already synced".
+      syncedOnce.current = false;
       return { error: e.message };
     }
-  }, [user, ebay.connected, loadListings]);
+  }, [user, ebay.connected, loadListings, watchImport]);
   useEffect(() => { syncStore(); }, [syncStore]);
 
   // The mirror import runs once per app session — but a tab (or the native
@@ -369,13 +428,64 @@ export function AppProvider({ children }) {
   const clearBulkRetry = useCallback(() => setBulkRetry(null), []);
   // Job finished: stop persisting (a reload shouldn't restore a done batch) but
   // keep it in memory so the results stay on screen until the user moves on.
+  // Marking it done is what stops the shell's banner from claiming the batch is
+  // still processing for the rest of the session — it only knew "a batch
+  // exists", so a finished one kept its spinner on every screen until the
+  // seller reopened the queue and exited it.
   const bulkSettled = useCallback(() => {
+    setActiveBulk((b) => (b && !b.done ? { ...b, done: true } : b));
     try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
   }, []);
   const clearBulk = useCallback(() => {
     setActiveBulk(null);
     try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
   }, []);
+  // A running batch is watched from the SHELL, not only from the queue screen.
+  // The queue polls the full status while it's open, but a seller who walks
+  // away from it (Home, Listings, a reload that lands elsewhere) left nothing
+  // watching — so a batch that finished server-side was never marked done and
+  // the banner kept claiming it was processing for the rest of the session.
+  // This is the cheap items-free poll: a heartbeat whose only job is to settle
+  // the batch and refresh Drafts when it ends.
+  useEffect(() => {
+    const jobId = activeBulk?.jobId;
+    if (!jobId || activeBulk?.done) return undefined;
+    let timer;
+    let stopped = false;
+    let misses = 0;
+    let fails = 0;
+    const tick = async () => {
+      try {
+        const j = await api(`/api/bulk/status/${jobId}/brief`);
+        misses = 0;
+        fails = 0;
+        if (stopped) return;
+        if (j.done) {
+          bulkSettled();
+          loadListings({ quiet: true });
+          return;  // settled — the effect tears itself down on the state change
+        }
+      } catch (e) {
+        // Only a job the server truly has no record of ends the watch, and
+        // only after a second look: a 404 on a blip (an auth hiccup mid-batch)
+        // must not declare a running batch finished. Everything else is worth
+        // retrying — the batch is still running, and this heartbeat is the only
+        // thing that will notice it finish while the queue screen is closed.
+        if ((e.message || "").includes("(404)")) misses += 1;
+        fails += 1;
+        if (misses >= 2) {
+          if (!stopped) bulkSettled();
+          return;
+        }
+      }
+      // Back off while the server is unreachable so a dropped connection
+      // doesn't mean a request every 5 seconds for as long as the tab is open.
+      if (!stopped) timer = setTimeout(tick, fails ? 15000 : 5000);
+    };
+    timer = setTimeout(tick, 5000);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [activeBulk, bulkSettled, loadListings]);
+
   // The whole bulk upload — screen flip first, then the slow part. It lives
   // here rather than in the uploader because that flip unmounts the uploader
   // while the downscale + POST are still running.
