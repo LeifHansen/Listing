@@ -6,6 +6,7 @@ Pipeline:
 """
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import json
@@ -1078,21 +1079,24 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     The legacy shape ({ok, issues}) is always the eBay checklist; when the
     request targets more marketplaces, their checklists ride along under
     by_marketplace so the editor can jump to marketplace-specific fixes."""
-    issues = await run_in_threadpool(
-        _preflight_issues, request, req.listing, req.mode or "live")
-    out = {"ok": not preflight.errors_only(issues), "issues": issues}
+    mode = req.mode or "live"
     others = [k for k in dict.fromkeys(
         (key or "").strip().lower() for key in req.marketplaces)
         if k and k != "ebay"]
-    if others:
-        uid = _uid(request)
-        by: dict = {}
-        for key in others:
-            provider = marketplaces.get(key)
-            if provider is None:
-                continue
-            by[key] = await run_in_threadpool(
-                provider.preflight, uid, req.listing, req.mode or "live")
+    named = [(k, marketplaces.get(k)) for k in others]
+    named = [(k, p) for k, p in named if p is not None]
+    uid = _uid(request) if named else None
+    # Every marketplace's checklist is read-only HTTP against that
+    # marketplace; run them concurrently so preflight costs the slowest
+    # checklist, not the sum of all of them.
+    results = await asyncio.gather(
+        run_in_threadpool(_preflight_issues, request, req.listing, mode),
+        *[run_in_threadpool(p.preflight, uid, req.listing, mode)
+          for _k, p in named])
+    issues = results[0]
+    out = {"ok": not preflight.errors_only(issues), "issues": issues}
+    if named:
+        by = {k: res for (k, _p), res in zip(named, results[1:])}
         out["by_marketplace"] = by
         out["ok"] = out["ok"] and not any(
             preflight.errors_only(v) for v in by.values())
@@ -1264,24 +1268,40 @@ _auto_promote_enabled = ebay_provider.auto_promote_enabled
 _promote = ebay_provider.promote
 
 
-def _pricing_strategy(uid: Optional[str]) -> str:
+def _load_prefs(uid: Optional[str]) -> dict:
+    """The user's saved prefs, or {} — fetched once per logical operation and
+    passed into the helpers below, so one identify doesn't pay the same
+    Postgres round trip twice (and a bulk batch doesn't pay it per item)."""
+    if not uid:
+        return {}
+    try:
+        return db.get_prefs(uid) or {}
+    except Exception:  # noqa: BLE001 - prefs are optional
+        return {}
+
+
+def _pricing_strategy(uid: Optional[str], prefs: Optional[dict] = None) -> str:
     """The account's pricing strategy ("" when unset/anonymous). Never raises."""
     if not uid:
         return ""
     try:
-        value = str(db.get_prefs(uid).get("pricing_strategy") or "")
+        if prefs is None:
+            prefs = _load_prefs(uid)
+        value = str(prefs.get("pricing_strategy") or "")
         return value if value in _PRICING_STRATEGIES else ""
     except Exception:  # noqa: BLE001 - prefs are optional
         return ""
 
 
-def _apply_listing_defaults(listing: Listing, uid: Optional[str]) -> Listing:
+def _apply_listing_defaults(listing: Listing, uid: Optional[str],
+                            prefs: Optional[dict] = None) -> Listing:
     """Fill gaps in a fresh AI draft from the user's saved defaults — the
     fields the photos can't tell us (package weight/dims, quantity) plus an
     explicit condition override. Never touches a field the AI populated."""
     if not uid:
         return listing
-    prefs = db.get_prefs(uid)
+    if prefs is None:
+        prefs = _load_prefs(uid)
     if not prefs:
         return listing
     def _f(key):  # noqa: E306
@@ -1454,17 +1474,28 @@ async def upload(
     request: Request,
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
+    pipeline: str = Form("false"),
 ) -> dict:
     """Accept images, optimize them, and return a session id.
 
     remove_bg: when "true", each photo's background is removed and replaced
     with a solid white canvas before the usual optimization pass.
+
+    pipeline: when "true", the request returns as soon as the originals are
+    saved — optimization AND the identify chain then run as one background
+    job ({session_id, job_id}; poll /api/bulk/status/{job_id}). The seller
+    watches per-stage progress instead of a request that blocks through the
+    whole photo pass; the old synchronous shape is unchanged when absent.
     """
     if not files:
         raise HTTPException(400, "No files uploaded")
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
+    run_pipeline = str(pipeline).lower() in ("true", "1", "yes", "on")
+    if run_pipeline and not config.anthropic_ready():
+        raise HTTPException(
+            400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Uploading + optimizing stays free; the AI background removal toggle is
     # metered per photo. Charged before any disk work so a broke/logged-out
@@ -1497,6 +1528,33 @@ async def upload(
         log.error("upload: disk write failed (%s)", exc)
         raise HTTPException(
             507, "The server is out of storage space — try again shortly.") from exc
+
+    if run_pipeline:
+        # Everything slow — the Pillow/cutout pass and the identify chain —
+        # runs as one background job; the client polls it with per-stage
+        # progress. The identify charge is taken up front like
+        # /api/identify-async does, so a broke caller 402s here (with the
+        # bg-removal charge given back) instead of after the photo work.
+        uid = _uid(request)
+        try:
+            identify_spent = _charge_ai(request, "identify")
+        except HTTPException:
+            tokens.refund(spent)
+            storage.purge_session(session_id)
+            raise
+        job_id = storage.new_session_id()
+        _register_bulk_job(job_id, {
+            "id": job_id, "kind": "pipeline", "phase": "optimizing",
+            "done": False, "error": None, "result": None,
+        }, uid=uid)
+        threading.Thread(
+            target=_run_pipeline_job,
+            args=(job_id, session_id, uid, strip_bg, spent, identify_spent),
+            daemon=True,
+        ).start()
+        log.info("pipeline job %s: started (session=%s, photos=%d)",
+                 job_id, session_id, len(files))
+        return {"session_id": session_id, "job_id": job_id}
 
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
@@ -2142,6 +2200,13 @@ BULK_GROUP_CHUNK = 100
 _BULK_JOBS_MAX = 200
 
 
+# Serialized job snapshots keyed by job id: (rev, json body). Polls re-serve
+# the cached JSON until the job actually changes — a 30-item bulk job is a
+# ~1MB dict that was deep-copied via json.dumps+loads on EVERY 1.5s poll, on
+# the same shared CPUs running inference.
+_BULK_SNAPSHOTS: dict[str, tuple[int, str]] = {}
+
+
 def _register_bulk_job(job_id: str, data: dict, uid: Optional[str] = None) -> None:
     """Register a background job. `uid` is the account that started it; job
     status carries drafted titles and prices, so a logged-in user's job is
@@ -2149,9 +2214,11 @@ def _register_bulk_job(job_id: str, data: dict, uid: Optional[str] = None) -> No
     owner and stay readable by whoever holds the id, matching how the rest of
     the app treats logged-out sessions."""
     with _BULK_LOCK:
-        _BULK_JOBS[job_id] = {**data, "_uid": uid}
+        _BULK_JOBS[job_id] = {**data, "_uid": uid, "_rev": 0}
         while len(_BULK_JOBS) > _BULK_JOBS_MAX:
-            _BULK_JOBS.pop(next(iter(_BULK_JOBS)))
+            oldest = next(iter(_BULK_JOBS))
+            _BULK_JOBS.pop(oldest)
+            _BULK_SNAPSHOTS.pop(oldest, None)
 
 
 def _bulk_set(job_id: str, **fields) -> None:
@@ -2159,13 +2226,15 @@ def _bulk_set(job_id: str, **fields) -> None:
         job = _BULK_JOBS.get(job_id)
         if job is not None:
             job.update(fields)
+            job["_rev"] = job.get("_rev", 0) + 1
 
 
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                   uid: Optional[str]) -> None:
     """Background worker: optimize -> group -> per-item identify. Every item
     lands as a draft for review; publishing is always an explicit choice."""
-    strategy = _pricing_strategy(uid)          # once, not per item
+    prefs = _load_prefs(uid)                   # one DB read for the whole batch
+    strategy = _pricing_strategy(uid, prefs)
     auto_promote = _auto_promote_enabled(uid)  # ditto
     billing = tokens.enabled() and uid is not None
     # Background-removal billing, tracked across the whole job: what was
@@ -2303,7 +2372,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names],
                                             item_names, strategy=strategy)
-                listing = _apply_listing_defaults(result.listing, uid)
+                listing = _apply_listing_defaults(result.listing, uid, prefs)
                 # Carry the account's Promote default onto the draft itself, so
                 # the queue card shows what will actually happen at publish
                 # rather than an unchecked box that promotes anyway.
@@ -2426,7 +2495,8 @@ async def bulk_upload(
 
 
 @app.get("/api/bulk/status/{job_id}")
-def bulk_status(job_id: str, request: Request) -> dict:
+def bulk_status(job_id: str, request: Request) -> Response:
+    caller = _uid(request)  # resolved before the lock — it may hit the DB
     with _BULK_LOCK:
         job = _BULK_JOBS.get(job_id)
         if job is None:
@@ -2434,11 +2504,17 @@ def bulk_status(job_id: str, request: Request) -> dict:
         owner = job.get("_uid")
         # Same rule as _assert_session_owner: an owned job is private to its
         # owner (404, not 403 — don't confirm the id exists).
-        if owner and owner != _uid(request):
+        if owner and owner != caller:
             raise HTTPException(404, "Unknown bulk job (the server may have restarted).")
-        snapshot = json.loads(json.dumps(job))  # deep copy, thread-safe
-    snapshot.pop("_uid", None)  # internal bookkeeping, not part of the API
-    return snapshot
+        rev = job.get("_rev", 0)
+        snap = _BULK_SNAPSHOTS.get(job_id)
+        if snap is None or snap[0] != rev:
+            # Serialize once per CHANGE, not once per poll; underscore keys
+            # are internal bookkeeping, not part of the API.
+            public = {k: v for k, v in job.items() if not k.startswith("_")}
+            snap = (rev, json.dumps(public))
+            _BULK_SNAPSHOTS[job_id] = snap
+    return Response(content=snap[1], media_type="application/json")
 
 
 def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
@@ -2466,10 +2542,11 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
             # dead at a fixed wall-clock cutoff.
             _bulk_set(job_id, phase=phase, beat=time.time())
 
+        prefs = _load_prefs(uid)  # once — strategy and defaults both read it
         _beat("identifying")
         result = claude_ai.identify([opt_dir / n for n in names], names,
-                                    strategy=_pricing_strategy(uid))
-        _apply_listing_defaults(result.listing, uid)
+                                    strategy=_pricing_strategy(uid, prefs))
+        _apply_listing_defaults(result.listing, uid, prefs)
         _beat("category")
         _resolve_category(result.listing)
         # Fill the category's item specifics (and hunt the maker) so the draft
@@ -2507,6 +2584,64 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
             log.warning("identify job %s: couldn't save stub draft: %s",
                         job_id, exc2)
         _bulk_set(job_id, done=True, error=reason)
+
+
+def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
+                      strip_bg: bool, bg_spent: Optional[dict],
+                      identify_spent: Optional[dict]) -> None:
+    """Background worker for the single-listing upload pipeline: optimize the
+    photos (with live per-photo progress) and then run the identify chain, as
+    ONE job the client polls. The upload endpoint returns the moment the
+    originals are on disk, so the seller watches real stages advance instead
+    of holding a silent multi-minute request open."""
+    try:
+        _bulk_set(job_id, phase="optimizing", current=0, beat=time.time())
+        opt_dir = storage.optimized_dir(session_id)
+        opt_results = images.optimize_all(
+            storage.original_dir(session_id), opt_dir, strip_bg,
+            progress=lambda done, total: _bulk_set(
+                job_id, current=done, total_photos=total, beat=time.time()))
+        optimized = storage.list_optimized(session_id)
+        if not optimized:
+            tokens.refund(bg_spent)
+            tokens.refund(identify_spent)
+            errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
+            _bulk_set(job_id, done=True, error=(
+                "Could not process the uploaded image(s)"
+                + (f": {errs}" if errs else ". Unsupported or corrupt file format.")))
+            return
+        # Photos whose cutout failed (engine down / out of credits) kept their
+        # background — give those tokens back, exactly as /api/upload does.
+        bg_failed = sum(1 for r in opt_results
+                        if r.get("bg_error") or r.get("error"))
+        if bg_spent and bg_failed:
+            tokens.refund(bg_spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        # The upload summary the old synchronous response carried (per-photo
+        # results for the rotation/bg toasts, the photo list) rides on the job.
+        _bulk_set(job_id, upload={"optimized": optimized,
+                                  "optimize_results": opt_results})
+        _in_background(objstore.upload_optimized, session_id, opt_dir,
+                       optimized, what="R2 push (pipeline)")
+    except OSError as exc:
+        tokens.refund(bg_spent)
+        tokens.refund(identify_spent)
+        if getattr(exc, "errno", None) == errno.ENOSPC:
+            freed = reclaim_space(aggressive=True)
+            log.warning("pipeline %s hit a full volume; reclaimed %.1f MB",
+                        job_id, freed / 1e6)
+        log.warning("pipeline %s: optimize failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=(
+            "The server ran out of photo storage — try again shortly."))
+        return
+    except Exception as exc:  # noqa: BLE001 - job-level failure must surface
+        tokens.refund(bg_spent)
+        tokens.refund(identify_spent)
+        log.warning("pipeline %s: optimize failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=f"Photo processing failed: {exc}")
+        return
+    # Photos are ready — hand off to the identify chain (it owns the
+    # identify-charge refund on failure, stub-draft rescue, and done/result).
+    _run_identify_job(job_id, session_id, uid, identify_spent)
 
 
 @app.post("/api/identify-async/{session_id}")
@@ -3026,9 +3161,13 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         if key and key not in targets:
             targets.append(key)
 
-    def _ctx() -> PublishContext:
+    def _ctx(own_listing: bool = False) -> PublishContext:
+        # own_listing gives the provider its own deep copy: concurrent
+        # providers each mutate listing.marketplaces, and the fold below reads
+        # outcomes + a fresh DB record, never these working copies.
+        listing = req.listing.model_copy(deep=True) if own_listing else req.listing
         return PublishContext(
-            session_id=req.session_id, listing=req.listing, mode=req.mode,
+            session_id=req.session_id, listing=listing, mode=req.mode,
             base_url=_base_url(request), uid=uid, prev_record=prev_rec)
 
     if not targets or targets == ["ebay"]:
@@ -3040,22 +3179,28 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         outcome = provider.publish(_ctx(), provider.creds_for(uid))
         return JSONResponse(outcome.raw)
 
-    outcomes: dict = {}
-    for key in targets:
+    def _publish_one(key: str) -> PublishOutcome:
         provider = marketplaces.get(key)
         if provider is None:
-            outcomes[key] = PublishOutcome(
-                ok=False, message=f"Unknown marketplace '{key}'.")
-            continue
+            return PublishOutcome(ok=False, message=f"Unknown marketplace '{key}'.")
         try:
-            outcomes[key] = provider.publish(_ctx(), provider.creds_for(uid))
+            return provider.publish(_ctx(own_listing=True),
+                                    provider.creds_for(uid))
         except HTTPException as exc:
-            outcomes[key] = PublishOutcome(ok=False, message=str(exc.detail))
+            return PublishOutcome(ok=False, message=str(exc.detail))
         except Exception as exc:  # noqa: BLE001 - isolate marketplace failures
             log.warning("%s publish crashed: session=%s: %s",
                         key, req.session_id, exc)
-            outcomes[key] = PublishOutcome(
+            return PublishOutcome(
                 ok=False, message=f"{provider.label} publish failed: {exc}")
+
+    # Fan out CONCURRENTLY: each marketplace is its own network pipeline (eBay
+    # ingests photo URLs, Etsy uploads photo bytes), so a multi-marketplace
+    # publish costs the slowest one instead of the sum. Failure isolation is
+    # per-provider inside _publish_one; the same-listing duplicate guard stays
+    # intact (only the eBay provider takes it, per listing, not per thread).
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        outcomes = dict(zip(targets, pool.map(_publish_one, targets)))
 
     # Fold every outcome into the record. Re-read first: providers (eBay
     # especially) upsert internally, and their writes must not be lost.

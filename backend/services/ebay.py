@@ -11,6 +11,7 @@ can inspect them and push later once you have a developer account.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import httpx
@@ -707,7 +708,15 @@ def publish(session_id: str, listing: Listing, mode: str, base_url: str,
                         or (path.is_file() and objstore.upload(path, key) is not None))
             return path.is_file() or objstore.restore(key, path)
 
-        unfetchable = not names or any(not _fetchable(n) for n in names)
+        # Check (and heal) every photo CONCURRENTLY: in public-R2 mode each
+        # check is an S3 HEAD, and the old serial any() paid one network round
+        # trip per photo on the publish request path. Evaluating them all also
+        # heals every gap in one pass instead of stopping at the first.
+        if names:
+            with ThreadPoolExecutor(max_workers=min(6, len(names))) as pool:
+                unfetchable = not all(pool.map(_fetchable, names))
+        else:
+            unfetchable = True
         if unfetchable:
             # Last resort before erroring: if eBay already hosts images for this
             # SKU, reuse them so the edit still goes through.

@@ -48,6 +48,9 @@ export function UploadPhase({ onBulkStarted }) {
   const [bulk, setBulk] = useState(false);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Live status of the background pipeline job (phase/current/total_photos),
+  // so the wait card reports what's actually happening instead of guessing.
+  const [stage, setStage] = useState(null);
   // Past the single-listing cap the pile can only be a bulk batch.
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
@@ -102,28 +105,34 @@ export function UploadPhase({ onBulkStarted }) {
     if (!files.length) return;
     if (bulkOn) return startBulk();
     setBusy(true);
+    setStage(null);
     try {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
+      // The upload returns as soon as the originals are saved; optimization
+      // and the whole identify chain run as ONE background job we poll, with
+      // real per-stage progress instead of a request that blocks silently
+      // through the photo pass.
+      fd.append("pipeline", "true");
       const up = await api("/api/upload", { method: "POST", body: fd });
+      let last = null;
+      const result = await pollJob(up.job_id, {
+        onUpdate: (j) => { last = j; setStage(j); },
+      });
+      const optResults = last?.upload?.optimize_results || [];
       if (removeBg) {
-        const warning = bgFailureMessage(up.optimize_results, prepped.length);
+        const warning = bgFailureMessage(optResults, prepped.length);
         if (warning) toast(warning, { kind: "warning", ttl: 10000 });
       }
       // Photos shot with the item lying sideways get straightened server-side
       // (EXIF can't catch that) — say so, since it's a visible change.
-      const turned = (up.optimize_results || []).filter((r) => r && r.rotated).length;
+      const turned = optResults.filter((r) => r && r.rotated).length;
       if (turned) {
         toast(`Straightened ${turned} sideways photo${turned === 1 ? "" : "s"} — rotate any of them in the editor if we got one wrong.`,
           { kind: "success" });
       }
-
-      // Identify runs as a background job we poll, so a slow multi-photo vision
-      // call can't outlive the browser/proxy timeout.
-      const { job_id } = await api(`/api/identify-async/${up.session_id}`, { method: "POST" });
-      const result = await pollJob(job_id);
       files.forEach((f) => URL.revokeObjectURL(f.url));
       setSession({
         sessionId: up.session_id,
@@ -137,6 +146,7 @@ export function UploadPhase({ onBulkStarted }) {
       toast(`Error: ${e.message}`, { kind: "error" });
     } finally {
       setBusy(false);
+      setStage(null);
     }
   });
 
@@ -144,16 +154,21 @@ export function UploadPhase({ onBulkStarted }) {
     return <AIStatusCard messages={["Uploading your photo pile…", "This may take a moment…"]} />;
   }
   if (busy) {
+    // Real pipeline stages from the job status; the pre-job moment (uploading
+    // the files themselves) is the only guessed line.
+    const total = stage?.total_photos || files.length;
+    const doneCount = Math.min((stage?.current || 0) + 1, total);
+    const stageLine = !stage?.phase ? "Uploading your photos…"
+      : stage.phase === "optimizing"
+        ? `${removeBg ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
+        : stage.phase === "identifying" ? "Identifying your item…"
+          : stage.phase === "category" ? "Finding the right eBay category…"
+            : stage.phase === "specifics" ? "Filling item specifics from your photos…"
+              : stage.phase === "maker" ? "Double-checking the brand…"
+                : "Finishing up…";
     return (
       <div className="flex flex-col gap-5">
-        <AIStatusCard messages={[
-          removeBg ? "Removing backgrounds…" : "Optimizing your photos…",
-          "Looking for brand & model…",
-          "Detecting item specifics…",
-          "Writing a better title…",
-          "Finding the right category…",
-          "Optimizing for eBay search…",
-        ]} />
+        <AIStatusCard messages={[stageLine]} />
         <WorkflowSkeleton />
       </div>
     );
