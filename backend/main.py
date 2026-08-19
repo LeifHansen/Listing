@@ -1876,21 +1876,37 @@ async def rotate_image(payload: dict, request: Request) -> dict:
             rotated = img.convert("RGB").transpose(Image.Transpose.ROTATE_270)
         tmp = path.with_name(path.name + ".tmp")
         # No optimize=True here: the two-pass encode nearly doubles the time
-        # for a few KB — a one-tap rotate should feel instant.
-        rotated.save(tmp, "JPEG", quality=88)
+        # for a few KB — a one-tap rotate should feel instant. Quality 95
+        # rather than the pipeline's 90 because this re-encodes an ALREADY
+        # encoded JPEG: four taps round the compass used to mean four
+        # generations of loss stacked on a photo the seller only meant to
+        # turn upright.
+        rotated.save(tmp, "JPEG", quality=95)
         os.replace(tmp, path)
 
     try:
         await run_in_threadpool(_rotate)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Couldn't rotate that photo: {exc}") from exc
-    # Mirror + bookkeeping off the critical path: the rotate is already live
-    # locally (which /media serves first), so the R2 re-push and the
-    # updated_at bump don't need to hold the spinner. Each was a sequential
-    # network round-trip that made a one-tap rotate feel like seconds.
+    # The R2 push is AWAITED, unlike the bookkeeping below it. This used to be
+    # fire-and-forget on a daemon thread with failures only logged, and that is
+    # what made manual rotation look unreliable: the local file was rotated and
+    # /media served it, so the tile looked right — while R2 still held the old
+    # orientation. Then the machine recycles, _ensure_local pulls the photo
+    # back down, and the rotation is simply gone. Worse, eBay is handed the R2
+    # public URL at publish, so the sideways photo is the one that goes live.
+    # A rotate is not done until the copy the world sees is rotated too.
     if objstore.enabled():
-        _in_background(objstore.upload, path, objstore.key_for(session_id, name),
-                       what="rotate R2 push")
+        try:
+            await run_in_threadpool(
+                objstore.upload, path, objstore.key_for(session_id, name))
+        except Exception as exc:  # noqa: BLE001 - the local file IS rotated
+            log.warning("rotate: R2 push failed for %s/%s: %s",
+                        session_id, name, exc)
+            raise HTTPException(
+                502, "The photo was rotated here but the copy we publish from "
+                     "didn't update. Try the rotation again in a moment."
+            ) from exc
     _in_background(db.touch_listing, session_id, what="rotate touch")
     return {"ok": True}
 
