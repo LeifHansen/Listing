@@ -3,7 +3,7 @@ import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
-import { usePublishTargets } from "./publishShared";
+import { publishListing, usePublishTargets } from "./publishShared";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -56,7 +56,9 @@ function fromListing(l) {
 }
 
 export function useListingForm() {
-  const { session, setSession, health, loadListings, openListings } = useApp();
+  const {
+    session, setSession, health, loadListings, openListings, patchListing,
+  } = useApp();
   const { toast } = useToast();
 
   const [form, setForm] = useState(() => fromListing(session?.listing));
@@ -405,14 +407,9 @@ export function useListingForm() {
     try {
       const listing = collect();
       setSession((s) => ({ ...s, listing }));
-      const body = { session_id: sessionId, listing, mode };
-      // Only send `marketplaces` when the selector is visible and picked
-      // something beyond bare eBay — everyone else stays on the legacy
-      // single-eBay path with its byte-identical responses.
-      if (chipTargets && !(chipTargets.length === 1 && chipTargets[0] === "ebay")) {
-        body.marketplaces = chipTargets;
-      }
-      const result = await postJson("/api/publish", body);
+      // Same recipe the drafts strip and bulk queue use — see publishListing.
+      // The editor is not allowed its own publish path.
+      const result = await publishListing(sessionId, listing, chipTargets, mode);
       setPublishResult(result);
       // A clean draft save is "done editing" — hand the seller back the Sell
       // overview (drafts + listings grid) instead of leaving them parked in
@@ -446,6 +443,26 @@ export function useListingForm() {
           if (first) setFixTarget(first.target);
         }
       }
+      // A live publish that did NOT go live has to say so out loud. Without
+      // this the editor simply re-rendered itself: no screen change, no
+      // toast, no error text — indistinguishable from the click not
+      // registering. The result banner explains the details; this is the
+      // part you can't miss.
+      if (mode === "live" && !result.published) {
+        toast(result.message
+          || "That didn't go live — check the publish card for what to fix.",
+          { kind: "error" });
+      }
+      // Reflect the outcome on the card immediately. loadListings is the
+      // authority and lands a moment later, but a listing that just went
+      // live must never still be sitting under Drafts while it does.
+      if (result.published) patchListing(sessionId, { status: "published" });
+      // The listing went live but our own record of it didn't move. Say it
+      // plainly — the danger here is the seller publishing a second time.
+      const recordWarning = result.record_warning
+        || Object.values(result.results || {}).map((res) => res.record_warning)
+          .find(Boolean);
+      if (recordWarning) toast(recordWarning, { kind: "warning" });
       loadListings({ quiet: true });
       if (savedClean) openListings("drafts");
     } catch (e) {
@@ -453,7 +470,8 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, loadListings, openListings, toast, chipTargets]);
+  }), [collect, sessionId, setSession, loadListings, openListings, patchListing,
+      toast, chipTargets]);
 
   // End (withdraw) the live listing everywhere it's live; it stays here as an
   // editable 'ended' record so it can be relisted later. eBay keeps its

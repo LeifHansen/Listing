@@ -201,6 +201,20 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // Apply a known-authoritative change to one card without waiting for the
+  // next /api/listings round trip. Publishing is the case that matters: the
+  // server has already told us the listing is live, so the card must not sit
+  // under Drafts for the length of a refresh (or, if that refresh is slow or
+  // fails, indefinitely). The next loadListings still wins — this only
+  // closes the gap.
+  const patchListing = useCallback((id, patch) => {
+    if (!id || !patch) return;
+    setListingsState((s) => {
+      const items = s.items.map((it) => (it.id === id ? { ...it, ...patch } : it));
+      return items === s.items ? s : { ...s, items };
+    });
+  }, []);
+
   // ---------- eBay store mirror ----------
   // The app mirrors the seller's WHOLE eBay store, not just what it created:
   // once eBay is connected, the first load imports every active listing and
@@ -504,7 +518,7 @@ export function AppProvider({ children }) {
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
-    listingsState, loadListings, metricsById, metricsStatus,
+    listingsState, loadListings, patchListing, metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
@@ -517,7 +531,8 @@ export function AppProvider({ children }) {
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
-    listingsState, loadListings, metricsById, metricsStatus, storeSync, syncStore,
+    listingsState, loadListings, patchListing, metricsById, metricsStatus,
+    storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,

@@ -3292,6 +3292,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                 "issues": o.issues,
                 **({"promote_status": o.raw["promote_status"]}
                    if o.raw.get("promote_status") else {}),
+                **({"record_warning": o.raw["record_warning"]}
+                   if o.raw.get("record_warning") else {}),
             } for key, o in outcomes.items()
         },
     })

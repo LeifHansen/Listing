@@ -229,8 +229,17 @@ def _record_to_dict(rec: ListingRecord) -> dict:
 def upsert_listing(
     listing_id: str, listing: dict, status: str = "draft", user_id: Optional[str] = None,
     when: Optional[_dt.datetime] = None,
-) -> None:
+) -> bool:
     """Create or update a listing row. Never raises.
+
+    Returns True when the row now reflects `status`/`listing` (including the
+    no-op case where it already did), False when the write did not happen —
+    no DB configured, or the write failed. Callers that only save may ignore
+    it; the publish path must not. A publish records "this listing is live"
+    by writing that status here, and a swallowed failure there is invisible
+    and expensive: the listing IS live on eBay, the seller is told so, and
+    their copy of it sits under Drafts forever, one click away from being
+    published a second time.
 
     `when` overrides the row's updated_at. The store sync passes each eBay
     listing's own start time, because stamping every row with "now" on every
@@ -240,7 +249,7 @@ def upsert_listing(
     try:
         eng = _get_engine()
         if eng is None:
-            return
+            return False
         with Session(eng) as s:
             rec = s.get(ListingRecord, listing_id)
             now = _now()
@@ -248,7 +257,7 @@ def upsert_listing(
                 rec = ListingRecord(id=listing_id, created_at=when or now)
                 s.add(rec)
             elif rec.status == status and rec.data == listing:
-                return  # nothing changed — leave updated_at where it was
+                return True  # nothing changed — leave updated_at where it was
             # Claim ownership only if unowned; never reassign a listing to
             # whoever happens to save it (session ids can leak in URLs).
             if user_id is not None and rec.user_id in (None, user_id):
@@ -258,8 +267,10 @@ def upsert_listing(
             rec.data = listing
             rec.updated_at = when or now
             s.commit()
+            return True
     except Exception as exc:  # noqa: BLE001 - DB must never break a request
         log.warning(f"db: upsert_listing failed: {exc}")
+        return False
 
 
 def mutate_listing_data(
