@@ -77,3 +77,44 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
+
+  # Boots the real app and clicks through every screen. The unit tests and the
+  # build both pass happily on a UI that throws on mount — this is the job that
+  # catches a screen a seller cannot open.
+  smoke:
+    name: App smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      - name: Browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      # The app runs without the heavy image stack — it warns and lazy-loads —
+      # so the smoke test does not need rembg or onnxruntime to boot it.
+      - name: Server deps
+        run: pip install uvicorn fastapi python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT httpx pillow numpy
+      - name: Boot
+        run: |
+          SECRET_KEY=ci-smoke python -m uvicorn backend.main:app --port 8099 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8099/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server never became healthy" >&2; exit 1
+      - name: Smoke
+        run: npm run smoke
+        working-directory: frontend
