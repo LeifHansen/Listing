@@ -53,7 +53,10 @@ except Exception:  # noqa: BLE001
     pass
 
 TARGET_SIZE = 1600  # px, longest side per eBay zoom recommendation
-JPEG_QUALITY = 88
+# 90 is the knee: below it JPEG starts showing ringing on the hard
+# subject/white-canvas edge a cutout creates, above it the file grows for
+# detail eBay's own re-encode discards anyway.
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90") or 90)
 CANVAS_COLOR = (248, 248, 248)  # near-white, looks clean on eBay
 WHITE = (255, 255, 255)  # pure white when the user asks to strip the background
 # Downscale anything larger than this (longest side) up front: a 150MP phone
@@ -1396,6 +1399,50 @@ def _pad_square(crop: Image.Image, pad_color: tuple) -> Image.Image:
 # square window without getting chopped — think train-set boxes, skis, bats.
 _ELONGATED = 1.35
 
+# Breathing room around a cut-out subject on its white canvas, as a fraction of
+# the canvas per side. eBay's own gallery shots sit at roughly this; tighter
+# and the item collides with the thumbnail's edge, looser and it shrinks in
+# search results where every listing is competing at 220px.
+PAD_FRACTION = float(os.getenv("CUTOUT_PAD_FRACTION", "0.09") or 0.09)
+
+
+def _frame_cutout(img: Image.Image, pad: float = PAD_FRACTION) -> Image.Image:
+    """Centre a cut-out subject on a square white canvas with even padding.
+
+    The difference from _fill_square, which every photo used to get: that one
+    CROPS to fill the frame, so a subject with an awkward aspect ratio loses
+    its edges. On a photo that kept its background, filling is right — the
+    background is scenery and cropping it is free. On a cutout the background
+    IS the canvas, so there is nothing to gain by cropping and an item to
+    lose. Pad instead, and the item arrives whole and consistently sized.
+
+    Falls back to _fill_square when the subject can't be located (which for a
+    cutout on white would mean it filled the frame or vanished).
+    """
+    rgb = _flatten(img)
+    box = _subject_box(rgb)
+    if not box:
+        return _fill_square(rgb)
+    w, h = rgb.size
+    left, top, right, bottom = box
+    longest = max(right - left, bottom - top)
+    # The window: subject plus `pad` on each side. Floored at half the photo's
+    # short side, the same over-zoom guard _fill_square uses — a ring shot from
+    # across the room should not be blown up to 1600px of blur.
+    side = max(int(round(longest / max(0.1, 1 - 2 * pad))), min(w, h) // 2)
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    sx, sy = cx - side // 2, cy - side // 2
+    canvas = Image.new("RGB", (side, side), WHITE)
+    # Intersect with the photo and paste at the offset, rather than cropping
+    # past the edge (PIL would fill that with black) — and this keeps whatever
+    # sits just outside the subject box, notably the contact shadow, instead
+    # of slicing it off at the box's hard edge.
+    x0, y0 = max(0, sx), max(0, sy)
+    x1, y1 = min(w, sx + side), min(h, sy + side)
+    if x1 > x0 and y1 > y0:
+        canvas.paste(rgb.crop((x0, y0, x1, y1)), (x0 - sx, y0 - sy))
+    return canvas
+
 
 def _fill_square(img: Image.Image) -> Image.Image:
     """Square-frame the photo around its subject (eBay's recommended shape).
@@ -1445,8 +1492,10 @@ def _auto_tone(img: Image.Image) -> Image.Image:
     small = rgb.resize((64, 64), Image.BILINEAR)
 
     # --- white balance from the border ring (outer ~12%) ---
-    px = list(small.getdata())
-    ring = [px[y * 64 + x] for y in range(64) for x in range(64)
+    # Pixel access rather than getdata(): the latter is deprecated out of
+    # Pillow 14, and this only needs 64x64.
+    px = small.load()
+    ring = [px[x, y] for y in range(64) for x in range(64)
             if x < 8 or x >= 56 or y < 8 or y >= 56]
     n = max(1, len(ring))
     means = [sum(p[c] for p in ring) / n for c in range(3)]
@@ -1584,9 +1633,11 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
             bg_removed = bg_engine not in (None, "none")
         else:
             img = _autocrop_borders(img)
-        # Fill the square frame by cropping to the subject instead of padding
-        # with white bars (which looked terrible on portrait photos).
-        img = _fill_square(img)
+        # Square frame. A cutout gets centred with padding on its white canvas
+        # (the canvas is the point — cropping it only risks the item); a photo
+        # that kept its background gets cropped to fill, because there the
+        # background is scenery and white bars around it look broken.
+        img = _frame_cutout(img) if bg_removed else _fill_square(img)
 
         if img.size[0] != TARGET_SIZE:
             img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
@@ -1600,6 +1651,12 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
             img = _enhance(img)
 
         dst = dst.with_suffix(".jpg")
+        # No exif= argument, deliberately and on the record: the saved file
+        # carries no EXIF at all, so the GPS coordinates of the seller's home
+        # never ride along to a public marketplace listing. Pillow's default
+        # is to drop it, which makes this a guarantee that could be lost by
+        # someone helpfully "preserving metadata" — hence the note and
+        # test_export_pipeline.py's assertion.
         img.save(dst, "JPEG", quality=JPEG_QUALITY, optimize=True)
 
     out = {

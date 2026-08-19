@@ -49,6 +49,8 @@ jobs:
         run: pytest backend/tests/test_matte.py -q
       - name: Cutout regression suite
         run: pytest backend/tests/test_cutout_regression.py backend/tests/test_bg_border.py -q
+      - name: Export contract
+        run: pytest backend/tests/test_export_pipeline.py -q
 
   # The Vite build is the only thing that type-checks the JSX. Without it a
   # broken import or syntax error in the frontend only surfaced during the
