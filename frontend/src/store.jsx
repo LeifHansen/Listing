@@ -173,6 +173,10 @@ export function AppProvider({ children }) {
   });
   // eBay views/watchers per live listing, keyed by our listing record id.
   const [metricsById, setMetricsById] = useState({});
+  // Whether eBay's traffic report (views/impressions) was actually readable —
+  // so the UI can say "we couldn't ask" instead of showing everything as 0.
+  const [metricsStatus, setMetricsStatus] = useState(
+    { trafficOk: false, needsReconnect: false });
 
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     setListingsState((s) => ({ ...s, loading: !quiet }));
@@ -428,10 +432,19 @@ export function AppProvider({ children }) {
   // eBay views/watchers for live listings (best-effort; empty until eBay is
   // connected and the analytics scope granted). Refreshes as the set changes.
   useEffect(() => {
-    if (!user || !ebay.connected) { setMetricsById({}); return; }
+    if (!user || !ebay.connected) {
+      setMetricsById({});
+      setMetricsStatus({ trafficOk: false, needsReconnect: false });
+      return;
+    }
     let alive = true;
     api("/api/ebay/listing-metrics")
-      .then((r) => { if (alive) setMetricsById(r.metrics || {}); })
+      .then((r) => {
+        if (!alive) return;
+        setMetricsById(r.metrics || {});
+        setMetricsStatus({
+          trafficOk: !!r.traffic_ok, needsReconnect: !!r.needs_reconnect });
+      })
       .catch(() => {});
     return () => { alive = false; };
   }, [user, ebay.connected, listingsState.items.length]);
@@ -447,7 +460,7 @@ export function AppProvider({ children }) {
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
-    listingsState, loadListings, metricsById,
+    listingsState, loadListings, metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
@@ -460,7 +473,7 @@ export function AppProvider({ children }) {
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
-    listingsState, loadListings, metricsById, storeSync, syncStore,
+    listingsState, loadListings, metricsById, metricsStatus, storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
