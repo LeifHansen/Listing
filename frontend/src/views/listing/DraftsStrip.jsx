@@ -98,7 +98,8 @@ function resultSummary(res) {
 
 export function DraftsStrip({ search = "" }) {
   const {
-    listingsState, openListing, loadListings, deleteListing, bulkDeleteListings,
+    listingsState, openListing, loadListings, patchListing, deleteListing,
+    bulkDeleteListings,
     metricsById, skippedDraftIds, toggleSkipDraft,
   } = useApp();
   const { confirm, toast } = useToast();
@@ -151,6 +152,9 @@ export function DraftsStrip({ search = "" }) {
     setPublishing((p) => ({ ...p, [item.id]: true }));
     try {
       const res = await publishListing(item.id, item.listing || {}, effectiveTargets);
+      // Move the card out of Drafts on the spot — the refresh below confirms
+      // it, but a live listing must never linger under Drafts waiting for one.
+      if (res.published) patchListing(item.id, { status: "published" });
       return { published: !!res.published, res };
     } catch (e) {
       return { published: false, error: e.message };

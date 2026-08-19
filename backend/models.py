@@ -151,6 +151,12 @@ class RefineRequest(BaseModel):
     prompt: str
 
 
+class ImageOrderRequest(BaseModel):
+    """Just the photo order — see PATCH /api/listings/{id}/images/order."""
+
+    images: list[str]
+
+
 class PublishRequest(BaseModel):
     session_id: str
     listing: Listing

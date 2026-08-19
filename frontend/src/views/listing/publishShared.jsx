@@ -67,13 +67,17 @@ export function missingRequired(l = {}, targets = null) {
   return miss;
 }
 
-// One-click live publish of a saved listing record: persist any inline edits,
-// then publish — to the selected marketplaces when a selection is active,
-// else down the legacy single-eBay path. Returns the /api/publish response
-// (res.published, res.listing_id, and res.multi + res.results on fan-outs).
-export async function publishListing(id, listing, effectiveTargets) {
+// THE publish recipe — every publish in the app goes through here: the
+// drafts strip, the bulk queue, and the editor's Publish/Save Draft bar.
+// Persist first, then publish, so the record eBay is built from is exactly
+// what was just saved. The editor used to skip the save and publish straight
+// out of its in-memory form, which meant the same listing could publish fine
+// from its card and fail from the editor — two paths, two behaviours, one
+// very confused seller. Returns the /api/publish response (res.published,
+// res.listing_id, and res.multi + res.results on fan-outs).
+export async function publishListing(id, listing, effectiveTargets, mode = "live") {
   await postJson(`/api/save/${id}`, listing);
-  const body = { session_id: id, listing, mode: "live" };
+  const body = { session_id: id, listing, mode };
   if (effectiveTargets
       && !(effectiveTargets.length === 1 && effectiveTargets[0] === "ebay")) {
     body.marketplaces = effectiveTargets;

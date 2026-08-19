@@ -17,12 +17,12 @@ today's behavior. A wrong guess is one tap of the editor's rotate button.
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import config
 from ..config import log
-from . import claude_ai
 
 # Photos per vision call. Small enough that one bad response only costs a
 # handful of photos their auto-rotation, big enough to keep a 250-photo batch
@@ -33,6 +33,16 @@ _WORKERS = 3
 # judgement — 384px is plenty and keeps the token cost near-nothing.
 _THUMB = 384
 _VALID = (0, 90, 180, 270)
+# Orientation runs on the upload path, in front of everything a seller is
+# waiting for. The shared Claude client is bound at 120s with 2 retries, so a
+# wedged orientation call could hold the pipeline for six minutes to guess
+# whether a photo of a jacket is upside down. Its own budget instead, and no
+# retries: a coarse whole-image judgement is not worth asking twice.
+_CALL_TIMEOUT = float(os.getenv("ORIENT_TIMEOUT_SECONDS", "20") or 20)
+# ...and a ceiling on the pass as a whole. Past it, remaining batches are
+# skipped and their photos stay as shot -- which is the correct outcome for an
+# enhancement, and vastly better than a batch that never finishes uploading.
+_TOTAL_BUDGET = float(os.getenv("ORIENT_BUDGET_SECONDS", "75") or 75)
 
 _SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
@@ -101,7 +111,12 @@ def _model() -> str:
 
 def _detect_batch(batch: list[Path]) -> dict[str, int]:
     """{filename: clockwise degrees} for one batch. {} on any failure."""
-    from . import images
+    # claude_ai (and through it the Anthropic SDK) is imported here rather than
+    # at module scope: everything else in this file — the batching, the budget,
+    # the degree validation — is plain Python, and keeping it importable
+    # without an LLM client is what lets those rules be tested in the
+    # image-only CI job.
+    from . import claude_ai, images
     try:
         content: list[dict] = []
         for p in batch:
@@ -112,7 +127,8 @@ def _detect_batch(batch: list[Path]) -> dict[str, int]:
             f"These are photos 1 to {len(batch)} of secondhand items being "
             "listed for sale. For each, say how it must be rotated to appear "
             "upright.\n" + _SCHEMA)})
-        resp = claude_ai.client().messages.create(
+        resp = claude_ai.client().with_options(
+            timeout=_CALL_TIMEOUT, max_retries=0).messages.create(
             model=_model(), max_tokens=400,
             messages=[{"role": "user", "content": content}])
         text = "".join(b.text for b in resp.content if b.type == "text")
@@ -145,6 +161,7 @@ def _verify_batch(proposals: list[tuple[Path, int]]) -> dict[str, int]:
     confirmed turns survive — an unconfirmed one is cancelled, never applied.
     {} on any failure (= apply nothing from this batch)."""
     from PIL import Image, ImageOps
+    from . import claude_ai
     from . import images as _images
 
     try:
@@ -158,7 +175,8 @@ def _verify_batch(proposals: list[tuple[Path, int]]) -> dict[str, int]:
         content.append({"type": "text", "text": (
             f"These are photos 1 to {len(proposals)} of secondhand items, "
             "after auto-rotation.\n" + _VERIFY_SCHEMA)})
-        resp = claude_ai.client().messages.create(
+        resp = claude_ai.client().with_options(
+            timeout=_CALL_TIMEOUT, max_retries=0).messages.create(
             model=_model(), max_tokens=300,
             messages=[{"role": "user", "content": content}])
         text = "".join(b.text for b in resp.content if b.type == "text")
@@ -198,10 +216,23 @@ def detect_rotations(paths: list[Path]) -> dict[str, int]:
     files = [p for p in paths if p.is_file()]
     if not files or not _enabled():
         return {}
+    deadline = time.monotonic() + _TOTAL_BUDGET
+
+    def _within_budget(fn):
+        """Skip a batch once the pass has spent its budget. The photos in it
+        stay as shot, which is the right answer for an enhancement — an upload
+        must not wait on orientation, and a batch of 250 photos should not be
+        able to spend six minutes deciding which way up they are."""
+        def _call(batch):
+            if time.monotonic() > deadline:
+                return {}
+            return fn(batch)
+        return _call
+
     batches = [files[i:i + _BATCH] for i in range(0, len(files), _BATCH)]
     proposed: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(batches))) as pool:
-        for part in pool.map(_detect_batch, batches):
+        for part in pool.map(_within_budget(_detect_batch), batches):
             proposed.update(part)
     if not proposed:
         return {}
@@ -214,7 +245,7 @@ def detect_rotations(paths: list[Path]) -> dict[str, int]:
     chunks = [items[i:i + _BATCH] for i in range(0, len(items), _BATCH)]
     rotations: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(chunks))) as pool:
-        for part in pool.map(_verify_batch, chunks):
+        for part in pool.map(_within_budget(_verify_batch), chunks):
             rotations.update(part)
     dropped = len(proposed) - len(rotations)
     log.info("auto-orient: %d proposed, %d confirmed, %d cancelled by verify "

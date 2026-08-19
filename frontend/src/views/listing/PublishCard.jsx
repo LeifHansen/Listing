@@ -258,7 +258,7 @@ function MarketplaceChips({ w }) {
 }
 
 export function PublishBar({ w }) {
-  const { canPublishLive, deleteListing, setSession, setView, openListings } = useApp();
+  const { canPublishLive, deleteListing, setSession, openListings } = useApp();
   const { confirm } = useToast();
   const gaps = Object.entries(w.completion)
     .filter(([, s]) => s === "attention")

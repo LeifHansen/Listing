@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
+import { useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Trash2, Pencil, RotateCw, GripVertical } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 
@@ -9,10 +11,19 @@ import { cn, mediaUrl } from "@/lib/utils";
 // drag handle (bottom-right) to reorder. The first photo is the eBay hero, so
 // it wears a "Main" badge.
 export function PhotoTile({
-  sessionId, name, version, index, onDelete, onRotate, onEdit,
-  reorderable, dragging, onDragStart, onDragMove, onDragEnd,
+  sessionId, name, version, index, onDelete, onRotate, onEdit, reorderable,
 }) {
   const [rotating, setRotating] = useState(false);
+  // Reordering runs on @dnd-kit rather than the hand-rolled pointer-capture +
+  // elementFromPoint drag this replaced. That version hit-tested the grid on
+  // every pointer move, which is why dragging stuttered; it fought the page's
+  // own scrolling on touch, which is why a drag on a phone half the time
+  // scrolled instead; and being pointer events only, it was unreachable by
+  // keyboard entirely.
+  const {
+    attributes, listeners, setNodeRef, setActivatorNodeRef, transform,
+    transition, isDragging,
+  } = useSortable({ id: name });
   const rotate = async () => {
     if (rotating || !onRotate) return;
     setRotating(true);
@@ -20,15 +31,16 @@ export function PhotoTile({
   };
   return (
     <motion.div
-      layout="position"
-      data-photo-idx={index}
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
       initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: dragging ? 1.05 : 1 }}
+      animate={{ opacity: 1 }}
       exit={{ opacity: 0, scale: 0.9 }}
       transition={{ duration: 0.2 }}
       className={cn(
         "relative group rounded-tile overflow-hidden border bg-bg-sunken aspect-square",
-        dragging ? "z-20 border-blue ring-2 ring-blue shadow-float" : "border-line",
+        isDragging ? "z-20 border-blue ring-2 ring-blue shadow-float opacity-90"
+          : "border-line",
       )}
     >
       <img
@@ -74,25 +86,31 @@ export function PhotoTile({
           Main
         </span>
       )}
-      {/* Drag handle — reorder photos. touch-none so a drag doesn't scroll the
-          page on mobile; pointer capture routes move/up back here. */}
+      {/* Drag handle. 44x44 hit area (Apple's and Google's minimum) with the
+          visible pill inside it: at the old 28px this was a coin-sized target
+          on a phone, which is most of why reordering felt like a fight.
+          touch-none stops the browser claiming the gesture for scrolling. */}
       {reorderable && (
         <button
+          ref={setActivatorNodeRef}
           type="button"
-          aria-label={`Drag to reorder photo ${name}`}
+          aria-label={`Reorder photo ${index + 1}. Press space, then use the arrow keys.`}
           title="Drag to reorder"
-          onPointerDown={onDragStart}
-          onPointerMove={onDragMove}
-          onPointerUp={onDragEnd}
-          onPointerCancel={onDragEnd}
+          {...attributes}
+          {...listeners}
           className={cn(
-            "absolute bottom-1.5 right-1.5 z-10 grid place-items-center size-7 rounded-full touch-none",
-            "bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card",
-            "hover:text-blue hover:border-blue/40 transition-colors duration-150",
-            dragging ? "cursor-grabbing text-blue border-blue/40" : "cursor-grab",
+            "absolute -bottom-1 -right-1 z-10 grid place-items-center size-11 touch-none",
+            "text-ink-faint hover:text-blue transition-colors duration-150",
+            isDragging ? "cursor-grabbing text-blue" : "cursor-grab",
           )}
         >
-          <GripVertical size={14} aria-hidden />
+          <span className={cn(
+            "grid place-items-center size-7 rounded-full bg-card/85 backdrop-blur",
+            "border shadow-card pointer-events-none",
+            isDragging ? "border-blue/40" : "border-line",
+          )}>
+            <GripVertical size={14} aria-hidden />
+          </span>
         </button>
       )}
       <div

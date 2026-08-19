@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   RotateCcw, Crop, Highlighter, CheckCircle2, Eraser, Wand2, Paintbrush,
+  Undo2, Redo2, Brush, Eye,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -8,14 +9,24 @@ import { AIStatusInline } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
 import { api } from "@/lib/api";
 import { cn, mediaUrl } from "@/lib/utils";
+import {
+  ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
+  layersFrom, pushOperation, pushStroke, replay, snapshot,
+} from "./editorLayers";
 
 /* Photo studio — a small toolbar of one-tap tools, all previewed on the canvas
    (nothing is stored until Save):
    - Remove background: in-house cutout onto pure white
    - Auto levels: stretch brightness/contrast to make the shot pop (client-side)
    - Crop: drag a rectangle; it applies the moment you release
-   - Highlight leftovers: tint any background the cutout missed red, so you can
-     paint it out with the white brush (off until you turn it on). */
+   - Highlight leftovers: tint any background the cutout missed red
+   - Restore / Erase brushes, undo/redo, and Compare
+
+   Nothing here is destructive. The original photo stays underneath the cutout
+   for as long as the studio is open (see editorLayers.js), which is what makes
+   Restore possible at all: when the remover eats a strap or a heel, the seller
+   paints it back instead of hitting Revert and losing the parts it got right.
+   Every edit is undoable, and Save is the only thing that writes. */
 
 const HIGHLIGHT_COLOR = "#e85c46"; // brand coral, tinted over leftovers
 
@@ -78,6 +89,16 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const paintedSinceAnalyze = useRef(false);
   const [brush, setBrush] = useState(40);
   const brushRef = useRef(40);
+  // The non-destructive layer stack + the edit history over it.
+  const layersRef = useRef(null);
+  const strokesRef = useRef([]);
+  const historyRef = useRef(createHistory());
+  const strokeRef = useRef(null);      // the stroke currently under the finger
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [comparing, setComparing] = useState(false);
+  const [brushMode, setBrushMode] = useState(ERASE);
+  const brushModeRef = useRef(ERASE);
   const [saving, setSaving] = useState(false);
   const [aiBusy, setAiBusy] = useState(null); // destructive op running (locks Save)
   const [checking, setChecking] = useState(null); // passive border re-check (never locks Save)
@@ -92,11 +113,99 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const { toast } = useToast();
 
   useEffect(() => { toolRef.current = tool; }, [tool]);
+  useEffect(() => { brushModeRef.current = brushMode; }, [brushMode]);
 
   const clearOverlay = useCallback(() => {
     const o = overlayRef.current;
     if (o) o.getContext("2d").clearRect(0, 0, o.width, o.height);
   }, []);
+
+  const syncHistory = useCallback(() => {
+    setCanUndo(historyRef.current.undo.length > 0);
+    setCanRedo(historyRef.current.redo.length > 0);
+  }, []);
+
+  // Re-draw the visible canvas from the layers. Everything that changes an
+  // edit ends here.
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current;
+    const layers = layersRef.current;
+    if (canvas && layers) compose(layers, canvas);
+  }, []);
+
+  // Replace the cutout layer with the result of a big operation, recording
+  // the before/after so it can be undone like anything else.
+  const commitOperation = useCallback((nextSource, { keepStrokes = false } = {}) => {
+    const layers = layersRef.current;
+    if (!layers) return;
+    const before = snapshot(layers, strokesRef.current);
+    const next = layersFrom(nextSource);
+    // The ORIGINAL is carried forward, not replaced: it is the thing Restore
+    // paints back, and a cutout that replaced it would leave nothing to
+    // restore FROM. Crop is the exception -- it changes the frame, so the
+    // original has to be re-cut to match, which layersFrom already did.
+    if (!keepStrokes) strokesRef.current = [];
+    if (layers.width === next.width && layers.height === next.height) {
+      next.original = layers.original;
+    }
+    layersRef.current = next;
+    replay(next, strokesRef.current);
+    redraw();
+    pushOperation(historyRef.current, before,
+                  snapshot(next, strokesRef.current));
+    syncHistory();
+  }, [redraw, syncHistory]);
+
+  const undo = useCallback(() => {
+    const entry = historyRef.current.undo.pop();
+    if (!entry) return;
+    historyRef.current.redo.push(entry);
+    if (entry.kind === "stroke") {
+      strokesRef.current = strokesRef.current.slice(0, -1);
+      replay(layersRef.current, strokesRef.current);
+    } else {
+      strokesRef.current = applySnapshot(layersRef.current, entry.before);
+    }
+    clearOverlay();
+    redraw();
+    syncHistory();
+  }, [clearOverlay, redraw, syncHistory]);
+
+  // Press-and-hold before/after. Draws the untouched original straight to the
+  // visible canvas and puts the composition back on release — no state to get
+  // out of step, and nothing about the edit changes.
+  const showOriginal = useCallback(() => {
+    const layers = layersRef.current;
+    const canvas = canvasRef.current;
+    if (!layers || !canvas) return;
+    setComparing(true);
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(layers.original, 0, 0);
+  }, []);
+
+  const showEdited = useCallback(() => {
+    setComparing((was) => {
+      if (was) redraw();
+      return false;
+    });
+  }, [redraw]);
+
+  const redo = useCallback(() => {
+    const entry = historyRef.current.redo.pop();
+    if (!entry) return;
+    historyRef.current.undo.push(entry);
+    if (entry.kind === "stroke") {
+      strokesRef.current = [...strokesRef.current, entry.stroke];
+      drawStroke(layersRef.current, entry.stroke);
+    } else {
+      strokesRef.current = applySnapshot(layersRef.current, entry.after);
+    }
+    clearOverlay();
+    redraw();
+    syncHistory();
+  }, [clearOverlay, redraw, syncHistory]);
+
 
   // Crop framing: dim everything outside the dragged rect.
   const drawCropOverlay = useCallback((rect) => {
@@ -168,9 +277,11 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     try {
       // Same-origin so the canvas isn't tainted and toBlob() works.
       const img = await loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`);
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      canvas.getContext("2d").drawImage(img, 0, 0);
+      layersRef.current = layersFrom(img);
+      strokesRef.current = [];
+      historyRef.current = createHistory();
+      syncHistory();
+      redraw();
       clearOverlay();
       setResiduePct(null);
     } catch (e) {
@@ -182,19 +293,21 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     setChecking("Re-checking the item's borders…");
     try { await analyze(null); }
     finally { setChecking(null); }
-  }, [sessionId, name, analyze, clearOverlay, toast]);
+  }, [sessionId, name, analyze, clearOverlay, redraw, syncHistory, toast]);
 
-  // Preview an AI-processed image (data URL) onto the canvas, then re-check.
+  // Land an AI-processed image as the new cutout layer.
+  //
+  // Deliberately does NOT kick off a border re-check. That second inference
+  // fired automatically after every removal, on the one path where a seller is
+  // already waiting, behind the same single inference slot the removal just
+  // used — so the wait for "remove background" was silently two model runs
+  // long. The check is still one tap away under Highlight.
   const applyPreview = useCallback(async (dataUrl) => {
-    const canvas = canvasRef.current;
     const img = await loadImage(dataUrl);
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    canvas.getContext("2d").drawImage(img, 0, 0);
+    commitOperation(img);
     clearOverlay();
-    const blob = await canvasBlob(canvas);
-    await analyze(blob);
-  }, [analyze, clearOverlay]);
+    setResiduePct(null);
+  }, [commitOperation, clearOverlay]);
 
   const removeBg = useCallback(async () => {
     const canvas = canvasRef.current;
@@ -221,8 +334,9 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   // remaining luminance range across the full 0-255 span on every channel (so
   // hues are preserved — it brightens and adds contrast without a color cast).
   const autoLevels = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || aiBusy) return;
+    const layers = layersRef.current;
+    if (!layers || aiBusy) return;
+    const canvas = layers.cutout;
     const ctx = canvas.getContext("2d");
     const px = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const d = px.data;
@@ -242,9 +356,17 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     for (let i = 0; i < d.length; i += 4) {
       d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]];
     }
-    ctx.putImageData(px, 0, 0);
-    toast("Auto levels applied — Revert to undo, Save to keep.", { kind: "success" });
-  }, [aiBusy, toast]);
+    // Into a scratch canvas, then through commitOperation, so this is one
+    // undoable step like everything else rather than a change with no way back
+    // short of Revert.
+    const next = document.createElement("canvas");
+    next.width = canvas.width;
+    next.height = canvas.height;
+    next.getContext("2d").putImageData(px, 0, 0);
+    commitOperation(next, { keepStrokes: true });
+    toast("Auto levels applied — Undo to take it back, Save to keep.",
+          { kind: "success" });
+  }, [aiBusy, commitOperation, toast]);
 
   // Manual crop: toggle the tool, drag a rect, Apply.
   const toggleCropTool = useCallback(() => {
@@ -264,23 +386,24 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const applyCrop = useCallback(async () => {
     const canvas = canvasRef.current;
     const rect = cropRect;
-    if (!canvas || !rect) return;
+    if (!canvas || !rect || !layersRef.current) return;
+    // Crop the COMPOSED image: it is what the seller framed. The layer stack
+    // is rebuilt around it (which resets the original to the cropped view —
+    // Restore can only reach back to pixels that are still in frame), and the
+    // whole thing is one undoable step.
     const tmp = document.createElement("canvas");
     tmp.width = Math.max(1, Math.round(rect.w));
     tmp.height = Math.max(1, Math.round(rect.h));
     tmp.getContext("2d").drawImage(
       canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, tmp.width, tmp.height);
-    canvas.width = tmp.width;
-    canvas.height = tmp.height;
-    canvas.getContext("2d").drawImage(tmp, 0, 0);
     setCropRect(null);
     liveRect.current = null;
     clearOverlay();
     setTool("brush");
-    toast("Cropped — Revert to undo, Save to keep it.", { kind: "success" });
-    const blob = await canvasBlob(canvas);
-    analyze(blob);
-  }, [cropRect, clearOverlay, analyze, toast]);
+    commitOperation(tmp);
+    setResiduePct(null);
+    toast("Cropped — Undo to take it back, Save to keep it.", { kind: "success" });
+  }, [cropRect, clearOverlay, commitOperation, toast]);
 
   // Crop applies the moment you release the drag — no separate Apply button.
   useEffect(() => {
@@ -336,20 +459,24 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         y: (p.clientY - rect.top) * (canvas.height / rect.height),
       };
     };
+    // A stroke accumulates points and is re-drawn from its start each time —
+    // so the segments join into a continuous line instead of the dotted trail
+    // of separate stamps a quick drag used to leave.
     const paintAt = (e) => {
-      if (!painting.current) return;
-      const ctx = canvas.getContext("2d");
+      if (!painting.current || !layersRef.current) return;
       const { x, y } = point(e);
-      // Brush radius is in displayed pixels; scale to canvas pixels.
       const scale = canvas.width / canvas.getBoundingClientRect().width;
       const r = (brushRef.current || 40) * scale / 2;
-      ctx.fillStyle = "#ffffff";
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+      const stroke = strokeRef.current;
+      if (!stroke) return;
+      stroke.points.push([x, y]);
+      // Redrawing the whole (short) stroke is cheaper than it sounds and
+      // keeps live painting identical to what replay() will produce.
+      replay(layersRef.current, [...strokesRef.current, stroke]);
+      compose(layersRef.current, canvas);
       paintedSinceAnalyze.current = true;
-      // Clear the highlight where the user painted, so it doesn't nag about
-      // an area they just fixed.
+      // Clear the highlight where they painted, so it stops nagging about an
+      // area they just fixed.
       const overlay = overlayRef.current;
       if (overlay && overlay.width) {
         const octx = overlay.getContext("2d");
@@ -383,7 +510,15 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         e.preventDefault();
         return;
       }
-      painting.current = true; paintAt(e); e.preventDefault();
+      painting.current = true;
+      const scale = canvas.width / canvas.getBoundingClientRect().width;
+      strokeRef.current = {
+        tool: brushModeRef.current,
+        radius: (brushRef.current || 40) * scale / 2,
+        points: [],
+      };
+      paintAt(e);
+      e.preventDefault();
     };
     const move = (e) => {
       if (toolRef.current === "crop") {
@@ -400,6 +535,13 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         else { liveRect.current = null; drawCropOverlay(null); }
         return;
       }
+      if (painting.current && strokeRef.current?.points.length) {
+        strokesRef.current = [...strokesRef.current, strokeRef.current];
+        pushStroke(historyRef.current, strokeRef.current);
+        setCanUndo(true);
+        setCanRedo(false);
+      }
+      strokeRef.current = null;
       painting.current = false;
     };
 
@@ -422,6 +564,10 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const save = async () => {
     const canvas = canvasRef.current;
     if (!canvas || !name) return;
+    // Compose fresh rather than trusting whatever is on screen — Compare
+    // paints the original onto this canvas, and a save mid-hold would
+    // otherwise write the un-edited photo.
+    if (layersRef.current) compose(layersRef.current, canvas);
     const blob = await canvasBlob(canvas);
     if (!blob) { toast("Couldn't export the edited image.", { kind: "error" }); return; }
     setSaving(true);
@@ -442,11 +588,15 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     }
   };
 
+  // "Item borders look clean" claimed more than the check can know — it looks
+  // for leftover BACKGROUND, and says nothing about whether the item is all
+  // still there. A seller reading "clean" over a cutout missing half a strap
+  // was being told the opposite of the truth.
   const borderState = residuePct == null
     ? null
     : residuePct >= 0.2
-      ? `Found leftover background (~${residuePct}% of the frame)${highlight ? " — tinted red" : ""}. Turn on Highlight to see it, or paint it out with the brush.`
-      : "Item borders look clean.";
+      ? `Found leftover background (~${residuePct}% of the frame)${highlight ? " — tinted red" : ""}. Turn on Highlight to see it, or paint it out with the Erase brush.`
+      : "No leftover background detected.";
 
   return (
     <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
@@ -454,17 +604,38 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         <Tool icon={Eraser} label="Remove BG" onClick={removeBg} disabled={!!aiBusy} />
         <Tool icon={Wand2} label="Auto levels" onClick={autoLevels} disabled={!!aiBusy} />
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
+        {/* The two brushes. Restore is the one that did not exist: with only a
+            white brush, a cutout that ate part of the item was a dead end. */}
+        <Tool icon={Brush} label="Restore item" active={tool === "brush" && brushMode === RESTORE}
+          onClick={() => { setTool("brush"); setBrushMode(RESTORE); }}
+          disabled={!!aiBusy} />
+        <Tool icon={Paintbrush} label="Erase BG" active={tool === "brush" && brushMode === ERASE}
+          onClick={() => { setTool("brush"); setBrushMode(ERASE); }}
+          disabled={!!aiBusy} />
+        <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
         <Tool icon={Crop} label="Crop" active={tool === "crop"}
           onClick={toggleCropTool} disabled={!!aiBusy} />
         <Tool icon={Highlighter} label="Highlight" active={highlight}
           onClick={toggleHighlight} disabled={!!aiBusy} />
+        <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
+        <Tool icon={Undo2} label="Undo" onClick={undo} disabled={!canUndo || !!aiBusy} />
+        <Tool icon={Redo2} label="Redo" onClick={redo} disabled={!canRedo || !!aiBusy} />
+        {/* Press and hold: the only honest way to judge a cutout is against
+            the photo it came from. */}
+        <Tool
+          icon={Eye} label="Compare" active={comparing} disabled={!!aiBusy}
+          onPointerDown={showOriginal} onPointerUp={showEdited}
+          onPointerLeave={showEdited} onPointerCancel={showEdited}
+        />
       </div>
       <p className="text-xs text-ink-secondary mb-3 px-0.5">
         {tool === "crop"
           ? "Drag a box on the photo — it crops the moment you let go."
-          : highlight
-            ? "Leftover background is tinted red — paint over it with the white brush."
-            : "Paint the background out with the white brush, or turn on Highlight to spot leftovers."}
+          : brushMode === RESTORE
+            ? "Paint over anything the cutout removed by mistake — the original photo comes back underneath."
+            : highlight
+              ? "Leftover background is tinted red — paint over it with the Erase brush."
+              : "Paint the background out, or switch to Restore item to bring back anything the cutout took."}
       </p>
 
       <div className="rounded-tile overflow-hidden border border-line bg-bg-sunken grid place-items-center max-h-[52vh] p-2">
@@ -505,7 +676,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
           />
         </label>
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" onClick={load} disabled={!!aiBusy}>
+          <Button variant="ghost" onClick={load} disabled={!!aiBusy}
+            title="Discard every edit and reload the saved photo">
             <RotateCcw aria-hidden /> Revert
           </Button>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>

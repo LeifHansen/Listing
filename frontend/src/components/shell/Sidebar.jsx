@@ -15,7 +15,7 @@ import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
-  { id: "shop", label: "Shop Mode", icon: Store },
+  { id: "shop", label: "Shop", icon: Store },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

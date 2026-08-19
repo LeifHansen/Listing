@@ -115,6 +115,38 @@ def promote(record_id: str, listing: Listing, creds: Optional[dict],
         return {"promoted": False, "message": f"Promotion failed: {exc}"}
 
 
+# Message the seller sees when eBay took the listing but our own record of it
+# didn't move. Rare, but the failure it names is the confusing one: the item is
+# live, and the app still shows it as a draft.
+RECORD_WARNING = ("It's live on eBay, but we couldn't update your copy here. "
+                  "Refresh in a moment — don't publish it again, that would "
+                  "post a second listing.")
+
+
+def _record_published(session_id: str, dump: dict, status: str,
+                      uid: Optional[str]) -> bool:
+    """Persist a publish outcome, retrying once, and say whether it landed.
+
+    db.upsert_listing swallows its own failures by design (a database blip
+    must never break a request). For a status write that is fine — except
+    right here, where the write IS the outcome: it's what moves the listing
+    out of Drafts, what tells the next publish "already listed, revise it",
+    and what stops a second live listing being posted for the same item. So
+    this one gets a retry and, failing that, a loud log and a warning the
+    seller can actually act on.
+    """
+    if db.upsert_listing(session_id, dump, status=status, user_id=uid):
+        return True
+    log.warning("publish: status write failed (session=%s status=%s) — retrying",
+                session_id, status)
+    if db.upsert_listing(session_id, dump, status=status, user_id=uid):
+        return True
+    log.error("publish: COULD NOT record status=%s for session=%s — the "
+              "listing is live on eBay but our record still says otherwise",
+              status, session_id)
+    return False
+
+
 def refresh_eps_urls(listing_id: str, token: str, item_id: str,
                      uid: Optional[str]) -> None:
     """After eBay ingests our /media photo URLs on a revise, fetch the fresh
@@ -312,6 +344,15 @@ class EbayProvider:
         session_id, listing, mode = ctx.session_id, ctx.listing, ctx.mode
         prev_rec = ctx.prev_record
         already_live = prev_rec.get("status") in ("published", "live")
+        # Which of the three publish routes this request takes is the single
+        # most useful thing to know when a publish "does nothing" — create,
+        # revise, or the Inventory fallback, and what decided it. One line,
+        # no listing content.
+        log.info("publish route: session=%s mode=%s connected=%s "
+                 "prev_status=%s already_live=%s imported=%s has_item_id=%s",
+                 session_id, mode, bool(creds), prev_rec.get("status") or "none",
+                 already_live, listing_sync.is_imported(listing),
+                 bool(listing.ebay_listing_id))
 
         # A listing IMPORTED from eBay (or published by us through Trading)
         # isn't Inventory-API managed, so edits go back through the Trading
@@ -380,8 +421,8 @@ class EbayProvider:
                     raw={"dry_run": False, "error": True, "mode": "live",
                          "message": str(exc),
                          "issues": ebay_errors.from_response(str(exc))})
-            db.upsert_listing(session_id, listing.model_dump(),
-                              status="published", user_id=uid)
+            recorded = _record_published(session_id, listing.model_dump(),
+                                         "published", uid)
             if pushed_local:
                 # eBay accepted our copies: re-baseline the checksums and, in
                 # the background (after the upsert above, so it can't be
@@ -405,6 +446,7 @@ class EbayProvider:
                 raw={"published": True, "revised": not relist,
                      "relisted": relist, "mode": "live",
                      "listing_id": res.get("listing_id"),
+                     **({} if recorded else {"record_warning": RECORD_WARNING}),
                      "message": ("Relisted! It's live on eBay as a fresh "
                                  "listing with a new item number."
                                  if relist else
@@ -478,11 +520,12 @@ class EbayProvider:
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:
             # an id that never lands is indistinguishable from "never listed".
-            db.upsert_listing(session_id, listing.model_dump(),
-                              status="published", user_id=ctx.uid)
+            recorded = _record_published(session_id, listing.model_dump(),
+                                         "published", ctx.uid)
             storage.save_listing(session_id, listing)
             result = {"published": True, "mode": "live",
                       "listing_id": res["listing_id"],
+                      **({} if recorded else {"record_warning": RECORD_WARNING}),
                       "message": ("Your listing is live on eBay."
                                   if not res.get("already_listed") else
                                   "This listing was already live on eBay — "
@@ -528,7 +571,10 @@ class EbayProvider:
         # the live listing across sessions.
         if result.get("listing_id"):
             dump["ebay_listing_id"] = str(result["listing_id"])
-        db.upsert_listing(session_id, dump, status=status, user_id=ctx.uid)
+        recorded = (_record_published(session_id, dump, status, ctx.uid)
+                    if result.get("published")
+                    else db.upsert_listing(session_id, dump, status=status,
+                                           user_id=ctx.uid))
         # Promoted Listings: once the item is live, best-effort create/refresh
         # its ad. Runs when the listing's Promote toggle is on OR the
         # account's auto-promote default (Settings) is — at the chosen rate,
@@ -549,6 +595,8 @@ class EbayProvider:
                     dump["ebay_listing_id"] = str(result["listing_id"])
                 db.upsert_listing(session_id, dump, status=status,
                                   user_id=ctx.uid)
+        if result.get("published") and not recorded:
+            result["record_warning"] = RECORD_WARNING
         listing_id = str(result.get("listing_id") or "")
         return PublishOutcome(
             ok=not result.get("error"),

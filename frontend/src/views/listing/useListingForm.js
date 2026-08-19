@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
-import { usePublishTargets } from "./publishShared";
+import { publishListing, usePublishTargets } from "./publishShared";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -56,7 +56,9 @@ function fromListing(l) {
 }
 
 export function useListingForm() {
-  const { session, setSession, health, loadListings, openListings } = useApp();
+  const {
+    session, setSession, health, loadListings, openListings, patchListing,
+  } = useApp();
   const { toast } = useToast();
 
   const [form, setForm] = useState(() => fromListing(session?.listing));
@@ -328,13 +330,36 @@ export function useListingForm() {
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
   // the form + session immediately (optimistic) and save in the background.
-  const reorderImages = useCallback((nextImages) => {
+  // Persist a new photo order. Two things this deliberately does NOT do any
+  // more: send the whole listing (a drag could overwrite a title being edited
+  // in another tab with a stale copy), and swallow the failure. It used to end
+  // in `.catch(() => {})`, so a rejected save left the new order on screen,
+  // saved nowhere, until a reload quietly put it back — which is the seller
+  // dragging their main photo into place and finding it moved again later.
+  const reorderImages = useCallback(async (nextImages) => {
     const imgs = [...nextImages];
+    const previous = form.images || [];
     setForm((f) => ({ ...f, images: imgs }));
     setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
     if (!sessionId) return;
-    postJson(`/api/save/${sessionId}`, { ...collect(), images: imgs }).catch(() => {});
-  }, [collect, sessionId, setForm, setSession]);
+    try {
+      const res = await api(`/api/listings/${sessionId}/images/order`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images: imgs }),
+      });
+      // The server's answer wins — it is what eBay will be handed.
+      const saved = res.images || imgs;
+      if (saved.join("|") !== imgs.join("|")) {
+        setForm((f) => ({ ...f, images: saved }));
+        setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: saved } } : s));
+      }
+    } catch (e) {
+      setForm((f) => ({ ...f, images: previous }));
+      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: previous } } : s));
+      toast(`Photo order not saved: ${e.message}`, { kind: "error" });
+    }
+  }, [form.images, sessionId, setForm, setSession, toast]);
 
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
@@ -346,7 +371,8 @@ export function useListingForm() {
     try {
       const fd = new FormData();
       files.forEach((f) => fd.append("files", f));
-      const res = await api(`/api/upload-more/${sessionId}`, { method: "POST", body: fd });
+      const res = await api(`/api/upload-more/${sessionId}`,
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       const added = res.added || [];
       if (added.length) {
         const next = [...(form.images || []), ...added];
@@ -405,14 +431,9 @@ export function useListingForm() {
     try {
       const listing = collect();
       setSession((s) => ({ ...s, listing }));
-      const body = { session_id: sessionId, listing, mode };
-      // Only send `marketplaces` when the selector is visible and picked
-      // something beyond bare eBay — everyone else stays on the legacy
-      // single-eBay path with its byte-identical responses.
-      if (chipTargets && !(chipTargets.length === 1 && chipTargets[0] === "ebay")) {
-        body.marketplaces = chipTargets;
-      }
-      const result = await postJson("/api/publish", body);
+      // Same recipe the drafts strip and bulk queue use — see publishListing.
+      // The editor is not allowed its own publish path.
+      const result = await publishListing(sessionId, listing, chipTargets, mode);
       setPublishResult(result);
       // A clean draft save is "done editing" — hand the seller back the Sell
       // overview (drafts + listings grid) instead of leaving them parked in
@@ -446,6 +467,26 @@ export function useListingForm() {
           if (first) setFixTarget(first.target);
         }
       }
+      // A live publish that did NOT go live has to say so out loud. Without
+      // this the editor simply re-rendered itself: no screen change, no
+      // toast, no error text — indistinguishable from the click not
+      // registering. The result banner explains the details; this is the
+      // part you can't miss.
+      if (mode === "live" && !result.published) {
+        toast(result.message
+          || "That didn't go live — check the publish card for what to fix.",
+          { kind: "error" });
+      }
+      // Reflect the outcome on the card immediately. loadListings is the
+      // authority and lands a moment later, but a listing that just went
+      // live must never still be sitting under Drafts while it does.
+      if (result.published) patchListing(sessionId, { status: "published" });
+      // The listing went live but our own record of it didn't move. Say it
+      // plainly — the danger here is the seller publishing a second time.
+      const recordWarning = result.record_warning
+        || Object.values(result.results || {}).map((res) => res.record_warning)
+          .find(Boolean);
+      if (recordWarning) toast(recordWarning, { kind: "warning" });
       loadListings({ quiet: true });
       if (savedClean) openListings("drafts");
     } catch (e) {
@@ -453,7 +494,8 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, loadListings, openListings, toast, chipTargets]);
+  }), [collect, sessionId, setSession, loadListings, openListings, patchListing,
+      toast, chipTargets]);
 
   // End (withdraw) the live listing everywhere it's live; it stays here as an
   // editable 'ended' record so it can be relisted later. eBay keeps its
