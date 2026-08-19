@@ -217,6 +217,7 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             on_progress(phase, done, total)
         except Exception as exc:  # noqa: BLE001 - progress must never sink a sync
             log.debug("sync: progress callback failed: %s", exc)
+
     jobs: list[tuple[str, str]] = []  # (item_id, status) — first entry wins
     seen: set[str] = set()
 

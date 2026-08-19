@@ -3470,7 +3470,17 @@ def _run_import_job(job_id: str, token: str, uid: str) -> None:
     real store takes minutes — far longer than a browser (or the proxy in
     front of us) will hold a request open, which is why this is a job the
     client polls rather than the response to the POST."""
+    # Every update writes the job's status mirror to disk, and a 2500-listing
+    # store ticks twice per listing — so the count is published on a beat
+    # rather than on every item. A phase change and the last tick of a phase
+    # always get through, so the client never sits on a stale "142 of 380".
+    beat = {"at": 0.0, "phase": ""}
+
     def _progress(phase: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if phase == beat["phase"] and done < total and now - beat["at"] < 0.5:
+            return
+        beat.update(at=now, phase=phase)
         jobstore.update(job_id, phase=phase, current=done, total_items=total)
     try:
         result = listing_sync.import_active(
