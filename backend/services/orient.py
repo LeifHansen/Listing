@@ -23,7 +23,6 @@ from pathlib import Path
 
 from .. import config
 from ..config import log
-from . import claude_ai
 
 # Photos per vision call. Small enough that one bad response only costs a
 # handful of photos their auto-rotation, big enough to keep a 250-photo batch
@@ -112,7 +111,12 @@ def _model() -> str:
 
 def _detect_batch(batch: list[Path]) -> dict[str, int]:
     """{filename: clockwise degrees} for one batch. {} on any failure."""
-    from . import images
+    # claude_ai (and through it the Anthropic SDK) is imported here rather than
+    # at module scope: everything else in this file — the batching, the budget,
+    # the degree validation — is plain Python, and keeping it importable
+    # without an LLM client is what lets those rules be tested in the
+    # image-only CI job.
+    from . import claude_ai, images
     try:
         content: list[dict] = []
         for p in batch:
@@ -157,6 +161,7 @@ def _verify_batch(proposals: list[tuple[Path, int]]) -> dict[str, int]:
     confirmed turns survive — an unconfirmed one is cancelled, never applied.
     {} on any failure (= apply nothing from this batch)."""
     from PIL import Image, ImageOps
+    from . import claude_ai
     from . import images as _images
 
     try:
