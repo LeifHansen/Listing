@@ -99,12 +99,23 @@ export function postJson(path, body) {
 // browser would time out ("server taking too long to respond"). If we give up
 // waiting, the server keeps working and saves the draft anyway.
 export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
+  // The timeout is per STAGE, not per job: the server heartbeats each phase
+  // change (identifying -> category -> specifics -> maker), and the deadline
+  // resets whenever the job visibly advances. A job is only declared stuck
+  // after timeoutMs with NO progress — a legitimately long multi-stage chain
+  // used to blow a fixed 240s budget while the server was still working.
+  let deadline = Date.now() + timeoutMs;
+  let lastSeen = "";
   for (;;) {
     const j = await api(`/api/bulk/status/${jobId}`);
     if (j.done) {
       if (j.error) throw new Error(j.error);
       return j.result;
+    }
+    const seen = `${j.phase || ""}|${j.beat || ""}|${j.current || ""}`;
+    if (seen !== lastSeen) {
+      lastSeen = seen;
+      deadline = Date.now() + timeoutMs;
     }
     if (Date.now() > deadline) {
       throw new Error(

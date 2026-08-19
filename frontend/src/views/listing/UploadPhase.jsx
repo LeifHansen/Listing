@@ -129,6 +129,9 @@ export function UploadPhase({ onBulkStarted }) {
         sessionId: up.session_id,
         listing: result.listing,
         confidence: result.confidence,
+        // Server already ran the specifics/maker enrichment for this draft —
+        // the editor's autofill effect skips its (re-charging) re-run.
+        specificsAutofilled: !!result.specifics_autofilled,
       });
     } catch (e) {
       toast(`Error: ${e.message}`, { kind: "error" });

@@ -13,6 +13,7 @@ Endpoints used:
 from __future__ import annotations
 
 import re
+import threading
 import time
 from typing import Optional
 
@@ -24,6 +25,39 @@ from ..config import log
 # Simple in-process caches (token + per-marketplace tree id).
 _token_cache: dict = {"token": None, "expires_at": 0.0}
 _tree_cache: dict = {}
+
+# One lock for every TTL cache below: identify jobs, bulk workers, and request
+# threads all read/write them concurrently. The lock only guards the dict —
+# never held across an HTTP call, so a slow eBay response can't serialize
+# unrelated lookups (two threads racing the same cold key just fetch twice).
+_CACHE_LOCK = threading.Lock()
+
+
+def _cache_get(cache: dict, key, ttl: float):
+    with _CACHE_LOCK:
+        hit = cache.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    return None
+
+
+def _cache_put(cache: dict, key, value, bound: int = 500) -> None:
+    with _CACHE_LOCK:
+        if len(cache) > bound:  # tiny bound; whole-cache clear is fine
+            cache.clear()
+        cache[key] = (time.time(), value)
+
+
+# Category suggestions barely change for a given query, but they were fetched
+# live on EVERY identify (and every click of "Suggest categories") — one eBay
+# round trip per listing that a bulk batch of similar items repeats endlessly.
+_SUGGEST_TTL = 24 * 3600
+_SUGGEST_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+# Item conditions are per-category metadata (same answer for every seller),
+# fetched on every editor session open. As static as aspects — cache alike.
+_CONDITIONS_TTL = 24 * 3600
+_CONDITIONS_CACHE: dict[tuple, tuple[float, dict]] = {}
 
 
 def _app_token() -> str:
@@ -90,6 +124,11 @@ def suggest(query: str, marketplace_id: Optional[str] = None, limit: int = 5) ->
     if not query:
         return {"query": query, "tree_id": None, "suggestions": []}
 
+    cache_key = (" ".join(query.lower().split()), marketplace_id or "", limit)
+    cached = _cache_get(_SUGGEST_CACHE, cache_key, _SUGGEST_TTL)
+    if cached is not None:
+        return cached
+
     tree_id = default_tree_id(marketplace_id)
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/commerce/taxonomy/v1/category_tree/{tree_id}"
@@ -116,7 +155,9 @@ def suggest(query: str, marketplace_id: Optional[str] = None, limit: int = 5) ->
                 "path": path,
             }
         )
-    return {"query": query, "tree_id": tree_id, "suggestions": suggestions}
+    result = {"query": query, "tree_id": tree_id, "suggestions": suggestions}
+    _cache_put(_SUGGEST_CACHE, cache_key, result)
+    return result
 
 
 def best_category_id(query: str, marketplace_id: Optional[str] = None) -> dict:
@@ -149,6 +190,12 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
     if not category_id:
         return {"conditions": []}
     marketplace_id = marketplace_id or config.EBAY_MARKETPLACE_ID
+    # Cached per category, not per seller: the allowed conditions are category
+    # metadata — the same answer whichever token asked for it.
+    cache_key = (category_id, marketplace_id)
+    cached = _cache_get(_CONDITIONS_CACHE, cache_key, _CONDITIONS_TTL)
+    if cached is not None:
+        return cached
     token = access_token or _app_token()
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/sell/metadata/v1/marketplace/{marketplace_id}"
@@ -174,7 +221,9 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
                 "id": cid,
                 "label": c.get("conditionDescription", "") or enum.replace("_", " ").title(),
             })
-    return {"conditions": conditions}
+    result = {"conditions": conditions}
+    _cache_put(_CONDITIONS_CACHE, cache_key, result)
+    return result
 
 
 # Aspects rarely change, but they're fetched on every preflight AND every
@@ -205,9 +254,9 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     if not category_id:
         return {"aspects": []}
     cache_key = f"{category_id}|{marketplace_id or ''}"
-    hit = _ASPECTS_CACHE.get(cache_key)
-    if hit and time.time() - hit[0] < _ASPECTS_TTL:
-        return hit[1]
+    cached = _cache_get(_ASPECTS_CACHE, cache_key, _ASPECTS_TTL)
+    if cached is not None:
+        return cached
     tree_id = default_tree_id(marketplace_id)
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/commerce/taxonomy/v1/category_tree/{tree_id}"
@@ -255,9 +304,7 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
     result = {"aspects": aspects}
-    if len(_ASPECTS_CACHE) > 300:  # tiny bound; entries are per-category
-        _ASPECTS_CACHE.clear()
-    _ASPECTS_CACHE[cache_key] = (time.time(), result)
+    _cache_put(_ASPECTS_CACHE, cache_key, result, bound=300)
     return result
 
 

@@ -513,11 +513,17 @@ export function useListingForm() {
   // confidence score), so listings come SEO-ready with no manual step. Runs
   // once per session, and NOT when reopening a saved listing or a bulk item
   // (confidence is null there) so we never re-spend on an already-filled item.
+  // Also NOT when the identify job already ran the server-side enrichment
+  // (specificsAutofilled) — re-running the same vision passes seconds later
+  // added nothing and charged the account a second time. The effect still
+  // fires when the server pass was skipped (no category resolved, taxonomy
+  // down), which is exactly when a client-side fill completes the listing.
   const autoFilledFor = useRef(null);
   useEffect(() => {
     const aspects = categoryMeta.aspects || [];
     const fresh = !!session?.confidence;
-    if (!fresh || !aspects.length || autoFilledFor.current === sessionId) return;
+    if (!fresh || session?.specificsAutofilled || !aspects.length
+      || autoFilledFor.current === sessionId) return;
     const missingRequired = aspects.some((a) => a.required && !getSpecific(a.name));
     if (!missingRequired) return;
     autoFilledFor.current = sessionId;

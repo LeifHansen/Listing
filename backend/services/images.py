@@ -1407,6 +1407,43 @@ def thumb_jpeg(path: Path, side: int = 512) -> bytes:
         return buf.getvalue()
 
 
+# The size vision calls send. Claude reads images in 28px patches and never
+# downscales anything up to ~1092px on the long side (⌈1092/28⌉² = 1521 visual
+# tokens); the full 1600px listing photo costs ⌈1600/28⌉² = 3364 tokens on
+# high-resolution models AND double the upload bytes, for no extra detail the
+# identify prompts actually use. Tag close-ups keep cropping from the full
+# photo — this is only the whole-frame payload size.
+VISION_SIDE = int(os.getenv("VISION_IMAGE_SIDE", "1092") or "1092")
+
+
+def vision_copy(path: Path, side: int = 0) -> Path:
+    """A cached, right-sized JPEG copy of an optimized photo for vision calls.
+
+    Lives in the session's vision/ dir (a sibling of optimized/, invisible to
+    the image list and the R2 mirror) and is regenerated whenever the source
+    file is newer — photo edits rewrite the optimized file, so staleness is
+    just an mtime comparison. Returns `path` unchanged for anything that isn't
+    a session's optimized photo, so callers can pass any path safely."""
+    if path.parent.name != "optimized":
+        return path
+    side = side or VISION_SIDE
+    dst = path.parent.parent / "vision" / path.name
+    try:
+        if dst.is_file() and dst.stat().st_mtime >= path.stat().st_mtime:
+            return dst
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(path) as img:
+            img = _flatten(img)
+            img.thumbnail((side, side), Image.LANCZOS)
+            tmp = dst.with_name(dst.name + ".tmp")
+            img.save(tmp, "JPEG", quality=85)
+            os.replace(tmp, dst)  # atomic: a racing reader never sees a torn file
+        return dst
+    except Exception as exc:  # noqa: BLE001 - a copy is an optimization only
+        log.info("vision copy skipped for %s: %s", path.name, exc)
+        return path
+
+
 # How many photos to run through a remote engine (Pixian/Photoroom/Adobe) at
 # once. The per-photo work there is mostly waiting on the API, so the pool
 # turns a 250-photo bulk batch from ~15 minutes of serial waiting into
