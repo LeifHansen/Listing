@@ -1,7 +1,7 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, downscaleAllForUpload } from "@/lib/api";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -173,6 +173,10 @@ export function AppProvider({ children }) {
   });
   // eBay views/watchers per live listing, keyed by our listing record id.
   const [metricsById, setMetricsById] = useState({});
+  // Whether eBay's traffic report (views/impressions) was actually readable —
+  // so the UI can say "we couldn't ask" instead of showing everything as 0.
+  const [metricsStatus, setMetricsStatus] = useState(
+    { trafficOk: false, needsReconnect: false });
 
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     setListingsState((s) => ({ ...s, loading: !quiet }));
@@ -202,6 +206,7 @@ export function AppProvider({ children }) {
     syncing: false, lastSynced: null, error: null,
   });
   const syncedOnce = useRef(false);
+  const lastReconcile = useRef(0); // ms — throttles the quiet status re-checks
   const syncStore = useCallback(async ({ force = false } = {}) => {
     if (!user || !ebay.connected) return null;
     if (syncedOnce.current && !force) return null;
@@ -210,6 +215,7 @@ export function AppProvider({ children }) {
     try {
       const res = await postJson("/api/ebay/import-listings", {});
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
+      lastReconcile.current = Date.now();
       postJson("/api/ebay/sync-listings", {})
         .then((r) => { if (r.changed) loadListings({ quiet: true }); })
         .catch(() => {});
@@ -222,6 +228,32 @@ export function AppProvider({ children }) {
     }
   }, [user, ebay.connected, loadListings]);
   useEffect(() => { syncStore(); }, [syncStore]);
+
+  // The mirror import runs once per app session — but a tab (or the native
+  // shell) can stay open for days, and a listing that ends or sells ON eBay
+  // in that time would sit under Active until a manual sync. Quietly re-check
+  // live statuses whenever the app comes back into focus, and on a slow
+  // heartbeat while it stays visible, so those records slide into
+  // Inactive/Sold on their own. Throttled: each check fans out real eBay
+  // calls server-side.
+  const reconcileStatuses = useCallback(async () => {
+    if (!user || !ebay.connected || document.hidden) return;
+    if (Date.now() - lastReconcile.current < 5 * 60000) return;
+    lastReconcile.current = Date.now();
+    try {
+      const r = await postJson("/api/ebay/sync-listings", {});
+      if (r.changed) loadListings({ quiet: true });
+    } catch (e) { /* best-effort — the next pass tries again */ }
+  }, [user, ebay.connected, loadListings]);
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) reconcileStatuses(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const t = setInterval(reconcileStatuses, 10 * 60000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(t);
+    };
+  }, [reconcileStatuses]);
 
   // ---------- the listing being worked on ----------
   // session: { sessionId, listing, confidence } — null until AI identify runs
@@ -303,6 +335,22 @@ export function AppProvider({ children }) {
     try { localStorage.setItem("quickflip-bulk", JSON.stringify(b)); } catch (e) {}
     setView("new");
   }, []);
+  // A batch begins when the seller hits the button, not when the server hands
+  // back a job id: uploading a big pile takes seconds, and until now those
+  // seconds were spent still sitting on the Sell tab with the listings in
+  // view. Parking a job-less entry flips straight to the batch screen, which
+  // shows "Uploading your photo pile…" until the id arrives. Not persisted —
+  // there is no job to resume yet.
+  const beginBulk = useCallback(() => {
+    setActiveBulk({ jobId: null });
+    setView("new");
+  }, []);
+  // The pile of a batch whose upload never got off the ground. The uploader
+  // unmounts the moment the batch screen takes over, so without handing the
+  // photos back the seller would return to an empty drop zone and have to
+  // pick every one of them again.
+  const [bulkRetry, setBulkRetry] = useState(null); // { files, removeBg }
+  const clearBulkRetry = useCallback(() => setBulkRetry(null), []);
   // Job finished: stop persisting (a reload shouldn't restore a done batch) but
   // keep it in memory so the results stay on screen until the user moves on.
   const bulkSettled = useCallback(() => {
@@ -312,6 +360,26 @@ export function AppProvider({ children }) {
     setActiveBulk(null);
     try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
   }, []);
+  // The whole bulk upload — screen flip first, then the slow part. It lives
+  // here rather than in the uploader because that flip unmounts the uploader
+  // while the downscale + POST are still running.
+  const runBulkUpload = useCallback(async (files, removeBg) => {
+    beginBulk();
+    try {
+      const prepped = await downscaleAllForUpload(files.map((f) => f.file));
+      const fd = new FormData();
+      prepped.forEach((f) => fd.append("files", f));
+      fd.append("remove_bg", removeBg ? "true" : "false");
+      const { job_id } = await api("/api/bulk/upload", { method: "POST", body: fd });
+      files.forEach((f) => URL.revokeObjectURL(f.url));
+      startBulk(job_id);
+    } catch (e) {
+      // Back to the uploader with the pile intact, so retrying is one click.
+      setBulkRetry({ files, removeBg });
+      clearBulk();
+      toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
+    }
+  }, [beginBulk, startBulk, clearBulk, toast]);
 
   // ---------- OAuth redirect landing (eBay + generic marketplaces) ----------
   useEffect(() => {
@@ -392,10 +460,19 @@ export function AppProvider({ children }) {
   // eBay views/watchers for live listings (best-effort; empty until eBay is
   // connected and the analytics scope granted). Refreshes as the set changes.
   useEffect(() => {
-    if (!user || !ebay.connected) { setMetricsById({}); return; }
+    if (!user || !ebay.connected) {
+      setMetricsById({});
+      setMetricsStatus({ trafficOk: false, needsReconnect: false });
+      return;
+    }
     let alive = true;
     api("/api/ebay/listing-metrics")
-      .then((r) => { if (alive) setMetricsById(r.metrics || {}); })
+      .then((r) => {
+        if (!alive) return;
+        setMetricsById(r.metrics || {});
+        setMetricsStatus({
+          trafficOk: !!r.traffic_ok, needsReconnect: !!r.needs_reconnect });
+      })
       .catch(() => {});
     return () => { alive = false; };
   }, [user, ebay.connected, listingsState.items.length]);
@@ -411,11 +488,12 @@ export function AppProvider({ children }) {
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
-    listingsState, loadListings, metricsById,
+    listingsState, loadListings, metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
-    activeBulk, startBulk, bulkSettled, clearBulk,
+    activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
+    bulkRetry, clearBulkRetry,
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
@@ -423,10 +501,11 @@ export function AppProvider({ children }) {
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
-    listingsState, loadListings, metricsById, storeSync, syncStore,
+    listingsState, loadListings, metricsById, metricsStatus, storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
-    activeBulk, startBulk, bulkSettled, clearBulk,
+    activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
+    bulkRetry, clearBulkRetry,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
