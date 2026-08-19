@@ -1521,8 +1521,18 @@ def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
 
     chain = config.bg_engine_chain() if remove_bg else []
     remote_first = bool(chain) and chain[0] != "local"
-    workers = min(_PHOTO_BATCH_WORKERS if remote_first else _LOCAL_BATCH_WORKERS,
-                  total)
+    if remote_first:
+        workers = min(_PHOTO_BATCH_WORKERS, total)
+    elif remove_bg:
+        # Local cutouts: model inference releases the GIL (and is serialized
+        # by _INFER_LOCK anyway), so a second photo's mask/crop/encode work
+        # genuinely overlaps it.
+        workers = min(_LOCAL_BATCH_WORKERS, total)
+    else:
+        # No cutout = pure Pillow CPU with no waits to overlap; measured with
+        # the perf harness, a 2-thread pool is ~15% SLOWER than serial here
+        # (GIL + memory-bandwidth contention), so plain optimizes stay serial.
+        workers = 1
     if workers > 1:
         from concurrent.futures import ThreadPoolExecutor
 
