@@ -330,13 +330,36 @@ export function useListingForm() {
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
   // the form + session immediately (optimistic) and save in the background.
-  const reorderImages = useCallback((nextImages) => {
+  // Persist a new photo order. Two things this deliberately does NOT do any
+  // more: send the whole listing (a drag could overwrite a title being edited
+  // in another tab with a stale copy), and swallow the failure. It used to end
+  // in `.catch(() => {})`, so a rejected save left the new order on screen,
+  // saved nowhere, until a reload quietly put it back — which is the seller
+  // dragging their main photo into place and finding it moved again later.
+  const reorderImages = useCallback(async (nextImages) => {
     const imgs = [...nextImages];
+    const previous = form.images || [];
     setForm((f) => ({ ...f, images: imgs }));
     setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
     if (!sessionId) return;
-    postJson(`/api/save/${sessionId}`, { ...collect(), images: imgs }).catch(() => {});
-  }, [collect, sessionId, setForm, setSession]);
+    try {
+      const res = await api(`/api/listings/${sessionId}/images/order`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images: imgs }),
+      });
+      // The server's answer wins — it is what eBay will be handed.
+      const saved = res.images || imgs;
+      if (saved.join("|") !== imgs.join("|")) {
+        setForm((f) => ({ ...f, images: saved }));
+        setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: saved } } : s));
+      }
+    } catch (e) {
+      setForm((f) => ({ ...f, images: previous }));
+      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: previous } } : s));
+      toast(`Photo order not saved: ${e.message}`, { kind: "error" });
+    }
+  }, [form.images, sessionId, setForm, setSession, toast]);
 
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.

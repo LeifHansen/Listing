@@ -35,7 +35,8 @@ from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
-from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
+from .models import (ImageOrderRequest, ItemSpecific, Listing,
+                     MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
                        ebay_trading, image_import, images, jobstore,
@@ -2219,6 +2220,56 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     db.upsert_listing(session_id, listing.model_dump(),
                       status=_sticky_status(prev), user_id=_uid(request))
     return {"saved": True}
+
+
+@app.patch("/api/listings/{session_id}/images/order")
+def reorder_images(session_id: str, req: ImageOrderRequest,
+                   request: Request) -> dict:
+    """Persist the photo order, and nothing else.
+
+    Reordering used to ride on POST /api/save with the WHOLE listing attached,
+    which made a drag do two things it should never do: ship every field the
+    editor happens to be holding (so a reorder could overwrite a title edit
+    made in another tab with a stale copy), and depend on that whole payload
+    validating. A dedicated endpoint means a drag persists a list of names.
+
+    The new order has to be a PERMUTATION of the stored one. That is the
+    guard that matters: a client working from a stale list would otherwise
+    DELETE the photos missing from it, and "my photos vanished when I dragged
+    one" is a considerably worse bug than the one being fixed. A mismatch is
+    409 — the client refetches rather than forcing its stale view through.
+    """
+    _assert_session_owner(session_id, request)
+    rec = db.get_listing(session_id) or {}
+    stored = list((rec.get("listing") or {}).get("images") or [])
+    wanted = [str(n).strip() for n in req.images if str(n).strip()]
+    if sorted(wanted) != sorted(stored):
+        log.info("reorder rejected: session=%s sent=%d stored=%d",
+                 session_id, len(wanted), len(stored))
+        raise HTTPException(
+            409, "This listing's photos changed somewhere else — reopen it "
+                 "and try the reorder again.")
+    if wanted == stored:
+        return {"images": stored}
+
+    def _set_order(data: dict) -> dict:
+        data["images"] = wanted
+        return data
+
+    # Under the row lock, like every other write that shares a listing with
+    # publish's background threads.
+    data = db.mutate_listing_data(session_id, _set_order,
+                                  status=_sticky_status(rec), user_id=_uid(request))
+    saved = list((data or {}).get("images") or wanted)
+    # Keep the on-disk copy in step; eBay is served photos in this order.
+    if data:
+        try:
+            storage.save_listing(session_id, Listing(**data))
+        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+            log.warning("reorder: disk mirror not updated for %s: %s",
+                        session_id, exc)
+    log.info("reorder: session=%s %d photos", session_id, len(saved))
+    return {"images": saved}
 
 
 @app.post("/api/item-aspects")

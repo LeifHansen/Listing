@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext, arrayMove, rectSortingStrategy, sortableKeyboardCoordinates,
+} from "@dnd-kit/sortable";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
@@ -17,8 +23,6 @@ import { PhotoTile } from "./PhotoTile";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
-
-const SEP = "|";
 
 // Fallback strip for an imported listing whose photos couldn't be copied into
 // app storage yet (opening the listing normally imports them automatically,
@@ -44,68 +48,40 @@ function EbayPhotos({ urls }) {
 
 export function PhotosCard({ w, onEdit, onDelete }) {
   const formImages = w.form.images || [];
-  // Local order is the source of truth while dragging; the ref mirrors it
-  // synchronously so pointer handlers never read a stale array.
+  // Local order leads while dragging so the tiles move with the finger; the
+  // form catches up when the drop is persisted.
   const [order, setOrder] = useState(formImages);
-  const orderRef = useRef(formImages);
-  const dragNameRef = useRef(null);
-  const dragStartRef = useRef(null);
   const [draggingName, setDraggingName] = useState(null);
 
   // Sync from the form when NOT mid-drag (a photo was added, deleted, rotated).
   useEffect(() => {
-    if (dragNameRef.current) return;
-    const imgs = w.form.images || [];
-    orderRef.current = imgs;
-    setOrder(imgs);
+    if (draggingName) return;
+    setOrder(w.form.images || []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [w.form.images]);
 
-  // Pointer moves are coalesced to one hit-test per animation frame — the raw
-  // pointermove stream (60-120/s) each forced a synchronous elementFromPoint
-  // reflow, which is what made the drag stutter.
-  const rafRef = useRef(0);
-  const lastPtRef = useRef(null);
+  // Pointer sensor with a small activation distance: on a phone the drag
+  // handle is also a tap target, and without a threshold every tap that
+  // wobbles a pixel starts a drag. Keyboard sensor because reordering photos
+  // with a keyboard is otherwise impossible — the old implementation was
+  // pointer events and elementFromPoint, which no keyboard can reach.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
-  const reorderTo = (targetIdx) => {
-    const cur = orderRef.current;
-    const from = cur.indexOf(dragNameRef.current);
-    if (from < 0 || targetIdx < 0 || targetIdx >= cur.length || targetIdx === from) return;
-    const next = [...cur];
-    const [moved] = next.splice(from, 1);
-    next.splice(targetIdx, 0, moved);
-    orderRef.current = next;
-    setOrder(next);
-  };
-
-  const startDrag = (name) => (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragNameRef.current = name;
-    dragStartRef.current = orderRef.current;
-    setDraggingName(name);
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported */ }
-  };
-  const processMove = () => {
-    rafRef.current = 0;
-    const p = lastPtRef.current;
-    if (!p || !dragNameRef.current) return;
-    const el = document.elementFromPoint(p.x, p.y);
-    const tile = el && el.closest ? el.closest("[data-photo-idx]") : null;
-    if (tile) reorderTo(Number(tile.getAttribute("data-photo-idx")));
-  };
-  const onMove = (e) => {
-    if (!dragNameRef.current) return;
-    lastPtRef.current = { x: e.clientX, y: e.clientY };
-    if (!rafRef.current) rafRef.current = requestAnimationFrame(processMove);
-  };
-  const endDrag = () => {
-    if (!dragNameRef.current) return;
-    dragNameRef.current = null;
+  const onDragStart = ({ active }) => setDraggingName(active.id);
+  const onDragCancel = () => setDraggingName(null);
+  const onDragEnd = ({ active, over }) => {
     setDraggingName(null);
-    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
-    const next = orderRef.current;
-    if (next.join(SEP) !== (dragStartRef.current || []).join(SEP)) w.reorderImages(next);
+    if (!over || active.id === over.id) return;
+    const from = order.indexOf(active.id);
+    const to = order.indexOf(over.id);
+    if (from < 0 || to < 0) return;
+    const next = arrayMove(order, from, to);
+    setOrder(next);
+    // reorderImages rolls this back if the server rejects it.
+    w.reorderImages(next);
   };
 
   const ebayUrls = w.form.image_urls || [];
@@ -120,6 +96,13 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onDragCancel={onDragCancel}
+      >
       <div className={cn(
         "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
         // While dragging, kill hover scale + CSS transitions on every tile and
@@ -128,25 +111,23 @@ export function PhotosCard({ w, onEdit, onDelete }) {
         // behind the lag, plus the Edit button flashing on each tile).
         draggingName && "select-none [&_img]:!scale-100 [&_*]:!transition-none [&_.ph-ov]:!opacity-0",
       )}>
-        <AnimatePresence>
-          {order.map((name, i) => (
-            <PhotoTile
-              key={name}
-              sessionId={w.sessionId}
-              name={name}
-              index={i}
-              version={w.imageVersions[name] || 0}
-              reorderable={order.length > 1}
-              dragging={draggingName === name}
-              onDragStart={startDrag(name)}
-              onDragMove={onMove}
-              onDragEnd={endDrag}
-              onEdit={() => onEdit(name)}
-              onDelete={() => onDelete(name)}
-              onRotate={() => w.rotateImage(name)}
-            />
-          ))}
-        </AnimatePresence>
+        <SortableContext items={order} strategy={rectSortingStrategy}>
+          <AnimatePresence>
+            {order.map((name, i) => (
+              <PhotoTile
+                key={name}
+                sessionId={w.sessionId}
+                name={name}
+                index={i}
+                version={w.imageVersions[name] || 0}
+                reorderable={order.length > 1}
+                onEdit={() => onEdit(name)}
+                onDelete={() => onDelete(name)}
+                onRotate={() => w.rotateImage(name)}
+              />
+            ))}
+          </AnimatePresence>
+        </SortableContext>
         {/* Add more photos — optimizes + appends to this listing. */}
         <label className={cn(
           "relative rounded-tile border-2 border-dashed border-line bg-bg-sunken/40 aspect-square",
@@ -167,6 +148,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           </span>
         </label>
       </div>
+      </DndContext>
       )}
     </WorkflowCard>
   );
