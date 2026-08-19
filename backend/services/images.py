@@ -1179,34 +1179,75 @@ def _pad_square(crop: Image.Image, pad_color: tuple) -> Image.Image:
 _ELONGATED = 1.35
 
 
+def _plain_backdrop(rgb: Image.Image, tol: int = 28) -> bool:
+    """True when the photo's border is a near-uniform backdrop (white sweep,
+    a cleaned cutout, a plain table) rather than a busy scene.
+
+    _subject_box gives up when the difference box spans the frame, which means
+    one of two very different things: the item fills the photo edge to edge, or
+    the background is textured and every pixel differs from the corner. On a
+    plain backdrop it's the former, and cropping such a photo would slice the
+    item — so _fill_square needs to tell the two apart.
+    """
+    ref = _border_color(rgb)
+    w, h = rgb.size
+    step = max(1, min(w, h) // 32)
+    samples, plain = 0, 0
+    for x in range(0, w, step):
+        for y in (0, h - 1):
+            px = rgb.getpixel((x, y))
+            samples += 1
+            plain += all(abs(px[i] - ref[i]) <= tol for i in range(3))
+    for y in range(0, h, step):
+        for x in (0, w - 1):
+            px = rgb.getpixel((x, y))
+            samples += 1
+            plain += all(abs(px[i] - ref[i]) <= tol for i in range(3))
+    return samples > 0 and plain / samples >= 0.85
+
+
 def _fill_square(img: Image.Image) -> Image.Image:
     """Square-frame the photo around its subject (eBay's recommended shape).
 
-    Normal subjects get a square crop that tightly frames them (plus margin)
-    so the item fills the photo — no letterbox bars. ELONGATED subjects are
-    the exception: a square window can't contain a long flat box without
-    cutting it off (the 'cropping way too much' bug), so those are cropped as
-    a rectangle around the whole subject and padded to square with the
-    photo's own backdrop color. Whole item beats full frame."""
+    A subject that fits inside a square window gets a square crop that frames
+    it tightly (plus margin) so the item fills the photo — no letterbox bars.
+    A subject that does NOT fit — an elongated one (train-set boxes, skis,
+    bats) or simply one that spans more than the short side of the frame, like
+    a shirt shot to fill a portrait photo — is cropped as a rectangle around
+    the whole subject and padded to square with the photo's own backdrop
+    color. The square window is never smaller than the subject itself: cutting
+    the item off (chopped sleeves and hems) is worse than a little padding.
+    Whole item beats full frame."""
     rgb = _flatten(img)
     w, h = rgb.size
+    window = min(w, h)  # the largest square the frame can hold
     box = _subject_box(rgb)
     if box:
         left, top, right, bottom = box
         bw, bh = right - left, bottom - top
-        if max(bw, bh) / max(1, min(bw, bh)) > _ELONGATED:
-            mx, my = max(6, int(bw * 0.05)), max(6, int(bh * 0.05))
+        mx, my = max(6, int(bw * 0.05)), max(6, int(bh * 0.05))
+        # What a square crop would have to contain to keep the whole subject.
+        need = max(bw + 2 * mx, bh + 2 * my)
+        elongated = max(bw, bh) / max(1, min(bw, bh)) > _ELONGATED
+        if elongated or need > window:
             crop = rgb.crop((max(0, left - mx), max(0, top - my),
                              min(w, right + mx), min(h, bottom + my)))
             return _pad_square(crop, _border_color(rgb))
         cx, cy = (left + right) // 2, (top + bottom) // 2
         # A square big enough for the subject + ~30% breathing room, but never
-        # larger than the frame nor a tiny over-zoom.
+        # larger than the frame, nor a tiny over-zoom, nor — above all —
+        # smaller than the subject it has to hold.
         want = int(max(bw, bh) * 1.3)
-        side = max(min(w, h) // 2, min(want, w, h))
+        side = max(window // 2, min(want, window), need)
+    elif _plain_backdrop(rgb):
+        # No clean box on a plain backdrop: the item runs edge to edge (or is
+        # a speck on an empty sweep). Either way there's nothing safe to crop,
+        # so pad the frame out to square and keep every pixel of it.
+        return _pad_square(rgb, _border_color(rgb))
     else:
+        # Busy, textured scene — no idea where the item is. Center crop.
         cx, cy = w // 2, h // 2
-        side = min(w, h)
+        side = window
     # Clamp the window so it stays fully inside the image (still no padding).
     left = min(max(0, cx - side // 2), w - side)
     top = min(max(0, cy - side // 2), h - side)
