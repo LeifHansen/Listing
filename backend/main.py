@@ -1911,39 +1911,6 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/image/analyze")
-async def image_analyze(
-    request: Request,
-    session_id: str = Form(""),
-    name: str = Form(""),
-    file: Optional[UploadFile] = File(None),
-) -> dict:
-    """Re-check the item's borders: returns a mask of leftover background
-    (non-white areas outside the detected subject) for the editor to highlight.
-
-    Free by design (it fires after every crop and save), but it runs the same
-    rembg model as its metered siblings — hence the shared studio guard.
-    """
-    _studio_guard(request)
-    data = await file.read() if file else None
-    if data and len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, "Image too large")
-
-    def _run() -> dict:
-        img = _studio_load(request, session_id, name, data)
-        res = images.analyze_cleanup(img)
-        return {
-            "ok": True,
-            "residue_pct": res["residue_pct"],
-            "bbox": res["bbox"],
-            "mask": _data_url(res["residue_mask"], "PNG") if res["residue_pct"] > 0 else None,
-            "width": res["residue_mask"].width,
-            "height": res["residue_mask"].height,
-        }
-
-    return await run_in_threadpool(_run)
-
-
 @app.post("/api/image/auto-clean")
 async def image_auto_clean(
     request: Request,
