@@ -40,7 +40,7 @@ from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
 from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
                        ebay_trading, image_import, images, listing_sync,
                        metrics, notifications, orient, preflight, pricing,
-                       promotions, recommender, taxonomy, tokens)
+                       promotions, recommender, sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -3309,30 +3309,6 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     return res
 
 
-# The per-item probe sweeps below are the expensive half of a sync: up to 60
-# imported + 40 app listings, each its own eBay round trip. The cheap half
-# (eBay's own sold/unsold lists, 2 calls) already catches anything that
-# finished, so the sweeps only exist to correct records those lists miss —
-# which does not need to happen on every poll. Without this cooldown a single
-# open tab's status heartbeat spends ~100 eBay calls every few minutes and
-# burns the app's DAILY Trading API quota, after which every call fails —
-# including the AddFixedPriceItem that publishes a listing.
-_SWEEP_COOLDOWN = float(os.getenv("EBAY_SWEEP_COOLDOWN_SECONDS", "21600") or 21600)
-_last_sweep: dict[str, float] = {}
-_sweep_lock = threading.Lock()
-
-
-def _sweep_due(user_id: str, force: bool) -> bool:
-    """True when the per-item probe sweeps may run for this user. A manual
-    sync (force) always may; the background heartbeat waits out the cooldown."""
-    now = time.time()
-    with _sweep_lock:
-        if not force and now - _last_sweep.get(user_id, 0.0) < _SWEEP_COOLDOWN:
-            return False
-        _last_sweep[user_id] = now
-        return True
-
-
 @app.post("/api/ebay/sync-listings")
 def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     """Reconcile our 'live' listings with eBay: a sold item is auto-archived
@@ -3379,7 +3355,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
                     if listing_sync.is_imported(i.get("listing") or {})}
     imported = [i for i in live if i["id"] in imported_ids]
     items = [i for i in live if i["id"] not in imported_ids]
-    if not _sweep_due(user["id"], force):
+    if not sync_guard.sweep_due(user["id"], force):
         # Cooled down: the finished-list reconcile above already ran (and is
         # what actually moves ended/sold records), so skip the ~100-call
         # per-item sweeps rather than spending the account's daily eBay quota

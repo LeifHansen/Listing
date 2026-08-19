@@ -16,45 +16,40 @@ rejections a seller can hit are explained rather than reported as a generic
 from __future__ import annotations
 
 import backend.ebay_errors as ebay_errors
-import backend.main as main
-
-
-def _reset(user_id: str = "u1") -> None:
-    main._last_sweep.pop(user_id, None)
+from backend.services import sync_guard
 
 
 def test_first_unforced_sweep_runs_then_cools_down():
-    _reset()
+    sync_guard.reset()
     # The first background check is free — nothing has been swept yet.
-    assert main._sweep_due("u1", force=False) is True
+    assert sync_guard.sweep_due("u1") is True
     # Immediately after, the expensive sweeps are skipped.
-    assert main._sweep_due("u1", force=False) is False
-    assert main._sweep_due("u1", force=False) is False
+    assert sync_guard.sweep_due("u1") is False
+    assert sync_guard.sweep_due("u1") is False
 
 
 def test_force_always_runs_the_sweep():
-    _reset()
-    assert main._sweep_due("u1", force=False) is True
+    sync_guard.reset()
+    assert sync_guard.sweep_due("u1") is True
     # The manual "Sync with eBay" button must never be silently downgraded.
-    assert main._sweep_due("u1", force=True) is True
-    assert main._sweep_due("u1", force=True) is True
+    assert sync_guard.sweep_due("u1", force=True) is True
+    assert sync_guard.sweep_due("u1", force=True) is True
 
 
 def test_cooldown_is_per_account():
-    _reset("u1")
-    _reset("u2")
-    assert main._sweep_due("u1", force=False) is True
+    sync_guard.reset()
+    assert sync_guard.sweep_due("u1") is True
     # One user's sweep must not stop another account's first check.
-    assert main._sweep_due("u2", force=False) is True
-    assert main._sweep_due("u1", force=False) is False
+    assert sync_guard.sweep_due("u2") is True
+    assert sync_guard.sweep_due("u1") is False
 
 
 def test_cooldown_expires():
-    _reset()
-    assert main._sweep_due("u1", force=False) is True
+    sync_guard.reset()
+    assert sync_guard.sweep_due("u1") is True
     # Age the record past the window rather than sleeping through it.
-    main._last_sweep["u1"] -= main._SWEEP_COOLDOWN + 1
-    assert main._sweep_due("u1", force=False) is True
+    sync_guard._last_sweep["u1"] -= sync_guard.COOLDOWN_SECONDS + 1
+    assert sync_guard.sweep_due("u1") is True
 
 
 def test_call_limit_error_is_explained_not_generic():
