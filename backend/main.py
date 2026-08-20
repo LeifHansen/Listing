@@ -40,9 +40,9 @@ from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
                        ebay_trading, image_import, images, jobstore,
-                       listing_sync, metrics, notifications, orient, preflight,
-                       pricing, promotions, recommender, sync_guard, taxonomy,
-                       tokens)
+                       listing_merge, listing_sync, metrics, notifications,
+                       orient, preflight, pricing, promotions, recommender,
+                       sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -3186,12 +3186,16 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
             "skipped": [i for i in ids if i not in deleted]}
 
 
-@app.post("/api/listings/merge")
-def merge_listings(payload: dict, request: Request) -> dict:
-    """Merge duplicate drafts into one listing: every source listing's photos
-    are appended to the target (order preserved), then the sources are deleted
-    (DB + disk + R2). The fix-up for bulk grouping splitting one item's photos
-    into several draft listings."""
+# --- Merging duplicate drafts ------------------------------------------------
+# One item photographed twice leaves a bulk batch as two half-right drafts, so
+# consolidating them is a decision, not a button: which draft is the master,
+# and — where the drafts disagree — whose entry survives. Both steps run the
+# same validation and the same field walk (services/listing_merge.py), so the
+# review screen can promise exactly what the merge delivers.
+
+def _merge_ids(payload: dict, request: Request) -> tuple[str, list[str]]:
+    """The master and the drafts being consolidated into it, ownership-checked.
+    The master is never also a source, and a draft named twice is one draft."""
     target_id = str(payload.get("target_id") or "").strip()
     raw_sources = [str(s).strip() for s in (payload.get("source_ids") or [])]
     source_ids = [s for s in dict.fromkeys(raw_sources) if s and s != target_id]
@@ -3200,14 +3204,82 @@ def merge_listings(payload: dict, request: Request) -> dict:
     _assert_session_owner(target_id, request)
     for sid in source_ids:
         _assert_session_owner(sid, request)
-    uid = _uid(request)
+    return target_id, source_ids
 
+
+def _merge_records(target_id: str,
+                   source_ids: list[str]) -> tuple[dict, list[tuple[str, dict]]]:
+    """The master's record, and each draft to consolidate in merge order.
+
+    A live listing is refused at either end: as the master because a published
+    listing is not a draft to pour photos into, as a source because merging
+    deletes it here while it stays up on eBay with nothing left pointing at it.
+    """
     trec = db.get_listing(target_id)
     if not trec:
         raise HTTPException(404, "Listing not found")
     if trec.get("status") in ("published", "live"):
         raise HTTPException(400, "Merge into a draft — this target is already live on eBay.")
-    listing = Listing(**(trec.get("listing") or {}))
+    sources: list[tuple[str, dict]] = []
+    for sid in source_ids:
+        srec = db.get_listing(sid) or {}
+        if srec.get("status") in ("published", "live"):
+            raise HTTPException(
+                400, "One of the drafts you picked is already live on eBay — "
+                     "end that listing first, then merge.")
+        sources.append((sid, srec.get("listing") or {}))
+    return trec, sources
+
+
+def _merge_row(listing_id: str, data: dict) -> dict:
+    """One draft as the review screen lists it."""
+    return {"listing_id": listing_id,
+            "title": str(data.get("title") or "").strip(),
+            "photos": len(data.get("images") or storage.list_optimized(listing_id))}
+
+
+@app.post("/api/listings/merge/preview")
+def merge_listings_preview(payload: dict, request: Request) -> dict:
+    """A merge, worked out but not performed: with `target_id` as the master,
+    every field these drafts disagree about — each entry on offer and which
+    draft it came from — plus the blanks on the master a duplicate can fill in.
+
+    Writes nothing. The seller's answers go to /api/listings/merge as
+    `field_choices`, and re-previewing with a different `target_id` is how the
+    master changes."""
+    target_id, source_ids = _merge_ids(payload, request)
+    trec, sources = _merge_records(target_id, source_ids)
+    tdata = trec.get("listing") or {}
+    consolidating = [_merge_row(sid, data) for sid, data in sources]
+    return {"ok": True, "target_id": target_id,
+            "target": _merge_row(target_id, tdata),
+            "sources": consolidating,
+            "added_photos": sum(row["photos"] for row in consolidating),
+            **listing_merge.review([(target_id, tdata), *sources])}
+
+
+@app.post("/api/listings/merge")
+def merge_listings(payload: dict, request: Request) -> dict:
+    """Merge duplicate drafts into one listing. `target_id` names the master:
+    every source listing's photos are appended to it (order preserved), the
+    fields named in `field_choices` ({field key: the listing id whose entry
+    wins}, both straight out of /api/listings/merge/preview) are written over
+    the master's, any field the master left blank is filled from the first
+    duplicate that has one, and the sources are then deleted (DB + disk + R2).
+    The fix-up for bulk grouping splitting one item's photos into several
+    draft listings.
+
+    Sent without `field_choices` — every client from before the review step —
+    each of the master's own entries stands, exactly as it used to; only its
+    blanks fill in."""
+    target_id, source_ids = _merge_ids(payload, request)
+    trec, sources = _merge_records(target_id, source_ids)
+    uid = _uid(request)
+
+    data, applied = listing_merge.resolve(
+        [(target_id, trec.get("listing") or {}), *sources],
+        payload.get("field_choices"))
+    listing = Listing(**data)
     tdir = storage.optimized_dir(target_id)
     tdir.mkdir(parents=True, exist_ok=True)
 
@@ -3215,9 +3287,7 @@ def merge_listings(payload: dict, request: Request) -> dict:
     nxt = max((storage.image_index(n)
                for n in base + storage.list_optimized(target_id)), default=-1) + 1
     added: list[str] = []
-    for sid in source_ids:
-        srec = db.get_listing(sid) or {}
-        s_listing = srec.get("listing") or {}
+    for sid, s_listing in sources:
         sdir = storage.optimized_dir(sid)
         for n in (s_listing.get("images") or storage.list_optimized(sid)):
             src = sdir / n
@@ -3241,10 +3311,10 @@ def merge_listings(payload: dict, request: Request) -> dict:
     for sid in source_ids:
         db.delete_listing(sid, uid)
         _purge_session_images(sid)
-    log.info("merged %d listing(s) into %s (+%d photos) user=%s",
-             len(source_ids), target_id, len(added), uid)
+    log.info("merged %d listing(s) into %s (+%d photos, %d field(s) carried over) user=%s",
+             len(source_ids), target_id, len(added), len(applied), uid)
     return {"ok": True, "added": len(added), "removed": source_ids,
-            "listing": listing.model_dump()}
+            "applied": applied, "listing": listing.model_dump()}
 
 
 @app.post("/api/publish")

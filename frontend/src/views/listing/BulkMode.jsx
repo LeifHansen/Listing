@@ -15,6 +15,7 @@ import { TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
+import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import {
   MarketTargetChips, missingRequired, publishListing, usePublishTargets,
@@ -345,7 +346,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const [checked, setChecked] = useState({});
   const [publishing, setPublishing] = useState({});
   const [deleting, setDeleting] = useState({});
-  const [merging, setMerging] = useState(false);
+  // The merge review dialog. `key` bumps on every open so the dialog remounts
+  // with fresh state (which draft is master, which entries win) instead of
+  // reopening on the last merge's answers; `drafts` is the snapshot it was
+  // opened on, so the queue polling underneath can't reshuffle it mid-review.
+  const [merge, setMerge] = useState({ open: false, drafts: [], key: 0 });
   // Watching was given up on (job gone, or too many failed polls). Without it
   // the pre-first-poll "Uploading…" state below would spin forever.
   const [unwatched, setUnwatched] = useState(false);
@@ -609,44 +614,38 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   };
 
-  // Merge duplicate drafts of the SAME item into one listing: photos combine
-  // under the first selected item; the other drafts are deleted.
-  const mergeSelected = async () => {
+  // Merge duplicate drafts of the SAME item into one listing. Which draft is
+  // the master, and whose entry wins where two drafts disagree, are both the
+  // seller's calls — MergeListingsDialog asks them before anything is written.
+  const mergeSelected = () => {
     const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
     if (targets.length < 2) {
       toast("Select the duplicate drafts (2 or more) to merge.", { kind: "warning" });
       return;
     }
-    const [target, ...sources] = targets;
-    const name = target.listing?.title || target.title || "the first selected draft";
-    if (!(await confirm({
-      title: `Merge ${targets.length} drafts into one?`,
-      message: `All their photos combine under "${name}". The other ${sources.length === 1 ? "draft is" : `${sources.length} drafts are`} deleted. Use this when one item got split into duplicates.`,
-      confirmLabel: "Merge",
-    }))) return;
-    setMerging(true);
-    try {
-      const res = await postJson("/api/listings/merge", {
-        target_id: target.session_id,
-        source_ids: sources.map((s) => s.session_id),
-      });
-      sources.forEach((s) => removed.current.add(s.session_id));
-      setItems((cur) => cur
-        .filter((it) => !removed.current.has(it.session_id))
-        .map((it) => (it.session_id === target.session_id ? { ...it, listing: res.listing } : it)));
-      setChecked((c) => {
-        const next = { ...c };
-        sources.forEach((s) => delete next[s.session_id]);
-        return next;
-      });
-      loadListings({ quiet: true });
-      toast(`Merged into "${name}" — ${res.added} photo${res.added === 1 ? "" : "s"} moved over.`,
-        { kind: "success" });
-    } catch (e) {
-      toast(`Couldn't merge: ${e.message}`, { kind: "error" });
-    } finally {
-      setMerging(false);
-    }
+    setMerge((m) => ({ open: true, drafts: targets, key: m.key + 1 }));
+  };
+
+  // The merge went through: drop the consolidated drafts, take the master's
+  // merged listing back, and say what moved over.
+  const onMerged = (res, { masterId, title }) => {
+    const gone = new Set(res.removed || []);
+    gone.forEach((id) => removed.current.add(id));
+    setItems((cur) => cur
+      .filter((it) => !removed.current.has(it.session_id))
+      .map((it) => (it.session_id === masterId ? { ...it, listing: res.listing } : it)));
+    setChecked((c) => {
+      const next = { ...c };
+      gone.forEach((id) => delete next[id]);
+      return next;
+    });
+    setMerge((m) => ({ ...m, open: false }));
+    loadListings({ quiet: true });
+    const fields = res.applied?.length
+      ? `, ${res.applied.length} field${res.applied.length === 1 ? "" : "s"} carried over`
+      : "";
+    toast(`Merged into "${title}" — ${res.added} photo${res.added === 1 ? "" : "s"} moved over${fields}.`,
+      { kind: "success" });
   };
 
   const publishSelected = async () => {
@@ -810,8 +809,8 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             <Rocket aria-hidden /> Publish selected ({drafts.filter((d) => checked[d.session_id]).length})
           </Button>
           {drafts.filter((d) => checked[d.session_id]).length >= 2 && (
-            <Button variant="secondary" onClick={mergeSelected} loading={merging}
-              title="Same item split into duplicates? Combine the selected drafts into one listing.">
+            <Button variant="secondary" onClick={mergeSelected}
+              title="Same item split into duplicates? Pick the master, choose whose entries win, and combine them into one listing.">
               <Combine aria-hidden /> Merge into one
             </Button>
           )}
@@ -827,6 +826,16 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             <PenLine aria-hidden /> Start another batch
           </Button>
         </div>
+      )}
+
+      {merge.drafts.length >= 2 && (
+        <MergeListingsDialog
+          key={merge.key}
+          open={merge.open}
+          drafts={merge.drafts}
+          onClose={() => setMerge((m) => ({ ...m, open: false }))}
+          onMerged={onMerged}
+        />
       )}
 
       {/* Preview cards stream in one by one, as each item is drafted. */}

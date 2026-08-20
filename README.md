@@ -157,6 +157,8 @@ Without them, you can still type a category ID manually in the preview.
 | `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
+| `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
 | `GET`  | `/api/insights` | Ranked "what to do next" actions across the user's listings |
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
