@@ -31,7 +31,7 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..models import ItemSpecific, Listing
+from ..models import TITLE_MAX_CHARS, ItemSpecific, Listing
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -264,7 +264,7 @@ def _item_to_listing(item: ET.Element) -> dict:
     weight_minor = _float(dims, "WeightMinor") if dims is not None else None
 
     return {
-        "title": _text(item, "Title")[:80],
+        "title": _text(item, "Title")[:TITLE_MAX_CHARS],
         "subtitle": _text(item, "SubTitle"),
         "brand": next((s["value"] for s in specifics
                        if s["name"].strip().lower() == "brand"), ""),
@@ -495,7 +495,7 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> li
     """The <Item> children shared by create and revise: the listing's content."""
     parts: list[str] = []
     if listing.title:
-        parts.append(f"<Title>{_esc(listing.title[:80])}</Title>")
+        parts.append(f"<Title>{_esc(listing.title[:TITLE_MAX_CHARS])}</Title>")
     if listing.description:
         parts.append(f"<Description>{_cdata(listing.description)}</Description>")
     if listing.category_id:
