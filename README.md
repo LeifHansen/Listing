@@ -21,7 +21,7 @@ payload when you don't have eBay credentials yet).
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
-| Optimize | Auto-orient, trim plain borders, pad to square on a clean canvas, upscale to 1600px, mild enhance | Pillow |
+| Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (or trim plain borders when removal is off), square-frame without cropping the item, resize to 1600px, finishing sharpen | Pillow |
 | Identify | Photos sent to Claude vision; returns structured listing draft + confidence + "missing info" to verify | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
@@ -347,6 +347,39 @@ every stranded region that doesn't match it is put back, with the pixels taken
 from the original photo. The same repaired mask drives the photo studio's
 auto-clean, residue highlight, and smart crop. Tunable with
 `BG_HOLE_TOLERANCE` (default 45) and `BG_FILL_HOLES=off`.
+
+**One inference at a time, but two different deadlines.** The local model is
+serialized (two runs at once double peak memory and OOM the box), so callers
+queue for a slot — and how long they should queue depends entirely on who is
+waiting. Someone watching the photo studio's spinner wants a fast "busy, try
+again" (`REMBG_WAIT_SECONDS`, default 25). A photo in a background batch has
+nobody to tell and gets no retry, so giving up just saves it with its
+background still on — it queues instead (`REMBG_BATCH_WAIT_SECONDS`, default
+300). A single deadline served both at 25s, which is shorter than one
+inference on a loaded box, so every photo queued behind another was guaranteed
+to time out and keep its background.
+
+Resolution is split the same way: `REMBG_MAX_SIDE` (640) is what batches run
+at, `REMBG_STUDIO_MAX_SIDE` (1024 in production) is for the studio's one-off
+cutout. Pixel count goes as the square, so that difference is 2.6x the work
+per photo — the setting that decides whether a big batch finishes at all.
+`REMBG_THREADS` caps onnxruntime, defaulting to one fewer than the visible
+CPUs: uvicorn still has to answer its health check while a batch runs, and a
+machine that misses those gets replaced by the platform, killing the batch.
+
+**A batch survives the machine it started on.** Bulk does every photo's
+background removal up front and only then starts drafting, so until the last
+cutout lands nothing durable exists. A machine that goes away during that pass
+(a deploy, an OOM, a platform replacement) used to take the whole batch with
+it, even though the finished photos were on the volume the entire time.
+Optimized outputs are now renamed into place — so a file existing means it is
+complete — and the photo pass skips any it already has. On boot, a batch that
+was interrupted *before it drafted anything* is re-registered under its own
+job id and run again, so a browser still polling simply carries on. Batches
+interrupted during `identifying` are left alone: each finished item is already
+saved and already billed per item, so resuming would duplicate both.
+`BULK_MAX_RESUMES` (default 2) stops a batch that keeps dying from taking the
+machine with it.
 
 ## Bi-directional eBay sync
 
