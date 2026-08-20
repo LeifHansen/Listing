@@ -108,7 +108,9 @@ export const ORIGIN_META = {
 export function EbayMark({ className }) {
   return (
     <span aria-label="eBay"
-      className={cn("font-extrabold italic tracking-tight leading-none select-none", className)}>
+      /* font-sans is explicit: this sits inside a TagPill, which is font-display,
+         and the wordmark must not inherit Fredoka (no italic, no 800). */
+      className={cn("font-sans font-extrabold italic tracking-tight leading-none select-none", className)}>
       <span style={{ color: "#E53238" }}>e</span>
       <span style={{ color: "#0064D2" }}>b</span>
       <span style={{ color: "#F5AF02" }}>a</span>

@@ -1049,7 +1049,11 @@ export function PromoteCard({ w }) {
               <div>
                 <p className="text-[13px] font-medium text-ink-secondary">Ad rate</p>
                 <p className="font-display text-[34px] font-bold text-ink tabular-nums leading-none mt-1">
-                  {rate.toFixed(1)}<span className="text-xl align-top">%</span>
+                  {/* Fredoka has no tabular figures, so the digits change width
+                      as the slider steps. Reserve the widest value's box
+                      ("20.0") to keep the % from dancing mid-drag. */}
+                  <span className="inline-block min-w-[1.95em]">{rate.toFixed(1)}</span>
+                  <span className="text-xl align-top">%</span>
                 </p>
               </div>
               <div className="text-right">

@@ -98,7 +98,14 @@
   /* Type pairing — Fredoka for display (headings, statistics, short
      labels), Nunito Sans for everything you read in a line (navigation,
      buttons, body copy). Fredoka only ships 600-700 here, so anything
-     wearing font-display must be semibold or bolder. */
+     wearing font-display must be semibold or bolder.
+
+     One caveat: Fredoka has proportional figures and no tnum feature, so
+     `tabular-nums` is inert wherever font-display wins. It is still worth
+     keeping on numeric elements — every fallback in the stack honors it,
+     which is what the native build renders with when the webfont is
+     unavailable — but a font-display value that updates in place needs its
+     width reserved rather than relying on tabular-nums (see PromoteCard). */
   --font-sans: "Nunito Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-display: "Fredoka", "Nunito Sans", ui-sans-serif, system-ui, sans-serif;
 
