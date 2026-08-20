@@ -53,6 +53,35 @@ export function AppProvider({ children }) {
     } catch (e) { /* banner stays hidden until we know */ }
   }, []);
 
+  // ---------- eBay connection ----------
+  // Declared ahead of auth: logout() lists loadEbayStatus as a dependency,
+  // and a useCallback dependency array is evaluated during render — a
+  // forward reference there is a temporal-dead-zone crash, not a lint nit.
+  const [ebay, setEbay] = useState({
+    connected: false, env: "", username: "", email: "", oauth_ready: false,
+    oauth_missing: [], labels_enabled: false,
+  });
+  const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
+
+  const loadEbayStatus = useCallback(async () => {
+    try {
+      const s = await api("/api/ebay/status");
+      setEbay({
+        connected: !!s.connected,
+        env: s.env || "",
+        username: s.username || "",
+        email: s.email || "",
+        oauth_ready: !!s.oauth_ready,
+        oauth_missing: s.oauth_missing || [],
+        labels_enabled: !!s.labels_enabled,
+      });
+    } catch (e) { /* keep previous */ }
+  }, []);
+
+  // Publishing is live if EITHER the user connected their eBay account or the
+  // server has env-level credentials.
+  const canPublishLive = ebay.connected || health.ebay_configured;
+
   // ---------- auth ----------
   const [user, setUser] = useState(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -87,32 +116,6 @@ export function AppProvider({ children }) {
   const loadTokens = useCallback(async () => {
     try { setTokens(await api("/api/tokens")); } catch (e) { /* keep previous */ }
   }, []);
-
-  // ---------- eBay connection ----------
-  const [ebay, setEbay] = useState({
-    connected: false, env: "", username: "", email: "", oauth_ready: false,
-    oauth_missing: [], labels_enabled: false,
-  });
-  const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
-
-  const loadEbayStatus = useCallback(async () => {
-    try {
-      const s = await api("/api/ebay/status");
-      setEbay({
-        connected: !!s.connected,
-        env: s.env || "",
-        username: s.username || "",
-        email: s.email || "",
-        oauth_ready: !!s.oauth_ready,
-        oauth_missing: s.oauth_missing || [],
-        labels_enabled: !!s.labels_enabled,
-      });
-    } catch (e) { /* keep previous */ }
-  }, []);
-
-  // Publishing is live if EITHER the user connected their eBay account or the
-  // server has env-level credentials.
-  const canPublishLive = ebay.connected || health.ebay_configured;
 
   // ---------- marketplace roster (eBay + Etsy + Depop + ...) ----------
   // Every registered marketplace with this user's connection state, from
