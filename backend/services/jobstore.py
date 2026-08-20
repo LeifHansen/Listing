@@ -35,6 +35,8 @@ _JOBS: dict[str, dict] = {}
 # batch is a ~1MB dict, so the JSON is built once per CHANGE rather than once
 # per poll — this runs on the same shared CPUs as photo inference.
 _SNAPSHOTS: dict[str, tuple[int, str]] = {}
+# Same cache for the items-free body the app shell polls (see brief_json).
+_BRIEFS: dict[str, tuple[int, str]] = {}
 _LOCK = threading.Lock()
 
 # Bound the in-memory store. An identify runs as a job on EVERY upload, so
@@ -89,6 +91,7 @@ def register(job_id: str, data: dict, uid: Optional[str] = None) -> None:
         job = {**data, "id": job_id, "_uid": uid, "_rev": 0}
         _JOBS[job_id] = job
         _SNAPSHOTS.pop(job_id, None)
+        _BRIEFS.pop(job_id, None)
         # Evict FINISHED jobs first. Dicts keep insertion order, and dropping
         # the oldest blindly could evict a bulk batch that is still running —
         # its own poller would then be told the batch doesn't exist, which is
@@ -98,6 +101,7 @@ def register(job_id: str, data: dict, uid: Optional[str] = None) -> None:
             dropped = finished if finished is not None else next(iter(_JOBS))
             _JOBS.pop(dropped)
             _SNAPSHOTS.pop(dropped, None)
+            _BRIEFS.pop(dropped, None)
         record = _record(job)
     _write_mirror(job_id, record)
 
@@ -153,6 +157,34 @@ def snapshot_json(job_id: str, uid: Optional[str] = None) -> Optional[str]:
         return hit[1]
 
 
+def brief_json(job_id: str, uid: Optional[str] = None) -> Optional[str]:
+    """`snapshot_json` minus the drafted items — the "is it finished yet?"
+    answer on its own.
+
+    The app shell watches the running batch from every screen (the banner
+    that says one is processing has to stop saying it when the batch ends,
+    whichever tab the seller is on), and a 30-item batch's full status is a
+    ~1MB body. This is the few hundred bytes that question actually needs,
+    cached per change exactly like the full one.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            return None
+        owner = job.get("_uid")
+        if owner and owner != uid:
+            return None
+        rev = job.get("_rev", 0)
+        hit = _BRIEFS.get(job_id)
+        if hit is None or hit[0] != rev:
+            public = {k: v for k, v in job.items()
+                      if not k.startswith("_") and k != "items"}
+            public["total_items"] = job.get("total_items") or len(job.get("items") or [])
+            hit = (rev, json.dumps(public))
+            _BRIEFS[job_id] = hit
+        return hit[1]
+
+
 def _record(job: dict) -> dict:
     return {k: job[k] for k in MIRROR_FIELDS if k in job}
 
@@ -161,6 +193,15 @@ def interrupted_message(record: dict) -> str:
     """Why a mirrored job that was still running has no result: the process it
     ran in went away. Names the phase and count it reached, so the answer is
     "it stopped optimizing photo 37 of 38" rather than a shrug."""
+    if record.get("kind") == "ebay-import":
+        # The store mirror, not a photo batch: nothing was drafted, and what it
+        # did import is already in Listings.
+        total = record.get("total_items") or 0
+        current = record.get("current") or 0
+        where = f" ({min(current, total)} of {total} listings in)" if total else ""
+        return ("The server restarted while mirroring your eBay store"
+                f"{where}, so the sync stopped early. Whatever it imported is "
+                "in Listings — run Sync with eBay again to finish.")
     if record.get("kind") == "identify":
         # A single item, not a pile — there is no partial batch to salvage and
         # nothing was written, so don't send the seller looking in Drafts.
@@ -235,3 +276,4 @@ def reset() -> None:
     with _LOCK:
         _JOBS.clear()
         _SNAPSHOTS.clear()
+        _BRIEFS.clear()

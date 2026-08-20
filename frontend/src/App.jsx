@@ -16,7 +16,7 @@ import { ShopMode } from "@/views/ShopMode";
 import { SettingsView } from "@/views/SettingsView";
 
 function Main() {
-  const { view, setView, health, activeBulk } = useApp();
+  const { view, setView, health, activeBulk, clearBulk } = useApp();
   const [search, setSearch] = useState("");
 
   return (
@@ -29,7 +29,11 @@ function Main() {
         <TopBar onSearch={setSearch} onManageEbay={() => setView("settings")} />
 
         {activeBulk && view !== "new" && (
-          <BulkBanner onReview={() => setView("new")} />
+          <BulkBanner
+            done={!!activeBulk.done}
+            onReview={() => setView("new")}
+            onDismiss={clearBulk}
+          />
         )}
 
         {health._loaded && !health.anthropic_configured && (

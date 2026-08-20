@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from .. import db, ebay_auth, storage
 from ..config import log
@@ -197,12 +197,27 @@ def _started_at(data: dict) -> Optional[datetime]:
         return None
 
 
-def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
+def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
+                  on_progress: Optional[Callable[[str, int, int], None]] = None) -> dict:
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently ENDED (unsold → status 'ended', the Inactive
     tab) and SOLD listings (status 'sold'), each capped at
     EBAY_SYNC_INACTIVE_LIMIT. Returns {"found", "imported", "updated",
-    "failed"}."""
+    "failed"}.
+
+    `on_progress(phase, done, total)` is called as the run advances — one
+    GetItem per listing means a real store takes minutes, and the caller runs
+    this as a background job so the seller watches a count instead of a
+    request that never answers.
+    """
+    def _tick(phase: str, done: int, total: int) -> None:
+        if not on_progress:
+            return
+        try:
+            on_progress(phase, done, total)
+        except Exception as exc:  # noqa: BLE001 - progress must never sink a sync
+            log.debug("sync: progress callback failed: %s", exc)
+
     jobs: list[tuple[str, str]] = []  # (item_id, status) — first entry wins
     seen: set[str] = set()
 
@@ -212,6 +227,7 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
                 seen.add(i)
                 jobs.append((i, status))
 
+    _tick("listing", 0, 0)
     _add(ebay_trading.active_listing_ids(token, limit=limit), "published")
     # Inactive/sold mirrors are additive — a failure there must not sink the
     # main active-store sync.
@@ -252,10 +268,19 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT) -> dict:
 
     # Fetch in parallel, but write to the DB from this thread only, in eBay's
     # original order — so the import stays deterministic and needs no locking.
+    _tick("fetching", 0, len(jobs))
     with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(1, len(jobs)))) as pool:
-        fetched = list(pool.map(_fetch, jobs)) if jobs else []
+        # submit + as_completed rather than pool.map: the results are still read
+        # in eBay's order below (futures keep their slots), but the count can
+        # tick as each GetItem lands instead of only when the last one does.
+        futures = [pool.submit(_fetch, job) for job in jobs]
+        for done_n, _ in enumerate(as_completed(futures), 1):
+            _tick("fetching", done_n, len(jobs))
+        fetched = [f.result() for f in futures]
 
-    for item_id, status, fresh in fetched:
+    _tick("saving", 0, len(fetched))
+    for done_n, (item_id, status, fresh) in enumerate(fetched, 1):
+        _tick("saving", done_n, len(fetched))
         if fresh is None:
             failed += 1
             continue

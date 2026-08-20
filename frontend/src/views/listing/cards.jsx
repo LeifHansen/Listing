@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
@@ -54,6 +54,60 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     w.reorderImages(next);
   };
 
+  // ---------- drop photos straight onto the grid ----------
+  // Files dragged from the desktop land here. Gated on the "Files" type so an
+  // internal drag — the tiles hold <img>, which browsers make draggable on
+  // their own — can't be mistaken for an upload and light up the drop state.
+  const [fileDrag, setFileDrag] = useState(false);
+  // dragenter/dragleave fire per element as the pointer crosses tiles inside
+  // the grid, so a plain boolean flickers. Counting entries against leaves
+  // keeps the highlight steady until the pointer really leaves.
+  const dragDepth = useRef(0);
+  const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
+  const onFileDragEnter = (e) => {
+    if (w.addingPhotos || !hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setFileDrag(true);
+  };
+  const onFileDragOver = (e) => {
+    if (w.addingPhotos || !hasFiles(e)) return;
+    e.preventDefault();  // without this the browser opens the dropped file
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onFileDragLeave = (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (!dragDepth.current) setFileDrag(false);
+  };
+  // A drag that ends anywhere else — dropped on the desktop, or cancelled with
+  // Escape — never sends this grid a dragleave, so the highlight would stay lit
+  // until the next drag. The window hears about both.
+  useEffect(() => {
+    if (!fileDrag) return undefined;
+    const clear = () => { dragDepth.current = 0; setFileDrag(false); };
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, [fileDrag]);
+
+  const onFileDrop = (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setFileDrag(false);
+    if (w.addingPhotos) return;
+    // Only images: a stray PDF or folder would otherwise ride along to the
+    // uploader and come back as a server-side error.
+    const files = Array.from(e.dataTransfer.files || [])
+      .filter((f) => (f.type || "").startsWith("image/"));
+    if (files.length) w.addImages(files);
+  };
+
   const ebayUrls = w.form.image_urls || [];
   const fromEbay = (w.form.source || "") === "ebay" && !formImages.length;
 
@@ -62,13 +116,22 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       id="photos" icon={ImageIcon} title="Photos"
       hint={fromEbay
         ? "The photos on your live eBay listing"
-        : "The first photo is your eBay main image — tap Main on any other photo to promote it, or ‹ › to nudge one place. One-tap rotate & delete; hover Edit to clean up or crop"}
+        : "Drop more photos anywhere in here. The first photo is your eBay main image — tap Main on any other photo to promote it, or ‹ › to nudge one place. One-tap rotate & delete; hover Edit to clean up or crop"}
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
-      <div className={cn(
-        "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3",
-      )}>
+      <div
+        className={cn(
+          "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3 rounded-tile",
+          // The whole grid takes the drop, not just the tile at the end — a
+          // seller aiming at their photos shouldn't have to hit a small target.
+          fileDrag && "outline outline-2 outline-blue outline-offset-4 bg-blue-soft/40",
+        )}
+        onDragEnter={onFileDragEnter}
+        onDragOver={onFileDragOver}
+        onDragLeave={onFileDragLeave}
+        onDrop={onFileDrop}
+      >
         {formImages.map((name, i) => (
           <PhotoTile
             key={name}
@@ -90,6 +153,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           "relative rounded-tile border-2 border-dashed border-line bg-bg-sunken/40 aspect-square",
           "grid place-items-center cursor-pointer text-ink-secondary transition-colors duration-150",
           "hover:border-blue/50 hover:text-blue",
+          fileDrag && "border-blue text-blue bg-blue-soft",
           w.addingPhotos && "pointer-events-none opacity-70",
         )}>
           <input
@@ -101,7 +165,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
             {w.addingPhotos
               ? <Loader2 size={20} className="animate-spin" aria-hidden />
               : <Plus size={20} aria-hidden />}
-            {w.addingPhotos ? "Adding…" : "Add photos"}
+            {w.addingPhotos ? "Adding…" : fileDrag ? "Drop to add" : "Add photos"}
           </span>
         </label>
       </div>

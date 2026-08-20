@@ -290,9 +290,19 @@ function MirrorStatus() {
     );
   }
   if (storeSync.syncing) {
+    // A store of any size takes minutes (one eBay call per listing), so the
+    // line carries the count the background job reports — a bare spinner with
+    // no end in sight reads as broken.
+    const p = storeSync.progress;
+    const detail = p && p.total
+      ? (p.phase === "saving"
+        ? ` saving ${Math.min(p.done, p.total)} of ${p.total}`
+        : ` ${Math.min(p.done, p.total)} of ${p.total} listings`)
+      : "";
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary">
-        <Loader2 size={14} className="animate-spin" aria-hidden /> Syncing your eBay store…
+        <Loader2 size={14} className="animate-spin" aria-hidden />
+        {` Syncing your eBay store…${detail}`}
       </span>
     );
   }

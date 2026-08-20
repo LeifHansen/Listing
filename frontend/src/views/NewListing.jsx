@@ -486,7 +486,13 @@ export function NewListing({ search = "" }) {
   if (!session) {
     return (
       <>
-        {activeBulk && <BulkBanner onReview={() => setShowBulk(true)} />}
+        {activeBulk && (
+          <BulkBanner
+            done={!!activeBulk.done}
+            onReview={() => setShowBulk(true)}
+            onDismiss={clearBulk}
+          />
+        )}
         <SellHome search={search} />
       </>
     );
