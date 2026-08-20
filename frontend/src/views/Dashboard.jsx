@@ -16,7 +16,7 @@ import { ListingCard } from "@/components/ListingCard";
 import { DuplicateListings } from "@/components/DuplicateListings";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
+import { BoxIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
@@ -519,7 +519,7 @@ export function Dashboard() {
               </div>
             </div>
             <div className="hidden lg:block shrink-0 -my-2">
-              <RobotIllustration />
+              <WelcomeIllustration />
             </div>
           </div>
         </Card>

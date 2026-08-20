@@ -14,7 +14,7 @@ import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import {
-  BoxIllustration, TagIllustration,
+  BoxIllustration, ListingsIllustration,
 } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 
@@ -28,7 +28,7 @@ const TABS = [
     id: "active", label: "Active", statuses: ["published", "live"],
     sub: "Everything currently live on eBay — created here or imported",
     empty: {
-      illustration: TagIllustration, title: "Nothing live yet",
+      illustration: ListingsIllustration, title: "Nothing live yet",
       message: "Publish a draft (or create a listing from photos) and it shows up here the moment it's live.",
       action: { label: "Create Listing", icon: PlusCircle, go: "new" },
     },
@@ -46,7 +46,7 @@ const TABS = [
     id: "inactive", label: "Inactive", statuses: ["ended"],
     sub: "Ended listings — no longer on eBay; open one to relist it fresh",
     empty: {
-      illustration: TagIllustration, title: "No inactive listings",
+      illustration: ListingsIllustration, title: "No inactive listings",
       message: "Listings you end (the ⊘ button on an active card) and eBay listings that "
         + "end without selling both collect here, one tap from a fresh relist.",
     },
@@ -55,7 +55,7 @@ const TABS = [
     id: "sold", label: "Sold", statuses: ["sold"],
     sub: "Sold on eBay — nice work",
     empty: {
-      illustration: TagIllustration, title: "No sales recorded yet",
+      illustration: ListingsIllustration, title: "No sales recorded yet",
       message: "When something sells on eBay, the mirror moves it here automatically.",
     },
   },
@@ -63,7 +63,7 @@ const TABS = [
     id: "all", label: "All", statuses: null,
     sub: "A live mirror of your whole eBay store — every status at once",
     empty: {
-      illustration: TagIllustration, title: "No listings yet",
+      illustration: ListingsIllustration, title: "No listings yet",
       message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
       action: { label: "Create Listing", icon: PlusCircle, go: "new" },
     },

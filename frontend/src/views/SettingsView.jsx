@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { RobotIllustration } from "@/components/ui/illustrations";
+import { AccountIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
 const POLICY_KINDS = [
@@ -142,7 +142,7 @@ export function SettingsView() {
       <SettingsShell>
         <Card className="p-0">
           <EmptyState
-            illustration={RobotIllustration}
+            illustration={AccountIllustration}
             title="Log in first"
             message="Your eBay connection and listing defaults live on your account."
             action={

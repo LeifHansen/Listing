@@ -11,7 +11,7 @@ import { Toggle } from "@/components/ui/fields";
 import { Card } from "@/components/ui/Card";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { WorkflowSkeleton } from "@/components/ui/Skeleton";
-import { CameraIllustration } from "@/components/ui/illustrations";
+import { PhotoUploadIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
 // When background removal can't run (out of credits, bad key, rate limit) the
@@ -181,7 +181,7 @@ export function UploadPhase() {
         onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
       >
         <div className="flex flex-col items-center text-center gap-3 py-8">
-          <CameraIllustration />
+          <PhotoUploadIllustration />
           <h2 className="text-xl font-bold text-ink">Drag photos here</h2>
           <p className="text-sm text-ink-secondary">
             or bring them in another way — the AI writes the listing from your shots.

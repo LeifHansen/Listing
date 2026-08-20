@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { ConfidenceBadge, TagPill, PriceBadge } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { SearchIllustration } from "@/components/ui/illustrations";
+import { ShopModeIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
 // Shop Mode — scan items while thrifting: instant ID + typical resale price,
@@ -269,7 +269,7 @@ export function ShopMode() {
       {!busy && !result && !shelf && (
         <Card className="p-0">
           <EmptyState
-            illustration={SearchIllustration}
+            illustration={ShopModeIllustration}
             title="Nothing scanned yet"
             message="Point your camera at a thrift-store find and see what it's worth in seconds."
             action={
