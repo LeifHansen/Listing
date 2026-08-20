@@ -13,9 +13,7 @@ import { InfoTip } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
-import {
-  BoxIllustration, ListingsIllustration,
-} from "@/components/ui/illustrations";
+import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
@@ -37,7 +35,7 @@ const TABS = [
     id: "finds", label: "Finds", statuses: ["unlisted"],
     sub: "Shop Mode finds waiting to become listings",
     empty: {
-      illustration: BoxIllustration, title: "No unlisted finds",
+      illustration: ListingsIllustration, title: "No unlisted finds",
       message: "Scan items in Shop Mode while you're out hunting — tap Buy and they land here to finish later.",
       action: { label: "Open Shop Mode", icon: Store, go: "shop" },
     },
