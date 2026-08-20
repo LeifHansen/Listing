@@ -117,6 +117,11 @@ _MIN_FG_COVERAGE = 0.045
 # mistook for background (not a real backdrop, which is white/neutral) — keep
 # the original. Tunable via DARK_BG_LUMA.
 _DARK_BG_LUMA = int(os.getenv("DARK_BG_LUMA", "70") or "70")
+# ...and when a dark surround leaves less than this much of the frame, the
+# survivor is about the size of a chest print, so the cutout goes out flagged
+# for review rather than unremarked. Above it, a dark surface is just a dark
+# surface and the cutout is reported clean.
+_DARK_REVIEW_COVERAGE = float(os.getenv("DARK_REVIEW_COVERAGE", "0.20") or 0.20)
 # Cap the resolution the background model actually runs at. isnet on a full
 # 1600px image thrashes memory on a 2GB machine and can hang a bulk job for
 # minutes; running on a smaller copy is fast and light, and the resulting mask
@@ -973,6 +978,33 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW, fill_holes=False)
 
 
+# Scale the boundary test runs at. It is a question about shapes, not about
+# pixels, and 512px answers it in a few ms on a mask that may be 1600px+.
+_BOUNDARY_SCAN_SIDE = int(os.getenv("BG_BOUNDARY_SCAN", "512") or 512)
+
+
+def _boundary_support(alpha: Image.Image, rgb: Image.Image) -> dict:
+    """matte.boundary_support for a PIL matte + photo: does the silhouette sit
+    on something that is actually in the picture?
+
+    Any failure returns "supported" — this test exists to stop a guard from
+    deleting good cutouts, so it must never become a new way to delete one.
+    """
+    import numpy as np
+
+    try:
+        side = max(1, _BOUNDARY_SCAN_SIDE)
+        scale = min(1.0, side / max(1, max(rgb.size)))
+        size = (max(2, int(rgb.width * scale)), max(2, int(rgb.height * scale)))
+        small = rgb.resize(size, Image.BILINEAR)
+        kept = np.asarray(alpha.resize(size, Image.BILINEAR), dtype=np.uint8) >= 128
+        return matte.boundary_support(np.asarray(small, dtype=np.float32),
+                                      _edge_strength(small), kept)
+    except Exception as exc:  # noqa: BLE001 - inconclusive must mean "keep"
+        log.warning("bg-removal: boundary test failed (%s) — keeping the cutout", exc)
+        return {"edge_ratio": None, "colour_gap": None, "supported": True}
+
+
 def _subject_survived(alpha: Image.Image, rgb: Image.Image,
                       result: matte.CutoutResult,
                       dark_guard: bool = True) -> bool:
@@ -997,23 +1029,50 @@ def _subject_survived(alpha: Image.Image, rgb: Image.Image,
                     "original was kept.")
         return False
     # Dark-background guard: a dark garment that fills the frame gets called
-    # 'background', leaving only its bright printed graphic. A removed region
-    # that's both LARGE and DARK is almost never a real backdrop (those are
-    # white/neutral), so keep the original rather than a garment reduced to its
-    # logo. A normal white/neutral backdrop is light, so this never fires on
-    # good cutouts.
+    # 'background', leaving only its bright printed graphic. A large, dark
+    # removed region is the SYMPTOM of that, so it still opens the question —
+    # but it is not the answer, and treating it as one is why removal appeared
+    # dead for anyone shooting on a dark floor, slate, black card or asphalt:
+    # a flawless cutout was thrown away for the colour of the surface behind
+    # the item. Brightness cannot tell "cut through a black hoodie" from "cut
+    # around a bowl on a dark worktop"; the presence of a real boundary can,
+    # so the photo itself casts the deciding vote (see matte.boundary_support).
     if dark_guard and (total - opaque) / total > 0.5:
         bg_mask = alpha.point(lambda a: 255 if a < 128 else 0)
         stat = ImageStat.Stat(rgb.convert("L"), mask=bg_mask)
         result.metrics["removed_luma"] = round(stat.mean[0], 1) if stat.count[0] else None
         if stat.count[0] and stat.mean[0] < _DARK_BG_LUMA:
-            log.warning("bg-removal: removed area large & dark (mean L=%.0f) — likely ate a "
-                        "dark item, keeping original", stat.mean[0])
-            result.status = matte.KEPT_ORIGINAL
-            result.error_code = matte.ERR_DARK_SUBJECT
-            result.warn("The item looked like the background (dark item, dark "
-                        "photo), so the original was kept.")
-            return False
+            support = _boundary_support(alpha, rgb)
+            result.metrics.update(support)
+            if not support["supported"]:
+                log.warning("bg-removal: removed area large & dark (mean L=%.0f) with no "
+                            "edge under the cut (edge_ratio=%s colour_gap=%s) — likely ate "
+                            "a dark item, keeping original", stat.mean[0],
+                            support["edge_ratio"], support["colour_gap"])
+                result.status = matte.KEPT_ORIGINAL
+                result.error_code = matte.ERR_DARK_SUBJECT
+                result.warn("The item looked like the background (dark item, dark "
+                            "photo), so the original was kept.")
+                return False
+            # The cut follows a real edge — but "a real edge" is also what the
+            # outline of a printed graphic is, so evidence alone cannot tell a
+            # bowl on a slate worktop from a black hoodie reduced to its chest
+            # print. Nothing local can: the two are the same picture, and only
+            # the difference between a surface and an object separates them.
+            # So stop guessing. When the survivor is ALSO small enough to be
+            # just such a graphic, keep the cutout and say so — the seller is
+            # looking at the grid and can revert in one tap, which beats both
+            # silently shipping it and silently throwing it away.
+            if opaque / total < _DARK_REVIEW_COVERAGE:
+                log.info("bg-removal: dark surround (mean L=%.0f) kept only %.1f%% — "
+                         "flagging for review", stat.mean[0], 100 * opaque / total)
+                result.warn("This photo was taken on a dark surface and only a small "
+                            "part of it was kept — check the whole item is still there.")
+            else:
+                log.info("bg-removal: removed area is dark (mean L=%.0f) but the cut "
+                         "follows a real edge (edge_ratio=%s colour_gap=%s) — keeping "
+                         "the cutout", stat.mean[0], support["edge_ratio"],
+                         support["colour_gap"])
     return True
 
 
@@ -1257,8 +1316,15 @@ def _studio_and_cutout(
     studio_applied, studio_error = False, None
     for engine in config.bg_engine_chain():
         if engine == "local":
+            # Carry a result in: _cutout_on_white writes the REASON it gave up
+            # on it (subject erased, item read as the backdrop, ...). Letting
+            # it default meant that reason was built, logged and dropped, and
+            # the seller got a bare "cutout failed" for every distinct cause —
+            # nothing to act on, and nothing to tell the difference between a
+            # busy machine and a photo the model could not read.
+            verdict = matte.CutoutResult()
             try:
-                out = _cutout_on_white(img)
+                out = _cutout_on_white(img, result=verdict)
             except CutoutBusy as exc:
                 # The automatic path never fails a photo — it keeps the
                 # original and says why, which is the right trade in a batch.
@@ -1270,7 +1336,8 @@ def _studio_and_cutout(
                 out = None
             if out is not None:
                 return out, "local", None, studio_applied, studio_error
-            last_err = last_err or "cutout failed"
+            last_err = last_err or (verdict.warnings[0] if verdict.warnings
+                                    else "cutout failed")
         elif engine == "adobe":
             if not config.adobe_ready():
                 continue

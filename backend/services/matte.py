@@ -487,3 +487,108 @@ def trim_depth_for(short_side: int) -> int:
 def protect(mask: np.ndarray, protected: np.ndarray) -> np.ndarray:
     """Put `protected` back into `mask` — the rollback primitive."""
     return mask | protected
+
+
+# --- is the cut a real boundary? --------------------------------------------
+# The dark-subject guard used to ask "is the region we removed large and
+# dark?" and throw the cutout away when it was. That question has a false
+# premise — that real backdrops are white or neutral — and sellers who shoot
+# on a dark floor, a slate worktop, black card or asphalt fail it with a
+# PERFECT cutout, so background removal silently does nothing for them and
+# there is no clue why (see tests/test_dark_backdrop.py).
+#
+# The failure the guard is actually for is narrower: the model cut THROUGH a
+# continuous dark object — a black hoodie filling the frame — and kept only
+# its bright printed graphic. What separates that from a dark backdrop is not
+# brightness, it is whether the photo contains a boundary where the matte
+# claims one. So ask the photo:
+#
+#   * edge_ratio  — is the gradient along the silhouette stronger than the
+#     texture of the region being removed? A cut across one continuous
+#     material rides at the same level as that material's own grain. Taking
+#     it as a RATIO against that grain is what lets a grainy concrete floor
+#     and a seamless white sweep be judged on one scale.
+#   * colour_gap  — do the pixels just inside the cut actually look different
+#     from the pixels just outside it? "The item looked like the background"
+#     is the claim; this measures it directly instead of via a proxy.
+#
+# Only when BOTH say there is nothing there is the cutout refused. Either one
+# alone is enough to keep it: the cost of a wrong refusal (removal appears
+# broken) is paid on every photo the seller takes, the cost of a wrong accept
+# is one photo they can see and revert.
+BOUNDARY_BAND_PX = int(os.getenv("CUTOUT_BOUNDARY_BAND", "4") or 4)
+MIN_EDGE_RATIO = float(os.getenv("CUTOUT_MIN_EDGE_RATIO", "1.35") or 1.35)
+MIN_COLOUR_GAP = float(os.getenv("CUTOUT_MIN_COLOUR_GAP", "10.0") or 10.0)
+# Brightness is damped for the same reason _colour_gap damps it: a contact
+# shadow is the backdrop's own colour with the light taken out, and at full
+# weight it reads as a different material.
+BOUNDARY_LUMA_WEIGHT = float(os.getenv("CUTOUT_BOUNDARY_LUMA_WEIGHT", "0.35") or 0.35)
+
+
+def grow(mask: np.ndarray, width: int) -> np.ndarray:
+    """Dilate `mask` by `width` px, 4-connected, in plain NumPy.
+
+    Deliberately not matte.dilate: that one degrades to the identity without
+    SciPy, which is the safe default for a refinement but would silently
+    collapse the sampling bands below to nothing. A rule that decides whether
+    to ship a cutout has to give the same answer on every machine.
+    """
+    out = mask.copy()
+    for _ in range(max(0, int(width))):
+        nxt = out.copy()
+        nxt[1:] |= out[:-1]
+        nxt[:-1] |= out[1:]
+        nxt[:, 1:] |= out[:, :-1]
+        nxt[:, :-1] |= out[:, 1:]
+        if nxt.sum() == out.sum():
+            break
+        out = nxt
+    return out
+
+
+def boundary_support(rgb: np.ndarray, edges: np.ndarray, kept: np.ndarray,
+                     band: int = BOUNDARY_BAND_PX,
+                     luma_weight: float = BOUNDARY_LUMA_WEIGHT) -> dict:
+    """Evidence, from the photo itself, that `kept`'s outline is a real edge.
+
+    `rgb` is float (h, w, 3), `edges` the photo's per-pixel gradient magnitude
+    (h, w), `kept` the boolean subject mask — all at the same scale.
+
+    Returns the two measurements plus `supported`. `supported` is True when
+    the answer is unknowable (no cut in frame, nothing to compare against):
+    an inconclusive test must not be the thing that deletes a good cutout.
+    """
+    metrics = {"edge_ratio": None, "colour_gap": None, "supported": True}
+    removed = ~kept
+    if not kept.any() or not removed.any():
+        return metrics
+    # The two sides of the cut, and the removed region's own grain well away
+    # from it (2*band, so the cut's own gradient can't contaminate the
+    # baseline it is being measured against).
+    inner = kept & grow(removed, band)
+    outer = removed & grow(kept, band)
+    ambient = removed & ~grow(kept, 2 * band)
+    if not inner.any() or not outer.any():
+        return metrics
+
+    cut = inner | outer
+    if ambient.any():
+        base = float(edges[ambient].mean())
+        # A perfectly flat backdrop has no grain to measure; any real edge
+        # beats it, so floor the baseline rather than dividing by ~0.
+        ratio = float(edges[cut].mean()) / max(base, 1e-3)
+        metrics["edge_ratio"] = round(ratio, 3)
+
+    in_mean = rgb[inner].mean(axis=0)
+    out_mean = rgb[outer].mean(axis=0)
+    in_luma, out_luma = float(in_mean.mean()), float(out_mean.mean())
+    in_chroma, out_chroma = in_mean - in_luma, out_mean - out_luma
+    gap = float(np.sqrt(luma_weight * (in_luma - out_luma) ** 2
+                        + float(((in_chroma - out_chroma) ** 2).sum())))
+    metrics["colour_gap"] = round(gap, 2)
+
+    if metrics["edge_ratio"] is None:
+        return metrics  # nothing to measure the silhouette against — keep it
+    metrics["supported"] = bool(metrics["edge_ratio"] >= MIN_EDGE_RATIO
+                                or gap >= MIN_COLOUR_GAP)
+    return metrics
