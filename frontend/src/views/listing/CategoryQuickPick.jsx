@@ -108,7 +108,7 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
           )}
         >
           <span className="min-w-0 text-ink leading-snug">{c.path || c.category_name}</span>
-          <span className="shrink-0 font-bold text-blue tabular-nums text-[12px]">
+          <span className="shrink-0 font-display font-bold text-blue tabular-nums text-[12px]">
             #{c.category_id}
           </span>
         </button>

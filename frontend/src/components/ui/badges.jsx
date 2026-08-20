@@ -12,7 +12,7 @@ export function TagPill({ children, tone = "neutral", className }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold",
+        "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-display text-xs font-semibold",
         tones[tone] || tones.neutral,
         className,
       )}
@@ -29,7 +29,7 @@ export function PriceBadge({ value, currency = "USD", approx = false, className 
     <span
       className={cn(
         "inline-flex items-baseline gap-0.5 rounded-full bg-green-soft px-2.5 py-0.5",
-        "text-[13px] font-bold text-green tabular-nums",
+        "font-display text-[13px] font-bold text-green tabular-nums",
         className,
       )}
     >

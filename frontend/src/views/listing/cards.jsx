@@ -238,7 +238,7 @@ function SuggestionRow({ chosen, onClick, left, right }) {
       )}
     >
       <span className="min-w-0 text-ink">{left}</span>
-      <span className="shrink-0 font-bold text-blue tabular-nums">{right}</span>
+      <span className="shrink-0 font-display font-bold text-blue tabular-nums">{right}</span>
     </div>
   );
 }
@@ -340,7 +340,7 @@ function SpecGroup({ title, note, count, children }) {
       <div className="flex items-baseline flex-wrap gap-x-2 gap-y-0.5 pb-1.5 border-b border-line">
         <h4 className="text-[13px] font-bold text-ink">{title}</h4>
         {count != null && (
-          <span className="text-[12px] font-semibold text-ink-faint tabular-nums">{count}</span>
+          <span className="font-display text-[12px] font-semibold text-ink-faint tabular-nums">{count}</span>
         )}
         {note && <span className="text-[12px] font-normal text-ink-faint">{note}</span>}
       </div>
@@ -1048,7 +1048,7 @@ export function PromoteCard({ w }) {
             <div className="flex items-end justify-between gap-4">
               <div>
                 <p className="text-[13px] font-medium text-ink-secondary">Ad rate</p>
-                <p className="text-[34px] font-bold text-ink tabular-nums leading-none mt-1">
+                <p className="font-display text-[34px] font-bold text-ink tabular-nums leading-none mt-1">
                   {rate.toFixed(1)}<span className="text-xl align-top">%</span>
                 </p>
               </div>
@@ -1056,7 +1056,7 @@ export function PromoteCard({ w }) {
                 {fee > 0 ? (
                   <>
                     <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
-                    <p className="text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee)}</p>
+                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee)}</p>
                   </>
                 ) : (
                   <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>

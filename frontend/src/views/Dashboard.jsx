@@ -195,7 +195,7 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
           <span className="font-semibold text-sm text-ink truncate">
             {REC_GROUP_LABEL[group.type] || group.recs[0].label}
           </span>
-          <span className="grid place-items-center tabular-nums text-[11px] font-bold rounded-full bg-bg-sunken px-1.5 min-w-5 h-5 text-ink-secondary">
+          <span className="grid place-items-center font-display tabular-nums text-[11px] font-bold rounded-full bg-bg-sunken px-1.5 min-w-5 h-5 text-ink-secondary">
             {group.recs.length}
           </span>
           <motion.span
@@ -488,7 +488,7 @@ export function Dashboard() {
         <Card className="relative overflow-hidden p-7 sm:p-8">
           <div className="flex flex-wrap items-start gap-6 justify-between">
             <div className="min-w-0">
-              <h1 className="text-2xl sm:text-[28px] font-bold tracking-tight text-ink">
+              <h1 className="text-2xl sm:text-[28px] font-bold text-ink">
                 {greeting()}{user ? `, ${user.display_name || user.email.split("@")[0]}` : ""} 👋
               </h1>
               <p className="mt-1.5 text-[15px] text-ink-secondary">

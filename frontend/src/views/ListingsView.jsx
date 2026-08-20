@@ -254,7 +254,7 @@ export function ListingsView({ search = "" }) {
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0 flex items-center gap-2">
-          <h2 className="text-lg sm:text-xl font-bold tracking-tight text-ink">Listings</h2>
+          <h2 className="text-lg sm:text-xl font-bold text-ink">Listings</h2>
           <InfoTip text={tab.sub} />
         </div>
         <div className="flex items-center gap-2">
@@ -290,7 +290,7 @@ export function ListingsView({ search = "" }) {
           >
             {t.label}
             <span className={cn(
-              "tabular-nums text-[11px] font-bold rounded-full px-1.5 min-w-5 h-5 grid place-items-center",
+              "font-display tabular-nums text-[11px] font-bold rounded-full px-1.5 min-w-5 h-5 grid place-items-center",
               tabId === t.id ? "bg-white/20" : "bg-bg-sunken",
             )}>
               {counts[t.id]}
