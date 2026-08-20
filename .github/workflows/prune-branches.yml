@@ -1,0 +1,60 @@
+name: Prune merged branches (one-shot)
+
+# A one-shot cleanup, run by hand from the Actions tab, that deletes the
+# branches left over from before `main` became the default again.
+#
+# Every name in .github/branches-to-prune.txt was audited first: each is either
+# already an ancestor of `main`, or was squash-merged (its content is
+# byte-identical on `main`, verified by patch-id and blob hash, under a
+# different commit SHA), or was an abandoned dead end. The one branch that held
+# unlanded work had it salvaged first (.github/workflows/fly-logs.yml). The
+# legacy history `main` used to carry is preserved at archive/legacy-main.
+#
+# The list is a checked-in file rather than a workflow input, so a run cannot
+# be pointed at anything else, and the KEEP guard below refuses the branches
+# that must survive even if one were added to the list by mistake.
+#
+# DELETE THIS FILE AND THE LIST once it has run. It exists to do one job once.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    name: Delete audited branches
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          KEEP="main archive/legacy-main claude/branding-assets-delivery-p10z7a claude/codebase-review-cleanup-nwlgwf"
+          deleted=0; refused=0; missing=0
+          while IFS= read -r branch || [ -n "$branch" ]; do
+            branch="$(printf '%s' "$branch" | tr -d '[:space:]')"
+            [ -z "$branch" ] && continue
+            protected=no
+            for k in $KEEP; do
+              [ "$branch" = "$k" ] && protected=yes
+            done
+            if [ "$protected" = yes ]; then
+              echo "REFUSED (protected)  $branch"
+              refused=$((refused + 1))
+              continue
+            fi
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" >/dev/null 2>&1; then
+              echo "deleted              $branch"
+              deleted=$((deleted + 1))
+            else
+              echo "already gone/failed  $branch"
+              missing=$((missing + 1))
+            fi
+          done < .github/branches-to-prune.txt
+          echo "-----"
+          echo "deleted=$deleted refused=$refused already-gone-or-failed=$missing"
+          echo "remaining branches:"
+          gh api "repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name' | sort
