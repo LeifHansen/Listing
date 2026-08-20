@@ -2327,18 +2327,97 @@ _register_bulk_job = jobstore.register
 _bulk_set = jobstore.update
 
 
+# How many times one batch may be picked up again. A batch that dies, resumes,
+# and dies again is not unlucky — it is hitting something it will keep hitting
+# (a photo that OOMs the box, most likely), and a machine that restarts into
+# the same doomed batch forever never gets to serve anyone else.
+BULK_MAX_RESUMES = int(os.getenv("BULK_MAX_RESUMES", "2") or 2)
+# The phases a batch can be picked up from. All of them are BEFORE the first
+# draft is written, which is what makes resuming safe: re-running them creates
+# nothing, so there is nothing to duplicate and no second charge to make. Once
+# "identifying" starts, each finished item is already saved as a draft and the
+# per-item AI has already been billed, so a resume would draft and charge
+# those items twice — that case keeps the honest "run the rest again" message.
+_RESUMABLE_PHASES = ("uploading", "optimizing", "grouping")
+
+
+def _resume_interrupted_batches(records: list[dict]) -> None:
+    """Restart photo batches whose process died before they drafted anything.
+
+    A bulk batch does all of its photo work up front and only then starts
+    drafting, so a machine that goes away during background removal — a
+    deploy, an OOM, a platform replacing the VM — used to take the whole batch
+    with it: every cutout it had finished was thrown away and the seller was
+    told to run it again from scratch. The optimized photos were on the volume
+    the entire time. This picks the batch back up and optimize_all skips
+    straight past what is already done.
+    """
+    for record in records:
+        job_id, staging = record.get("id"), record.get("_staging_id")
+        # kind is absent on photo batches; pipeline/identify/ebay-import jobs
+        # each have their own worker and their own resume story.
+        if record.get("kind") or not job_id or not staging:
+            continue
+        if record.get("phase") not in _RESUMABLE_PHASES:
+            continue
+        resumes = int(record.get("_resumes") or 0)
+        if resumes >= BULK_MAX_RESUMES:
+            log.warning("bulk %s: interrupted %d time(s) — not picking it up "
+                        "again", job_id, resumes)
+            continue
+        # session_dir, NOT storage.original_dir: that one calls ensure_session
+        # and would CREATE the tree it is being asked about — re-making the
+        # very directories the orphan sweep just removed, and reporting a
+        # swept batch as resumable every time.
+        originals = storage.session_dir(staging) / "original"
+        if not originals.is_dir() or not any(originals.iterdir()):
+            # Swept, or the volume it lived on is gone. Nothing to resume from,
+            # and re-running would just optimize an empty directory.
+            continue
+        uid = record.get("_uid")
+        strip_bg = bool(record.get("_strip_bg"))
+        _register_bulk_job(job_id, {
+            "id": job_id, "phase": "optimizing", "done": False,
+            "error": None, "items": [], "total_items": 0, "current": 0,
+            "total_photos": record.get("total_photos") or 0,
+            "resumed": True,
+            "_staging_id": staging, "_strip_bg": strip_bg,
+            "_resumes": resumes + 1,
+        }, uid=uid)
+        threading.Thread(
+            target=_run_bulk_job, args=(job_id, staging, strip_bg, uid),
+            kwargs={"resumed": True}, daemon=True,
+        ).start()
+        log.info("bulk %s: resuming after a restart (attempt %d, phase was %s)",
+                 job_id, resumes + 1, record.get("phase"))
+
+
 @app.on_event("startup")
 def _adopt_job_mirrors() -> None:
     """Re-adopt mirrored jobs before the first request is served, so a client
     that polls straight through a restart is told its batch was interrupted
-    rather than being handed a 404 for a job that once existed."""
-    jobstore.adopt_mirrors()
+    rather than being handed a 404 for a job that once existed — and pick back
+    up the photo batches that can still be finished."""
+    interrupted = jobstore.adopt_mirrors()
+    # Off the startup path: resuming re-enters the photo pipeline, and uvicorn
+    # must be answering its health check long before that finishes.
+    threading.Thread(target=_resume_interrupted_batches,
+                     args=(interrupted,), daemon=True).start()
 
 
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
-                  uid: Optional[str]) -> None:
+                  uid: Optional[str], resumed: bool = False) -> None:
     """Background worker: optimize -> group -> per-item identify. Every item
-    lands as a draft for review; publishing is always an explicit choice."""
+    lands as a draft for review; publishing is always an explicit choice.
+
+    `resumed` marks a batch being picked back up after the machine went away
+    mid-run (see _resume_interrupted_batches). The only thing it changes is
+    billing: the background-removal tokens were already taken on the first
+    attempt, so this run must not charge for them a second time. It also can't
+    refund them — the receipt that made a refund possible died with the
+    process — but the work is being finished rather than abandoned, which is
+    what that charge was for. Everything else re-runs as normal, because a
+    resume only ever restarts phases that had drafted nothing."""
     prefs = _load_prefs(uid)                   # one DB read for the whole batch
     strategy = _pricing_strategy(uid, prefs)
     auto_promote = _auto_promote_enabled(uid)  # ditto
@@ -2359,7 +2438,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # Bulk background removal is metered per photo, charged before the
         # engines run. Not enough tokens -> photos are kept as-is (with a
         # visible reason) rather than failing the whole batch.
-        if strip_bg and billing:
+        if strip_bg and billing and not resumed:
             n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
                            if p.is_file())
             bg_spent = tokens.spend(uid, "image_ai", units=n_photos)
@@ -2585,15 +2664,18 @@ async def bulk_upload(
     # Capture per-request context now — the worker thread has no Request.
     uid = _uid(request)
     job_id = storage.new_session_id()
+    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     _register_bulk_job(job_id, {
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
+        # Mirrored (see jobstore.MIRROR_FIELDS) so a restart can pick this
+        # batch back up instead of throwing away the photo work it finished.
+        "_staging_id": staging_id, "_strip_bg": strip_bg, "_resumes": 0,
     }, uid=uid)
     threading.Thread(
         target=_run_bulk_job,
-        args=(job_id, staging_id, str(remove_bg).lower() in ("true", "1", "yes", "on"),
-              uid),
+        args=(job_id, staging_id, strip_bg, uid),
         daemon=True,
     ).start()
     log.info("bulk %s: started (%d files)", job_id, len(files))

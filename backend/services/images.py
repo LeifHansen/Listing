@@ -1820,7 +1820,19 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         # is to drop it, which makes this a guarantee that could be lost by
         # someone helpfully "preserving metadata" — hence the note and
         # test_export_pipeline.py's assertion.
-        img.save(dst, "JPEG", quality=JPEG_QUALITY, optimize=True)
+        #
+        # Written via a temp file and renamed: a photo that exists is a photo
+        # that is FINISHED. optimize_all treats an existing output as done and
+        # skips it (that is what makes an interrupted batch resumable), so a
+        # torn JPEG left behind by a machine that died mid-save would be
+        # adopted as a good one and shipped to a listing.
+        tmp = dst.with_name(f".{dst.name}.{os.getpid():x}.tmp")
+        try:
+            img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
+            os.replace(tmp, dst)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     out = {
         "file": dst.name,
@@ -1913,7 +1925,16 @@ _LOCAL_BATCH_WORKERS = int(os.getenv("PHOTO_LOCAL_WORKERS", "2") or "2")
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
                  progress=None) -> list[dict]:
     """Optimize every image in src_dir. `progress(done, total)` (optional) is
-    called after each photo so long bulk jobs can show a live count."""
+    called after each photo so long bulk jobs can show a live count.
+
+    Photos whose output already exists are left alone and reported as
+    {"file", "reused"}. That is what lets a batch that died halfway — a deploy,
+    an OOM, a machine the platform decided to replace — be started again
+    without paying for the cutouts it already finished. It is safe to trust an
+    existing output because optimize() renames its result into place, so a
+    file being there means it was written completely (see the save in
+    optimize()). Positions come from the sorted source list, so the same photo
+    maps to the same output name on every run."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
@@ -1922,34 +1943,52 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     jobs = [(i, src) for i, src
             in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
             if src.suffix.lower() in exts]
-    # One batched vision pass over the whole set decides which photos were shot
-    # with the ITEM lying sideways or upside-down — something EXIF can't tell
-    # us. Done up front so each photo is straightened before its cutout and
-    # square crop, not after.
+    todo = [(i, src, dst) for i, src in jobs
+            if not (dst := dst_dir / f"img_{i:03d}.jpg").exists()]
+    if len(todo) < len(jobs):
+        log.info("images: %d of %d photo(s) already optimized — resuming",
+                 len(jobs) - len(todo), len(jobs))
+    # One batched vision pass over the photos still to do decides which were
+    # shot with the ITEM lying sideways or upside-down — something EXIF can't
+    # tell us. Done up front so each photo is straightened before its cutout
+    # and square crop, not after.
     # Imported here, not at module scope: orient reaches the Anthropic SDK,
     # and everything else in this file is pure Pillow/NumPy. Keeping the AI
     # dependency inside the one function that needs it is what lets the cutout
     # safety suite run in CI without installing an LLM client to check that a
     # mask kept a shoelace.
     from . import orient
-    rotations = orient.detect_rotations([src for _i, src in jobs])
-    return optimize_batch(
-        [(src, dst_dir / f"img_{i:03d}.jpg", rotations.get(src.name, 0))
-         for i, src in jobs],
-        remove_bg=remove_bg, progress=progress)
+    rotations = orient.detect_rotations([src for _i, src, _dst in todo])
+    # A list, not a set: these line up positionally with optimize_batch's
+    # results below, and a set's iteration order is not the job order.
+    pending = [i for i, _src, _dst in todo]
+    results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
+               for i, _src in jobs if i not in set(pending)}
+    results.update(zip(pending, optimize_batch(
+        [(src, dst, rotations.get(src.name, 0)) for _i, src, dst in todo],
+        remove_bg=remove_bg, progress=progress,
+        done_already=len(results), grand_total=len(jobs))))
+    # Back into source order, so results still line up with the filenames.
+    return [results[i] for i, _src in jobs]
 
 
 def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
-                   progress=None) -> list[dict]:
+                   progress=None, done_already: int = 0,
+                   grand_total: int = 0) -> list[dict]:
     """Optimize (src, dst, clockwise-rotation) jobs, pooled to fit the engine.
 
     A chain led by a remote API (Pixian/Photoroom/Adobe) gets a wide pool —
     each photo is mostly a network call we wait on. The local engine (and the
     no-cutout path) gets a small pool: inference is serialized by _INFER_LOCK
     either way, but the pipeline around it overlaps. Results come back in job
-    order; a failed photo yields {"file", "error"} instead of raising."""
-    total = len(jobs)
-    done = 0
+    order; a failed photo yields {"file", "error"} instead of raising.
+
+    `done_already`/`grand_total` describe work this call is NOT doing — the
+    photos a resumed batch found already finished. They only shift what
+    `progress` reports, so the seller's count stays "38 of 40" across a
+    restart instead of dropping back to "0 of 2"."""
+    total = grand_total or len(jobs)
+    done = done_already
     done_lock = threading.Lock()
 
     def _tick() -> None:
@@ -1974,13 +2013,15 @@ def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
 
     chain = config.bg_engine_chain() if remove_bg else []
     remote_first = bool(chain) and chain[0] != "local"
+    # Sized to the photos THIS call has to run, not to `total` — which on a
+    # resumed batch also counts the ones already on disk.
     if remote_first:
-        workers = min(_PHOTO_BATCH_WORKERS, total)
+        workers = min(_PHOTO_BATCH_WORKERS, len(jobs))
     elif remove_bg:
         # Local cutouts: model inference releases the GIL (and is serialized
         # by _INFER_LOCK anyway), so a second photo's mask/crop/encode work
         # genuinely overlaps it.
-        workers = min(_LOCAL_BATCH_WORKERS, total)
+        workers = min(_LOCAL_BATCH_WORKERS, len(jobs))
     else:
         # No cutout = pure Pillow CPU with no waits to overlap; measured with
         # the perf harness, a 2-thread pool is ~15% SLOWER than serial here

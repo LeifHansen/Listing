@@ -27,7 +27,7 @@ import {
 
 const PHASE_MESSAGES = {
   uploading: ["Uploading your photo pile…"],
-  optimizing: ["Optimizing photos…", "Straightening & brightening…"],
+  optimizing: ["Optimizing photos…", "Straightening & removing backgrounds…"],
   grouping: ["Sorting photos into items…", "Matching angles of the same item…"],
   identifying: ["Identifying items…", "Writing titles & prices…", "Detecting brands…"],
 };
@@ -707,7 +707,13 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     <div className="flex flex-col gap-4">
       {busy && (
         <div className="flex flex-col gap-3">
-          <AIStatusCard messages={(PHASE_MESSAGES[phase] || ["Working…"]).map((m) => m + progressDetail)} />
+          <AIStatusCard messages={[
+            // A batch the server picked back up after a restart keeps the same
+            // job id, so this view just carries on polling. Say so, or the
+            // count appearing to jump reads as a glitch.
+            ...(job?.resumed ? ["Picking your batch back up where it stopped…"] : []),
+            ...(PHASE_MESSAGES[phase] || ["Working…"]).map((m) => m + progressDetail),
+          ]} />
           <BrandProgress
             className="px-1"
             value={pct}

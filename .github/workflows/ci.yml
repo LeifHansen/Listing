@@ -49,6 +49,12 @@ jobs:
         run: pytest backend/tests/test_matte.py -q
       - name: Cutout regression suite
         run: pytest backend/tests/test_cutout_regression.py backend/tests/test_bg_border.py -q
+      # The photo pass's durability invariants: outputs are renamed into place,
+      # and an existing one is trusted as finished. They are the same kind of
+      # rule as the mask-safety ones — get them wrong and a torn photo ships to
+      # a listing — and they need only Pillow, so this is where they belong.
+      - name: Photo-pass resume rules
+        run: pytest backend/tests/test_photo_resume.py -q
       - name: Export contract
         run: pytest backend/tests/test_export_pipeline.py backend/tests/test_orientation.py -q
 
@@ -118,7 +124,9 @@ jobs:
       # missing Pillow and in `cutout` there is no fastapi — which meant they
       # were passing by never executing.
       - name: API tests
-        run: pytest backend/tests/test_readiness.py backend/tests/test_image_order.py -q
+        run: |
+          pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
+                 backend/tests/test_bulk_resume.py -q
       - name: Boot
         run: |
           SECRET_KEY=ci-smoke nohup python -m uvicorn backend.main:app --port 8099 \
