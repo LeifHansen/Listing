@@ -228,6 +228,34 @@ def test_a_sale_ebay_reports_no_amount_for_still_gets_a_date(reconciled):
     assert saved["sold_at"], "a record that just flipped to sold is dated now"
 
 
+def test_a_second_sale_never_inherits_the_first_sales_numbers(reconciled):
+    """A listing that sold, was relisted, and sold again. eBay hasn't reported
+    the new transaction yet — and the old sale's price and date must not stand
+    in for it, or the new sale is filed under the old date and falls outside
+    the dashboard's window entirely."""
+    trading = FakeTradingLists(sold=[ITEM], statuses={ITEM: ("sold", 1, 0)})
+    rec = _rec("sess-a", ITEM)  # relisted: live again, carrying the old sale
+    rec["listing"].update({"price": 89.99, "sold_price": 76.5,
+                           "sold_at": "2026-05-01T10:00:00.000Z"})
+    _, _, fake_db, _, _ = reconciled([rec], trading)
+    saved = fake_db.saved["sess-a"]
+    assert saved.get("sold_price") is None
+    assert saved["sold_at"] != "2026-05-01T10:00:00.000Z"
+
+
+def test_a_seller_entered_sale_price_survives_a_re_sync(reconciled):
+    """eBay never reported this sale, so the seller typed the amount in. A
+    later sweep of an already-sold record must not wipe it."""
+    trading = FakeTradingLists(sold=[ITEM], statuses={ITEM: ("sold", 1, 0)})
+    rec = _rec("sess-a", ITEM, status="sold")
+    rec["listing"].update({"price": 89.99, "sold_price": 70.0,
+                           "sold_at": "2026-08-01T10:00:00.000Z"})
+    _, _, fake_db, _, _ = reconciled([rec], trading)
+    saved = fake_db.saved.get("sess-a", rec["listing"])
+    assert saved["sold_price"] == 70.0
+    assert saved["sold_at"] == "2026-08-01T10:00:00.000Z"
+
+
 def test_a_multi_quantity_listing_still_live_is_not_pulled_off_active(reconciled):
     """A partially-sold multi-quantity listing shows up in the sold list while
     it is STILL live — the per-item probe is what keeps it under Active."""

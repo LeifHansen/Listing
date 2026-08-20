@@ -218,12 +218,24 @@ def stamp_sale(data: dict, sale: Optional[dict] = None,
     sale price the seller typed in by hand survives a sync that learns
     nothing new.
 
-    `mark_now` stamps sold_at with the current time when nothing better is
-    known. Pass it ONLY for a record transitioning to sold right now: on a
-    first-time import of an old sale it would date a historical sale to today
-    and inflate the dashboard's "sold this week".
+    `mark_now` marks a record that is transitioning to sold RIGHT NOW, which
+    settles two things nothing else can:
+
+      - Any sale numbers already on the record belong to a PREVIOUS sale (the
+        listing sold, was relisted, and sold again), so they're cleared rather
+        than left to stand in for this one. Keeping them was the worse half:
+        the new sale would carry the old date and sit outside the dashboard's
+        window entirely.
+      - Failing anything from eBay, sold_at becomes now — the sync just
+        watched it happen.
+
+    So pass it ONLY for a real transition: on a first-time import of an old
+    sale it would date a historical sale to today and inflate "sold this week".
     """
     out = dict(data)
+    if mark_now:
+        out.pop("sold_price", None)
+        out.pop("sold_at", None)
     if sale:
         price = sale.get("price")
         if price is not None:
