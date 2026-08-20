@@ -61,6 +61,17 @@ def test_a_half_finished_batch_only_does_what_is_left(tmp_path):
         "img_000.jpg", "img_001.jpg", "img_002.jpg", "img_003.jpg"]
 
 
+def test_a_fully_finished_batch_still_reports_its_count(tmp_path):
+    """Every photo already done means no work, so nothing ticks — and a
+    resumed batch's progress bar would sit at zero until the phase changed."""
+    src, dst = _photos(tmp_path / "orig", n=3), tmp_path / "opt"
+    images.optimize_all(src, dst)
+
+    ticks = []
+    images.optimize_all(src, dst, progress=lambda d, t: ticks.append((d, t)))
+    assert ticks == [(3, 3)]
+
+
 def test_progress_counts_the_whole_batch_not_just_the_remainder(tmp_path):
     """A resumed batch's progress bar must not drop back to 0 — the seller is
     watching a count that already reached 38 of 40."""

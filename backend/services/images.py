@@ -700,13 +700,12 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
         if _rembg_session is None:
             # Set before the session is built, not after — rembg reads this
             # when it constructs the SessionOptions and never looks again.
-            threads = _infer_threads()
-            os.environ.setdefault("OMP_NUM_THREADS", str(threads))
+            os.environ.setdefault("OMP_NUM_THREADS", str(_infer_threads()))
             _rembg_session = new_session(_REMBG_MODEL)
             _model_ready = True
-            log.info("bg-removal: model %s ready (%d inference thread(s), "
+            log.info("bg-removal: model %s ready (%s inference thread(s), "
                      "%dpx, %d photo workers)", _REMBG_MODEL,
-                     int(os.environ["OMP_NUM_THREADS"]), _REMBG_MAX_SIDE,
+                     os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE,
                      _LOCAL_BATCH_WORKERS)
         alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
     finally:
@@ -1964,6 +1963,13 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     pending = [i for i, _src, _dst in todo]
     results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
                for i, _src in jobs if i not in set(pending)}
+    if progress and not todo and jobs:
+        # Nothing left to do, so nothing below will ever tick. Report the real
+        # count once rather than leaving a resumed batch's bar reading zero.
+        try:
+            progress(len(jobs), len(jobs))
+        except Exception:  # noqa: BLE001 - progress is display-only
+            pass
     results.update(zip(pending, optimize_batch(
         [(src, dst, rotations.get(src.name, 0)) for _i, src, dst in todo],
         remove_bg=remove_bg, progress=progress,
