@@ -125,17 +125,26 @@ _DARK_BG_LUMA = int(os.getenv("DARK_BG_LUMA", "70") or "70")
 # for review rather than unremarked. Above it, a dark surface is just a dark
 # surface and the cutout is reported clean.
 _DARK_REVIEW_COVERAGE = float(os.getenv("DARK_REVIEW_COVERAGE", "0.20") or 0.20)
-# Cap the resolution the background model actually runs at. isnet on a full
-# 1600px image thrashes memory on a 2GB machine and can hang a bulk job for
-# minutes; running on a smaller copy is fast and light, and the resulting mask
-# upscales cleanly (product cutouts don't need pixel-perfect edges). Override
-# with REMBG_MAX_SIDE.
+# Size of the copy handed to the background model. Read the name carefully:
+# this caps OUR image, not the model's work.
+#
+# It is tempting to treat this as an inference-cost dial — halve the side,
+# quarter the pixels, quarter the time — and that is simply not how these
+# models run. Both of the ones shipped here normalize their input to a fixed
+# tensor first (isnet to 1024x1024, u2netp to 320x320), so a smaller copy is
+# upscaled straight back before a single convolution happens. Measured on two
+# pinned cores, 640 and 1024 finish within 2% of each other. Going smaller
+# than the model's own input therefore buys nothing and costs real quality:
+# the matte is then a downscale that got upscaled, and it still has to be
+# resized once more to the photo.
+#
+# What it does control is memory (the working copy, which is why a 2GB box may
+# want it lower) and the resolution the refinement passes run at, since
+# _cutout_on_white refines the matte at its native size.
 _REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
-# The photo-studio 'Remove background' can run the matte at a higher resolution
-# for crisper edges — BUT a 1024px isnet inference peaks well over what the 2GB
-# machine has, so the worker gets OOM-killed (the 502 users hit) before any
-# Python-level fallback can run. Default to the memory-safe bulk size; raise
-# REMBG_STUDIO_MAX_SIDE (e.g. to 1024) only on a machine with more RAM (4GB+).
+# The photo studio can run the matte at a different size from a batch — it
+# does one photo at a time with a seller watching. Defaults to the batch size;
+# per the above, raising it past the model's own input size does nothing.
 _STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", str(_REMBG_MAX_SIDE))
                        or str(_REMBG_MAX_SIDE))
 # Serialize model inference: two isnet runs at once (e.g. a studio cutout during

@@ -359,13 +359,27 @@ background still on — it queues instead (`REMBG_BATCH_WAIT_SECONDS`, default
 inference on a loaded box, so every photo queued behind another was guaranteed
 to time out and keep its background.
 
-Resolution is split the same way: `REMBG_MAX_SIDE` (640) is what batches run
-at, `REMBG_STUDIO_MAX_SIDE` (1024 in production) is for the studio's one-off
-cutout. Pixel count goes as the square, so that difference is 2.6x the work
-per photo — the setting that decides whether a big batch finishes at all.
-`REMBG_THREADS` caps onnxruntime, defaulting to one fewer than the visible
-CPUs: uvicorn still has to answer its health check while a batch runs, and a
-machine that misses those gets replaced by the platform, killing the batch.
+**`REMBG_MAX_SIDE` is not a speed dial.** It caps the copy handed to the
+model, and both bundled models normalize their input to a fixed tensor first
+(isnet 1024x1024, u2netp 320x320) — so a smaller copy is upscaled straight
+back before any convolution runs. Measured on two pinned cores, 640 and 1024
+finish within 2% of each other; going below the model's own input size costs
+quality and buys nothing. Production matches isnet at 1024. What the setting
+genuinely controls is memory and the resolution the refinement passes run at.
+
+What *does* cost time is contention. On the same two pinned cores one
+inference takes 0.32s with nothing else running, 0.72s against one competing
+worker and 0.83s against two — so `PHOTO_LOCAL_WORKERS` is sized to cores, not
+to RAM, and `REMBG_THREADS` caps onnxruntime at one fewer than the visible
+CPUs (uvicorn still has to answer its health check while a batch runs, and a
+machine that misses those gets replaced by the platform, killing the batch).
+
+Those are worth perhaps 1.5x. The 41s and 105s inferences in the incident that
+prompted this were an order of magnitude beyond what contention explains, and
+the remaining factor is the `shared-cpu` allocation itself: sustained batches
+exhaust the burst allowance and get throttled to baseline. If batches need to
+be genuinely fast rather than merely reliable, the lever is `performance-2x`
+(dedicated cores) or a remote engine — not these settings.
 
 **A batch survives the machine it started on.** Bulk does every photo's
 background removal up front and only then starts drafting, so until the last
