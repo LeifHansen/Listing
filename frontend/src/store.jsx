@@ -53,42 +53,10 @@ export function AppProvider({ children }) {
     } catch (e) { /* banner stays hidden until we know */ }
   }, []);
 
-  // ---------- auth ----------
-  const [user, setUser] = useState(null);
-  const [authOpen, setAuthOpen] = useState(false);
-  // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
-  const afterLogin = useRef(null);
-
-  const loadAuth = useCallback(async () => {
-    try {
-      const res = await api("/api/auth/me");
-      setUser(res.user);
-    } catch (e) { setUser(null); }
-  }, []);
-
-  const openAuth = useCallback((resume) => {
-    afterLogin.current = resume || null;
-    setAuthOpen(true);
-  }, []);
-
-  const logout = useCallback(async () => {
-    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
-    storeToken(null); // native shell's bearer token — no-op on the web
-    setUser(null);
-    loadEbayStatus();
-  }, []);
-
-  // ---------- AI tokens (monetization) ----------
-  // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
-  // installs) hides the whole surface. The dialog opens from the TopBar chip
-  // or automatically when any AI call comes back 402 "out of tokens".
-  const [tokens, setTokens] = useState({ enabled: false, total: 0, packs: [], costs: {} });
-  const [tokensOpen, setTokensOpen] = useState(false);
-  const loadTokens = useCallback(async () => {
-    try { setTokens(await api("/api/tokens")); } catch (e) { /* keep previous */ }
-  }, []);
-
   // ---------- eBay connection ----------
+  // Declared ahead of auth: logout() lists loadEbayStatus as a dependency,
+  // and a useCallback dependency array is evaluated during render — a
+  // forward reference there is a temporal-dead-zone crash, not a lint nit.
   const [ebay, setEbay] = useState({
     connected: false, env: "", username: "", email: "", oauth_ready: false,
     oauth_missing: [], labels_enabled: false,
@@ -113,6 +81,41 @@ export function AppProvider({ children }) {
   // Publishing is live if EITHER the user connected their eBay account or the
   // server has env-level credentials.
   const canPublishLive = ebay.connected || health.ebay_configured;
+
+  // ---------- auth ----------
+  const [user, setUser] = useState(null);
+  const [authOpen, setAuthOpen] = useState(false);
+  // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
+  const afterLogin = useRef(null);
+
+  const loadAuth = useCallback(async () => {
+    try {
+      const res = await api("/api/auth/me");
+      setUser(res.user);
+    } catch (e) { setUser(null); }
+  }, []);
+
+  const openAuth = useCallback((resume) => {
+    afterLogin.current = resume || null;
+    setAuthOpen(true);
+  }, []);
+
+  const logout = useCallback(async () => {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+    storeToken(null); // native shell's bearer token — no-op on the web
+    setUser(null);
+    loadEbayStatus();
+  }, [loadEbayStatus]);
+
+  // ---------- AI tokens (monetization) ----------
+  // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
+  // installs) hides the whole surface. The dialog opens from the TopBar chip
+  // or automatically when any AI call comes back 402 "out of tokens".
+  const [tokens, setTokens] = useState({ enabled: false, total: 0, packs: [], costs: {} });
+  const [tokensOpen, setTokensOpen] = useState(false);
+  const loadTokens = useCallback(async () => {
+    try { setTokens(await api("/api/tokens")); } catch (e) { /* keep previous */ }
+  }, []);
 
   // ---------- marketplace roster (eBay + Etsy + Depop + ...) ----------
   // Every registered marketplace with this user's connection state, from
