@@ -460,7 +460,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       canvas.removeEventListener("touchmove", move);
       canvas.removeEventListener("touchend", end);
     };
-  }, [name]);
+  }, [name, drawCropOverlay]);
 
   const save = async () => {
     const canvas = canvasRef.current;

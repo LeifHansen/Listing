@@ -76,7 +76,7 @@ export function AppProvider({ children }) {
     storeToken(null); // native shell's bearer token — no-op on the web
     setUser(null);
     loadEbayStatus();
-  }, []);
+  }, [loadEbayStatus]);
 
   // ---------- AI tokens (monetization) ----------
   // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
