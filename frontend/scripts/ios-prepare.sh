@@ -48,6 +48,31 @@ fi
 echo "==> Syncing web assets + plugins into ios/"
 npx cap sync ios
 
+# Icon + splash screens. Without this the app ships whatever `cap add ios`
+# scaffolded — Capacitor's own placeholder — because `cap sync` copies web
+# assets and plugins but never generates app icons. frontend/assets/ sat
+# unread for exactly that reason.
+#
+# `brand:assets` redraws the three sources from vector art (see
+# scripts/brand-icon.mjs); `@capacitor/assets` then fans them out into every
+# size the Xcode asset catalog wants. npx'd rather than pinned, matching how
+# `cap` itself is invoked above — this is a Mac-only release step, so pinning
+# it would put a large dependency (and its native image toolchain) into every
+# CI install for no benefit.
+#
+# --assetPath points at the FOLDER, never a single file — a file path is what
+# produces "No assets found in the asset path". The background colours are the
+# brand canvases from tokens.css, not white: they back Android's adaptive icon
+# and the generated iOS splash storyboard, so white would flash against a navy
+# app on every cold start.
+echo "==> Regenerating app icon + splash screens"
+npm run brand:assets
+npx --yes @capacitor/assets generate --ios \
+  --assetPath assets \
+  --iconBackgroundColor '#101a2e' \
+  --splashBackgroundColor '#f8f3e7' \
+  --splashBackgroundColorDark '#101a2e'
+
 if [ ! -f "$PLIST" ]; then
   echo "!! $PLIST not found — did 'npx cap add ios' fail?" >&2
   exit 1

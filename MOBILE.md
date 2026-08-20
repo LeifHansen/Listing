@@ -63,19 +63,37 @@ npx cap add ios
 npx cap add android    # optional, only if you also want Android/Play
 ```
 
-## 2. App icon + splash from the logo
+## 2. App icon + splash — handled by the prepare script
 
-`frontend/assets/` already holds the sources this tool expects — `icon.png`
-(1024²) and `splash.png` / `splash-dark.png` (2732²), pre-rendered from the
-brand logo on white. Point `--assetPath` at that FOLDER, never at a single
-image file (that's the "No assets found in the asset path" error).
+**`./scripts/ios-prepare.sh` does this for you** (step 3 below); this section
+is only for running it by hand or changing the art.
+
+`frontend/assets/` holds the three sources Capacitor consumes — `icon.png`
+(1024²) and `splash.png` / `splash-dark.png` (2732²). They are **generated**,
+not hand-drawn: `npm run brand:assets` redraws them from the vector art in
+`scripts/brand-icon.mjs`, so edit that script rather than the PNGs.
+
+The icon is the logo's price-tag character, not the wordmark — "Thryft Shop"
+is unreadable at the ~60pt a home screen actually renders.
 
 ```bash
-npm install --save-dev @capacitor/assets
-npx capacitor-assets generate --assetPath assets \
-  --iconBackgroundColor '#ffffff' --splashBackgroundColor '#ffffff'
+npm run brand:assets            # redraw the three sources
+npx --yes @capacitor/assets generate --ios \
+  --assetPath assets \
+  --iconBackgroundColor '#101a2e' \
+  --splashBackgroundColor '#f8f3e7' \
+  --splashBackgroundColorDark '#101a2e'
 npx cap sync
 ```
+
+Point `--assetPath` at that FOLDER, never at a single image file (that's the
+"No assets found in the asset path" error). The background colours are the
+brand canvases from `tokens.css` — they back Android's adaptive icon and the
+generated iOS splash storyboard, so white would flash against a navy app on
+every cold start.
+
+Note that `cap sync` alone never generates icons; it copies web assets and
+plugins only. Skipping the generate step ships Capacitor's placeholder icon.
 
 ## 3. iOS permission strings — handled by the prepare script
 

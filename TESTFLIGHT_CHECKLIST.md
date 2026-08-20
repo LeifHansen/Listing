@@ -42,11 +42,9 @@ Store Connect requires. It's idempotent; run it before every build and never
 hand-edit `Info.plist`. If it prints a note that the privacy manifest was
 just created, do the one-time "add file to App target" step it describes.
 
-Only if the app icon changed:
-
-```bash
-npx capacitor-assets generate --assetPath assets --iconBackgroundColor '#ffffff' --splashBackgroundColor '#ffffff'
-```
+The icon and splash screens are regenerated as part of that script, so there
+is nothing separate to run when the art changes — edit
+`frontend/scripts/brand-icon.mjs` and re-run the prepare script.
 
 ## C. Xcode: sign, archive, upload
 
