@@ -33,9 +33,9 @@ export function StatCard({ icon: Icon, label, value, sub, tone = "blue", classNa
         <span className={cn("grid place-items-center size-10 rounded-[13px] shrink-0", tones[tone])}>
           <Icon size={19} strokeWidth={2} aria-hidden />
         </span>
-        <span className="text-[13px] font-semibold text-ink-secondary">{label}</span>
+        <span className="font-display text-[13px] font-semibold text-ink-secondary">{label}</span>
       </div>
-      <p className="mt-3 text-[28px] leading-none font-bold text-ink tabular-nums">{value}</p>
+      <p className="font-display mt-3 text-[28px] leading-none font-bold text-ink tabular-nums">{value}</p>
       {sub && <p className="mt-1.5 text-xs text-ink-faint">{sub}</p>}
     </Comp>
   );

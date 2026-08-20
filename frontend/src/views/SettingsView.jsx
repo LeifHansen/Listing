@@ -1114,7 +1114,7 @@ function SettingsShell({ children }) {
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Settings</h1>
+        <h1 className="text-xl sm:text-2xl font-bold text-ink">Settings</h1>
         <p className="text-sm text-ink-secondary mt-1">
           Your eBay connection and the defaults applied to every publish.
         </p>

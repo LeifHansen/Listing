@@ -154,7 +154,7 @@ export function TokensDialog() {
           <div className="flex-1 min-w-0">
             {user ? (
               <>
-                <div className="text-2xl font-extrabold text-ink leading-tight">
+                <div className="font-display text-2xl font-bold text-ink leading-tight">
                   {(tokens.total ?? free + purchased)}{" "}
                   <span className="text-sm font-semibold text-ink-secondary">tokens</span>
                 </div>
@@ -206,12 +206,12 @@ export function TokensDialog() {
                 )}
               >
                 {p.id === bestValue && (
-                  <span className="absolute -top-2.5 left-3 rounded-full bg-blue text-on-accent text-[10px] font-bold px-2 py-0.5 inline-flex items-center gap-1">
+                  <span className="absolute -top-2.5 left-3 rounded-full bg-blue text-on-accent font-display text-[10px] font-bold px-2 py-0.5 inline-flex items-center gap-1">
                     <Check size={10} aria-hidden /> Best value
                   </span>
                 )}
-                <div className="text-sm font-bold text-ink">{p.label}</div>
-                <div className="text-xl font-extrabold text-ink">{p.tokens}</div>
+                <div className="font-display text-sm font-bold text-ink">{p.label}</div>
+                <div className="font-display text-xl font-bold text-ink">{p.tokens}</div>
                 <div className="text-xs text-ink-faint mb-2">
                   tokens · {fmtUsd(Math.round(p.usd_cents / p.tokens))}/token
                 </div>

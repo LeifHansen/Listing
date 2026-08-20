@@ -42,7 +42,7 @@ function Brand({ collapsed }) {
           className="h-14 w-auto object-contain"
         />
       ) : (
-        <span className="font-extrabold text-[19px] tracking-tight text-ink whitespace-nowrap">
+        <span className="font-display font-bold text-[19px] text-ink whitespace-nowrap">
           Thryft <span className="text-blue">Shop</span>
         </span>
       )}
@@ -134,7 +134,7 @@ export function Sidebar() {
               collapsed && "justify-center px-0",
             )}
           >
-            <span className="grid place-items-center size-8 rounded-full bg-green-soft text-green font-bold text-xs uppercase shrink-0">
+            <span className="grid place-items-center size-8 rounded-full bg-green-soft text-green font-display font-bold text-xs uppercase shrink-0">
               {(user.display_name || user.email).slice(0, 2)}
             </span>
             {!collapsed && (

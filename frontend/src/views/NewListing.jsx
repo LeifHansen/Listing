@@ -93,7 +93,7 @@ function PublishedScreen({ w }) {
           <CheckCircle2 size={17} aria-hidden />{" "}
           {r?.multi ? `Live on ${liveLabels || "your marketplaces"}` : "Live on eBay"}
         </p>
-        <h1 className="text-2xl font-bold tracking-tight text-ink">
+        <h1 className="text-2xl font-bold text-ink">
           {r?.revised ? "Listing updated! ✅" : "Listing published! 🎉"}
         </h1>
         {r?.multi ? (
@@ -314,7 +314,7 @@ function Workflow() {
     <motion.div variants={stagger} initial="hidden" animate="show" className="flex flex-col gap-4">
       <motion.div variants={rise} className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink truncate">
+          <h1 className="text-xl sm:text-2xl font-bold text-ink truncate">
             {w.form.title || "New listing"}
           </h1>
           <div className="flex items-center gap-2 mt-1">
@@ -447,7 +447,7 @@ function SellHome({ search }) {
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Sell</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-ink">Sell</h1>
           <p className="text-sm text-ink-secondary mt-1">
             Start with photos — the AI handles the boring parts.
           </p>
@@ -495,7 +495,7 @@ export function NewListing({ search = "" }) {
     return (
       <div className="flex flex-col gap-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Bulk listing</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-ink">Bulk listing</h1>
           <p className="text-sm text-ink-secondary mt-1">
             One photo pile, many listings — review each item below.
           </p>

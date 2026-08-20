@@ -25,14 +25,14 @@ export function BrandProgress({ value, caption, className }) {
           style={{ width: `${fillPct}%` }}
         >
           {labelInside && (
-            <span className="absolute inset-y-0 right-2.5 inline-flex items-center text-xs font-extrabold tabular-nums text-white [text-shadow:0_1px_2px_rgb(23_40_74/0.55)]">
+            <span className="absolute inset-y-0 right-2.5 inline-flex items-center font-display text-xs font-bold tabular-nums text-white [text-shadow:0_1px_2px_rgb(23_40_74/0.55)]">
               {pct}%
             </span>
           )}
         </div>
         {!labelInside && (
           <span
-            className="absolute inset-y-0 inline-flex items-center pl-2.5 text-xs font-extrabold tabular-nums text-ink transition-[left] duration-700 ease-out"
+            className="absolute inset-y-0 inline-flex items-center pl-2.5 font-display text-xs font-bold tabular-nums text-ink transition-[left] duration-700 ease-out"
             style={{ left: `${fillPct}%` }}
           >
             {pct}%

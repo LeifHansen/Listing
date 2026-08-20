@@ -112,7 +112,7 @@ export function ShopMode() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-center gap-2">
-        <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-ink">Shop Mode</h1>
+        <h1 className="text-xl sm:text-2xl font-bold text-ink">Shop Mode</h1>
         <InfoTip text="Snap an item to identify it and see what it typically sells for on eBay. Tap Buy to drop it into your inventory and finish the listing later." />
       </div>
 

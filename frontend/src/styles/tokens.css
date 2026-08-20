@@ -95,7 +95,19 @@
 
 /* Expose tokens to Tailwind utilities (bg-card, text-secondary, rounded-card…) */
 @theme inline {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* Type pairing — Fredoka for display (headings, statistics, short
+     labels), Nunito Sans for everything you read in a line (navigation,
+     buttons, body copy). Fredoka only ships 600-700 here, so anything
+     wearing font-display must be semibold or bolder.
+
+     One caveat: Fredoka has proportional figures and no tnum feature, so
+     `tabular-nums` is inert wherever font-display wins. It is still worth
+     keeping on numeric elements — every fallback in the stack honors it,
+     which is what the native build renders with when the webfont is
+     unavailable — but a font-display value that updates in place needs its
+     width reserved rather than relying on tabular-nums (see PromoteCard). */
+  --font-sans: "Nunito Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Fredoka", "Nunito Sans", ui-sans-serif, system-ui, sans-serif;
 
   --color-blue: var(--brand-blue);
   --color-blue-strong: var(--brand-blue-strong);
@@ -153,6 +165,20 @@ body {
   min-height: 100dvh;
   font-size: 15px;
   line-height: 1.55;
+}
+
+/* Every heading is Fredoka automatically — components only reach for the
+   `font-display` utility for the non-heading display type (stat numbers and
+   short labels). Kept in @layer base so Tailwind's font-* and tracking-*
+   utilities can still override it per element. */
+@layer base {
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    /* Fredoka's rounded, generous shapes already read tight — the negative
+       tracking Inter wanted closes them up too far. */
+    letter-spacing: 0;
+  }
 }
 
 /* Visible, on-brand focus for keyboard users (WCAG). */

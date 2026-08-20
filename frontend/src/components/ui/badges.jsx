@@ -12,7 +12,7 @@ export function TagPill({ children, tone = "neutral", className }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold",
+        "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-display text-xs font-semibold",
         tones[tone] || tones.neutral,
         className,
       )}
@@ -30,7 +30,7 @@ export function PriceBadge({ value, currency = "USD", approx = false, className,
       title={title}
       className={cn(
         "inline-flex items-baseline gap-0.5 rounded-full bg-green-soft px-2.5 py-0.5",
-        "text-[13px] font-bold text-green tabular-nums",
+        "font-display text-[13px] font-bold text-green tabular-nums",
         className,
       )}
     >
@@ -109,7 +109,9 @@ export const ORIGIN_META = {
 export function EbayMark({ className }) {
   return (
     <span aria-label="eBay"
-      className={cn("font-extrabold italic tracking-tight leading-none select-none", className)}>
+      /* font-sans is explicit: this sits inside a TagPill, which is font-display,
+         and the wordmark must not inherit Fredoka (no italic, no 800). */
+      className={cn("font-sans font-extrabold italic tracking-tight leading-none select-none", className)}>
       <span style={{ color: "#E53238" }}>e</span>
       <span style={{ color: "#0064D2" }}>b</span>
       <span style={{ color: "#F5AF02" }}>a</span>
