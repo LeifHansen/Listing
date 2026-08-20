@@ -103,16 +103,24 @@ def test_end_without_an_item_id_fails_without_probing(monkeypatch):
 # ------------------------------------------------------- reconcile_recent
 
 class FakeTradingLists:
-    """GetMyeBaySelling's finished-item lists + the per-item probe."""
+    """GetMyeBaySelling's finished-item lists + the per-item probe.
+
+    `sold` may be plain item ids or {item_id: sale} — the sold list is read
+    as transactions now, because the amount an item actually went for (an
+    accepted offer settles below the asking price) only exists there.
+    """
 
     def __init__(self, sold=(), unsold=(), statuses=None):
-        self.sold = list(sold)
+        self.sold = ({k: dict(v) for k, v in sold.items()}
+                     if isinstance(sold, dict)
+                     else {i: {"price": None, "currency": "USD",
+                               "quantity": 1, "sold_at": ""} for i in sold})
         self.unsold = list(unsold)
         self.statuses = statuses or {}
         self.probed: list[str] = []
 
-    def sold_listing_ids(self, token, limit=None):
-        return self.sold
+    def sold_sales(self, token, limit=None):
+        return {k: dict(v) for k, v in self.sold.items()}
 
     def unsold_listing_ids(self, token, limit=None):
         return self.unsold
@@ -125,10 +133,12 @@ class FakeTradingLists:
 class FakeDb:
     def __init__(self):
         self.upserts: list[tuple[str, str]] = []  # (record id, status)
+        self.saved: dict[str, dict] = {}          # record id -> listing written
 
     def upsert_listing(self, listing_id, listing, status="draft", user_id=None,
                        when=None):
         self.upserts.append((listing_id, status))
+        self.saved[listing_id] = dict(listing)
 
 
 class FakeNotifications:
@@ -189,6 +199,63 @@ def test_a_listing_that_sold_on_ebay_is_archived_with_a_notification(reconciled)
     assert store.purged == ["sess-a"]
 
 
+def test_the_recorded_sale_price_is_what_the_buyer_paid(reconciled):
+    """An accepted offer settles below the asking price, and eBay leaves the
+    listing's own price alone — so a sold record built from the listing alone
+    reported the asking price. The transaction amount is what lands now."""
+    trading = FakeTradingLists(
+        sold={ITEM: {"price": 76.5, "currency": "USD", "quantity": 1,
+                     "sold_at": "2026-08-12T18:04:11.000Z"}},
+        statuses={ITEM: ("sold", 1, 0)})
+    rec = _rec("sess-a", ITEM)
+    rec["listing"]["price"] = 89.99
+    _, _, fake_db, _, _ = reconciled([rec], trading)
+    saved = fake_db.saved["sess-a"]
+    assert saved["sold_price"] == 76.5
+    assert saved["sold_at"] == "2026-08-12T18:04:11.000Z"
+    assert saved["price"] == 89.99, "the asking price stays what was asked"
+
+
+def test_a_sale_ebay_reports_no_amount_for_still_gets_a_date(reconciled):
+    """No transaction amount (a sale outside eBay's ~90-day window, or a list
+    that wouldn't load) leaves sold_price unset — the UI falls back to the
+    asking price and says it's approximate — but the record still gets a sale
+    date, so it counts toward the sold-in-the-last-N-days tile."""
+    trading = FakeTradingLists(sold=[ITEM], statuses={ITEM: ("sold", 1, 0)})
+    _, _, fake_db, _, _ = reconciled([_rec("sess-a", ITEM)], trading)
+    saved = fake_db.saved["sess-a"]
+    assert saved.get("sold_price") is None
+    assert saved["sold_at"], "a record that just flipped to sold is dated now"
+
+
+def test_a_second_sale_never_inherits_the_first_sales_numbers(reconciled):
+    """A listing that sold, was relisted, and sold again. eBay hasn't reported
+    the new transaction yet — and the old sale's price and date must not stand
+    in for it, or the new sale is filed under the old date and falls outside
+    the dashboard's window entirely."""
+    trading = FakeTradingLists(sold=[ITEM], statuses={ITEM: ("sold", 1, 0)})
+    rec = _rec("sess-a", ITEM)  # relisted: live again, carrying the old sale
+    rec["listing"].update({"price": 89.99, "sold_price": 76.5,
+                           "sold_at": "2026-05-01T10:00:00.000Z"})
+    _, _, fake_db, _, _ = reconciled([rec], trading)
+    saved = fake_db.saved["sess-a"]
+    assert saved.get("sold_price") is None
+    assert saved["sold_at"] != "2026-05-01T10:00:00.000Z"
+
+
+def test_a_seller_entered_sale_price_survives_a_re_sync(reconciled):
+    """eBay never reported this sale, so the seller typed the amount in. A
+    later sweep of an already-sold record must not wipe it."""
+    trading = FakeTradingLists(sold=[ITEM], statuses={ITEM: ("sold", 1, 0)})
+    rec = _rec("sess-a", ITEM, status="sold")
+    rec["listing"].update({"price": 89.99, "sold_price": 70.0,
+                           "sold_at": "2026-08-01T10:00:00.000Z"})
+    _, _, fake_db, _, _ = reconciled([rec], trading)
+    saved = fake_db.saved.get("sess-a", rec["listing"])
+    assert saved["sold_price"] == 70.0
+    assert saved["sold_at"] == "2026-08-01T10:00:00.000Z"
+
+
 def test_a_multi_quantity_listing_still_live_is_not_pulled_off_active(reconciled):
     """A partially-sold multi-quantity listing shows up in the sold list while
     it is STILL live — the per-item probe is what keeps it under Active."""
@@ -203,7 +270,7 @@ def test_a_multi_quantity_listing_still_live_is_not_pulled_off_active(reconciled
 
 def test_unreachable_lists_change_nothing(reconciled):
     class Down(FakeTradingLists):
-        def sold_listing_ids(self, token, limit=None):
+        def sold_sales(self, token, limit=None):
             raise RuntimeError("eBay is down")
 
         def unsold_listing_ids(self, token, limit=None):

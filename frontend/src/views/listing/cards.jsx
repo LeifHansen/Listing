@@ -662,6 +662,10 @@ export function PricingCard({ w }) {
   const currency = w.form.currency || "USD";
   const fmt = w.form.listing_format || "FIXED_PRICE";
   const isAuction = fmt === "AUCTION" || fmt === "AUCTION_BIN";
+  // Profit is measured against what the item GOT once it has sold, and
+  // against what it's asking for while it's still for sale.
+  const soldOrAsking = (w.isSold && w.form.sold_price !== "")
+    ? w.form.sold_price : w.form.price;
 
   return (
     <WorkflowCard
@@ -739,13 +743,32 @@ export function PricingCard({ w }) {
               onChange={(e) => w.set("purchase_price", e.target.value)}
             />
           </Field>
+          {/* Sold items only: what the buyer actually paid. An accepted offer
+              settles BELOW the price above, and eBay never moves the listing's
+              own price to match — so this is the only place the real number
+              can live. Filled from eBay's transaction on sync; editable here
+              for a sale eBay didn't report (one older than its ~90-day
+              window, say). */}
+          {w.isSold && (
+            <Field
+              label={`Sold for (${currency})`}
+              help="What the buyer actually paid — lower than the price above if you accepted an offer. Pulled from eBay when it reports the sale."
+            >
+              <Input
+                type="number" step="0.01" min="0" inputMode="decimal"
+                placeholder={w.form.price !== "" ? String(w.form.price) : "0.00"}
+                value={w.form.sold_price}
+                onChange={(e) => w.set("sold_price", e.target.value)}
+              />
+            </Field>
+          )}
         </div>
-        {w.form.purchase_price !== "" && Number(w.form.price) > 0 && (
+        {w.form.purchase_price !== "" && Number(soldOrAsking) > 0 && (
           <p className="text-[13px] text-ink-secondary -mt-1">
-            Potential profit at this price:{" "}
-            <strong className={Number(w.form.price) - Number(w.form.purchase_price) >= 0
+            {w.isSold ? "Profit on this sale:" : "Potential profit at this price:"}{" "}
+            <strong className={Number(soldOrAsking) - Number(w.form.purchase_price) >= 0
               ? "text-success" : "text-warning"}>
-              ${(Number(w.form.price) - Number(w.form.purchase_price)).toFixed(2)}
+              ${(Number(soldOrAsking) - Number(w.form.purchase_price)).toFixed(2)}
             </strong>{" "}
             before fees & shipping.
           </p>

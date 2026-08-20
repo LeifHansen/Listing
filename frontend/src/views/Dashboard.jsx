@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Coins, Lightbulb, Megaphone, TrendingDown, Tag, RotateCcw,
+  Tags, Coins, Lightbulb, Megaphone, TrendingDown, RotateCcw,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown,
+  ChevronDown, DollarSign,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -18,6 +18,7 @@ import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
+import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
 // it during render is a no-op state write when it is already empty, instead of
@@ -326,6 +327,71 @@ function MirrorStatus() {
   );
 }
 
+// The sold tile's window. Remembered across visits — a seller who thinks in
+// months shouldn't have to re-pick every morning. Rendered as a plain select:
+// it lives in the tile's corner as a sibling of the tile button (see
+// StatCard's `action`), so it has to be a real control, not a nested one.
+const SOLD_RANGE_KEY = "quickflip-sold-range";
+
+function readSoldRange() {
+  try {
+    const saved = localStorage.getItem(SOLD_RANGE_KEY);
+    if (SOLD_RANGES.some((r) => r.id === saved)) return saved;
+  } catch (e) { /* private mode — the default is fine */ }
+  return DEFAULT_SOLD_RANGE;
+}
+
+// The sold tile's second line. It has one job per state: what the total is
+// made of, or — when nothing sold in the window — what to do instead.
+function soldSub(sales, soldEnded) {
+  const ended = soldEnded.filter((i) => i.status === "ended").length;
+  if (!sales.count) {
+    // An undated sale is one the app knew about before it started recording
+    // sale dates — a store sync backfills them from eBay's own dates.
+    if (sales.undated) {
+      return `sync your store to date ${sales.undated} past sale${sales.undated === 1 ? "" : "s"}`;
+    }
+    return ended
+      ? `nothing in the ${sales.range.long} · ${ended} to relist`
+      : `nothing in the ${sales.range.long}`;
+  }
+  // The window itself is named by the picker in the corner, so this line
+  // spends its width on what the total is made of instead of repeating it.
+  const parts = [`${sales.count} sale${sales.count === 1 ? "" : "s"}`];
+  if (sales.profit != null) {
+    const sign = sales.profit >= 0 ? "+" : "−";
+    parts.push(`${sign}${formatMoney(Math.abs(sales.profit))} profit`);
+  }
+  // Say when the total is leaning on asking prices rather than reported sale
+  // amounts, instead of presenting a guess as the takings.
+  if (sales.approx) parts.push(`${sales.approx} estimated`);
+  return parts.join(" · ");
+}
+
+function SoldRangePicker({ value, onChange }) {
+  return (
+    <select
+      value={value}
+      aria-label="Time range for the sold total"
+      onChange={(e) => onChange(e.target.value)}
+      className={cn(
+        "appearance-none rounded-full border border-line bg-bg-sunken",
+        "px-2.5 py-1 pr-6 text-[11px] font-bold text-ink-secondary cursor-pointer",
+        "bg-[length:9px] bg-[right_8px_center] bg-no-repeat",
+        "focus:outline-none focus:ring-2 focus:ring-blue/40",
+      )}
+      style={{
+        backgroundImage:
+          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2394a3b8' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E\")",
+      }}
+    >
+      {SOLD_RANGES.map((r) => (
+        <option key={r.id} value={r.id}>{r.label}</option>
+      ))}
+    </select>
+  );
+}
+
 export function Dashboard() {
   const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay } = useApp();
   const { confirm, toast } = useToast();
@@ -450,6 +516,15 @@ export function Dashboard() {
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");
   const soldEnded = items.filter((i) => i.status === "sold" || i.status === "ended");
+  // Sold revenue over the chosen window. What the buyers actually PAID —
+  // an accepted offer settles below the asking price, and totalling `price`
+  // would report money that never arrived. See lib/sales.
+  const [soldRangeId, setSoldRangeId] = useState(readSoldRange);
+  const sales = salesSummary(items, soldRangeId);
+  const pickSoldRange = (id) => {
+    setSoldRangeId(id);
+    try { localStorage.setItem(SOLD_RANGE_KEY, id); } catch (e) { /* private mode */ }
+  };
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
   const watcherTotal = live.reduce((sum, i) => {
     const m = metricsById[i.id];
@@ -560,9 +635,10 @@ export function Dashboard() {
             ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"} from Shop Mode`
             : "open one to finish & publish"}
           onClick={() => openListings("drafts")} />
-        <StatCard icon={Tag} tone="blue" label="Sold & ended"
-          value={soldEnded.length}
-          sub="relist ended items in one tap"
+        <StatCard icon={DollarSign} tone="blue" label="Sold"
+          value={formatMoney(sales.total) || "$0.00"}
+          sub={soldSub(sales, soldEnded)}
+          action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings(soldEnded.some((i) => i.status === "sold") ? "sold" : "inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
           value={todays.length}
@@ -693,7 +769,7 @@ export function Dashboard() {
         ) : recent.length > 0 ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {recent.map((item) => (
-              <ListingCard key={item.id} item={item} onOpen={openListing} onDelete={askDelete}
+              <ListingCard key={item.id} className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
                 metrics={metricsById[item.id]} />
             ))}
           </div>

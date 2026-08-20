@@ -11,6 +11,10 @@ import { publishListing, usePublishTargets } from "./publishShared";
 
 const EMPTY = {
   title: "", subtitle: "", brand: "", price: "", purchase_price: "", quantity: 1,
+  // What it ACTUALLY sold for (see models.Listing.sold_price) — eBay fills
+  // this in from the transaction; the seller can correct it in the editor
+  // when eBay never reported one. "" = unknown, not free.
+  sold_price: "",
   listing_format: "FIXED_PRICE", auction_start_price: "", auction_duration: "DAYS_7",
   package_weight_lb: "", package_weight_oz: "",
   package_length_in: "", package_width_in: "", package_height_in: "",
@@ -42,6 +46,7 @@ function fromListing(l) {
     marketplaces: l.marketplaces || {},
     price: l.price != null ? l.price : "",
     purchase_price: l.purchase_price != null ? l.purchase_price : "",
+    sold_price: l.sold_price != null ? l.sold_price : "",
     auction_start_price: l.auction_start_price != null ? l.auction_start_price : "",
     quantity: l.quantity || 1,
     package_weight_lb: l.package_weight_lb || "",
@@ -87,6 +92,9 @@ export function useListingForm() {
   // Ended/sold records get the Publish action instead — the server relists
   // them as a fresh listing (eBay can't revise an ended item).
   const settled = session?.status === "ended" || session?.status === "sold";
+  // A sold listing gets the one field only a finished sale has: what it
+  // actually went for.
+  const isSold = session?.status === "sold";
   const isLive = !settled && (session?.status === "published" || session?.status === "live"
     || (session?.listing?.source || "") === "ebay");
   const ebayListingId = session?.listing?.ebay_listing_id
@@ -124,6 +132,7 @@ export function useListingForm() {
       ...form,
       price: form.price === "" ? null : parseFloat(form.price),
       purchase_price: form.purchase_price === "" ? null : parseFloat(form.purchase_price),
+      sold_price: form.sold_price === "" ? null : parseFloat(form.sold_price),
       auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
       quantity: parseInt(form.quantity || "1", 10),
       package_weight_lb: num(form.package_weight_lb),
@@ -637,7 +646,7 @@ export function useListingForm() {
 
   return {
     sessionId, form, set, setForm, collect,
-    isLive, ebayListingId, endListing,
+    isLive, isSold, ebayListingId, endListing,
     aiBusy, setAiBusy,
     marketTargets, toggleMarketTarget, chipTargets,
     publish, publishResult, setPublishResult, runPreflight,

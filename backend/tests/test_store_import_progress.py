@@ -52,8 +52,8 @@ class FakeTrading:
     def active_listing_ids(self, token, limit=0):
         return list(self.item_ids)
 
-    def sold_listing_ids(self, token, limit=0):
-        return []
+    def sold_sales(self, token, limit=0):
+        return {}
 
     def unsold_listing_ids(self, token, limit=0):
         return []

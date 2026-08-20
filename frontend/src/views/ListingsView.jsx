@@ -17,6 +17,7 @@ import {
   BoxIllustration, TagIllustration,
 } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
+import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -230,11 +231,12 @@ export function ListingsView({ search = "" }) {
         {items.map((item, i) => (
           <motion.div
             key={item.id}
+            className="h-full"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
-            <ListingCard item={item} onOpen={openListing} onDelete={askDelete}
+            <ListingCard className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
               onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
               ending={endingId === item.id}
               skipped={skippedDraftIds.has(item.id)}
@@ -302,18 +304,25 @@ export function ListingsView({ search = "" }) {
       {/* Profit framework: on the Sold tab, total up what the items with a
           recorded cost basis made (sale − purchase price, before fees). */}
       {tabId === "sold" && hasItems && (() => {
+        // Counts what the buyers PAID — an accepted offer settles below the
+        // asking price, so totalling `price` here overstated every profit.
         const withCost = items.filter(
-          (i) => i.listing?.purchase_price != null && Number(i.listing?.price) > 0);
+          (i) => i.listing?.purchase_price != null && saleProceeds(i.listing) > 0);
         if (!withCost.length) return null;
         const profit = withCost.reduce(
-          (sum, i) => sum + (Number(i.listing.price) - Number(i.listing.purchase_price)), 0);
+          (sum, i) => sum + (saleProceeds(i.listing)
+            - Number(i.listing.purchase_price) * soldUnits(i.listing)), 0);
+        const approx = withCost.filter((i) => !hasSalePrice(i.listing)).length;
         return (
           <p className="text-[13px] text-ink-secondary -mt-1 flex items-center gap-1.5">
             <strong className={profit >= 0 ? "text-success" : "text-warning"}>
               {profit >= 0 ? "+" : "−"}${Math.abs(profit).toFixed(2)} profit
             </strong>
             <span>· {withCost.length} item{withCost.length === 1 ? "" : "s"}</span>
-            <InfoTip text="Sale price minus recorded purchase price, before fees & shipping — only items with a 'You paid' amount count. Add what you paid in the editor's Pricing card to track the rest." />
+            {approx > 0 && (
+              <span>· {approx} at the asking price</span>
+            )}
+            <InfoTip text="What each item sold for minus what you paid, before fees & shipping — only items with a 'You paid' amount count. Where eBay hasn't reported the sale amount, the asking price stands in; set the real one in the editor's Pricing card." />
           </p>
         );
       })()}

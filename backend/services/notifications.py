@@ -30,7 +30,11 @@ def notify_sold(user_id: Optional[str], record_id: str, listing: dict,
         return
     try:
         title = (listing.get("title") or "").strip() or "An item"
-        price = listing.get("price")
+        # What it SOLD for when eBay reported the transaction (an accepted
+        # offer settles below the asking price), else the asking price.
+        price = listing.get("sold_price")
+        if price is None:
+            price = listing.get("price")
         try:
             price_part = f" for ${float(price):,.2f}" if price else ""
         except (TypeError, ValueError):
