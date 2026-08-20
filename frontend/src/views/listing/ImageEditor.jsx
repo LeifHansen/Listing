@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  RotateCcw, Crop, Highlighter, CheckCircle2, Eraser, Wand2, Paintbrush,
-  Undo2, Redo2, Brush, Eye,
+  RotateCcw, Crop, Eraser, Wand2, Paintbrush, Undo2, Redo2, Brush, Eye,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -19,7 +18,6 @@ import {
    - Remove background: in-house cutout onto pure white
    - Auto levels: stretch brightness/contrast to make the shot pop (client-side)
    - Crop: drag a rectangle; it applies the moment you release
-   - Highlight leftovers: tint any background the cutout missed red
    - Restore / Erase brushes, undo/redo, and Compare
 
    Nothing here is destructive. The original photo stays underneath the cutout
@@ -28,10 +26,8 @@ import {
    paints it back instead of hitting Revert and losing the parts it got right.
    Every edit is undoable, and Save is the only thing that writes. */
 
-const HIGHLIGHT_COLOR = "#e85c46"; // brand coral, tinted over leftovers
-
 // One toolbar button — icon + label, with a pressed/active state for the
-// toggle tools (Crop, Highlight).
+// toggle tools (Crop, and the two brushes).
 function Tool({ icon: Icon, label, active, className, ...props }) {
   return (
     <button
@@ -86,7 +82,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
   const painting = useRef(false);
-  const paintedSinceAnalyze = useRef(false);
   const [brush, setBrush] = useState(40);
   const brushRef = useRef(40);
   // The non-destructive layer stack + the edit history over it.
@@ -101,9 +96,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const brushModeRef = useRef(ERASE);
   const [saving, setSaving] = useState(false);
   const [aiBusy, setAiBusy] = useState(null); // destructive op running (locks Save)
-  const [checking, setChecking] = useState(null); // passive border re-check (never locks Save)
-  const [highlight, setHighlight] = useState(false);
-  const [residuePct, setResiduePct] = useState(null);
   // Manual crop tool: drag a rect, then Apply.
   const [tool, setTool] = useState("brush"); // "brush" | "crop"
   const toolRef = useRef("brush");
@@ -230,47 +222,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     ctx.restore();
   }, []);
 
-  // Tint the residue mask red and lay it over the photo.
-  const drawOverlay = useCallback(async (maskUrl) => {
-    const canvas = canvasRef.current;
-    const overlay = overlayRef.current;
-    if (!canvas || !overlay) return;
-    overlay.width = canvas.width;
-    overlay.height = canvas.height;
-    const ctx = overlay.getContext("2d");
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    if (!maskUrl) return;
-    const mask = await loadImage(maskUrl);
-    const tint = document.createElement("canvas");
-    tint.width = overlay.width;
-    tint.height = overlay.height;
-    const tctx = tint.getContext("2d");
-    tctx.drawImage(mask, 0, 0, tint.width, tint.height);
-    tctx.globalCompositeOperation = "source-in";
-    tctx.fillStyle = HIGHLIGHT_COLOR;
-    tctx.fillRect(0, 0, tint.width, tint.height);
-    ctx.globalAlpha = 0.45;
-    ctx.drawImage(tint, 0, 0);
-    ctx.globalAlpha = 1;
-  }, []);
-
-  // Ask the AI to re-check the item borders; highlight whatever needs cleaning.
-  const analyze = useCallback(async (blob, { show } = {}) => {
-    try {
-      const res = await studioCall("/api/image/analyze", sessionId, name, blob, 30000);
-      paintedSinceAnalyze.current = false;
-      setResiduePct(res.residue_pct);
-      // Highlight is opt-in now: only tint leftovers when the user explicitly
-      // turns it on (show === true). On load / after an edit we just record the
-      // residue for the status line, without the red overlay.
-      const shouldShow = show === true;
-      setHighlight(shouldShow);
-      await drawOverlay(shouldShow ? res.mask : null);
-    } catch (e) {
-      setResiduePct(null); // analysis is an assist — never block the editor
-    }
-  }, [sessionId, name, drawOverlay]);
-
   const load = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || !name) return;
@@ -283,30 +234,16 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       syncHistory();
       redraw();
       clearOverlay();
-      setResiduePct(null);
     } catch (e) {
       toast(e.message, { kind: "error" });
-      return;
     }
-    // Border re-check is a passive assist: it never blocks Save (the image is
-    // already on the canvas) and times out so a slow model can't lock the editor.
-    setChecking("Re-checking the item's borders…");
-    try { await analyze(null); }
-    finally { setChecking(null); }
-  }, [sessionId, name, analyze, clearOverlay, redraw, syncHistory, toast]);
+  }, [sessionId, name, clearOverlay, redraw, syncHistory, toast]);
 
   // Land an AI-processed image as the new cutout layer.
-  //
-  // Deliberately does NOT kick off a border re-check. That second inference
-  // fired automatically after every removal, on the one path where a seller is
-  // already waiting, behind the same single inference slot the removal just
-  // used — so the wait for "remove background" was silently two model runs
-  // long. The check is still one tap away under Highlight.
   const applyPreview = useCallback(async (dataUrl) => {
     const img = await loadImage(dataUrl);
     commitOperation(img);
     clearOverlay();
-    setResiduePct(null);
   }, [commitOperation, clearOverlay]);
 
   const removeBg = useCallback(async () => {
@@ -379,7 +316,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       setTool("brush");
       return;
     }
-    setHighlight(false);
     setTool("crop");
   }, [aiBusy, clearOverlay]);
 
@@ -401,7 +337,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     clearOverlay();
     setTool("brush");
     commitOperation(tmp);
-    setResiduePct(null);
     toast("Cropped — Undo to take it back, Save to keep it.", { kind: "success" });
   }, [cropRect, clearOverlay, commitOperation, toast]);
 
@@ -411,24 +346,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cropRect]);
 
-  const toggleHighlight = useCallback(async () => {
-    if (aiBusy || checking) return;
-    if (highlight) {
-      setHighlight(false);
-      clearOverlay();
-      return;
-    }
-    // Re-analyze against the current canvas so fresh brush strokes count.
-    setChecking("Re-checking the item's borders…");
-    try {
-      const blob = paintedSinceAnalyze.current
-        ? await canvasBlob(canvasRef.current) : null;
-      await analyze(blob, { show: true });
-    } finally {
-      setChecking(null);
-    }
-  }, [aiBusy, checking, highlight, analyze, clearOverlay]);
-
   useEffect(() => {
     if (!name) return;
     setTool("brush");
@@ -437,7 +354,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       await load();
       if (initialAction === "removebg") removeBg();
       else if (initialAction === "manualcrop" || initialAction === "crop") {
-        setHighlight(false);
         clearOverlay();
         setTool("crop");
       }
@@ -465,8 +381,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     const paintAt = (e) => {
       if (!painting.current || !layersRef.current) return;
       const { x, y } = point(e);
-      const scale = canvas.width / canvas.getBoundingClientRect().width;
-      const r = (brushRef.current || 40) * scale / 2;
       const stroke = strokeRef.current;
       if (!stroke) return;
       stroke.points.push([x, y]);
@@ -474,19 +388,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       // keeps live painting identical to what replay() will produce.
       replay(layersRef.current, [...strokesRef.current, stroke]);
       compose(layersRef.current, canvas);
-      paintedSinceAnalyze.current = true;
-      // Clear the highlight where they painted, so it stops nagging about an
-      // area they just fixed.
-      const overlay = overlayRef.current;
-      if (overlay && overlay.width) {
-        const octx = overlay.getContext("2d");
-        octx.save();
-        octx.globalCompositeOperation = "destination-out";
-        octx.beginPath();
-        octx.arc(x, y, r, 0, Math.PI * 2);
-        octx.fill();
-        octx.restore();
-      }
     };
     // Crop tool: drag out a rect (dimmed framing preview via the overlay).
     const cropDragTo = (e) => {
@@ -588,16 +489,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     }
   };
 
-  // "Item borders look clean" claimed more than the check can know — it looks
-  // for leftover BACKGROUND, and says nothing about whether the item is all
-  // still there. A seller reading "clean" over a cutout missing half a strap
-  // was being told the opposite of the truth.
-  const borderState = residuePct == null
-    ? null
-    : residuePct >= 0.2
-      ? `Found leftover background (~${residuePct}% of the frame)${highlight ? " — tinted red" : ""}. Turn on Highlight to see it, or paint it out with the Erase brush.`
-      : "No leftover background detected.";
-
   return (
     <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
       <div className="flex items-center gap-1 p-1.5 mb-2 rounded-[14px] bg-bg-sunken border border-line overflow-x-auto">
@@ -615,8 +506,6 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
         <Tool icon={Crop} label="Crop" active={tool === "crop"}
           onClick={toggleCropTool} disabled={!!aiBusy} />
-        <Tool icon={Highlighter} label="Highlight" active={highlight}
-          onClick={toggleHighlight} disabled={!!aiBusy} />
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
         <Tool icon={Undo2} label="Undo" onClick={undo} disabled={!canUndo || !!aiBusy} />
         <Tool icon={Redo2} label="Redo" onClick={redo} disabled={!canRedo || !!aiBusy} />
@@ -633,9 +522,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
           ? "Drag a box on the photo — it crops the moment you let go."
           : brushMode === RESTORE
             ? "Paint over anything the cutout removed by mistake — the original photo comes back underneath."
-            : highlight
-              ? "Leftover background is tinted red — paint over it with the Erase brush."
-              : "Paint the background out, or switch to Restore item to bring back anything the cutout took."}
+            : "Paint the background out, or switch to Restore item to bring back anything the cutout took."}
       </p>
 
       <div className="rounded-tile overflow-hidden border border-line bg-bg-sunken grid place-items-center max-h-[52vh] p-2">
@@ -653,17 +540,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       </div>
 
       <div className="mt-3 min-h-5 text-[13px]" aria-live="polite">
-        {(aiBusy || checking) ? (
-          <AIStatusInline message={aiBusy || checking} />
-        ) : borderState && (
-          <span className={cn(
-            "inline-flex items-center gap-1.5",
-            residuePct >= 0.2 ? "text-warning font-medium" : "text-success font-medium",
-          )}>
-            {residuePct < 0.2 && <CheckCircle2 size={14} aria-hidden />}
-            {borderState}
-          </span>
-        )}
+        {aiBusy && <AIStatusInline message={aiBusy} />}
       </div>
 
       <div className="flex flex-wrap items-center gap-3 mt-4">

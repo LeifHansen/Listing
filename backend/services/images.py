@@ -565,6 +565,21 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
             snapped = snapped | starved
             if result is not None:
                 result.metrics["parts_restored_px"] = int(starved.sum())
+    # 2c. Scraps: a lump of background the matte swallowed whole — a cast
+    #     shadow, a wedge of table, a hand. The depth cap above can never
+    #     reach one, by design, so this uses confidence instead of distance
+    #     and is safe by construction (see matte.uncertain_scraps).
+    if raw_small is not None:
+        # Restricted to `arr`, the mask the MODEL produced. The grow pass adds
+        # pixels the raw matte never had — recovering a hem the model shaved —
+        # and those read as "the model was unsure" for the trivial reason that
+        # the model never saw them as subject at all. Judging them here would
+        # undo the grow pass's work on exactly the photos that needed it.
+        scrap = matte.uncertain_scraps(raw_small, snapped & arr, core)
+        if scrap.any():
+            snapped = snapped & ~scrap
+            if result is not None:
+                result.metrics["scrap_removed_px"] = int(scrap.sum())
     # 3. And the backstop: whatever survived, it still has to contain what the
     #    model was confident about — in substance, not in total. A few px
     #    shaved evenly off the rim is this pass working; a chunk out of a hem
@@ -1368,7 +1383,7 @@ def warm() -> None:
     real uploads hit a warm (~1s) path."""
     try:
         # Warm the LOCAL model directly (the default engine, and it powers the
-        # highlight/subject masks either way) — never via _studio_and_cutout,
+        # subject masks either way) — never via _studio_and_cutout,
         # which would burn a paid API credit on every boot when a remote
         # engine is configured. Warm the mask pipeline only, not the full
         # cutout: a synthetic solid-color square has no subject to keep, and
@@ -1886,59 +1901,18 @@ def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
 
 
 # ---------------------------------------------------------------------------
-# Photo studio: AI subject detection powering smart crop, leftover-background
-# highlighting, and one-tap auto clean-up in the in-browser editor.
+# Photo studio: AI subject detection powering smart crop and one-tap auto
+# clean-up in the in-browser editor.
 # ---------------------------------------------------------------------------
-
-# How far a channel may fall below pure white and still count as "clean".
-RESIDUE_WHITE_TOL = 22
-# The subject's soft edge is grown by this many px before looking for residue,
-# so anti-aliased borders aren't flagged.
-SUBJECT_GROW_PX = 9
-
 
 def _subject_mask(img: Image.Image) -> Image.Image:
     """Soft alpha mask (mode L, same size as img) of the detected subject,
     with interior holes re-attached — otherwise a graphic or a bright panel the
     model mistakes for background makes auto-clean whiten a chunk out of the
-    middle of the item (and makes the residue highlight flag the item's own
-    interior as leftover background)."""
+    middle of the item."""
     rgb = img.convert("RGB")
     mask, _ = _fill_interior_holes(_alpha_mask(rgb), rgb)
     return mask
-
-
-def analyze_cleanup(img: Image.Image) -> dict:
-    """Re-check the item's borders: find the subject and any non-white
-    leftovers outside it (the bits a background removal missed).
-
-    Returns the subject bbox, a binary residue mask (mode L), and how much of
-    the frame that residue covers.
-    """
-    from PIL import ImageChops
-
-    rgb = _flatten(img)
-    mask = _subject_mask(rgb)
-    subject = mask.point(lambda a: 255 if a >= 96 else 0)
-    bbox = subject.getbbox()
-
-    # Grow the subject so its soft edge isn't counted as residue.
-    grown = subject.filter(ImageFilter.MaxFilter(SUBJECT_GROW_PX))
-    # Residue = meaningfully non-white pixels outside the (grown) subject.
-    white = Image.new("RGB", rgb.size, WHITE)
-    nonwhite = ImageChops.difference(rgb, white).convert("L").point(
-        lambda d: 255 if d > RESIDUE_WHITE_TOL else 0)
-    residue = ImageChops.subtract(nonwhite, grown)
-    # Knock out 1-2px speckle so the highlight shows real leftovers, not noise.
-    residue = residue.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
-
-    total = rgb.size[0] * rgb.size[1]
-    residue_px = sum(residue.histogram()[128:])
-    return {
-        "residue_mask": residue,
-        "bbox": list(bbox) if bbox else None,
-        "residue_pct": round(100.0 * residue_px / total, 2),
-    }
 
 
 def auto_clean(img: Image.Image) -> Image.Image:

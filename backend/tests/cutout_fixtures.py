@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 SIZE = 640
 MANIFEST = Path(__file__).parent / "fixtures" / "cutout" / "manifest.json"
@@ -164,6 +164,33 @@ def transparent_panel():
     return photo, truth
 
 
+def cast_shadow():
+    """The everyday shot: item on a table under one light, throwing a soft
+    shadow. The shadow is the thing a model most often decides is part of the
+    item, and it is what comes out the far side as a grey scrap on white."""
+    photo, truth = _blank((250, 250, 250)), _mask()
+    shadow = Image.new("L", (SIZE, SIZE), 0)
+    ImageDraw.Draw(shadow).ellipse((190, 430, 560, 560), fill=150)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(22))
+    photo = Image.composite(_blank((120, 118, 115)), photo, shadow)
+    box = (150, 130, 470, 500)
+    ImageDraw.Draw(photo).rounded_rectangle(box, radius=28, fill=(55, 70, 100))
+    ImageDraw.Draw(truth).rounded_rectangle(box, radius=28, fill=255)
+    return _noise(photo, 21), truth
+
+
+def table_edge():
+    """Shot on a worktop with the counter's edge running behind the item. The
+    model keeps a wedge of counter attached to the product -- a scrap far too
+    thick to be a halo, and nowhere near the item's colour."""
+    photo, truth = _blank((238, 236, 232)), _mask()
+    ImageDraw.Draw(photo).rectangle((0, 470, SIZE, SIZE), fill=(168, 140, 110))
+    box = (170, 150, 470, 490)
+    ImageDraw.Draw(photo).rounded_rectangle(box, radius=26, fill=(200, 60, 55))
+    ImageDraw.Draw(truth).rounded_rectangle(box, radius=26, fill=255)
+    return _noise(photo, 22), truth
+
+
 def busy_background():
     """Shot on a rug, on a bed, in a room. "Not the backdrop colour" stops
     meaning "item", which is exactly when growing the border is dangerous."""
@@ -204,6 +231,8 @@ BUILDERS: dict[str, Callable[[], tuple[Image.Image, Image.Image]]] = {
     "fringe": fringe,
     "reflective": reflective,
     "transparent_panel": transparent_panel,
+    "cast_shadow": cast_shadow,
+    "table_edge": table_edge,
     "busy_background": busy_background,
     "small_subject": small_subject,
     "large_subject": large_subject,
@@ -224,6 +253,23 @@ def degrade(truth: Image.Image, mode: str = "chewed", seed: int = 5) -> Image.Im
             ImageFilter.GaussianBlur(1.5))
     if mode == "soft":
         return truth.filter(ImageFilter.GaussianBlur(4.0))
+    if mode == "scrappy":
+        # What sellers actually report: not an even fringe, but a LUMP of
+        # background still attached -- a shadow, a wedge of table, a bit of
+        # the hand that was holding it. Thick enough that no rim-depth trim
+        # will ever reach it, and carrying the mid alpha of a model that was
+        # not sure, which is the handle for removing it safely.
+        rng = _rng(seed + 3)
+        scrap = Image.new("L", truth.size, 0)
+        draw = ImageDraw.Draw(scrap)
+        box = truth.getbbox() or (0, 0, SIZE, SIZE)
+        for _ in range(3):
+            x = int(rng.integers(box[0], max(box[0] + 1, box[2])))
+            y = int(rng.integers(max(0, box[3] - 30), min(SIZE, box[3] + 70)))
+            r = int(rng.integers(45, 85))
+            draw.ellipse((x - r, y - r, x + r, y + r), fill=160)
+        scrap = scrap.filter(ImageFilter.GaussianBlur(6))
+        return ImageChops.lighter(truth, scrap)
     rng = _rng(seed)
     inside = np.asarray(truth, dtype=np.uint8) >= 128
     mask = truth.filter(ImageFilter.MinFilter(5))

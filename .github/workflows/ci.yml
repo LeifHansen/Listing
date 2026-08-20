@@ -77,3 +77,60 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
+
+  # Boots the real app and clicks through every screen. The unit tests and the
+  # build both pass happily on a UI that throws on mount — this is the job that
+  # catches a screen a seller cannot open.
+  smoke:
+    name: App smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      - name: Browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      # Installed FROM requirements.txt, minus only the two packages the app
+      # imports lazily (rembg pulls onnxruntime and a ~176MB model). A
+      # hand-written second list is what put this job in a loop: it was missing
+      # anthropic, then python-multipart, each found one CI run at a time.
+      # Deriving it from the real file means a new dependency cannot drift out
+      # of sync with what the app actually needs to boot.
+      - name: Server deps
+        run: |
+          grep -vE '^(rembg|onnxruntime)' requirements.txt > /tmp/ci-reqs.txt
+          pip install -r /tmp/ci-reqs.txt pytest
+      # This is the only job with fastapi AND Pillow together, so it is the
+      # only place these can run at all. In `checks` they importorskip on the
+      # missing Pillow and in `cutout` there is no fastapi — which meant they
+      # were passing by never executing.
+      - name: API tests
+        run: pytest backend/tests/test_readiness.py backend/tests/test_image_order.py -q
+      - name: Boot
+        run: |
+          SECRET_KEY=ci-smoke nohup python -m uvicorn backend.main:app --port 8099 \
+            > /tmp/server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8099/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server never became healthy:" >&2; cat /tmp/server.log >&2; exit 1
+      - name: Smoke
+        run: npm run smoke
+        working-directory: frontend
+      - name: Server log on failure
+        if: failure()
+        run: cat /tmp/server.log || true

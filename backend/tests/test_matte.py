@@ -165,6 +165,53 @@ def test_a_part_that_only_loses_a_rim_is_left_alone():
     assert not matte.undersized_parts(core, kept).any()
 
 
+# --- leftover scraps --------------------------------------------------------
+def test_a_swallowed_lump_of_background_is_removed(matte_pair=None):
+    """The reported failure: a cast shadow or a wedge of table taken into the
+    mask whole. Far too thick for any rim-depth trim to reach, which is why
+    confidence rather than distance decides it."""
+    mask = _rect((300, 300), 60, 220, 60, 220)
+    mask[200:280, 100:190] = True                  # a shadow hanging off it
+    raw = np.where(mask, 255, 0).astype(np.uint8)
+    raw[200:280, 100:190] = 150                    # ...that the model doubted
+    core = matte.confident_core(raw)
+    scrap = matte.uncertain_scraps(raw, mask, core)
+    assert scrap[240, 145], "the scrap survived"
+    assert not scrap[140, 140], "it ate the product"
+
+
+def test_the_products_soft_edge_is_not_a_scrap():
+    """Every anti-aliased edge is low-confidence. Treating that as leftover
+    background would shave the outline off every photo."""
+    mask = _rect((300, 300), 60, 240, 60, 240)
+    raw = np.where(mask, 255, 0).astype(np.uint8)
+    raw[58:62, 60:240] = 140                       # a soft 4px edge
+    core = matte.confident_core(raw)
+    assert not matte.uncertain_scraps(raw, mask, core).any()
+
+
+def test_fur_and_laces_are_not_scraps():
+    """Thin and uncertain describes fringe, hair and shoelaces exactly. Only
+    THICK uncertain regions are lumps of background."""
+    mask = _rect((300, 300), 60, 220, 60, 220)
+    mask[220:260, 100:106] = True                  # a 6px lace hanging down
+    raw = np.where(mask, 255, 0).astype(np.uint8)
+    raw[220:260, 100:106] = 150
+    core = matte.confident_core(raw)
+    assert not matte.uncertain_scraps(raw, mask, core)[240, 103], \
+        "a lace was removed as background"
+
+
+def test_an_uncertain_patch_inside_the_product_is_left_alone():
+    """A specular highlight or a printed graphic the model was unsure about
+    sits in the MIDDLE of the item. Punching it out leaves a hole."""
+    mask = _rect((300, 300), 60, 240, 60, 240)
+    raw = np.where(mask, 255, 0).astype(np.uint8)
+    raw[130:170, 130:170] = 150                    # unsure, but enclosed
+    core = matte.confident_core(raw)
+    assert not matte.uncertain_scraps(raw, mask, core).any()
+
+
 # --- result type ------------------------------------------------------------
 def test_kept_original_is_not_a_failure_and_needs_review_is_usable():
     assert not matte.CutoutResult(status=matte.KEPT_ORIGINAL).ok

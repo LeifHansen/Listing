@@ -423,6 +423,54 @@ def undersized_parts(core: np.ndarray, kept: np.ndarray,
     return losing[labels]
 
 
+# A leftover scrap has to be at least this thick (half-width, at scan scale)
+# before it is removed wholesale. Below it we are looking at fur, fringe, a
+# lace or an anti-aliased edge — all low-confidence, all genuinely the item.
+SCRAP_RADIUS_PX = int(os.getenv("CUTOUT_SCRAP_RADIUS", "5") or 5)
+# How much anti-aliased skirt to keep outside the confident subject, so the
+# cutout's edge stays soft rather than cut with scissors.
+EDGE_KEEP_PX = int(os.getenv("CUTOUT_EDGE_KEEP", "5") or 5)
+
+
+def uncertain_scraps(raw_alpha: np.ndarray, mask: np.ndarray,
+                     core: np.ndarray, radius: int = SCRAP_RADIUS_PX,
+                     edge_keep: int = EDGE_KEEP_PX) -> np.ndarray:
+    """Lumps of leftover background still attached to the subject.
+
+    This is the failure sellers actually report, and it is not a halo: it is a
+    cast shadow, a wedge of the table, a bit of the hand that was holding the
+    item — swallowed whole by the matte. Depth-capped trimming can never reach
+    it, precisely because the cap exists to stop a trim eating a sleeve.
+
+    So depth is the wrong question. Confidence is the right one. A scrap is
+    somewhere the MODEL WAS UNSURE, thick enough to be a lump rather than an
+    edge, and reachable from outside the mask. All three matter:
+
+      * unsure, so it can never take the product (the confident core, plus a
+        skirt of anti-aliasing around it, is excluded outright);
+      * thick, so fur, fringe, laces and soft edges — low-confidence and
+        genuinely the item — are left alone;
+      * reachable from outside, so an uncertain patch in the MIDDLE of the
+        product (a specular panel, a printed graphic) is not punched out.
+
+    Returns the pixels to remove.
+    """
+    empty = np.zeros_like(mask)
+    nd = _ndimage()
+    if nd is None or not mask.any():
+        return empty
+    candidate = mask & (raw_alpha < CONFIDENT_ALPHA) & ~dilate(core, edge_keep)
+    if not candidate.any():
+        return empty
+    thick = erode(candidate, radius)
+    if not thick.any():
+        return empty
+    lumps = reconstruct(thick, candidate)
+    # ...and only the lumps that reach the outside.
+    touching = reconstruct(candidate & dilate(~mask, 1), candidate)
+    return lumps & touching
+
+
 def rim(mask: np.ndarray, depth: int) -> np.ndarray:
     """The outer `depth` px of `mask` — everything the inward trim is allowed
     to touch. Anything deeper than this is the item, not a halo."""
