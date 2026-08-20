@@ -31,6 +31,16 @@ export function PhotoTile({
 
   // Belt and braces: if a load event is ever missed, a version bump still
   // clears the optimistic spin rather than leaving the tile turned twice.
+  //
+  // This deliberately stays in an effect rather than becoming a render-phase
+  // derivation. The primary reset is the <img>'s onLoad below, timed to the
+  // moment the re-encoded file is actually on screen — a version bump only
+  // changes `src`, and the browser keeps painting the OLD bytes until the new
+  // ones arrive. Clearing during render would drop the CSS rotation a frame
+  // sooner, i.e. off the image still being displayed, which is exactly the
+  // flash of the old orientation this component is built to avoid. It cannot
+  // cascade: it reads `version` and never writes it.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setSpin(0); }, [version]);
 
   const rotate = async () => {

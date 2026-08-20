@@ -11,7 +11,11 @@ import { BrandMark } from "@/components/BrandMark";
 // Log in / sign up. On success, resumes whatever action prompted the login
 // (e.g. Shop-mode "Buy").
 export function AuthDialog() {
-  const { authOpen, setAuthOpen, setUser, loadEbayStatus, afterLogin } = useApp();
+  // `afterLogin` is a useRef created in the store; renamed to the `...Ref`
+  // convention here so the React Compiler can tell it is a ref (it loses that
+  // identity coming out of the context object) and allows the `.current` write
+  // below. Same object either way — rename only.
+  const { authOpen, setAuthOpen, setUser, loadEbayStatus, afterLogin: afterLoginRef } = useApp();
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -40,8 +44,8 @@ export function AuthDialog() {
       setAuthOpen(false);
       loadEbayStatus();
       // Resume the action that was interrupted by the login prompt.
-      const resume = afterLogin.current;
-      afterLogin.current = null;
+      const resume = afterLoginRef.current;
+      afterLoginRef.current = null;
       if (resume) resume();
     } catch (e) {
       setError(e.message);

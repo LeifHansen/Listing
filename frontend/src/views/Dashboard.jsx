@@ -19,6 +19,11 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
 
+// The signed-out / no-suggestions list. A shared frozen constant so clearing
+// it during render is a no-op state write when it is already empty, instead of
+// a fresh [] that re-renders the whole dashboard. Never mutated.
+const NO_INSIGHTS = Object.freeze([]);
+
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
   promote: Megaphone, lower_price: TrendingDown,
@@ -327,12 +332,32 @@ export function Dashboard() {
   const items = listingsState.items;
 
   // "What to do next" — ranked actions across the user's listings.
-  const [insights, setInsights] = useState([]);
+  const [insights, setInsights] = useState(NO_INSIGHTS);
   const [promoting, setPromoting] = useState(null); // listing id, or "all"
+  // Signing out throws the suggestions away — they are one account's to-do
+  // list, and eBay actions fire straight off them. That reset used to sit at
+  // the top of `refreshInsights`, which made it a setState inside the effect
+  // below: a cascading render, and one commit late, so the previous account's
+  // suggestions stayed on screen (and stayed clickable) for a frame. React's
+  // documented alternative is to adjust state DURING render — same shape as
+  // the metrics reset in store.jsx. Only the reset moved; the fetch still
+  // lives in the effect, and `refreshInsights` is still the single thing the
+  // action handlers call after they change eBay.
+  //
+  // The condition is "there is nobody to show these to", NOT "the moment the
+  // user went away": the effect below cleared on EVERY run while signed out,
+  // and an edge-triggered version (compare against the previous `user`) would
+  // lose that. The `/api/insights` fetch has no abort — a response sent for
+  // the old session can resolve after the logout render and repopulate the
+  // list, and past that edge nothing would ever clear it again, leaving one
+  // account's listings (with live Promote / Lower-price buttons) on a
+  // signed-out dashboard. Level-triggering costs an identity check and
+  // converges: once `insights` is the shared empty, the write is skipped.
+  if (!user && insights !== NO_INSIGHTS) setInsights(NO_INSIGHTS);
   const refreshInsights = useCallback(() => {
-    if (!user) { setInsights([]); return; }
+    if (!user) return;
     api("/api/insights")
-      .then((r) => setInsights(r.recommendations || []))
+      .then((r) => setInsights(r.recommendations || NO_INSIGHTS))
       .catch(() => {});
   }, [user]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, items.length]);

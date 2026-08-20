@@ -11,6 +11,12 @@ import { useToast } from "@/components/ui/Toaster";
 
 const AppContext = createContext(null);
 
+// "We know nothing about eBay traffic" — the state the metrics below fall back
+// to whenever they are not ours to show (signed out, or eBay disconnected).
+// Module-level so that fallback keeps a stable identity across renders.
+const NO_METRICS = {};
+const NO_METRICS_STATUS = { trafficOk: false, needsReconnect: false };
+
 export function AppProvider({ children }) {
   const { toast } = useToast();
 
@@ -146,6 +152,13 @@ export function AppProvider({ children }) {
     } catch (e) { /* keep previous */ }
   }, [user]);
   useEffect(() => {
+    // This effect IS the subscription the rule asks for: a 60s poll of an
+    // external system, plus one immediate read so the bell isn't blank until
+    // the first tick. The state it writes lands after the fetch resolves; the
+    // one synchronous write is the signed-out branch above, which clears the
+    // bell exactly once per logout and cannot cascade (it depends only on
+    // `user`, which it does not change).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadNotifications();
     if (!user) return undefined;
     const t = setInterval(loadNotifications, 60000);
@@ -175,11 +188,34 @@ export function AppProvider({ children }) {
     loaded: false, loading: false, authed: true, dbConfigured: true, items: [],
   });
   // eBay views/watchers per live listing, keyed by our listing record id.
-  const [metricsById, setMetricsById] = useState({});
+  const [metricsById, setMetricsById] = useState(NO_METRICS);
   // Whether eBay's traffic report (views/impressions) was actually readable —
   // so the UI can say "we couldn't ask" instead of showing everything as 0.
-  const [metricsStatus, setMetricsStatus] = useState(
-    { trafficOk: false, needsReconnect: false });
+  const [metricsStatus, setMetricsStatus] = useState(NO_METRICS_STATUS);
+  // Metrics only mean anything while someone is signed in AND eBay is
+  // connected; the moment either drops, whatever we cached stops being ours to
+  // show. That forget-it step used to sit at the top of the fetch effect near
+  // the bottom of this file, which made it a setState inside an effect (a
+  // cascading render, and one commit late). React's documented alternative is
+  // to adjust state DURING render, so the stale numbers are already gone in
+  // the render that loses the connection.
+  // The fetch itself still lives in the effect — only the reset moved.
+  //
+  // The condition is "not ours to show", NOT "the moment it stopped being
+  // ours": the effect below cleared on every run while signed out, and an
+  // edge-triggered version would lose one case. An in-flight metrics response
+  // can resolve in the gap between the render that drops the connection and
+  // that render's effect cleanup (a concurrent render yields, microtasks run,
+  // `alive` is still true) — so a write can land AFTER the edge has passed.
+  // Level-triggering it costs an identity check and cannot leave stale numbers
+  // on screen. It converges: the clear is skipped once both are the shared
+  // empties, so this settles after at most one extra render pass.
+  const metricsLive = !!user && ebay.connected;
+  if (!metricsLive
+      && (metricsById !== NO_METRICS || metricsStatus !== NO_METRICS_STATUS)) {
+    setMetricsById(NO_METRICS);
+    setMetricsStatus(NO_METRICS_STATUS);
+  }
 
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     // `quiet` suppresses the spinner for background refreshes — but the FIRST
@@ -311,6 +347,12 @@ export function AppProvider({ children }) {
       return { error: e.message };
     }
   }, [user, ebay.connected, loadListings, watchImport]);
+  // Kick the once-per-session mirror import off as soon as we have a user and
+  // a connected eBay account. syncStore bails out immediately in every other
+  // case, and latches `syncedOnce` so re-running this effect is a no-op — the
+  // spinner state it sets synchronously happens once per session, on the run
+  // that actually starts the job, and the deps it reads are not ones it writes.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { syncStore(); }, [syncStore]);
 
   // The mirror import runs once per app session — but a tab (or the native
@@ -538,6 +580,10 @@ export function AppProvider({ children }) {
     const label = (k) => k ? k.charAt(0).toUpperCase() + k.slice(1) : "";
     if (ok) {
       toast(`${label(ok)} connected! You can now cross-post listings there.`, { kind: "success" });
+      // Re-read the roster so the new connection shows in Settings. Nothing is
+      // written synchronously: loadMarketplaces only calls setState after its
+      // fetch resolves, and this effect reads the URL once on mount.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMarketplaces();
     } else if (bad) {
       toast(`${label(bad)} connection failed. Please try again.`, { kind: "error" });
@@ -576,6 +622,9 @@ export function AppProvider({ children }) {
   }, [loadTokens]);
 
   // Balance changes with login state; it also refreshes when the dialog opens.
+  // loadTokens writes state only after its fetch resolves, so there is no
+  // synchronous cascade here — just a fetch tied to who is signed in.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadTokens(); }, [user, loadTokens]);
 
   // Refresh the balance when the app regains focus. In the native shell a
@@ -588,7 +637,14 @@ export function AppProvider({ children }) {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [loadTokens]);
 
+  // Boot: everything the shell needs before the first screen can be honest.
+  // All four write state only after their fetch resolves, so nothing here
+  // renders twice in a row; the deps are stable callbacks, so it runs once.
+  // (Three of them keep the previous value on failure; loadAuth is the
+  // exception — a failed /api/auth/me sets the user to null, i.e. treats an
+  // unreadable session as signed out, which is the safe direction.)
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadHealth();
     loadAuth();
     loadEbayStatus();
@@ -597,19 +653,22 @@ export function AppProvider({ children }) {
 
   // Refresh the listings cache (and per-user marketplace connections) when
   // auth changes (login/logout).
+  // loadListings does flip `loading` synchronously — that is the point of the
+  // spinner, and it settles in the same fetch that clears it. It depends on
+  // `user`, which it never writes, so there is no cascade: one render to show
+  // the skeletons, one when the data lands.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadListings({ quiet: true });
     loadMarketplaces();
   }, [user, loadListings, loadMarketplaces]);
 
   // eBay views/watchers for live listings (best-effort; empty until eBay is
   // connected and the analytics scope granted). Refreshes as the set changes.
+  // Signed out / disconnected is handled during render above (the state is
+  // cleared there), so this effect only ever fetches.
   useEffect(() => {
-    if (!user || !ebay.connected) {
-      setMetricsById({});
-      setMetricsStatus({ trafficOk: false, needsReconnect: false });
-      return;
-    }
+    if (!user || !ebay.connected) return undefined;
     let alive = true;
     api("/api/ebay/listing-metrics")
       .then((r) => {

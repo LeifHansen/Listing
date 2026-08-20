@@ -35,17 +35,24 @@ export default [
         caughtErrors: "none",
         varsIgnorePattern: "^_",
       }],
-      // The React Compiler rules. These are correctness rules and the ~30
-      // findings they raise are worth working through, but each one is a
-      // behaviour change in code that works today, and doing them in the same
-      // pass as the image workflow would bury both. Warn now, promote to
-      // error as they are cleared.
-      "react-hooks/set-state-in-effect": "warn",
-      "react-hooks/preserve-manual-memoization": "warn",
-      "react-hooks/immutability": "warn",
-      "react-hooks/refs": "warn",
-      "react-hooks/exhaustive-deps": "warn",
-      // ...but the two that catch outright bugs stay fatal.
+      // The React Compiler rules. These were staged as warnings while the
+      // ~30 findings they raised were worked through ("promote to error as
+      // they are cleared"). That backlog is now empty: every finding was
+      // either refactored away — state derived during render instead of
+      // synced in an effect, refs no longer read during render, hook returns
+      // no longer mutated — or carries a targeted eslint-disable-next-line
+      // with the reason it is correct at that site.
+      //
+      // So they are fatal now. That is the whole point of having done the
+      // work: a warning nobody has to clear silently accumulates again, and
+      // the next genuine defect hides in the noise. A new finding here fails
+      // CI, and the fix is either the refactor or an explicit, justified
+      // one-line suppression — never a quiet re-demotion of these lines.
+      "react-hooks/set-state-in-effect": "error",
+      "react-hooks/preserve-manual-memoization": "error",
+      "react-hooks/immutability": "error",
+      "react-hooks/refs": "error",
+      "react-hooks/exhaustive-deps": "error",
       "react-hooks/rules-of-hooks": "error",
     },
   },

@@ -104,6 +104,25 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const [cropRect, setCropRect] = useState(null); // {x,y,w,h} in canvas px
   const { toast } = useToast();
 
+  // Opening a different photo starts from a clean slate: the brush tool, no
+  // half-dragged crop carried over from the last one. This is derived DURING
+  // RENDER off the previous `name` (React's documented "adjust state when a
+  // prop changes" pattern) rather than in an effect, so the reset lands in the
+  // same commit as the new photo instead of costing a second render — the
+  // toolbar never paints one frame still showing the previous photo's Crop
+  // button lit up.
+  const [prevName, setPrevName] = useState(name);
+  if (name !== prevName) {
+    setPrevName(name);
+    // Closing the studio (name -> null) deliberately leaves the tools alone,
+    // exactly as the old effect's `if (!name) return` did — only opening a
+    // photo resets them.
+    if (name) {
+      setTool("brush");
+      setCropRect(null);
+    }
+  }
+
   useEffect(() => { toolRef.current = tool; }, [tool]);
   useEffect(() => { brushModeRef.current = brushMode; }, [brushMode]);
 
@@ -346,10 +365,13 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cropRect]);
 
+  // Load the newly-opened photo onto the canvas, then run whatever the caller
+  // asked for on open (Remove BG, or arm the crop tool). The tool/crop reset
+  // that used to head this effect now happens during render (see prevName
+  // above); everything left here is genuinely async work against the canvas
+  // and the API, so it has to stay in an effect.
   useEffect(() => {
     if (!name) return;
-    setTool("brush");
-    setCropRect(null);
     (async () => {
       await load();
       if (initialAction === "removebg") removeBg();

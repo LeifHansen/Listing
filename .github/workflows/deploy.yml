@@ -2,9 +2,18 @@ name: Deploy to Fly.io
 
 # Auto-deploy: every push to the default branch (i.e. every merged PR) deploys
 # the app to Fly. Can also be run manually from the Actions tab.
+#
+# Both names are listed during the move to `main`. The repo carries two
+# unrelated histories: the old `main` (archived at the branch
+# archive/legacy-main) and the trunk everything actually shipped from,
+# claude/ebay-listing-generator-se7lao. `main` now points at that trunk, so
+# either name deploying the same commit is correct — and listing both means
+# the deploy cannot silently stop working at the moment the default branch is
+# switched over. Drop the long name once the switch is done and it is deleted.
 on:
   push:
     branches:
+      - main
       - claude/ebay-listing-generator-se7lao
   workflow_dispatch:
 
