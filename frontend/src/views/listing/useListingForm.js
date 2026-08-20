@@ -92,9 +92,14 @@ export function useListingForm() {
   const ebayListingId = session?.listing?.ebay_listing_id
     || publishResult?.listing_id || "";
 
-  // Re-seed the form whenever a different listing session is opened.
+  // Re-seed the form whenever a different listing session is opened. The
+  // guard is a ref that is read and written ONLY inside the effect below:
+  // comparing it during render (to expose a "reseed is pending" flag) is
+  // exactly what React's refs rule rejects, because a render that React
+  // throws away would still have consumed the comparison. Nothing outside
+  // this effect needs to know a re-seed is pending — see the category-meta
+  // effect further down, which reads the incoming listing directly instead.
   const seededFor = useRef(sessionId);
-  const reseeded = seededFor.current !== sessionId;
   useEffect(() => {
     if (seededFor.current !== sessionId) {
       seededFor.current = sessionId;
@@ -204,12 +209,21 @@ export function useListingForm() {
     }
   }, [form.category_id, health.taxonomy_configured]);
 
-  // Load meta when a session opens with a category already set. On a session
-  // switch the form state is one render behind, so read the category straight
-  // from the incoming listing rather than the (stale) form.
+  // Load meta when a session opens with a category already set. This effect
+  // runs only on mount and on a session switch, and in both cases the
+  // category to load is the incoming listing's: on a switch the form state is
+  // one render behind (the effect above re-seeds it in this same commit), and
+  // on mount the form was itself seeded from this listing, so reading the
+  // listing covers both without needing to know which case we are in.
   useEffect(() => {
     if (!sessionId) return;
-    const cid = reseeded ? session?.listing?.category_id : form.category_id;
+    const cid = session?.listing?.category_id;
+    // loadCategoryMeta is async: the conditions/aspects it sets land after the
+    // /api/item-conditions + /api/item-aspects round trip, so this is a
+    // fetch-on-open rather than a synchronous render cascade. Its one
+    // synchronous setState path (taxonomy not configured on the server) only
+    // re-asserts the empty meta a session switch has just written.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (cid) loadCategoryMeta(cid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -274,7 +288,12 @@ export function useListingForm() {
       });
       setSession((s) => ({ ...s, listing: updated }));
       setForm(fromListing(updated));
-      seededFor.current = sessionId; // keep the reseed guard in sync
+      // The re-seed guard needs no touching here: it is keyed on sessionId,
+      // which a refine never changes, so it already matches. (It used to be
+      // re-stamped with the captured sessionId at this point, which was a
+      // no-op at best — and actively wrong if the seller opened a different
+      // listing while the refine was in flight, since it re-armed a re-seed
+      // against a session that had already moved on.)
       toast("Listing refined ✨", { kind: "success" });
       return true;
     } catch (e) {

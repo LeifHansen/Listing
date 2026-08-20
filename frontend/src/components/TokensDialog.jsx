@@ -63,20 +63,41 @@ export function TokensDialog() {
   // after a run of AI actions.
   useEffect(() => { if (tokensOpen) loadTokens(); }, [tokensOpen, loadTokens]);
 
+  // Two things have to be put back to their starting position the moment the
+  // dialog or the section is toggled, and both are done DURING RENDER by
+  // comparing against the previous values (React's documented "adjust state
+  // when something changes" pattern) instead of in an effect. An effect would
+  // only reset AFTER a frame carrying the old content had been committed, and
+  // in the ledger's case that frame shows a previous load's entries as if they
+  // were current — exactly the confusion this section exists to prevent.
+  //   * Closing the dialog collapses the section, so it opens as a buying
+  //     screen next time.
+  //   * Anything that restarts the ledger fetch below — opening the section,
+  //     reopening the dialog, a different user — puts the ledger back to
+  //     "Loading…". These are the same three values the fetch effect depends
+  //     on, compared by identity the way React compares dependencies, so the
+  //     reset and the re-fetch stay in step. Clearing when the section is
+  //     closed is invisible (nothing is rendered) and harmless.
+  const [prevOpenState, setPrevOpenState] = useState({ tokensOpen, historyOpen, user });
+  if (prevOpenState.tokensOpen !== tokensOpen
+    || prevOpenState.historyOpen !== historyOpen
+    || prevOpenState.user !== user) {
+    if (prevOpenState.tokensOpen !== tokensOpen && !tokensOpen) setHistoryOpen(false);
+    setPrevOpenState({ tokensOpen, historyOpen, user });
+    setHistory(null);
+  }
+
   // Fetched only when the section is opened, and re-fetched each time so it
-  // reflects AI spent since the dialog was last looked at.
+  // reflects AI spent since the dialog was last looked at. The reset to the
+  // loading state happens during render above, not here.
   useEffect(() => {
     if (!historyOpen || !user) return undefined;
     let alive = true;
-    setHistory(null);
     api("/api/tokens/history")
       .then((r) => { if (alive) setHistory({ entries: r.entries || [] }); })
       .catch((e) => { if (alive) setHistory({ error: `Couldn't load your activity: ${e.message}` }); });
     return () => { alive = false; };
   }, [historyOpen, user, tokensOpen]);
-
-  // Closing the dialog collapses the section, so it opens as a buying screen.
-  useEffect(() => { if (!tokensOpen) setHistoryOpen(false); }, [tokensOpen]);
 
   const buy = async (packId) => {
     if (!user) { setTokensOpen(false); openAuth(); return; }
@@ -101,7 +122,10 @@ export function TokensDialog() {
         setBuying(null);
         return;
       }
-      window.location.href = res.url; // off to Stripe Checkout
+      // Off to Stripe Checkout. assign() is the method form of setting
+      // location.href — same navigation, same history entry — and it does not
+      // read as a write to a value owned outside the component.
+      window.location.assign(res.url);
     } catch (e) {
       toast(`Couldn't start the purchase: ${e.message}`, { kind: "error" });
       setBuying(null);

@@ -193,11 +193,22 @@ function MoreDetails({ w, children }) {
   const attention = ["specifics", "shipping", "description"]
     .filter((k) => w.completion[k] === "attention").length;
   const auto = attention > 0 || reviewCount > 0;
-  const [manual, setManual] = useState(null); // null = follow `auto`
+  // null = follow `auto`. Seeded from the current fix target so a fold that
+  // mounts already flagged starts open.
+  const [manual, setManual] = useState(
+    () => (FOLDED_TARGETS.includes(w.fixTarget) ? true : null));
   const open = manual === null ? auto : manual;
-  useEffect(() => {
+  // An eBay fix-it target that lives behind the fold forces it open. This is
+  // React's "adjust state when a prop changes" recipe — the previous target is
+  // tracked in state and the comparison happens DURING render — rather than an
+  // effect, so the fold (and the flagged card inside it, which scrolls itself
+  // into view on mount) is already open in the commit that reacts to the
+  // target, instead of one painted frame later.
+  const [prevFixTarget, setPrevFixTarget] = useState(w.fixTarget);
+  if (w.fixTarget !== prevFixTarget) {
+    setPrevFixTarget(w.fixTarget);
     if (FOLDED_TARGETS.includes(w.fixTarget)) setManual(true);
-  }, [w.fixTarget]);
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -460,9 +471,24 @@ export function NewListing({ search = "" }) {
   // A deep link that lands while a batch is processing shouldn't dead-end on
   // the queue — show the lists with a compact way back to the batch.
   const [showBulk, setShowBulk] = useState(true);
+  // The batch going away (dismissed, or exited from the queue) re-arms the
+  // queue for the next one. Pure state-follows-state, so it is adjusted during
+  // render with
+  // the previous value tracked in state — no cascading render, and the stale
+  // `false` is never committed. It was invisible either way: showBulk is only
+  // ever read while activeBulk is set.
+  const [prevBulk, setPrevBulk] = useState(activeBulk);
+  if (prevBulk !== activeBulk) {
+    setPrevBulk(activeBulk);
+    if (!activeBulk) setShowBulk(true);
+  }
+  // The other half can't move into render: it reads listingsJumpRef, and a
+  // render React throws away would still have consumed that read (the same
+  // trap useListingForm's re-seed guard documents). The ref is an imperative
+  // navigation signal from openListings, not derivable state, so this stays an
+  // effect that reads it once per batch change.
   useEffect(() => {
     if (activeBulk && listingsJumpRef.current) setShowBulk(false);
-    if (!activeBulk) setShowBulk(true);
   }, [activeBulk, listingsJumpRef]);
 
   if (!session && activeBulk && showBulk) {

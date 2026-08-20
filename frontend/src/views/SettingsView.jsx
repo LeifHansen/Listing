@@ -52,7 +52,17 @@ export function SettingsView() {
     }
   }, [setPoliciesData, toast]);
 
+  // Policies are fetched once both external systems are ready: an authenticated
+  // session and a live eBay link. `load()` flips `loading` synchronously and
+  // that flip is load-bearing — `data` is seeded from the store cache, so
+  // without it the previous account's policies stay on screen (and stay
+  // editable) for the whole round trip after a re-login or a reconnect. The
+  // compiler rule flags exactly that flip; every other setState in `load`
+  // happens after the await. Suppressed rather than "fixed", because the
+  // alternatives (deriving the flag during render, or seeding `loading` from
+  // the connection state) all move which frame the shimmer appears on.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate: see the note above
     if (user && ebay.connected) load();
   }, [user, ebay.connected, load]);
 
@@ -763,14 +773,22 @@ function EbayAccountMirror() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  // The fetch itself touches state only in the promise callbacks; the shimmer
+  // flag is flipped by whoever asks for a refetch. Split that way because the
+  // first load doesn't need the flip at all — `loading` already starts true —
+  // so the mount effect stays free of a synchronous setState.
+  const fetchOverview = useCallback(() => {
     api("/api/ebay/account-overview")
       .then(setData)
       .catch(() => setData({ connected: false }))
       .finally(() => setLoading(false));
   }, []);
-  useEffect(load, [load]);
+  // Refresh button: back to the shimmer, then re-fetch.
+  const load = useCallback(() => {
+    setLoading(true);
+    fetchOverview();
+  }, [fetchOverview]);
+  useEffect(() => { fetchOverview(); }, [fetchOverview]);
 
   if (loading) return <div className="ai-shimmer h-24 rounded-tile" aria-hidden />;
   if (!data?.connected) {
@@ -1020,11 +1038,21 @@ function AddShippingServiceRow({ onCreated }) {
 function ProfileCard() {
   const { user, setUser, ebay } = useApp();
   const { toast } = useToast();
-  const [name, setName] = useState(user?.display_name || "");
+  const displayName = user?.display_name || "";
+  const [name, setName] = useState(displayName);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  useEffect(() => { setName(user?.display_name || ""); }, [user?.display_name]);
+  // The field is a draft the user types into, re-seeded whenever the stored
+  // display name changes underneath it — a save, an eBay sync, or signing in as
+  // someone else. This is React's documented "adjust state when a prop changes"
+  // pattern: compare against the previous value during render, so the input
+  // never paints a frame of the old name the way an effect would.
+  const [prevDisplayName, setPrevDisplayName] = useState(displayName);
+  if (displayName !== prevDisplayName) {
+    setPrevDisplayName(displayName);
+    setName(displayName);
+  }
 
   const save = async () => {
     setSaving(true);

@@ -98,12 +98,32 @@ export function ShippingDialog() {
     setTracking(""); setShipped(false);
   }, []);
 
-  // Load the order(s) when the dialog opens; remember the saved ship-from.
+  /* Opening the dialog starts a fresh shipping session, so the previous one's
+     order, package, quote and label have to be cleared and the default label
+     path re-picked. That clearing happens DURING RENDER, tracking the previous
+     session in state, which is React's documented way to reset state when an
+     input changes (react.dev/learn/you-might-not-need-an-effect). Doing it in
+     the effect below instead — as this used to — painted one frame of the
+     *last* order's details (and its "Label purchased" panel) before the reset
+     landed, and cost an extra render every time.
+
+     A session is identified by: the dialog being open, which listing it was
+     opened for, and whether eBay labels are available — the same three inputs
+     the loading effect keys off, so a change to any of them re-runs both. */
+  const sessionKey = open ? `${listingId}|${ebay.labels_enabled ? 1 : 0}` : null;
+  const [prevSessionKey, setPrevSessionKey] = useState(null);
+  if (sessionKey !== prevSessionKey) {
+    setPrevSessionKey(sessionKey);
+    if (open) {
+      reset();
+      setMethod(ebay.labels_enabled ? "ebay" : "pirateship");
+      setLoading(true);
+    }
+  }
+
+  // Load the order(s) for the session opened above; remember the saved ship-from.
   useEffect(() => {
     if (!open) return;
-    reset();
-    setMethod(ebay.labels_enabled ? "ebay" : "pirateship");
-    setLoading(true);
     (async () => {
       try {
         if (listingId) {
@@ -128,7 +148,7 @@ export function ShippingDialog() {
         if (saved) setShipFrom((f) => ({ ...f, ...saved }));
       } catch (e) { /* logged out or no prefs — the form stays blank */ }
     })();
-  }, [open, listingId, ebay.labels_enabled, pickOrder, reset]);
+  }, [open, listingId, ebay.labels_enabled, pickOrder]);
 
   const getRates = async () => {
     setQuoting(true);

@@ -1,0 +1,99 @@
+name: Fetch Fly logs
+
+# Ops helper: run it from the Actions tab to dump production logs plus
+# live-site ground truth into the run output. This is the only way to read
+# production right now — the app logs to a bare stdout handler (see
+# backend/config.py) with no Sentry/OTel/Datadog anywhere, so `flyctl logs` IS
+# the telemetry, and the "Errors and warnings only" step below is the pass
+# that makes it readable.
+#
+# Manual-dispatch only. It shares the deploy concurrency group so a log run
+# can never interleave with a deploy of the same app.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+env:
+  FLY_APP: listing-lfwjrg
+  SITE: https://listing-lfwjrg.fly.dev
+
+jobs:
+  logs:
+    name: Dump app status, live-site check, logs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Machines + releases
+        run: |
+          flyctl status -a "$FLY_APP" || true
+          echo "--- releases ---"
+          flyctl releases -a "$FLY_APP" | head -8 || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Secret names (values are never shown)
+        run: flyctl secrets list -a "$FLY_APP" || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Volume size + disk usage (the /data volume)
+        run: |
+          flyctl volumes list -a "$FLY_APP" || true
+          echo "--- df on the machine ---"
+          flyctl ssh console -a "$FLY_APP" -C "df -h /data" || true
+          echo "--- biggest consumers under /data ---"
+          flyctl ssh console -a "$FLY_APP" -C "du -sh /data/sessions /data/exports" || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Live site check (hits the public URL from the runner)
+        run: |
+          for i in 1 2 3 4; do
+            echo "=== attempt $i ==="
+            curl -sS -D - -o /tmp/index.html "$SITE/" | grep -i -E "fly-machine|http/|cache" || true
+            grep -o "<title>[^<]*</title>" /tmp/index.html || true
+            # Which built bundle is actually being served — the check that
+            # catches a deploy that published a stale frontend.
+            grep -o "assets/index-[A-Za-z0-9_-]*\.js" /tmp/index.html | head -1 || true
+          done
+
+      - name: Recent logs
+        run: flyctl logs -a "$FLY_APP" --no-tail | tail -120
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # The raw tail above is dominated by eBay's account-deletion pings (1-2 a
+      # MINUTE, around the clock); this pass surfaces the actual problems
+      # across the whole retained window. Nothing else in the repo does this.
+      - name: Errors and warnings only (full retained window)
+        run: |
+          flyctl logs -a "$FLY_APP" --no-tail \
+            | grep -viE 'account-deletion|GET (/|/api/health|/assets|/media|/favicon)|\.php|New SSH session' \
+            | grep -iE 'error|warn|exception|traceback|critical|" 5[0-9][0-9] |ENOSPC|No space' \
+            | tail -150 || echo "(no error/warning lines in the retained window)"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Compact tail so a reader only needs the LAST few lines of this job.
+      # Config and disk headroom come from /api/health and /api/ready rather
+      # than a hardcoded secrets grep: health already reports objstore state,
+      # disk_free_mb, the AI engines, tokens_missing, stripe_live_mode and db,
+      # so it cannot drift out of date the way a fixed key list did (that grep
+      # never learned about STRIPE_* or DATABASE_URL).
+      - name: SUMMARY
+        run: |
+          echo "===== SUMMARY ====="
+          flyctl ssh console -a "$FLY_APP" -C "du -sh /data/sessions /data/exports" 2>/dev/null | tail -2 || true
+          flyctl ssh console -a "$FLY_APP" -C "du -sh /data/* 2>/dev/null | sort -h | tail -5" 2>/dev/null | tail -5 || true
+          echo "--- /api/health ---"
+          curl -sS "$SITE/api/health" | tr ',' '\n' || true
+          echo "--- /api/ready (503 = not serving) ---"
+          curl -sS -o /tmp/ready.json -w 'HTTP %{http_code}\n' "$SITE/api/ready" || true
+          cat /tmp/ready.json 2>/dev/null | tr ',' '\n' || true
+          echo "===== END ====="
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

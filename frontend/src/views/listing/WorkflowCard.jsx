@@ -11,10 +11,29 @@ export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, chil
   const [open, setOpen] = useState(true);
   const ref = useRef(null);
 
-  // When a publish error points here, expand and scroll into view.
+  // When a publish error points here, expand and scroll into view. These are
+  // two separate concerns and are handled in two separate places:
+  //
+  // 1. Expanding is pure state adjustment, so it happens during render using
+  //    React's documented "adjust state when a prop changes" pattern — track
+  //    the previous `flagged` in state and react to the transition. Doing it
+  //    here rather than in an effect avoids a cascading second render (the
+  //    card is committed already-expanded instead of collapsed-then-expanded).
+  //    Note this only fires on a false → true transition, so a user who
+  //    manually collapses a still-flagged card keeps it collapsed — same as
+  //    before. PublishCard's "fix this" button deliberately clears fixTarget
+  //    and re-sets it on the next frame to force that transition again.
+  const [prevFlagged, setPrevFlagged] = useState(flagged);
+  if (flagged !== prevFlagged) {
+    setPrevFlagged(flagged);
+    if (flagged) setOpen(true);
+  }
+
+  // 2. Scrolling is a real side effect on the DOM, so it stays in an effect,
+  //    with the same `[flagged]` dependency and the same truthiness guard it
+  //    always had — including firing on mount when the card starts flagged.
   useEffect(() => {
     if (flagged) {
-      setOpen(true);
       ref.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [flagged]);

@@ -138,7 +138,15 @@ export function DuplicateListings({ onChanged }) {
       setState({ loading: false, groups: [] });  // advisory only — stay quiet
     }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  // Fetch the duplicate report once on mount. Nothing is written
+  // synchronously: `load` suspends on the `await` before either setState runs,
+  // so there is no cascading render for the compiler rule to protect against.
+  // `state.loading` starts true and the card renders null until the round trip
+  // finishes, so there is no flag to flip on the way in either.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate: see the note above
+    load();
+  }, [load]);
 
   const endOne = async (item) => {
     if (!(await confirm({
