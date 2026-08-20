@@ -119,6 +119,19 @@ class Listing(BaseModel):
     # Live eBay counters carried along on import/sync (display only).
     watch_count: int = 0
     sold_quantity: int = 0
+    # What the item ACTUALLY sold for, per unit, in `currency`. `price` above
+    # is the ASKING price and keeps that meaning forever — an accepted Best
+    # Offer, an auction close, or a markdown all settle BELOW it, and eBay
+    # reports the real amount only on the transaction. None means "not sold,
+    # or eBay hasn't told us what it went for"; the UI falls back to `price`
+    # and says so rather than inventing a number.
+    sold_price: Optional[float] = None
+    # ISO-8601 UTC of the sale — eBay's transaction date when it reported one,
+    # otherwise the moment this app first saw the listing flip to sold. This
+    # is what the dashboard's sold-in-the-last-N-days tile counts against;
+    # updated_at can't stand in for it, because an imported record's timestamp
+    # is the listing's START time.
+    sold_at: str = ""
     # eBay's own view URL for an imported listing (avoids guessing the domain).
     view_url: str = ""
     # Per-marketplace publish state, keyed by marketplace ("ebay", "etsy",

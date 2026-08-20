@@ -453,6 +453,33 @@ something to put behind a single button. The rules bulk runs follow —
   its own serial eBay revise; the remainder comes back as `deferred` for another
   pass instead of the request outliving the gateway.
 
+## What a sale actually made
+
+`price` on a listing is the **asking** price and keeps that meaning after the
+sale. When an item goes for less — an accepted Best Offer, an auction close, a
+markdown — eBay reports the real amount only on the *transaction*, and never
+moves the listing's own price to match. A sold record built from `GetItem`
+alone therefore showed what the seller hoped for, not what the buyer paid.
+
+So the sync reads `GetMyeBaySelling`'s **SoldList transactions** (the same
+paged call that already named the sold items, so no extra eBay quota) and
+stamps two fields on the record:
+
+- `sold_price` — the per-unit amount the buyer actually paid.
+- `sold_at` — eBay's transaction date. A record's `updated_at` can't stand in
+  for it: an imported listing carries its eBay *start* time.
+
+Both survive re-syncs, and the sale price is editable in the editor's Pricing
+card for a sale eBay never reported (one older than its ~90-day window). Where
+`sold_price` is unknown, the UI falls back to the asking price and marks the
+number approximate (`≈ $30.00`) rather than claiming it as the take.
+
+Everything downstream reads that: the sold card shows what it went for with
+the asking price struck through and how far under it landed, the Sold tab's
+profit line measures against the real amount, and the dashboard's **Sold**
+tile totals it over a window the seller picks (24 hours / 7 days / 30 days /
+90 days, defaulting to a week and remembered across visits).
+
 ## Sold notifications & shipping labels
 
 When a sync notices a listing flipped to **sold**, the seller gets an in-app

@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .. import db, ebay_auth, storage
@@ -197,6 +197,52 @@ def _started_at(data: dict) -> Optional[datetime]:
         return None
 
 
+def recent_sales(token: str) -> dict[str, dict]:
+    """{eBay item id: sale} for everything that sold in eBay's recent (~90 day)
+    window — see ebay_trading.sold_sales. Best-effort: an unreadable list
+    contributes nothing rather than sinking the sync that asked."""
+    try:
+        return ebay_trading.sold_sales(token, limit=_INACTIVE_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - sale amounts are additive
+        log.info("sync: couldn't read sold transactions: %s", exc)
+        return {}
+
+
+def stamp_sale(data: dict, sale: Optional[dict] = None,
+               mark_now: bool = False) -> dict:
+    """Record what a SOLD listing actually earned, returning a new dict.
+
+    `sale` is one entry from recent_sales (None when eBay didn't report the
+    sale at all — an item that sold outside the 90-day window, or a list that
+    couldn't be read). Only fields eBay actually gave us are written, so a
+    sale price the seller typed in by hand survives a sync that learns
+    nothing new.
+
+    `mark_now` stamps sold_at with the current time when nothing better is
+    known. Pass it ONLY for a record transitioning to sold right now: on a
+    first-time import of an old sale it would date a historical sale to today
+    and inflate the dashboard's "sold this week".
+    """
+    out = dict(data)
+    if sale:
+        price = sale.get("price")
+        if price is not None:
+            try:
+                out["sold_price"] = round(float(price), 2)
+            except (TypeError, ValueError):
+                pass
+        if sale.get("sold_at"):
+            out["sold_at"] = str(sale["sold_at"])
+        if sale.get("currency"):
+            out["currency"] = sale["currency"]
+        qty = int(sale.get("quantity") or 0)
+        if qty:
+            out["sold_quantity"] = max(int(out.get("sold_quantity") or 0), qty)
+    if mark_now and not out.get("sold_at"):
+        out["sold_at"] = datetime.now(timezone.utc).isoformat()
+    return out
+
+
 def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
                   on_progress: Optional[Callable[[str, int, int], None]] = None) -> dict:
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
@@ -230,13 +276,16 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     _tick("listing", 0, 0)
     _add(ebay_trading.active_listing_ids(token, limit=limit), "published")
     # Inactive/sold mirrors are additive — a failure there must not sink the
-    # main active-store sync.
-    for fetch, status in ((ebay_trading.sold_listing_ids, "sold"),
-                          (ebay_trading.unsold_listing_ids, "ended")):
-        try:
-            _add(fetch(token, limit=_INACTIVE_LIMIT), status)
-        except Exception as exc:  # noqa: BLE001
-            log.info("sync: couldn't list %s items: %s", status, exc)
+    # main active-store sync. The sold list is read through recent_sales
+    # (same one paged call) because it carries the transaction amounts as
+    # well as the ids, and the amount is the only place a discounted sale —
+    # an accepted offer — is visible at all.
+    sales = recent_sales(token)
+    _add(list(sales), "sold")
+    try:
+        _add(ebay_trading.unsold_listing_ids(token, limit=_INACTIVE_LIMIT), "ended")
+    except Exception as exc:  # noqa: BLE001
+        log.info("sync: couldn't list ended items: %s", exc)
 
     # Has to cover EVERY record the seller has, not a guess scaled off this
     # run's job count. A record the read misses is a record the dedupe below
@@ -289,6 +338,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         rid = prior["id"] if prior else mirror_id
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
+        if status == "sold":
+            # What it went for, not what it was listed at. mark_now only for a
+            # record we watched flip — backfilling an old sale must not date it
+            # to today.
+            data = stamp_sale(data, sales.get(item_id),
+                              mark_now=bool(prior) and prior.get("status") != "sold")
         # Validate through the model so a malformed field can't poison the DB.
         try:
             data = Listing(**{k: v for k, v in data.items()
@@ -316,10 +371,16 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             "deduped": deduped, "failed": failed}
 
 
-def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
+def refresh_statuses(token: str, user_id: str, records: list[dict],
+                     sales: Optional[dict] = None) -> int:
     """Re-check imported listings that are still marked live: sold/ended items
     get their status corrected, and watch/sold counters refreshed. Returns how
     many records changed. A None status (API blip) changes nothing.
+
+    `sales` is recent_sales()'s map, so a record that just sold records what it
+    actually went for. Callers that already fetched it pass it in; anything
+    else gets it fetched lazily — once, and only if something did sell, so a
+    sweep that finds nothing new costs no extra eBay call.
 
     Status calls run in parallel (each is its own eBay round-trip; serially
     a 60-listing sweep pinned a request thread for a minute); DB writes stay
@@ -339,6 +400,14 @@ def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
         with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(records))) as pool:
             probed = list(pool.map(_probe, records))
     changed = 0
+    known_sales = sales
+
+    def _sale_for(item_id: str) -> Optional[dict]:
+        nonlocal known_sales
+        if known_sales is None:
+            known_sales = recent_sales(token)
+        return known_sales.get(item_id)
+
     for rec, result in probed:
         if result is None:
             continue
@@ -349,6 +418,10 @@ def refresh_statuses(token: str, user_id: str, records: list[dict]) -> int:
         updates = dict(data)
         updates["sold_quantity"] = sold
         updates["watch_count"] = watch
+        if status == "sold":
+            updates = stamp_sale(
+                updates, _sale_for(str(data.get("ebay_listing_id") or "")),
+                mark_now=rec.get("status") != "sold")
         if status != rec.get("status") or updates != data:
             db.upsert_listing(rec["id"], updates, status=status, user_id=user_id)
             if status == "sold":
@@ -383,13 +456,13 @@ def reconcile_recent(token: str, user_id: str,
             log.info("sync: couldn't list %s items: %s", what, exc)
             return set()
 
-    finished = (_ids(ebay_trading.sold_listing_ids, "sold")
-                | _ids(ebay_trading.unsold_listing_ids, "ended"))
+    sales = recent_sales(token)
+    finished = set(sales) | _ids(ebay_trading.unsold_listing_ids, "ended")
     candidates = [r for r in records
                   if _item_id_of(r.get("listing") or {}) in finished]
     if not candidates:
         return 0, set()
-    changed = refresh_statuses(token, user_id, candidates)
+    changed = refresh_statuses(token, user_id, candidates, sales=sales)
     return changed, {r["id"] for r in candidates}
 
 

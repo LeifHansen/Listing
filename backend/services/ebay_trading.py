@@ -308,14 +308,9 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 25
 
 
-def _my_ebay_ids(token: str, container: str, sort: str,
-                 limit: Optional[int], max_pages: int) -> list[str]:
-    """Item ids from one GetMyeBaySelling container (ActiveList / UnsoldList /
-    SoldList), page by page. SoldList nests items inside order transactions
-    rather than a flat ItemArray, so ids are swept from every ItemID element
-    under the container (deduped, order kept)."""
-    ids: list[str] = []
-    seen: set[str] = set()
+def _my_ebay_pages(token: str, container: str, sort: str, max_pages: int):
+    """Yield one GetMyeBaySelling container element per page, following eBay's
+    own PaginationResult. Callers `break` out early when they have enough."""
     page = 1
     while page <= max_pages:
         body = (
@@ -329,7 +324,23 @@ def _my_ebay_ids(token: str, container: str, sort: str,
         root = _call("GetMyeBaySelling", token, body)
         cont = _find(root, container)
         if cont is None:
-            break
+            return
+        yield cont
+        total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
+        if page >= max(1, total_pages):
+            return
+        page += 1
+
+
+def _my_ebay_ids(token: str, container: str, sort: str,
+                 limit: Optional[int], max_pages: int) -> list[str]:
+    """Item ids from one GetMyeBaySelling container (ActiveList / UnsoldList /
+    SoldList), page by page. SoldList nests items inside order transactions
+    rather than a flat ItemArray, so ids are swept from every ItemID element
+    under the container (deduped, order kept)."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for cont in _my_ebay_pages(token, container, sort, max_pages):
         # EXACT tag match: a suffix test also catches <OrderLineItemID>, whose
         # value is "<itemId>-<transactionId>". Those aren't item ids, and eBay
         # rejected every one of them ("Input data for tag <ItemID> is invalid")
@@ -340,11 +351,8 @@ def _my_ebay_ids(token: str, container: str, sort: str,
             if i not in seen:
                 seen.add(i)
                 ids.append(i)
-        total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
-        if (page >= max(1, total_pages) or not page_ids
-                or (limit is not None and len(ids) >= limit)):
+        if not page_ids or (limit is not None and len(ids) >= limit):
             break
-        page += 1
     return ids[:limit] if limit is not None else ids
 
 
@@ -366,10 +374,55 @@ def unsold_listing_ids(token: str, limit: Optional[int] = None,
     return _my_ebay_ids(token, "UnsoldList", "", limit, max_pages)
 
 
-def sold_listing_ids(token: str, limit: Optional[int] = None,
-                     max_pages: int = _MAX_PAGES) -> list[str]:
-    """Listings SOLD in the recent period (~90 days) per GetMyeBaySelling."""
-    return _my_ebay_ids(token, "SoldList", "", limit, max_pages)
+def sold_sales(token: str, limit: Optional[int] = None,
+               max_pages: int = _MAX_PAGES) -> dict[str, dict]:
+    """What the recently-sold listings ACTUALLY brought in, keyed by item id:
+    {item_id: {"price", "currency", "quantity", "sold_at"}}.
+
+    The transaction is the only place the real money appears. An accepted Best
+    Offer settles below the asking price and eBay never moves the item's own
+    price to match, so a sold record built from GetItem alone reports what the
+    seller ASKED — which is how a $76.50 sale showed up in the app as $89.99.
+    SoldList nests one <Transaction> per sale under OrderTransactionArray, and
+    TransactionPrice is the per-unit amount the buyer actually paid.
+
+    Several transactions can share an item id (a multi-quantity listing sold
+    in separate orders): quantities add up, and the most recent transaction
+    owns the headline price and date.
+    """
+    out: dict[str, dict] = {}
+    for cont in _my_ebay_pages(token, "SoldList", "", max_pages):
+        found = 0
+        for tx in cont.iter():
+            if _name(tx) != "Transaction":
+                continue
+            item_id = _text(tx, "Item/ItemID")
+            if not item_id:
+                continue
+            found += 1
+            price_el = _find(tx, "TransactionPrice")
+            price = _float(tx, "TransactionPrice")
+            currency = (price_el.get("currencyID") or "") if price_el is not None else ""
+            qty = max(1, _int(tx, "QuantityPurchased", 1))
+            # CreatedDate is when the sale happened; PaidTime only exists once
+            # the buyer has paid, so it can't be the primary signal.
+            sold_at = _text(tx, "CreatedDate") or _text(tx, "PaidTime")
+            prior = out.get(item_id)
+            if prior is None:
+                out[item_id] = {"price": price, "currency": currency,
+                                "quantity": qty, "sold_at": sold_at}
+                continue
+            prior["quantity"] += qty
+            # eBay's timestamps are ISO-8601 UTC ("2026-08-12T18:04:11.000Z"),
+            # so a plain string compare orders them correctly.
+            if sold_at and sold_at > (prior.get("sold_at") or ""):
+                prior["sold_at"] = sold_at
+                if price is not None:
+                    prior["price"] = price
+                    prior["currency"] = currency
+        if not found or (limit is not None and len(out) >= limit):
+            break
+    return out
 
 
 def watch_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, int]:

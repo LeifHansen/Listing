@@ -22,11 +22,12 @@ export function TagPill({ children, tone = "neutral", className }) {
   );
 }
 
-export function PriceBadge({ value, currency = "USD", approx = false, className }) {
+export function PriceBadge({ value, currency = "USD", approx = false, className, title }) {
   const text = formatMoney(value, currency);
   if (!text) return <TagPill className={className}>no price yet</TagPill>;
   return (
     <span
+      title={title}
       className={cn(
         "inline-flex items-baseline gap-0.5 rounded-full bg-green-soft px-2.5 py-0.5",
         "text-[13px] font-bold text-green tabular-nums",

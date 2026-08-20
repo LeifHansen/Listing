@@ -3421,6 +3421,12 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # reclaim as every other sold path); anything else lands in Inactive.
         new_status = "sold" if res.get("status") == "sold" else "ended"
         data = rec.get("listing") or {}
+        if new_status == "sold" and creds:
+            # Record the amount it actually went for, not the asking price.
+            sales = listing_sync.recent_sales(creds["access_token"])
+            data = listing_sync.stamp_sale(
+                data, sales.get(str(data.get("ebay_listing_id") or "")),
+                mark_now=True)
         db.upsert_listing(req.session_id, data,
                           status=new_status, user_id=_uid(request))
         if new_status == "sold" and rec.get("status") != "sold":
@@ -3512,12 +3518,22 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if items:
         with ThreadPoolExecutor(max_workers=min(6, len(items))) as pool:
             checked = list(pool.map(_check, items))
+    # What each sale actually settled at, fetched once and only if something
+    # sold — the offer a seller accepted lives on the transaction, never on
+    # the listing's own price.
+    sales: Optional[dict] = None
     for it, (status, lid) in checked:
         if status == "sold":
-            db.upsert_listing(it["id"], it.get("listing") or {},
-                              status="sold", user_id=user["id"])
-            notifications.notify_sold(user["id"], it["id"],
-                                      it.get("listing") or {})
+            data = it.get("listing") or {}
+            if sales is None:
+                sales = (listing_sync.recent_sales(creds["access_token"])
+                         if creds else {})
+            data = listing_sync.stamp_sale(
+                data, sales.get(str(data.get("ebay_listing_id") or "")),
+                mark_now=True)
+            db.upsert_listing(it["id"], data, status="sold", user_id=user["id"])
+            notifications.notify_sold(user["id"], it["id"], data,
+                                      sold_quantity=data.get("sold_quantity") or 0)
             _purge_session_images(it["id"])  # archived — reclaim the storage
             changed += 1
             archived += 1

@@ -4,8 +4,9 @@ import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
   SkipForward, Undo2, Clock, AlertTriangle, Ban,
 } from "lucide-react";
-import { cn, mediaUrl } from "@/lib/utils";
+import { cn, formatMoney, mediaUrl } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
+import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 
 // ListingCard — one saved listing in a grid. Click opens it in the workflow;
 // when onDelete is provided, a trash button removes it. The delete control is a
@@ -36,6 +37,13 @@ export function ListingCard({
     ? mediaUrl(item.id, l.images[0], ver)
     : (l.image_urls && l.image_urls[0]) || null;
   const inventory = item.status === "unlisted";
+  // A sold listing is shown at what the buyer PAID (l.sold_price) whenever
+  // eBay reported it; without that we fall back to the asking price and mark
+  // the badge approximate rather than quietly claiming it as the take.
+  const sold = item.status === "sold";
+  const soldFor = sold ? salePrice(l) : null;
+  const knownSale = hasSalePrice(l);
+  const discount = sold ? saleDiscount(l) : null;
   const fromEbay = (l.source || "") === "ebay";
   // eBay's own watch count rides along on imported listings, so those cards
   // aren't blank while the metrics endpoint only covers app-created ones.
@@ -54,7 +62,13 @@ export function ListingCard({
         whileTap={{ scale: 0.985 }}
         transition={{ duration: 0.18, ease: "easeOut" }}
         className={cn(
-          "w-full text-left bg-card rounded-card border shadow-card overflow-hidden",
+          // h-full fills whatever height the caller gave the card, so a grid
+          // that passes `className="h-full"` gets a row of cards that line up
+          // even when one carries an extra line (a sold card's discount and
+          // profit rows). Callers that put their own controls UNDER the card
+          // (the drafts strip) leave it alone and keep a card sized to its
+          // own content.
+          "w-full h-full text-left bg-card rounded-card border shadow-card overflow-hidden",
           "flex flex-col cursor-pointer",
           selectable && selected ? "border-blue ring-2 ring-blue/60" : "border-line",
           // A skipped draft stays fully usable — just visibly set aside.
@@ -151,19 +165,43 @@ export function ListingCard({
               </div>
             );
           })()}
+          {/* What it actually went for. An accepted offer settles BELOW the
+              asking price and eBay never moves the listing's own price, so a
+              sold card showing `price` was showing what was asked. The ask
+              stays visible, struck through, with how far under it landed. */}
+          {sold && discount && (
+            <p className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary"
+              title={`Sold for ${formatMoney(soldFor, l.currency)} — ${formatMoney(discount.amount, l.currency)} (${discount.percent}%) under the ${formatMoney(l.price, l.currency)} asking price.`}>
+              <span className="line-through text-ink-faint tabular-nums">
+                {formatMoney(l.price, l.currency)}
+              </span>
+              <span className="rounded-full bg-blue-soft px-1.5 py-0.5 text-[11px] font-bold text-blue tabular-nums">
+                −{discount.percent}%
+              </span>
+            </p>
+          )}
           {/* Profit framework: a sold item with a recorded cost basis shows
               what it made (sale price − what you paid, before fees). */}
-          {item.status === "sold" && l.purchase_price != null && Number(l.price) > 0 && (
+          {sold && l.purchase_price != null && soldFor > 0 && (
             <p className="text-[12px] font-semibold"
-              title={`Sold ~$${Number(l.price).toFixed(2)} − paid $${Number(l.purchase_price).toFixed(2)}, before fees & shipping`}>
-              <span className={Number(l.price) - Number(l.purchase_price) >= 0 ? "text-success" : "text-warning"}>
-                {Number(l.price) - Number(l.purchase_price) >= 0 ? "+" : "−"}$
-                {Math.abs(Number(l.price) - Number(l.purchase_price)).toFixed(2)} profit
+              title={`Sold ${knownSale ? "" : "~"}${formatMoney(soldFor, l.currency)} − paid ${formatMoney(l.purchase_price, l.currency)}, before fees & shipping`}>
+              <span className={soldFor - Number(l.purchase_price) >= 0 ? "text-success" : "text-warning"}>
+                {soldFor - Number(l.purchase_price) >= 0 ? "+" : "−"}$
+                {Math.abs(soldFor - Number(l.purchase_price)).toFixed(2)} profit
               </span>
             </p>
           )}
           <div className="mt-auto flex items-center justify-between gap-2">
-            <PriceBadge value={l.price} currency={l.currency} approx={inventory} />
+            <PriceBadge
+              value={sold ? soldFor : l.price}
+              currency={l.currency}
+              approx={inventory || (sold && !knownSale)}
+              title={sold
+                ? (knownSale
+                  ? "What this actually sold for"
+                  : "eBay hasn't reported what this sold for — showing the asking price")
+                : undefined}
+            />
             {inventory && (
               <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue">
                 Finish &amp; list <ArrowRight size={13} aria-hidden />
