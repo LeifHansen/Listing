@@ -1,99 +1,137 @@
-import { useState } from "react";
-import { motion } from "framer-motion";
-import { Trash2, Pencil, RotateCw, GripVertical } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Trash2, Pencil, RotateCw, Star, ChevronLeft, ChevronRight,
+} from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 
-// PhotoTile — an uploaded photo as a rounded card with a single hover "Edit"
-// action (opens the photo studio: clean up, remove background, crop) plus
-// always-visible one-tap corners: rotate (right) and delete (left), and a
-// drag handle (bottom-right) to reorder. The first photo is the eBay hero, so
-// it wears a "Main" badge.
+/* PhotoTile — one uploaded photo as a rounded card.
+ *
+ * Ordering is explicit: "Make main" promotes a photo to the eBay hero shot in
+ * one tap, and ‹ › nudge it one place. There is deliberately no drag.
+ * Dragging looked like the obvious answer and was tried twice — a hand-rolled
+ * pointer implementation and then @dnd-kit — and it is a poor fit for what
+ * this actually is: a three-across grid of ~110px squares on a phone, where
+ * the drag target, the scroll gesture and the tap targets all overlap. Buttons
+ * cannot stutter, cannot be stolen by the page scroller, work with a keyboard
+ * and a screen reader for free, and say what they will do before you commit.
+ *
+ * Rotation applies instantly. The optimized file is a perfect square, so
+ * spinning the <img> 90 degrees in its square frame is exactly what the saved
+ * photo will look like — no distortion, no guess. The CSS rotation holds until
+ * the re-encoded file has loaded, so there is no flash of the old orientation.
+ */
 export function PhotoTile({
-  sessionId, name, version, index, onDelete, onRotate, onEdit,
-  reorderable, dragging, onDragStart, onDragMove, onDragEnd,
+  sessionId, name, version, index, total, onDelete, onRotate, onEdit,
+  onMakeMain, onMove, reorderable,
 }) {
   const [rotating, setRotating] = useState(false);
+  // Degrees applied optimistically, ahead of the server.
+  const [spin, setSpin] = useState(0);
+  const isMain = index === 0;
+
+  // Belt and braces: if a load event is ever missed, a version bump still
+  // clears the optimistic spin rather than leaving the tile turned twice.
+  useEffect(() => { setSpin(0); }, [version]);
+
   const rotate = async () => {
     if (rotating || !onRotate) return;
     setRotating(true);
-    try { await onRotate(); } finally { setRotating(false); }
+    setSpin((deg) => deg + 90);
+    try {
+      await onRotate();
+    } catch (e) {
+      setSpin((deg) => deg - 90);
+    } finally {
+      setRotating(false);
+    }
   };
+
+  const corner = "z-10 grid place-items-center size-8 rounded-full "
+    + "bg-card/90 backdrop-blur border border-line text-ink-faint shadow-card "
+    + "cursor-pointer transition-colors duration-150 "
+    + "disabled:opacity-35 disabled:pointer-events-none";
+
   return (
-    <motion.div
-      layout="position"
-      data-photo-idx={index}
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: dragging ? 1.05 : 1 }}
-      exit={{ opacity: 0, scale: 0.9 }}
-      transition={{ duration: 0.2 }}
-      className={cn(
-        "relative group rounded-tile overflow-hidden border bg-bg-sunken aspect-square",
-        dragging ? "z-20 border-blue ring-2 ring-blue shadow-float" : "border-line",
-      )}
-    >
+    <div className={cn(
+      "relative group rounded-tile overflow-hidden border bg-bg-sunken aspect-square",
+      isMain ? "border-blue/60 ring-1 ring-blue/30" : "border-line",
+    )}>
       <img
         src={`${mediaUrl(sessionId, name)}?v=${version}`}
         alt=""
         draggable={false}
-        className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.04]"
+        onLoad={() => setSpin(0)}
+        style={spin ? { transform: `rotate(${spin}deg)` } : undefined}
+        className="size-full object-cover"
       />
-      {/* One-click delete — always visible, no hover needed (works on touch). */}
+      {/* Delete — always visible, no hover needed (works on touch). */}
       <button
         type="button"
         onClick={onDelete}
-        aria-label={`Delete photo ${name}`}
+        aria-label={`Delete photo ${index + 1}`}
         title="Delete photo"
-        className="absolute top-1.5 left-1.5 z-10 grid place-items-center size-7 rounded-full
-          bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card cursor-pointer
-          hover:text-error hover:border-error/40 transition-colors duration-150"
+        className={cn(corner, "absolute top-1.5 left-1.5 hover:text-error hover:border-error/40")}
       >
-        <Trash2 size={13} aria-hidden />
+        <Trash2 size={14} aria-hidden />
       </button>
-      {/* One-click rotate 90° — always visible, top-right. */}
+      {/* Rotate 90° clockwise. */}
       {onRotate && (
         <button
           type="button"
           onClick={rotate}
           disabled={rotating}
-          aria-label={`Rotate photo ${name}`}
+          aria-label={`Rotate photo ${index + 1}`}
           title="Rotate 90°"
-          className={cn(
-            "absolute top-1.5 right-1.5 z-10 grid place-items-center size-7 rounded-full",
-            "bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card cursor-pointer",
-            "hover:text-blue hover:border-blue/40 transition-colors duration-150",
-            rotating && "animate-spin text-blue",
-          )}
+          className={cn(corner, "absolute top-1.5 right-1.5 hover:text-blue hover:border-blue/40")}
         >
-          <RotateCw size={13} aria-hidden />
+          <RotateCw size={14} aria-hidden />
         </button>
       )}
-      {/* Hero indicator — the first photo is eBay's gallery/main image. */}
-      {index === 0 && (
+      {/* The eBay gallery shot. A badge once it is, a one-tap promotion until
+          then — which is the ordering question sellers actually have. */}
+      {isMain ? (
         <span className="absolute bottom-1.5 left-1.5 z-10 px-2 py-0.5 rounded-full
           bg-blue text-on-accent text-[10px] font-bold tracking-wide shadow-card select-none">
           Main
         </span>
-      )}
-      {/* Drag handle — reorder photos. touch-none so a drag doesn't scroll the
-          page on mobile; pointer capture routes move/up back here. */}
-      {reorderable && (
+      ) : reorderable && (
         <button
           type="button"
-          aria-label={`Drag to reorder photo ${name}`}
-          title="Drag to reorder"
-          onPointerDown={onDragStart}
-          onPointerMove={onDragMove}
-          onPointerUp={onDragEnd}
-          onPointerCancel={onDragEnd}
-          className={cn(
-            "absolute bottom-1.5 right-1.5 z-10 grid place-items-center size-7 rounded-full touch-none",
-            "bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card",
-            "hover:text-blue hover:border-blue/40 transition-colors duration-150",
-            dragging ? "cursor-grabbing text-blue border-blue/40" : "cursor-grab",
-          )}
+          onClick={onMakeMain}
+          aria-label={`Make photo ${index + 1} the main image`}
+          title="Use as the main photo"
+          className="absolute bottom-1.5 left-1.5 z-10 inline-flex items-center gap-1
+            h-8 px-2.5 rounded-full bg-card/90 backdrop-blur border border-line
+            text-[11px] font-bold text-ink-faint shadow-card cursor-pointer
+            hover:text-blue hover:border-blue/40 transition-colors duration-150"
         >
-          <GripVertical size={14} aria-hidden />
+          <Star size={12} aria-hidden /> Main
         </button>
+      )}
+      {/* Nudge one place. */}
+      {reorderable && (
+        <span className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onMove(-1)}
+            disabled={index === 0}
+            aria-label={`Move photo ${index + 1} earlier`}
+            title="Move earlier"
+            className={cn(corner, "hover:text-blue hover:border-blue/40")}
+          >
+            <ChevronLeft size={14} aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => onMove(1)}
+            disabled={index === total - 1}
+            aria-label={`Move photo ${index + 1} later`}
+            title="Move later"
+            className={cn(corner, "hover:text-blue hover:border-blue/40")}
+          >
+            <ChevronRight size={14} aria-hidden />
+          </button>
+        </span>
       )}
       <div
         className="ph-ov absolute inset-0 bg-ink/0 group-hover:bg-ink/25 transition-colors duration-200
@@ -107,6 +145,6 @@ export function PhotoTile({
           <Pencil size={13} aria-hidden /> Edit
         </button>
       </div>
-    </motion.div>
+    </div>
   );
 }

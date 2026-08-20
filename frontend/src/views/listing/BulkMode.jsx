@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
-  ArrowRight,
+  ArrowRight, X,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, mediaUrl } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
@@ -101,7 +101,7 @@ function ShippingServiceSelect({ value, onChange }) {
 
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
-  onDelete, deleting, targets,
+  onDelete, deleting, onDeletePhoto, targets,
 }) {
   const l = item.listing || {};
   const editable = item.status !== "error";
@@ -112,9 +112,9 @@ function BulkItemCard({
   const missing = item.status === "draft" ? missingRequired(l, targets) : [];
   // All of the item's photos, not just the first. An item that failed before
   // a listing existed still has the server-picked `thumb`.
-  const photos = (l.images?.length
-    ? l.images.map((n) => mediaUrl(item.session_id, n, 1))
-    : [item.thumb && apiUrl(`${item.thumb}?v=1`)]).filter(Boolean);
+  const photos = l.images?.length
+    ? l.images.map((n) => ({ name: n, src: mediaUrl(item.session_id, n, 1) }))
+    : (item.thumb ? [{ name: null, src: apiUrl(`${item.thumb}?v=1`) }] : []);
   return (
     <motion.div
       layout
@@ -138,15 +138,41 @@ function BulkItemCard({
         {/* One row of thumbnails, as many as the card is wide — extras wrap
             below the max-height and are clipped away. */}
         <div className="flex-1 min-w-0 flex flex-wrap gap-1.5 max-h-12 overflow-hidden">
-          {photos.map((src) => (
-            <img
-              key={src}
-              src={src}
-              alt=""
-              loading="lazy"
-              className="size-12 shrink-0 rounded-[10px] object-cover border border-line"
-              onError={(e) => { e.currentTarget.style.display = "none"; }}
-            />
+          {photos.map((ph, i) => (
+            <div key={ph.name || ph.src} className="relative size-12 shrink-0">
+              <img
+                src={ph.src}
+                alt=""
+                loading="lazy"
+                className="size-full rounded-[10px] object-cover border border-line"
+                onError={(e) => {
+                  // Hide the whole tile, not just the <img> — otherwise a photo
+                  // that 404s leaves its remove button floating over nothing.
+                  const tile = e.currentTarget.parentElement;
+                  if (tile) tile.style.display = "none";
+                }}
+              />
+              {/* Quick-delete this photo without leaving the queue. Always
+                  visible (a hover-only control is unreachable on touch), and
+                  only where there's a real file behind the tile — the fallback
+                  `thumb` isn't a photo of this listing's own to delete. */}
+              {ph.name && item.status === "draft" && onDeletePhoto && (
+                <button
+                  type="button"
+                  onClick={() => onDeletePhoto(ph.name)}
+                  aria-label={`Remove photo ${i + 1}`}
+                  title="Remove this photo"
+                  className={cn(
+                    "absolute top-0.5 right-0.5 z-10 grid place-items-center size-[18px]",
+                    "rounded-full bg-card/90 backdrop-blur border border-line shadow-card",
+                    "text-ink-faint cursor-pointer transition-colors",
+                    "hover:text-error hover:border-error/40",
+                  )}
+                >
+                  <X size={11} strokeWidth={3} aria-hidden />
+                </button>
+              )}
+            </div>
           ))}
         </div>
         <div className="shrink-0">
@@ -449,6 +475,30 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const updateItem = (sid, listing) => {
     setItems((cur) => cur.map((it) =>
       it.session_id === sid ? { ...it, listing } : it));
+  };
+
+  // Remove one photo from a draft straight from its thumbnail strip — the
+  // fastest way to drop a blurry shot or a stray photo the grouper attached to
+  // the wrong item. Optimistic: the tile goes immediately and comes back only
+  // if the server delete fails. The shortened list is saved right away because
+  // the file is really gone — an unsaved draft would keep pointing at it.
+  const deletePhoto = async (it, name) => {
+    const l = it.listing || {};
+    const images = l.images || [];
+    if (images.length <= 1) {
+      toast("A listing needs at least one photo — add another before deleting this one.",
+        { kind: "warning" });
+      return;
+    }
+    const next = { ...l, images: images.filter((n) => n !== name) };
+    updateItem(it.session_id, next);
+    try {
+      await postJson("/api/delete-image", { session_id: it.session_id, name });
+      postJson(`/api/save/${it.session_id}`, next).catch(() => {});
+    } catch (e) {
+      updateItem(it.session_id, l);
+      toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
+    }
   };
 
   // Open one item in the full editor. The batch stays in memory (no onExit)
@@ -794,6 +844,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               publishing={!!publishing[it.session_id]}
               onDelete={() => deleteOne(it)}
               deleting={!!deleting[it.session_id]}
+              onDeletePhoto={(name) => deletePhoto(it, name)}
               targets={effectiveTargets}
             />
           ))}

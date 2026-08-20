@@ -35,7 +35,8 @@ from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
-from .models import (ItemSpecific, Listing, MarketplaceState, PublishRequest,
+from .models import (ImageOrderRequest, ItemSpecific, Listing,
+                     MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
                        ebay_trading, image_import, images, jobstore,
@@ -313,6 +314,45 @@ def health() -> dict:
         "stripe_live_mode": config.stripe_live_mode(),
         "db": db.db_status(),
     }
+
+
+# Disk below this and photo work will start failing mid-upload. Reporting it
+# as "not ready" is what lets a deploy or a load balancer act on it before a
+# seller loses a batch.
+READY_MIN_DISK_MB = int(os.getenv("READY_MIN_DISK_MB", "200") or 200)
+
+
+@app.get("/api/ready")
+def ready(response: Response) -> dict:
+    """Readiness, as distinct from /api/health's liveness.
+
+    /api/health answers "is this process up and what is configured"; it says
+    200 while the machine is out of disk and the image model has never
+    loaded. This answers the question that actually matters to a deploy or a
+    client about to send a 12MB photo: can it do the work right now. Anything
+    false here returns 503, so it is usable as an orchestrator probe rather
+    than something a human has to read.
+
+    Deliberately cheap and side-effect free — no model load, no inference, no
+    outbound call. A probe that does real work is a probe that falls over
+    under the load it is meant to detect.
+    """
+    free_mb = round(storage.disk_free_bytes() / 1e6)
+    database = db.db_status()
+    checks = {
+        # The volume photos are written to. Everything else is moot without it.
+        "storage_writable": storage.writable(),
+        "disk_space": free_mb >= READY_MIN_DISK_MB,
+        # A configured DB that is unreachable means drafts silently do not
+        # persist; no DB configured at all is a valid (filesystem-only) setup.
+        "database": (not database.get("configured")) or bool(database.get("connected")),
+    }
+    engine = images.engine_state()
+    ok = all(checks.values())
+    if not ok:
+        response.status_code = 503
+    return {"ready": ok, "checks": checks, "disk_free_mb": free_mb,
+            "image_engine": engine}
 
 
 def _category_query(listing) -> str:
@@ -1836,56 +1876,39 @@ async def rotate_image(payload: dict, request: Request) -> dict:
             rotated = img.convert("RGB").transpose(Image.Transpose.ROTATE_270)
         tmp = path.with_name(path.name + ".tmp")
         # No optimize=True here: the two-pass encode nearly doubles the time
-        # for a few KB — a one-tap rotate should feel instant.
-        rotated.save(tmp, "JPEG", quality=88)
+        # for a few KB — a one-tap rotate should feel instant. Quality 95
+        # rather than the pipeline's 90 because this re-encodes an ALREADY
+        # encoded JPEG: four taps round the compass used to mean four
+        # generations of loss stacked on a photo the seller only meant to
+        # turn upright.
+        rotated.save(tmp, "JPEG", quality=95)
         os.replace(tmp, path)
 
     try:
         await run_in_threadpool(_rotate)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Couldn't rotate that photo: {exc}") from exc
-    # Mirror + bookkeeping off the critical path: the rotate is already live
-    # locally (which /media serves first), so the R2 re-push and the
-    # updated_at bump don't need to hold the spinner. Each was a sequential
-    # network round-trip that made a one-tap rotate feel like seconds.
+    # The R2 push is AWAITED, unlike the bookkeeping below it. This used to be
+    # fire-and-forget on a daemon thread with failures only logged, and that is
+    # what made manual rotation look unreliable: the local file was rotated and
+    # /media served it, so the tile looked right — while R2 still held the old
+    # orientation. Then the machine recycles, _ensure_local pulls the photo
+    # back down, and the rotation is simply gone. Worse, eBay is handed the R2
+    # public URL at publish, so the sideways photo is the one that goes live.
+    # A rotate is not done until the copy the world sees is rotated too.
     if objstore.enabled():
-        _in_background(objstore.upload, path, objstore.key_for(session_id, name),
-                       what="rotate R2 push")
+        try:
+            await run_in_threadpool(
+                objstore.upload, path, objstore.key_for(session_id, name))
+        except Exception as exc:  # noqa: BLE001 - the local file IS rotated
+            log.warning("rotate: R2 push failed for %s/%s: %s",
+                        session_id, name, exc)
+            raise HTTPException(
+                502, "The photo was rotated here but the copy we publish from "
+                     "didn't update. Try the rotation again in a moment."
+            ) from exc
     _in_background(db.touch_listing, session_id, what="rotate touch")
     return {"ok": True}
-
-
-@app.post("/api/image/analyze")
-async def image_analyze(
-    request: Request,
-    session_id: str = Form(""),
-    name: str = Form(""),
-    file: Optional[UploadFile] = File(None),
-) -> dict:
-    """Re-check the item's borders: returns a mask of leftover background
-    (non-white areas outside the detected subject) for the editor to highlight.
-
-    Free by design (it fires after every crop and save), but it runs the same
-    rembg model as its metered siblings — hence the shared studio guard.
-    """
-    _studio_guard(request)
-    data = await file.read() if file else None
-    if data and len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, "Image too large")
-
-    def _run() -> dict:
-        img = _studio_load(request, session_id, name, data)
-        res = images.analyze_cleanup(img)
-        return {
-            "ok": True,
-            "residue_pct": res["residue_pct"],
-            "bbox": res["bbox"],
-            "mask": _data_url(res["residue_mask"], "PNG") if res["residue_pct"] > 0 else None,
-            "width": res["residue_mask"].width,
-            "height": res["residue_mask"].height,
-        }
-
-    return await run_in_threadpool(_run)
 
 
 @app.post("/api/image/auto-clean")
@@ -1940,6 +1963,13 @@ async def image_remove_bg(
     spent = _charge_ai(request, "image_ai")
     try:
         return await run_in_threadpool(_run)
+    except images.CutoutBusy as exc:
+        # 503, not 500 and not 422: nothing is wrong with the photo or the
+        # server, the one inference slot was occupied. Retry-After makes that
+        # machine-readable instead of leaving the client to guess.
+        tokens.refund(spent)
+        raise HTTPException(503, str(exc),
+                            headers={"Retry-After": "20"}) from exc
     except ValueError as exc:
         # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
         # of credits / rate limit) — the message tells the user exactly which.
@@ -2173,6 +2203,56 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     db.upsert_listing(session_id, listing.model_dump(),
                       status=_sticky_status(prev), user_id=_uid(request))
     return {"saved": True}
+
+
+@app.patch("/api/listings/{session_id}/images/order")
+def reorder_images(session_id: str, req: ImageOrderRequest,
+                   request: Request) -> dict:
+    """Persist the photo order, and nothing else.
+
+    Reordering used to ride on POST /api/save with the WHOLE listing attached,
+    which made a drag do two things it should never do: ship every field the
+    editor happens to be holding (so a reorder could overwrite a title edit
+    made in another tab with a stale copy), and depend on that whole payload
+    validating. A dedicated endpoint means a drag persists a list of names.
+
+    The new order has to be a PERMUTATION of the stored one. That is the
+    guard that matters: a client working from a stale list would otherwise
+    DELETE the photos missing from it, and "my photos vanished when I dragged
+    one" is a considerably worse bug than the one being fixed. A mismatch is
+    409 — the client refetches rather than forcing its stale view through.
+    """
+    _assert_session_owner(session_id, request)
+    rec = db.get_listing(session_id) or {}
+    stored = list((rec.get("listing") or {}).get("images") or [])
+    wanted = [str(n).strip() for n in req.images if str(n).strip()]
+    if sorted(wanted) != sorted(stored):
+        log.info("reorder rejected: session=%s sent=%d stored=%d",
+                 session_id, len(wanted), len(stored))
+        raise HTTPException(
+            409, "This listing's photos changed somewhere else — reopen it "
+                 "and try the reorder again.")
+    if wanted == stored:
+        return {"images": stored}
+
+    def _set_order(data: dict) -> dict:
+        data["images"] = wanted
+        return data
+
+    # Under the row lock, like every other write that shares a listing with
+    # publish's background threads.
+    data = db.mutate_listing_data(session_id, _set_order,
+                                  status=_sticky_status(rec), user_id=_uid(request))
+    saved = list((data or {}).get("images") or wanted)
+    # Keep the on-disk copy in step; eBay is served photos in this order.
+    if data:
+        try:
+            storage.save_listing(session_id, Listing(**data))
+        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+            log.warning("reorder: disk mirror not updated for %s: %s",
+                        session_id, exc)
+    log.info("reorder: session=%s %d photos", session_id, len(saved))
+    return {"images": saved}
 
 
 @app.post("/api/item-aspects")
@@ -3304,6 +3384,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                 "issues": o.issues,
                 **({"promote_status": o.raw["promote_status"]}
                    if o.raw.get("promote_status") else {}),
+                **({"record_warning": o.raw["record_warning"]}
+                   if o.raw.get("record_warning") else {}),
             } for key, o in outcomes.items()
         },
     })

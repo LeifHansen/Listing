@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
@@ -17,8 +17,6 @@ import { PhotoTile } from "./PhotoTile";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
-
-const SEP = "|";
 
 // Fallback strip for an imported listing whose photos couldn't be copied into
 // app storage yet (opening the listing normally imports them automatically,
@@ -44,68 +42,16 @@ function EbayPhotos({ urls }) {
 
 export function PhotosCard({ w, onEdit, onDelete }) {
   const formImages = w.form.images || [];
-  // Local order is the source of truth while dragging; the ref mirrors it
-  // synchronously so pointer handlers never read a stale array.
-  const [order, setOrder] = useState(formImages);
-  const orderRef = useRef(formImages);
-  const dragNameRef = useRef(null);
-  const dragStartRef = useRef(null);
-  const [draggingName, setDraggingName] = useState(null);
 
-  // Sync from the form when NOT mid-drag (a photo was added, deleted, rotated).
-  useEffect(() => {
-    if (dragNameRef.current) return;
+  // Move a photo one place, or to the front. Both go through reorderImages,
+  // which persists the order and rolls the card back if the server refuses.
+  const moveTo = (from, to) => {
     const imgs = w.form.images || [];
-    orderRef.current = imgs;
-    setOrder(imgs);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [w.form.images]);
-
-  // Pointer moves are coalesced to one hit-test per animation frame — the raw
-  // pointermove stream (60-120/s) each forced a synchronous elementFromPoint
-  // reflow, which is what made the drag stutter.
-  const rafRef = useRef(0);
-  const lastPtRef = useRef(null);
-
-  const reorderTo = (targetIdx) => {
-    const cur = orderRef.current;
-    const from = cur.indexOf(dragNameRef.current);
-    if (from < 0 || targetIdx < 0 || targetIdx >= cur.length || targetIdx === from) return;
-    const next = [...cur];
+    if (from < 0 || to < 0 || to >= imgs.length || from === to) return;
+    const next = [...imgs];
     const [moved] = next.splice(from, 1);
-    next.splice(targetIdx, 0, moved);
-    orderRef.current = next;
-    setOrder(next);
-  };
-
-  const startDrag = (name) => (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragNameRef.current = name;
-    dragStartRef.current = orderRef.current;
-    setDraggingName(name);
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported */ }
-  };
-  const processMove = () => {
-    rafRef.current = 0;
-    const p = lastPtRef.current;
-    if (!p || !dragNameRef.current) return;
-    const el = document.elementFromPoint(p.x, p.y);
-    const tile = el && el.closest ? el.closest("[data-photo-idx]") : null;
-    if (tile) reorderTo(Number(tile.getAttribute("data-photo-idx")));
-  };
-  const onMove = (e) => {
-    if (!dragNameRef.current) return;
-    lastPtRef.current = { x: e.clientX, y: e.clientY };
-    if (!rafRef.current) rafRef.current = requestAnimationFrame(processMove);
-  };
-  const endDrag = () => {
-    if (!dragNameRef.current) return;
-    dragNameRef.current = null;
-    setDraggingName(null);
-    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
-    const next = orderRef.current;
-    if (next.join(SEP) !== (dragStartRef.current || []).join(SEP)) w.reorderImages(next);
+    next.splice(to, 0, moved);
+    w.reorderImages(next);
   };
 
   // ---------- drop photos straight onto the grid ----------
@@ -170,18 +116,13 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       id="photos" icon={ImageIcon} title="Photos"
       hint={fromEbay
         ? "The photos on your live eBay listing"
-        : "Drop more photos anywhere in here. Drag the handle to reorder — the first photo is your eBay main image. One-tap rotate & delete; hover Edit to clean up or crop"}
+        : "Drop more photos anywhere in here. The first photo is your eBay main image — tap Main on any other photo to promote it, or ‹ › to nudge one place. One-tap rotate & delete; hover Edit to clean up or crop"}
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
       <div
         className={cn(
           "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3 rounded-tile",
-          // While dragging, kill hover scale + CSS transitions on every tile and
-          // hide the hover overlay — otherwise the pointer sweeping across the
-          // grid fires all their group-hover effects at once (the repaint storm
-          // behind the lag, plus the Edit button flashing on each tile).
-          draggingName && "select-none [&_img]:!scale-100 [&_*]:!transition-none [&_.ph-ov]:!opacity-0",
           // The whole grid takes the drop, not just the tile at the end — a
           // seller aiming at their photos shouldn't have to hit a small target.
           fileDrag && "outline outline-2 outline-blue outline-offset-4 bg-blue-soft/40",
@@ -191,25 +132,22 @@ export function PhotosCard({ w, onEdit, onDelete }) {
         onDragLeave={onFileDragLeave}
         onDrop={onFileDrop}
       >
-        <AnimatePresence>
-          {order.map((name, i) => (
-            <PhotoTile
-              key={name}
-              sessionId={w.sessionId}
-              name={name}
-              index={i}
-              version={w.imageVersions[name] || 0}
-              reorderable={order.length > 1}
-              dragging={draggingName === name}
-              onDragStart={startDrag(name)}
-              onDragMove={onMove}
-              onDragEnd={endDrag}
-              onEdit={() => onEdit(name)}
-              onDelete={() => onDelete(name)}
-              onRotate={() => w.rotateImage(name)}
-            />
-          ))}
-        </AnimatePresence>
+        {formImages.map((name, i) => (
+          <PhotoTile
+            key={name}
+            sessionId={w.sessionId}
+            name={name}
+            index={i}
+            total={formImages.length}
+            version={w.imageVersions[name] || 0}
+            reorderable={formImages.length > 1}
+            onEdit={() => onEdit(name)}
+            onDelete={() => onDelete(name)}
+            onRotate={() => w.rotateImage(name)}
+            onMakeMain={() => moveTo(i, 0)}
+            onMove={(delta) => moveTo(i, i + delta)}
+          />
+        ))}
         {/* Add more photos — optimizes + appends to this listing. */}
         <label className={cn(
           "relative rounded-tile border-2 border-dashed border-line bg-bg-sunken/40 aspect-square",

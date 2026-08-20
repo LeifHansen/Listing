@@ -1,4 +1,4 @@
-import { API_BASE, apiUrl, storedToken } from "@/lib/platform";
+import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
 
 // Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
 // same-origin navigation, exactly as before. In the native shell the
@@ -51,21 +51,51 @@ function ensureAiConsent() {
   });
 }
 
+// How long any one request may take before the client stops waiting. Photo
+// work on a shared machine is the slow case: an inference queued behind a
+// bulk batch, plus the upload itself. Callers with longer work (uploads,
+// bulk) pass their own opts.timeoutMs, and 0 disables it.
+const DEFAULT_TIMEOUT_MS = 90000;
+// Uploads move real bytes: a bulk batch over a phone connection takes
+// minutes and is not stuck.
+export const UPLOAD_TIMEOUT_MS = 300000;
+
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
-  // stored bearer token instead (no-op on the web build).
+  // stored bearer token instead (no-op on the web build). tokenReady settles
+  // once — reading the Keychain is asynchronous, and without waiting for it
+  // the first call after a cold start would go out unauthenticated.
+  await tokenReady();
   const token = storedToken();
   if (token && !(opts.headers && opts.headers.Authorization)) {
     opts = { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}` } };
   }
+  // Every request gets a deadline. Without one a stalled connection leaves a
+  // spinner up forever, and the seller's only signal is that nothing is
+  // happening — indistinguishable from slow, from broken, and from a tap that
+  // never registered. A caller with genuinely long work passes its own
+  // timeoutMs (or 0 to opt out); the default is generous enough for an image
+  // round trip and short enough to still be an answer.
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const abort = timeoutMs > 0 ? new AbortController() : null;
+  const timer = abort ? setTimeout(() => abort.abort(), timeoutMs) : null;
   let res;
   try {
-    res = await fetch(apiUrl(path), opts);
+    res = await fetch(apiUrl(path), abort ? { ...opts, signal: abort.signal } : opts);
   } catch (e) {
-    throw new Error("Network error — the server may be starting up. Try again in a few seconds.");
+    if (e?.name === "AbortError") {
+      throw new Error(
+        `That took longer than ${Math.round(timeoutMs / 1000)}s and was given up on. `
+        + "Nothing was lost — try again.", { cause: e });
+    }
+    throw new Error(
+      "Network error — the server may be starting up. Try again in a few seconds.",
+      { cause: e });
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   if (!res.ok) {
     let detail = res.statusText;
