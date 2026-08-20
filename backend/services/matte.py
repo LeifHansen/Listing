@@ -133,6 +133,23 @@ class CutoutResult:
         if message and message not in self.warnings:
             self.warnings.append(message)
 
+    @property
+    def reason(self) -> str:
+        """Why this cutout was refused, in the seller's own words — "" when it
+        was not refused.
+
+        The LAST warning, not the first, and only when `error_code` says the
+        cutout actually lost. A cutout collects ADVISORY warnings as it is
+        refined ("some background may still show around the edges"), and those
+        are appended before any guard gets to speak; the warning that ended it
+        is the one added at the point it gave up. Taking warnings[0] instead
+        reports a cosmetic note as the cause of a failure — which is the same
+        class of bug as reporting no cause at all.
+        """
+        if not self.error_code:
+            return ""
+        return self.warnings[-1] if self.warnings else ""
+
     def as_dict(self) -> dict:
         return {"status": self.status, "engine": self.engine,
                 "error_code": self.error_code, "warnings": list(self.warnings),

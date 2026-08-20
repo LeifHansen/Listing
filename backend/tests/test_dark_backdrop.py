@@ -212,3 +212,82 @@ def test_either_signal_alone_is_enough_to_keep_a_cutout():
     assert support["edge_ratio"] < matte.MIN_EDGE_RATIO, support
     assert support["colour_gap"] >= matte.MIN_COLOUR_GAP, support
     assert support["supported"], support
+
+
+# --- the reason that reaches the seller -------------------------------------
+def test_a_refusal_reports_the_guard_that_refused_it_not_a_cosmetic_note():
+    """A cutout picks up advisory warnings while it is refined, and those are
+    appended BEFORE any guard speaks. The reason the seller is shown has to be
+    the one that ended it — reporting "some background may still show" as the
+    cause of a discarded photo is the same bug as reporting nothing."""
+    result = matte.CutoutResult()
+    result.warn("Some background may still show around the edges — have a look.")
+    assert result.reason == "", "an un-refused cutout must report no reason"
+
+    result.error_code = matte.ERR_DARK_SUBJECT
+    result.warn("The item looked like the background, so the original was kept.")
+    assert result.reason == result.warnings[-1]
+    assert "background may still show" not in result.reason
+
+
+def test_a_refused_cutout_carries_its_reason_out_of_the_engine():
+    """The end-to-end shape of the fix: _subject_survived writes the reason,
+    and it is still there for the upload banner to read."""
+    _, result = _judge(*_cut_across_one_material())
+    assert result.reason
+    assert result.reason != "cutout failed"
+
+
+# --- what reaches the caller ------------------------------------------------
+def _local_chain(monkeypatch):
+    monkeypatch.setattr("backend.config.bg_engine_chain", lambda: ["local"])
+
+
+def test_a_usable_cutout_is_not_reported_through_the_failure_channel(monkeypatch):
+    """A cutout that wants a look still SUCCEEDED. It travels as `review`, so
+    the seller is not told background removal failed on a photo it worked on."""
+    _local_chain(monkeypatch)
+    photo = Image.new("RGB", (64, 64), (200, 200, 200))
+
+    def _cutout(img, result=None, **kwargs):
+        result.status = matte.NEEDS_REVIEW
+        result.warn("only a small part was kept — check the whole item is there")
+        return img
+
+    monkeypatch.setattr(images, "_cutout_on_white", _cutout)
+    _, engine, error, _, _, review = images._studio_and_cutout(photo)
+    assert engine == "local"
+    assert error is None, "a usable cutout must not report an error"
+    assert review and "small part" in review
+
+
+def test_a_refused_cutout_travels_as_an_error_with_the_guards_reason(monkeypatch):
+    """...and the mirror image: no cutout means an error carrying the reason
+    the guard gave, not the generic 'cutout failed'."""
+    _local_chain(monkeypatch)
+    photo = Image.new("RGB", (64, 64), (200, 200, 200))
+
+    def _cutout(img, result=None, **kwargs):
+        result.warn("Some background may still show around the edges.")  # advisory
+        result.status = matte.KEPT_ORIGINAL
+        result.error_code = matte.ERR_DARK_SUBJECT
+        result.warn("The item looked like the background, so the original was kept.")
+        return None
+
+    monkeypatch.setattr(images, "_cutout_on_white", _cutout)
+    _, engine, error, _, _, review = images._studio_and_cutout(photo)
+    assert engine == "none"
+    assert review is None
+    assert error == "The item looked like the background, so the original was kept."
+
+
+def test_an_unexplained_failure_still_says_something(monkeypatch):
+    """No reason recorded — an exception, say — must not surface as an empty
+    string, which reads to the seller as nothing happening at all."""
+    _local_chain(monkeypatch)
+    photo = Image.new("RGB", (64, 64), (200, 200, 200))
+    monkeypatch.setattr(images, "_cutout_on_white",
+                        lambda img, result=None, **kw: None)
+    _, engine, error, _, _, _ = images._studio_and_cutout(photo)
+    assert engine == "none"
+    assert error

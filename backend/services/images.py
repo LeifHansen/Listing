@@ -1297,11 +1297,15 @@ _REMOTE_CUTOUTS = {"pixian": _pixian_cutout, "photoroom": _photoroom_cutout}
 
 
 def _studio_and_cutout(
-        img: Image.Image) -> tuple[Image.Image, str, Optional[str], bool, Optional[str]]:
+        img: Image.Image) -> tuple[Image.Image, str, Optional[str], bool,
+                                   Optional[str], Optional[str]]:
     """Background removal + studio treatment for the automatic upload path.
-    Returns (image, engine, error, studio_applied, studio_error) where engine
-    is the chain member that produced the cutout ('pixian', 'photoroom',
-    'adobe', 'local') or 'none' (kept the original).
+    Returns (image, engine, error, studio_applied, studio_error, review) where
+    engine is the chain member that produced the cutout ('pixian', 'photoroom',
+    'adobe', 'local') or 'none' (kept the original), and `review` is set when a
+    cutout was USED but wants a look — a different thing from `error`, which
+    means no cutout was used at all, and worth keeping separate: reporting a
+    usable photo through the failure channel is how a warning becomes noise.
 
     The engines and their order come from config.bg_engine_chain() (BG_ENGINE):
     by default the budget Pixian API when configured (with the local model
@@ -1335,9 +1339,15 @@ def _studio_and_cutout(
                 log.warning("bg-removal: local cutout failed (%s)", exc)
                 out = None
             if out is not None:
-                return out, "local", None, studio_applied, studio_error
-            last_err = last_err or (verdict.warnings[0] if verdict.warnings
-                                    else "cutout failed")
+                # A cutout that wants a look carries its note out; an
+                # unremarkable one carries nothing. Guarded on `warnings`
+                # too — optimize() must not raise, least of all over a
+                # status set without one.
+                review = (verdict.warnings[-1]
+                          if verdict.status == matte.NEEDS_REVIEW and verdict.warnings
+                          else None)
+                return out, "local", None, studio_applied, studio_error, review
+            last_err = last_err or verdict.reason or "cutout failed"
         elif engine == "adobe":
             if not config.adobe_ready():
                 continue
@@ -1347,7 +1357,7 @@ def _studio_and_cutout(
             try:
                 out = _adobe_cutout(img)
                 if out is not None:
-                    return out, "adobe", None, studio_applied, studio_error
+                    return out, "adobe", None, studio_applied, studio_error, None
             except ValueError as exc:  # AdobeError
                 log.warning("adobe bg-removal: %s", exc)
                 last_err = str(exc)
@@ -1358,7 +1368,7 @@ def _studio_and_cutout(
             try:
                 out = _REMOTE_CUTOUTS[engine](img)
                 if out is not None:
-                    return out, engine, None, False, None
+                    return out, engine, None, False, None, None
             except ValueError as exc:  # PixianError/PhotoroomError — mapped reason
                 log.warning("%s: %s", engine, exc)
                 last_err = str(exc)
@@ -1370,7 +1380,7 @@ def _studio_and_cutout(
     log.warning("bg-removal: keeping the original photo (%s)",
                 last_err or "no engine produced a cutout")
     return (_flatten(img), "none", last_err or "background removal failed",
-            studio_applied, studio_error)
+            studio_applied, studio_error, None)
 
 
 def _matte_ladder() -> tuple[int, ...]:
@@ -1803,10 +1813,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
 
         studio_applied, studio_error = False, None
         bg_removed = False
-        bg_engine, bg_error = None, None
+        bg_engine, bg_error, bg_review = None, None, None
         if remove_bg:
             # Engine order comes from BG_ENGINE — see _studio_and_cutout.
-            img, bg_engine, bg_error, studio_applied, studio_error = \
+            img, bg_engine, bg_error, studio_applied, studio_error, bg_review = \
                 _studio_and_cutout(img)
             bg_removed = bg_engine not in (None, "none")
         else:
@@ -1853,6 +1863,8 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         out["bg_engine"] = bg_engine
     if bg_error:
         out["bg_error"] = bg_error  # why the original was kept instead
+    if bg_review:
+        out["bg_review"] = bg_review  # cutout was used, but worth a look
     return out
 
 
