@@ -21,11 +21,24 @@ primary_region = 'sjc'
   # VM below — and is baked into the image (see Dockerfile), so no runtime
   # download and no volume dependency.
   REMBG_MODEL = 'isnet-general-use'
-  REMBG_MAX_SIDE = '1024'
+  # Resolution the matte is computed at, split by who is waiting for it.
+  #
+  # A batch runs at the fast size. This was 1024 for both, and on the 2 shared
+  # vCPUs below that is what turned a bulk batch into an hours-long job:
+  # 1024px is 2.6x the pixels of 640px for every photo, single inferences were
+  # measured at 41s and 105s, and photos queued behind them timed out and were
+  # saved with their backgrounds still on. Edge crispness at 640 is not the
+  # thing a listing photo is judged on; finishing is.
+  #
+  # The studio keeps the crisp size: that path does one photo at a time,
+  # because a seller asked for it and is watching the result.
+  REMBG_MAX_SIDE = '640'
+  REMBG_STUDIO_MAX_SIDE = '1024'
   # Photos in flight per batch with the local engine. Inference stays
   # single-flight (in-process lock); this overlaps the mask/crop/encode work
-  # around it. 3 is sized for the 4GB VM below — drop with the memory.
-  PHOTO_LOCAL_WORKERS = '3'
+  # around it. 2, not 3: with 2 shared vCPUs a third worker had no core to run
+  # on and just added contention to the two doing the work.
+  PHOTO_LOCAL_WORKERS = '2'
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...
