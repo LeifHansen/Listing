@@ -16,7 +16,7 @@ import { ListingCard } from "@/components/ListingCard";
 import { DuplicateListings } from "@/components/DuplicateListings";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { BoxIllustration, RobotIllustration } from "@/components/ui/illustrations";
+import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
 
@@ -594,7 +594,7 @@ export function Dashboard() {
               </div>
             </div>
             <div className="hidden lg:block shrink-0 -my-2">
-              <RobotIllustration />
+              <WelcomeIllustration />
             </div>
           </div>
         </Card>
@@ -776,7 +776,7 @@ export function Dashboard() {
         ) : (
           <Card className="p-0">
             <EmptyState
-              illustration={BoxIllustration}
+              illustration={ListingsIllustration}
               title="No listings yet"
               message={user
                 ? "Let's create your first listing — snap a few photos and the AI writes the rest."

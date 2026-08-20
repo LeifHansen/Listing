@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "assets": {
+    "homeWelcome": "/brand/thryft-mascot-welcome.webp",
+    "sellPhotoUpload": "/brand/thryft-mascot-photo-upload.webp",
+    "listingsEmpty": "/brand/thryft-mascot-listings.webp",
+    "shopModeEmpty": "/brand/thryft-mascot-shop-mode.webp",
+    "accountLogin": "/brand/thryft-mascot-account.webp"
+  }
+}
