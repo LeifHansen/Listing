@@ -1607,6 +1607,15 @@ async def upload(
         _register_bulk_job(job_id, {
             "id": job_id, "kind": "pipeline", "phase": "optimizing",
             "done": False, "error": None, "result": None,
+            # The identify charge was taken above, before any work ran, and
+            # is only ever refunded in full. Written down so a machine that is
+            # killed rather than stopped doesn't take the only record of it
+            # with it — see _settle_interrupted_jobs. The background-removal
+            # charge deliberately is NOT here: it can be refunded in PART (one
+            # photo's worth per failed cutout), and a partial refund is keyed
+            # in the ledger by its amount, so settling one from a mirror after
+            # the process died holding the running total can pay twice.
+            "_refunds": tokens.receipts(identify_spent),
         }, uid=uid)
         threading.Thread(
             target=_run_pipeline_job,
@@ -2341,8 +2350,39 @@ BULK_MAX_RESUMES = int(os.getenv("BULK_MAX_RESUMES", "2") or 2)
 _RESUMABLE_PHASES = ("uploading", "optimizing", "grouping")
 
 
-def _resume_interrupted_batches(records: list[dict]) -> None:
-    """Restart photo batches whose process died before they drafted anything.
+def _settle_interrupted_jobs(records: list[dict]) -> None:
+    """Deal with the jobs whose process went away: finish them, or pay them back.
+
+    Two outcomes, and they are mutually exclusive on purpose. A photo batch
+    that can be picked up again is picked up, and its charge stands because
+    the work is about to be delivered. Everything else is settled in money:
+    the AI charges these jobs took UP FRONT bought nothing, and the receipts
+    for them died with the process that held them, so nobody was ever going to
+    give them back. That is a seller paying twice for one listing.
+
+    Refunding is safe to attempt on every boot, including for a job already
+    refunded on the last one: a full refund is keyed in the ledger by the
+    spend's own entry id, so the database rejects the second one instead of
+    paying twice (see tokens.refund_all).
+
+    What this does NOT settle is the per-photo background-removal charge —
+    see tokens.receipts for why a partially refundable charge cannot be
+    settled from a mirror. For a batch that is the smaller number anyway, and
+    resuming means it usually gets delivered rather than abandoned.
+    """
+    resumed = _resume_interrupted_batches(records)
+    for record in records:
+        if record.get("id") in resumed:
+            continue  # the work is being finished, so the charge was earned
+        given_back = tokens.refund_all(record.get("_refunds"))
+        if given_back:
+            log.info("job %s: refunded %d up-front AI charge(s) — the restart "
+                     "killed it before it delivered", record.get("id"), given_back)
+
+
+def _resume_interrupted_batches(records: list[dict]) -> set[str]:
+    """Restart photo batches whose process died before they drafted anything,
+    and return the ids of the ones actually picked up.
 
     A bulk batch does all of its photo work up front and only then starts
     drafting, so a machine that goes away during background removal — a
@@ -2352,6 +2392,7 @@ def _resume_interrupted_batches(records: list[dict]) -> None:
     the entire time. This picks the batch back up and optimize_all skips
     straight past what is already done.
     """
+    resumed: set[str] = set()
     for record in records:
         job_id, staging = record.get("id"), record.get("_staging_id")
         # kind is absent on photo batches; pipeline/identify/ebay-import jobs
@@ -2388,20 +2429,23 @@ def _resume_interrupted_batches(records: list[dict]) -> None:
             target=_run_bulk_job, args=(job_id, staging, strip_bg, uid),
             kwargs={"resumed": True}, daemon=True,
         ).start()
+        resumed.add(job_id)
         log.info("bulk %s: resuming after a restart (attempt %d, phase was %s)",
                  job_id, resumes + 1, record.get("phase"))
+    return resumed
 
 
 @app.on_event("startup")
 def _adopt_job_mirrors() -> None:
     """Re-adopt mirrored jobs before the first request is served, so a client
     that polls straight through a restart is told its batch was interrupted
-    rather than being handed a 404 for a job that once existed — and pick back
-    up the photo batches that can still be finished."""
+    rather than being handed a 404 for a job that once existed — then pick
+    back up the batches that can still be finished, and refund the charges of
+    the ones that cannot."""
     interrupted = jobstore.adopt_mirrors()
     # Off the startup path: resuming re-enters the photo pipeline, and uvicorn
     # must be answering its health check long before that finishes.
-    threading.Thread(target=_resume_interrupted_batches,
+    threading.Thread(target=_settle_interrupted_jobs,
                      args=(interrupted,), daemon=True).start()
 
 
@@ -2855,6 +2899,7 @@ def identify_async(session_id: str, request: Request) -> dict:
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
         "done": False, "error": None, "result": None,
+        "_refunds": tokens.receipts(spent),
     }, uid=uid)
     threading.Thread(
         target=_run_identify_job, args=(job_id, session_id, uid, spent), daemon=True,

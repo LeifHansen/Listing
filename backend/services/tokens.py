@@ -176,6 +176,50 @@ def refund(spend_result: Optional[dict], units: Optional[int] = None) -> None:
     db.token_refund(user_id, spend_result["entry_id"], units=units)
 
 
+def receipts(*spend_results: Optional[dict]) -> list[dict]:
+    """The part of each spend() result worth writing down, so a charge can
+    still be given back after the process that made it is gone.
+
+    Every in-process refund path holds the spend dict in a local variable,
+    which is exactly what a machine that is killed rather than stopped takes
+    with it — no finally block runs, and the seller has paid for a draft that
+    was never saved. Persisting these lets a later boot settle up (see
+    main._settle_interrupted_jobs).
+
+    Only the three fields refund() actually reads, so the result stays small
+    enough to mirror on every job and carries no account state beyond the ids
+    already on the record. Declined and un-metered spends yield nothing:
+    there is no charge to give back.
+
+    ONLY pass spends that are refunded all-or-nothing. A charge that some code
+    path may give back in PART (today: background removal, one photo's worth
+    per failed cutout) must never be recorded here. The ledger keys a refund
+    by the spend id plus its amount, so a full refund and an earlier partial
+    one are two different entries and both go through — and the running total
+    that would have prevented that died with the process this exists to
+    recover from. Under-refunding is recoverable; paying a seller twice out of
+    the token balance is not."""
+    return [{"ok": True, "entry_id": r["entry_id"], "user_id": r.get("user_id", "")}
+            for r in spend_results
+            if r and r.get("ok") and r.get("entry_id")]
+
+
+def refund_all(receipt_list: Optional[list]) -> int:
+    """Give back every receipt in a list, in full. Returns how many were
+    attempted. Safe to call more than once with the same list: a FULL refund
+    is keyed in the ledger by the spend's own entry id (db.token_refund's
+    unique `ref`), so the second attempt is rejected by the database rather
+    than paying the user twice. That guarantee is what lets the startup pass
+    below re-run on every boot without keeping a "already refunded" flag of
+    its own."""
+    done = 0
+    for item in receipt_list or []:
+        if isinstance(item, dict):
+            refund(item)
+            done += 1
+    return done
+
+
 def insufficient_message(res: dict) -> str:
     """The 402 detail. The word 'token' is load-bearing: the frontend opens
     the buy-tokens dialog for 402s that mention tokens (and must NOT for the

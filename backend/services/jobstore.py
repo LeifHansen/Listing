@@ -51,6 +51,9 @@ MIRROR_FIELDS = (
     # originals live, whether the seller asked for cutouts, and how many times
     # we have already tried. See main._resume_interrupted_batches.
     "_staging_id", "_strip_bg", "_resumes",
+    # AI charges this job took UP FRONT and has not yet earned. See `update`
+    # for the invariant, and main._settle_interrupted_jobs for who reads them.
+    "_refunds",
 )
 # Mirrors are a few hundred bytes each and only ever read at startup, so that
 # is where they're pruned — by age, then by count. A machine that never
@@ -111,12 +114,22 @@ def register(job_id: str, data: dict, uid: Optional[str] = None) -> None:
 
 
 def update(job_id: str, **fields) -> None:
-    """Merge `fields` into a job's status. A no-op for an unknown job."""
+    """Merge `fields` into a job's status. A no-op for an unknown job.
+
+    Finishing a job SETTLES its up-front charges. `_refunds` means "taken from
+    the seller and not yet earned", and a worker that reaches done has already
+    settled up in-process — it either delivered the draft (so the charge was
+    earned) or hit its own except/finally and refunded there. Only a job that
+    never reaches done leaves the record behind for a later boot to act on,
+    which is precisely the case where nothing in this process ever ran.
+    """
     with _LOCK:
         job = _JOBS.get(job_id)
         if job is None:
             return
         job.update(fields)
+        if fields.get("done"):
+            job.pop("_refunds", None)
         job["_rev"] = job.get("_rev", 0) + 1
         # Snapshot under the lock, write outside it: the mirror is disk I/O and
         # every progress tick in the batch would otherwise queue behind it.

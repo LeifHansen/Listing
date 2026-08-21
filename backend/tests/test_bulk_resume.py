@@ -135,3 +135,61 @@ def test_resuming_marks_the_job_running_again_for_its_poller(monkeypatch):
     snap = jobstore.snapshot("job-1", "owner")
     assert snap["done"] is False and snap["error"] is None
     assert snap["resumed"] is True
+
+
+# --- settling the charge of a job that will never finish -------------------
+def test_a_job_that_died_before_delivering_gets_its_charge_back(monkeypatch):
+    """The seller paid up front for a draft that was never saved, and the
+    receipt died with the process, so no finally was ever going to give it
+    back."""
+    from backend.services import tokens
+
+    refunded = []
+    monkeypatch.setattr(tokens, "refund_all",
+                        lambda rs: refunded.extend(rs or []) or len(rs or []))
+
+    main._settle_interrupted_jobs([
+        {"id": "job-9", "kind": "identify", "phase": "identifying",
+         "_refunds": [{"ok": True, "entry_id": "e1", "user_id": "u1"}]},
+    ])
+    assert refunded == [{"ok": True, "entry_id": "e1", "user_id": "u1"}]
+
+
+def test_a_batch_being_resumed_keeps_its_charge(resumed_settle, monkeypatch):
+    """The other side of the same coin: that work is about to be delivered, so
+    refunding it would hand back tokens for a draft the seller then gets."""
+    from backend.services import tokens
+
+    refunded = []
+    monkeypatch.setattr(tokens, "refund_all",
+                        lambda rs: refunded.extend(rs or []) or len(rs or []))
+
+    staging = storage.new_session_id()
+    _photos(storage.original_dir(staging))
+    main._settle_interrupted_jobs([
+        dict(_interrupted(staging),
+             _refunds=[{"ok": True, "entry_id": "e1", "user_id": "u1"}]),
+    ])
+    assert refunded == [], "refunded a batch that is being finished"
+
+
+@pytest.fixture
+def resumed_settle(monkeypatch):
+    """_settle_interrupted_jobs runs the real resume path; stub the worker so
+    it decides to resume without re-entering the photo pipeline."""
+    monkeypatch.setattr(main, "_run_bulk_job", lambda *a, **k: None)
+
+
+def test_finishing_a_job_settles_its_recorded_charge():
+    """The invariant the startup pass depends on: reaching done means the
+    worker already settled up in process, so nothing is left to give back."""
+    from backend.services import jobstore
+
+    jobstore.register("job-8", {"phase": "identifying", "done": False,
+                                "_refunds": [{"ok": True, "entry_id": "e1",
+                                              "user_id": "u1"}]}, uid="owner")
+    jobstore.update("job-8", phase="category")
+    assert jobstore._JOBS["job-8"].get("_refunds"), "cleared too early"
+
+    jobstore.update("job-8", done=True, result={})
+    assert not jobstore._JOBS["job-8"].get("_refunds")
