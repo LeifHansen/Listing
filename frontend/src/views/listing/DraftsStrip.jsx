@@ -4,12 +4,14 @@ import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
 import { api, pollJob, postJson } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
+import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
@@ -24,7 +26,7 @@ const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 // Shipping service picker right on a draft's card — the same eBay fulfillment
 // policies the editor and bulk queue offer, account default preselected.
 // Saves the moment it's changed.
-function DraftShipping({ item }) {
+function DraftShipping({ item, className }) {
   const { ebay, policiesData, setPoliciesData } = useApp();
   const { toast } = useToast();
   const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
@@ -47,7 +49,8 @@ function DraftShipping({ item }) {
     }
   };
   return (
-    <div className="mt-1.5 flex items-center gap-1.5" title="Shipping service for this draft">
+    <div className={cn("flex items-center gap-1.5", className || "mt-1.5")}
+      title="Shipping service for this draft">
       <Truck size={14} className="shrink-0 text-ink-faint" aria-hidden />
       <Select
         aria-label="Shipping service"
@@ -100,9 +103,13 @@ export function DraftsStrip({ search = "" }) {
     listingsState, openListing, loadListings, patchListing, deleteListing,
     bulkDeleteListings,
     metricsById, skippedDraftIds, toggleSkipDraft,
+    listingsLayout, setListingsLayout,
   } = useApp();
   const { confirm, toast } = useToast();
   const { selected, toggle, otherConnected, effectiveTargets } = usePublishTargets();
+  // Drafts follow the same grid/list preference as the listings manager
+  // below — one Sell screen, one layout.
+  const list = listingsLayout === "list";
 
   const [selecting, setSelecting] = useState(false);
   const [sel, setSel] = useState({});
@@ -286,6 +293,7 @@ export function DraftsStrip({ search = "" }) {
           <div className="flex flex-wrap items-center justify-end gap-2">
             <MarketTargetChips selected={selected} toggle={toggle}
               otherConnected={otherConnected} />
+            <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
             {!selecting && (
               <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
                 <CheckSquare aria-hidden /> Select
@@ -336,7 +344,9 @@ export function DraftsStrip({ search = "" }) {
           </div>
         </div>
       )}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div className={cn(list
+        ? "flex flex-col gap-3"
+        : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4")}>
         {drafts.map((item, i) => {
           const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
           return (
@@ -348,7 +358,7 @@ export function DraftsStrip({ search = "" }) {
             >
               {/* Delete lives in the labeled row below, not as another tiny
                   icon in the card's corner cluster. */}
-              <ListingCard item={item} onOpen={openListing}
+              <ListingCard item={item} layout={listingsLayout} onOpen={openListing}
                 onStartOver={startOver}
                 startingOver={startingOver === item.id}
                 onSkip={() => toggleSkipDraft(item.id)}
@@ -358,9 +368,11 @@ export function DraftsStrip({ search = "" }) {
                 selected={!!sel[item.id]}
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
               {!selecting && (
-                <>
-                  <div className="mt-1.5 flex items-center gap-1.5">
-                    <Button variant="secondary" size="sm" className="flex-1"
+                <div className={cn(list
+                  ? "mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 pl-1"
+                  : "contents")}>
+                  <div className={cn("flex items-center gap-1.5", !list && "mt-1.5")}>
+                    <Button variant="secondary" size="sm" className={cn(!list && "flex-1")}
                       onClick={() => publishOne(item)}
                       loading={!!publishing[item.id]}
                       disabled={blockers.length > 0}
@@ -369,7 +381,7 @@ export function DraftsStrip({ search = "" }) {
                         : undefined}>
                       <Rocket aria-hidden /> Publish
                     </Button>
-                    <Button variant="ghost" size="sm" className="flex-1"
+                    <Button variant="ghost" size="sm" className={cn(!list && "flex-1")}
                       onClick={() => openListing(item.id)}>
                       <PenLine aria-hidden /> Review &amp; List
                     </Button>
@@ -379,8 +391,13 @@ export function DraftsStrip({ search = "" }) {
                       <Trash2 aria-hidden />
                     </Button>
                   </div>
+                  {/* In a list row this drops to the end of the wrapped line
+                      (order-last); stacked cards keep it under the buttons,
+                      where it reads as the reason Publish is disabled. */}
                   {blockers.length > 0 && (
-                    <p className="mt-1.5 flex items-start gap-1.5 text-[12px] font-semibold text-warning"
+                    <p className={cn(
+                      "flex items-start gap-1.5 text-[12px] font-semibold text-warning",
+                      list ? "w-full order-last" : "mt-1.5")}
                       title={blockers.map((b) => `${b.label}: ${b.why}`).join("\n")}>
                       <AlertTriangle size={13} className="shrink-0 mt-px" aria-hidden />
                       <span className="min-w-0">
@@ -388,9 +405,14 @@ export function DraftsStrip({ search = "" }) {
                       </span>
                     </p>
                   )}
-                  <DraftCategory item={item} />
-                  <DraftShipping item={item} />
-                </>
+                  {/* Category and shipping stay reachable in both layouts —
+                      a wrong category is the AI misfire that costs most, and
+                      hiding it behind a layout switch would bury it. */}
+                  <div className={cn(list && "min-w-0 w-full sm:w-56")}>
+                    <DraftCategory item={item} />
+                  </div>
+                  <DraftShipping item={item} className={cn(list ? "min-w-0" : undefined)} />
+                </div>
               )}
             </motion.div>
           );
