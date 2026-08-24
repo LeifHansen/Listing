@@ -144,7 +144,8 @@ jobs:
         run: |
           set -o pipefail
           pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
-                 backend/tests/test_bulk_resume.py -q -rs | tee /tmp/api-tests.log
+                 backend/tests/test_bulk_resume.py \
+                 backend/tests/test_aspect_checkboxes.py -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
             echo "::error::API tests skipped in the only job that can run them"
             exit 1

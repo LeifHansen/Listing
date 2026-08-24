@@ -518,10 +518,24 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> li
         specifics.insert(0, ItemSpecific(
             name="Brand", value=listing.brand.split(",")[0].strip()[:65]))
     if specifics:
+        # One NameValueList PER NAME, with a <Value> per value. A multi-select
+        # aspect (eBay's item-specifics checkboxes: Features, Style, Season...)
+        # holds several values and reaches us as several rows — emitting those
+        # as separate NameValueLists is a duplicate-name error that rejects the
+        # whole publish, so group them here instead.
+        grouped: dict[str, list[str]] = {}
+        for s in specifics:
+            name = _esc(s.name.strip()[:40])
+            value = _esc(s.value.strip()[:65])
+            values = grouped.setdefault(name, [])
+            # eBay caps an aspect at 30 values; exact repeats never earn a slot.
+            if value not in values and len(values) < 30:
+                values.append(value)
         rows = "".join(
-            f"<NameValueList><Name>{_esc(s.name.strip()[:40])}</Name>"
-            f"<Value>{_esc(s.value.strip()[:65])}</Value></NameValueList>"
-            for s in specifics[:60])
+            f"<NameValueList><Name>{name}</Name>"
+            + "".join(f"<Value>{v}</Value>" for v in values)
+            + "</NameValueList>"
+            for name, values in list(grouped.items())[:60])
         parts.append(f"<ItemSpecifics>{rows}</ItemSpecifics>")
     if image_urls:
         urls = "".join(f"<PictureURL>{_esc(u)}</PictureURL>" for u in image_urls[:24])
