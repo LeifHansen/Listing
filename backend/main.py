@@ -395,18 +395,38 @@ def _tag_text_for(paths: list, aspects: list[dict]) -> str:
         return ""
 
 
+# eBay's ceiling on values per aspect (mirrored in services/ebay.py).
+_MAX_ASPECT_VALUES = 30
+
+
 def _merge_filled_specifics(listing: Listing, filled: list,
                             aspects: list[dict]) -> int:
     """Merge AI-filled specifics into the listing without touching anything
-    the seller answered. Aspect-aware: an aspect the listing already has a
-    value for is left alone entirely; an unanswered SINGLE aspect takes the
-    AI's first value; an unanswered MULTI aspect (Season, Features, Theme...)
-    takes ALL the AI's values — eBay accepts a list and buyers filter on each.
+    the seller answered. Aspect-aware:
+
+    - An aspect the seller entered or confirmed (confidence "", per
+      models.ItemSpecific) is left alone entirely.
+    - An unanswered SINGLE aspect takes the AI's first value; one that already
+      holds a value keeps it.
+    - A MULTI aspect (Season, Features, Theme... — eBay's multi-select
+      checkboxes) takes ALL the AI's values, and is TOPPED UP with the ones it
+      doesn't already hold rather than skipped: a single value left over from
+      the first vision pass used to block every further tick, which is why the
+      checkbox specifics reached eBay with one box ticked at most.
+
     Returns how many values were added."""
     multi = {a["name"].strip().lower() for a in aspects
              if (a.get("cardinality") or "SINGLE") == "MULTI"}
-    have = {s.name.strip().lower() for s in listing.item_specifics
-            if (s.value or "").strip()}
+    have: dict[str, set[str]] = {}
+    seller_owned: set[str] = set()
+    for s in listing.item_specifics:
+        value = (s.value or "").strip()
+        if not value:
+            continue
+        k = s.name.strip().lower()
+        have.setdefault(k, set()).add(value.lower())
+        if not (s.confidence or "").strip():
+            seller_owned.add(k)
     grouped: dict[str, list] = {}
     order: list[str] = []
     for f in filled:
@@ -417,9 +437,18 @@ def _merge_filled_specifics(listing: Listing, filled: list,
         grouped[k].append(f)
     added = 0
     for k in order:
-        if k in have:
+        if k in seller_owned:
             continue
-        for f in (grouped[k] if k in multi else grouped[k][:1]):
+        held = have.get(k, set())
+        is_multi = k in multi
+        if held and not is_multi:
+            continue
+        for f in (grouped[k] if is_multi else grouped[k][:1]):
+            value = (f.value or "").strip()
+            if not value or value.lower() in held or len(held) >= _MAX_ASPECT_VALUES:
+                continue
+            held.add(value.lower())
+            have[k] = held
             listing.item_specifics.append(f)
             added += 1
     return added
@@ -2055,9 +2084,10 @@ def identify(session_id: str, request: Request) -> dict:
 @app.post("/api/autofill-specifics/{session_id}")
 def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -> dict:
     """Fill eBay's required/recommended item specifics for the listing's
-    category from the product photos — choosing fixed-value ("checkbox")
-    aspects from eBay's own allowed values — and merge them in without
-    overwriting anything the seller already set."""
+    category from the product photos — choosing fixed-value aspects from eBay's
+    own allowed values, and ticking every value that applies on the multi-select
+    ("checkbox") ones — and merge them in without overwriting anything the
+    seller already set."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     _assert_session_owner(session_id, request)

@@ -370,6 +370,98 @@ function SpecGroup({ title, note, count, children }) {
   );
 }
 
+// A multi-select aspect: eBay shows these as tick boxes, so we do too. Ticking
+// adds a value rather than replacing one, which is the only way an aspect like
+// Features ("Breathable", "Pockets", "Water Resistant") ends up on the listing
+// with more than one box ticked.
+//
+// Not wrapped in <Field>: that renders a <label>, and a label around a group of
+// checkboxes hijacks every click inside it.
+function AspectChecklist({ w, a }) {
+  const [showAll, setShowAll] = useState(false);
+  const selected = w.getSpecificValues(a.name);
+  const picked = new Set(selected.map((v) => v.toLowerCase()));
+  // One badge for the whole group, showing the least certain tick in it — a
+  // group with four confident values and one guess still needs a look.
+  const rows = w.form.item_specifics.filter(
+    (s) => s.name.trim().toLowerCase() === a.name.trim().toLowerCase()
+      && (s.value || "").trim());
+  const row = rows.find((s) => s.confidence === "medium") || rows[0] || null;
+  const unreviewed = row?.confidence === "medium";
+  const missing = a.required && selected.length === 0;
+  // Values the listing holds that eBay doesn't offer here (a seller's own, or
+  // a category change) still get a box — otherwise they'd be invisible and
+  // unremovable.
+  const offList = selected.filter(
+    (v) => !a.values.some((x) => x.toLowerCase() === v.toLowerCase()));
+  const options = [...offList, ...a.values];
+  // A long list stays collapsed to the ticked values plus the first handful:
+  // Features can run to 60 boxes, and scrolling past them to reach the next
+  // aspect is worse than one extra tap.
+  const VISIBLE = 12;
+  const shown = showAll
+    ? options
+    : options.filter((v, i) => i < VISIBLE || picked.has(v.toLowerCase()));
+  const hidden = options.length - shown.length;
+
+  return (
+    <div className="flex flex-col gap-1.5 min-w-0">
+      <span className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
+        {a.name}
+        <span className="font-normal text-ink-faint inline-flex items-center gap-1.5">
+          <span className="text-[12px]">
+            {selected.length ? `${selected.length} selected` : "tick all that apply"}
+          </span>
+          <ConfidenceMark row={row} />
+          {unreviewed && (
+            <button
+              type="button"
+              onClick={() => w.confirmSpecific(a.name)}
+              title={`Confirm these ${a.name} selections are correct`}
+              className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning-soft px-1.5 py-px text-[11px] font-bold text-warning cursor-pointer hover:border-warning transition-colors"
+            >
+              <Check size={10} aria-hidden /> Looks right
+            </button>
+          )}
+          {missing && (
+            <span className="text-[12px] font-semibold text-warning">Required</span>
+          )}
+        </span>
+      </span>
+      <div
+        role="group"
+        aria-label={a.name}
+        className={cn(
+          "flex flex-col gap-1.5 rounded-input border border-line bg-card px-3 py-2.5",
+          missing && "ring-2 ring-warning/60",
+        )}
+      >
+        {shown.map((v) => (
+          <label key={v} className="flex items-start gap-2.5 text-[14px] text-ink cursor-pointer">
+            <input
+              type="checkbox"
+              checked={picked.has(v.toLowerCase())}
+              onChange={(e) => w.toggleSpecificValue(a.name, v, e.target.checked)}
+              className="size-4 mt-0.5 shrink-0 accent-blue"
+            />
+            <span className="min-w-0">{v}</span>
+          </label>
+        ))}
+        {hidden > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowAll(true)}
+            className="self-start text-[12px] font-semibold text-ink-secondary underline underline-offset-2 cursor-pointer hover:text-ink"
+          >
+            Show {hidden} more
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 export function SpecificsCard({ w }) {
   const aspects = w.categoryMeta.aspects || [];
   const required = aspects.filter((a) => a.required);
@@ -416,6 +508,13 @@ export function SpecificsCard({ w }) {
   };
 
   const renderAspect = (a) => {
+    // eBay's multi-select aspects — the item-specifics CHECKBOXES. A dropdown
+    // can only ever hold one answer, so rendering these as one hid the fact
+    // that Features/Style/Season take several, and the AI's extra picks had
+    // nowhere to land but an unexplained chip.
+    if (a.mode === "SELECTION_ONLY" && a.cardinality === "MULTI" && a.values?.length) {
+      return <AspectChecklist key={a.name} w={w} a={a} />;
+    }
     const row = w.getSpecificRow(a.name);
     // MULTI-value aspects (Season, Features, Theme...) can hold several
     // values; the field edits the first and the rest show as removable chips

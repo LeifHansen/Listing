@@ -10,6 +10,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -816,9 +817,18 @@ Rules:
     Occasion, estimated sizes). Fill these — a good inference beats a blank —
     the seller is shown a "review" flag on them.
 - Use the aspect's EXACT name as given.
-- For an aspect shown as "(choose one of: ...)", the value MUST be exactly one
-  of those allowed values, copied verbatim (this is how eBay's fixed-value /
-  checkbox specifics are matched). If none fits, omit that aspect.
+- FIXED-CHOICE aspects come in two shapes, and a value for either MUST be
+  copied VERBATIM from that aspect's allowed list — the verbatim copy is the
+  only thing that makes eBay's fixed-value specifics actually get selected:
+  * "(choose exactly one of: ...)" — eBay's dropdown. Give one value.
+  * "(CHECKBOXES - ...)" — eBay's multi-select tick boxes, and the specifics
+    that ship empty most often, so treat them as a priority: emit a SEPARATE
+    entry (same name, different value) for EVERY listed value that genuinely
+    applies — typically two to four. One is fine when only one applies; none
+    only when the item truly matches none. Never comma-join them into one
+    value, and never stop at the first match when others also apply.
+  When a listed value is only a near fit, prefer the closest defensible one at
+  "medium" over leaving the aspect blank; omit it only when nothing fits.
 - An aspect shown as "(plain number)" takes ONLY a number like "14" (one
   decimal at most, no words or units); "(4-digit year)" takes a year like
   "1985". If you can't tell, omit it — text there gets the listing rejected.
@@ -830,9 +840,9 @@ Rules:
   weight/type), Style, Features, Performance/Activity, Garment Care (from
   the care tag), Product Line (the brand's line, e.g. "Tommy Jeans"),
   Pattern, Fit, Neckline, Closure. An honest inference here beats a blank.
-- An aspect shown as "(may repeat: several values allowed)" can appear more
-  than once with different values — e.g. Season as both "Winter" and
-  "Spring". Repeat the name; never comma-join values.
+- A free-text aspect shown as "(may repeat: several values allowed)" works the
+  same way — e.g. Season as both "Winter" and "Spring". Repeat the name in a
+  new entry per value; never comma-join values.
 - Never invent identifiers: a UPC/EAN/ISBN/MPN/serial you cannot actually
   read must be omitted, and never fill any aspect with "Not Specified"/
   "Does Not Apply"/"Unknown" just to have an answer.
@@ -842,7 +852,9 @@ Rules:
   the photos' real-world scale, as a number with unit (e.g. "7 in",
   "1.5 lb") at "medium" confidence — some categories refuse to publish
   without these, and the seller can correct an estimate.
-- One value per aspect name.
+- One entry per VALUE, not per aspect: a single-value aspect appears once, a
+  repeatable one (CHECKBOXES, "may repeat") appears once per value that
+  applies.
 """
 
 
@@ -855,16 +867,41 @@ _ASPECTS_SYSTEM = (
     "possible.\n\n" + _ASPECTS_FILL_SCHEMA)
 
 
+# How many of a fixed-choice aspect's allowed values to show the model. The old
+# cap of 40 hid the rest silently, so anything past it could never be picked —
+# on the long lists (Country/Region of Manufacture runs ~250) that made whole
+# aspects unfillable. Allowed values are short strings and the aspect block is
+# prompt-cached per category, so a generous cap costs little; beyond it the line
+# says so and the model may answer off-list, which coerce_aspect_value still
+# matches against the FULL list.
+_MAX_SHOWN_VALUES = 150
+
+
+def _choice_line(a: dict, multi: bool) -> str:
+    """The prompt line for a fixed-choice aspect. MULTI ones are eBay's
+    multi-select tick boxes — the "Item Specifics checkboxes" — and are labelled
+    as such so the model ticks every value that applies instead of one."""
+    values = a["values"]
+    shown = ", ".join(values[:_MAX_SHOWN_VALUES])
+    if len(values) > _MAX_SHOWN_VALUES:
+        shown += (f", ... (+{len(values) - _MAX_SHOWN_VALUES} more allowed values "
+                  "not shown - if the right one is missing here, give it verbatim "
+                  "anyway)")
+    if multi:
+        return (f'- "{a["name"]}" (CHECKBOXES - tick every value that applies by '
+                f'repeating this aspect once per value; allowed values: {shown})')
+    return f'- "{a["name"]}" (choose exactly one of: {shown})'
+
+
 def _aspect_lines(named: list[dict]) -> str:
     lines = []
     for a in named:
         dtype = (a.get("data_type") or "STRING").upper()
         fmt = (a.get("format") or "").lower()
-        multi = " (may repeat: several values allowed)" \
-            if (a.get("cardinality") or "SINGLE") == "MULTI" else ""
+        is_multi = (a.get("cardinality") or "SINGLE") == "MULTI"
+        multi = " (may repeat: several values allowed)" if is_multi else ""
         if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
-            vals = ", ".join(a["values"][:40])
-            lines.append(f'- "{a["name"]}" (choose one of: {vals}){multi}')
+            lines.append(_choice_line(a, is_multi))
         elif dtype == "DATE" or "yyyy" in fmt:
             lines.append(f'- "{a["name"]}" (4-digit year)')
         elif dtype == "NUMBER":
@@ -880,12 +917,45 @@ def _listing_context(listing: Listing) -> str:
             f"Description: {(listing.description or '')[:500]}")
 
 
+# Separators a model reaches for when it comma-joins a repeatable aspect's
+# values despite being told not to ("Winter, Spring", "Cotton / Polyester").
+_MULTI_JOIN_RE = re.compile(r"\s*[,;|]\s*|\s+/\s+")
+
+# eBay's own ceiling on values per aspect (mirrored in services/ebay.py).
+_MAX_ASPECT_VALUES = 30
+
+
+def _legal_values(value: str, aspect: dict, is_multi: bool) -> list[str]:
+    """Every eBay-legal value `value` yields for `aspect`: one for a
+    single-value aspect, and possibly several for a repeatable (checkbox) one
+    that arrived comma-joined. Joining is what the prompt forbids, but when it
+    happens anyway the joined string matches no allowed value and the whole
+    aspect used to be dropped — the checkboxes went untouched. Splitting
+    recovers the individual ticks."""
+    allowed = aspect.get("values") or []
+    # A fixed-choice value can legitimately contain a comma ("Shirt, Blouse"),
+    # so an exact match on the whole string always wins over splitting it.
+    exact = (taxonomy.match_selection_value(value, allowed)
+             if aspect.get("mode") == "SELECTION_ONLY" and allowed else None)
+    if is_multi and exact is None and _MULTI_JOIN_RE.search(value):
+        pieces: list[str] = []
+        for piece in _MULTI_JOIN_RE.split(value):
+            legal = taxonomy.coerce_aspect_value(piece, aspect)
+            if legal is not None and legal not in pieces:
+                pieces.append(legal)
+        if pieces:
+            return pieces
+    legal = taxonomy.coerce_aspect_value(value, aspect)
+    return [legal] if legal is not None else []
+
+
 def _validate_specifics(data: dict, named: list[dict]) -> list[ItemSpecific]:
     """The model's raw specifics, coerced to eBay-legal ItemSpecifics."""
     by_name = {a["name"].strip().lower(): a for a in named}
     out: list[ItemSpecific] = []
     seen: set[tuple[str, str]] = set()   # (name, value) — exact repeats only
     single_used: set[str] = set()
+    counts: dict[str, int] = {}
     for s in (data.get("specifics") or []):
         if not isinstance(s, dict):
             continue
@@ -900,21 +970,27 @@ def _validate_specifics(data: dict, named: list[dict]) -> list[ItemSpecific]:
         # and buyers filter on each. Exact duplicates are dropped either way.
         if key in single_used:
             continue
+        is_multi = (a.get("cardinality") or "SINGLE") == "MULTI"
+        conf = str(s.get("confidence", "")).strip().lower()
         # Coerce to the aspect's own constraints (fixed choices matched to
         # eBay's exact wording, numbers stripped to plain numbers, years to
         # YYYY) — an illegal value is dropped rather than rejected later.
-        legal = taxonomy.coerce_aspect_value(value, a)
-        if legal is None or (key, legal.lower()) in seen:
-            continue
-        seen.add((key, legal.lower()))
-        if (a.get("cardinality") or "SINGLE") != "MULTI":
-            single_used.add(key)
-        conf = str(s.get("confidence", "")).strip().lower()
-        out.append(ItemSpecific(
-            name=a["name"], value=legal,
-            # Anything not explicitly "high" gets the review flag — safer to
-            # over-flag than to show an inference as read-off-the-tag fact.
-            confidence="high" if conf == "high" else "medium"))
+        for legal in _legal_values(value, a, is_multi):
+            if (key, legal.lower()) in seen:
+                continue
+            if counts.get(key, 0) >= _MAX_ASPECT_VALUES:
+                break
+            seen.add((key, legal.lower()))
+            counts[key] = counts.get(key, 0) + 1
+            out.append(ItemSpecific(
+                name=a["name"], value=legal,
+                # Anything not explicitly "high" gets the review flag — safer
+                # to over-flag than to show an inference as read-off-the-tag
+                # fact.
+                confidence="high" if conf == "high" else "medium"))
+            if not is_multi:
+                single_used.add(key)
+                break
     return out
 
 
@@ -931,9 +1007,10 @@ def _aspects_system_blocks(named: list[dict]) -> list[dict]:
 def fill_aspects(image_paths: list[Path], listing: Listing,
                  aspects: list[dict], tag_text: str = "") -> list[ItemSpecific]:
     """Fill eBay's category item specifics from the product photos. `aspects`
-    is the taxonomy list [{name, required, mode, values}]. Returns validated
-    ItemSpecifics — SELECTION_ONLY values are matched to eBay's allowed list so
-    the fixed-value ("checkbox") specifics actually populate on eBay.
+    is the taxonomy list [{name, required, mode, values, cardinality}]. Returns
+    validated ItemSpecifics — SELECTION_ONLY values are matched to eBay's
+    allowed list so the fixed-value specifics actually populate, and a MULTI
+    one (eBay's checkboxes) comes back as one entry per value ticked.
     `tag_text` (from read_tag_text) is passed as ground-truth context so Size/
     Material/Country/MPN come off the actual tags."""
     named = [a for a in aspects if a.get("name")]
