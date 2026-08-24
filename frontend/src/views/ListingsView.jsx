@@ -12,6 +12,7 @@ import { OriginChip, originOf } from "@/components/ui/badges";
 import { InfoTip } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
+import { ViewToggle } from "@/components/ui/ViewToggle";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
@@ -78,9 +79,16 @@ export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     ebay, loadListings, metricsById, skippedDraftIds, storeSync, syncStore,
-    listingsTab, setListingsTab, openShipping,
+    listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
   } = useApp();
   const { confirm, toast } = useToast();
+
+  const list = listingsLayout === "list";
+  // One class for every collection this view renders (cards and skeletons
+  // alike), so the two layouts can never drift apart.
+  const gridClass = list
+    ? "flex flex-col gap-2"
+    : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4";
 
   // "drafts" was a tab here before the drafts strip existed; a stale saved
   // selection lands on Active.
@@ -181,7 +189,7 @@ export function ListingsView({ search = "" }) {
   let body;
   if (listingsState.loading && !listingsState.loaded) {
     body = (
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div className={gridClass}>
         {[0, 1, 2, 3, 4, 5].map((i) => <ListingCardSkeleton key={i} />)}
       </div>
     );
@@ -225,16 +233,17 @@ export function ListingsView({ search = "" }) {
     );
   } else {
     body = (
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div className={gridClass}>
         {items.map((item, i) => (
           <motion.div
             key={item.id}
-            className="h-full"
+            className={list ? undefined : "h-full"}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
           >
-            <ListingCard className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
+            <ListingCard className={list ? undefined : "h-full"} layout={listingsLayout}
+              item={item} onOpen={openListing} onDelete={askDelete}
               onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
               ending={endingId === item.id}
               skipped={skippedDraftIds.has(item.id)}
@@ -258,6 +267,9 @@ export function ListingsView({ search = "" }) {
           <InfoTip text={tab.sub} />
         </div>
         <div className="flex items-center gap-2">
+          {/* Grid or list — a viewing preference, so it sits with the other
+              view-level controls and is remembered across visits. */}
+          <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
           {user && ebay.connected && (
             <Button variant="soft" onClick={() => openShipping()}>
               <Truck aria-hidden /> Ship orders

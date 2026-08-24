@@ -1,19 +1,20 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck,
+  FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
 import { pollJob, postJson } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
+import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
-import {
-  MarketTargetChips, missingRequired, publishListing, usePublishTargets,
-} from "./publishShared";
+import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { blockerLabels, ebayBlockers } from "./blockers";
 
 /* The drafts experience on the merged Sell screen: every draft one click
    from Publish or Review & List, plus select-mode bulk publish/delete.
@@ -24,7 +25,7 @@ const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 
 // Shipping policy right on a draft's card — the same one control the editor
 // and the bulk queue use (see ShippingPolicySelect). Saves on change.
-function DraftShipping({ item }) {
+function DraftShipping({ item, className }) {
   const { toast } = useToast();
   const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
   const save = async (id) => {
@@ -38,7 +39,8 @@ function DraftShipping({ item }) {
     }
   };
   return (
-    <div className="mt-1.5 flex items-center gap-1.5" title="Shipping policy for this draft">
+    <div className={cn("flex items-center gap-1.5", className || "mt-1.5")}
+      title="Shipping policy for this draft">
       <Truck size={14} className="shrink-0 text-ink-faint" aria-hidden />
       <ShippingPolicySelect
         className="h-9 text-[13px]"
@@ -84,9 +86,13 @@ export function DraftsStrip({ search = "" }) {
     listingsState, openListing, loadListings, patchListing, deleteListing,
     bulkDeleteListings,
     metricsById, skippedDraftIds, toggleSkipDraft,
+    listingsLayout, setListingsLayout,
   } = useApp();
   const { confirm, toast } = useToast();
   const { selected, toggle, otherConnected, effectiveTargets } = usePublishTargets();
+  // Drafts follow the same grid/list preference as the listings manager
+  // below — one Sell screen, one layout.
+  const list = listingsLayout === "list";
 
   const [selecting, setSelecting] = useState(false);
   const [sel, setSel] = useState({});
@@ -110,11 +116,13 @@ export function DraftsStrip({ search = "" }) {
   // Both bulk actions work on the drafts you can actually see: narrowing the
   // search after selecting must not publish or delete something off-screen.
   const selectedDrafts = drafts.filter((d) => sel[d.id]);
-  // eBay refuses a listing that's missing title/price/weight/category, so the
-  // per-card Publish button is disabled for those. Bulk publish holds the same
-  // line: they're left selected and named, not fired off to fail one by one.
+  // A draft eBay would refuse can't be published from here — the per-card
+  // Publish button is disabled and says which field is holding it (see
+  // blockers.js, the same rules the editor and the bulk queue use). Bulk
+  // publish holds the same line: those drafts are left selected and counted,
+  // not fired off to fail one at a time.
   const readyToPublish = selectedDrafts.filter(
-    (d) => missingRequired(d.listing || {}).length === 0);
+    (d) => ebayBlockers(d.listing || {}, { targets: effectiveTargets }).length === 0);
   const allSelected = drafts.length > 0 && selectedDrafts.length === drafts.length;
   const exitSelect = () => { setSelecting(false); setSel({}); };
   const toggleAll = () => setSel(allSelected
@@ -184,7 +192,7 @@ export function DraftsStrip({ search = "" }) {
     }
     const notReady = selectedDrafts.length - readyToPublish.length;
     if (!readyToPublish.length) {
-      toast(`${notReady === 1 ? "That draft is" : `All ${notReady} selected drafts are`} missing required info — open them to fill in what eBay needs.`,
+      toast(`${notReady === 1 ? "That draft has" : `All ${notReady} selected drafts have`} fields eBay won't accept without — open them to see which.`,
         { kind: "warning" });
       return;
     }
@@ -192,7 +200,7 @@ export function DraftsStrip({ search = "" }) {
       title: `Publish ${readyToPublish.length} draft${readyToPublish.length === 1 ? "" : "s"} live?`,
       message: `Each goes straight to ${targetNames}.`
         + (notReady
-          ? ` ${notReady} of the ${selectedDrafts.length} selected ${notReady === 1 ? "is" : "are"} missing required info and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
+          ? ` ${notReady} of the ${selectedDrafts.length} selected ${notReady === 1 ? "is" : "are"} still blocked by a field eBay requires, and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
           : ""),
       confirmLabel: "Publish live",
     }))) return;
@@ -210,7 +218,7 @@ export function DraftsStrip({ search = "" }) {
     exitSelect();
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
       + (failed ? ` ${failed} need attention — open them to fix.` : "")
-      + (notReady ? ` ${notReady} skipped for missing info.` : ""),
+      + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
       { kind: failed || notReady ? "warning" : "success" });
   };
 
@@ -268,6 +276,7 @@ export function DraftsStrip({ search = "" }) {
           <div className="flex flex-wrap items-center justify-end gap-2">
             <MarketTargetChips selected={selected} toggle={toggle}
               otherConnected={otherConnected} />
+            <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
             {!selecting && (
               <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
                 <CheckSquare aria-hidden /> Select
@@ -301,7 +310,7 @@ export function DraftsStrip({ search = "" }) {
               disabled={!selectedDrafts.length || !!bulkProgress}
               loading={!!bulkProgress}
               title={selectedDrafts.length && !readyToPublish.length
-                ? "Every selected draft is missing required info — open them to finish"
+                ? "Every selected draft is blocked by a field eBay requires — open them to finish"
                 : undefined}>
               <Rocket aria-hidden />
               {bulkProgress
@@ -318,9 +327,11 @@ export function DraftsStrip({ search = "" }) {
           </div>
         </div>
       )}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div className={cn(list
+        ? "flex flex-col gap-3"
+        : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4")}>
         {drafts.map((item, i) => {
-          const missing = missingRequired(item.listing || {}, effectiveTargets);
+          const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
           return (
             <motion.div
               key={item.id}
@@ -330,7 +341,7 @@ export function DraftsStrip({ search = "" }) {
             >
               {/* Delete lives in the labeled row below, not as another tiny
                   icon in the card's corner cluster. */}
-              <ListingCard item={item} onOpen={openListing}
+              <ListingCard item={item} layout={listingsLayout} onOpen={openListing}
                 onStartOver={startOver}
                 startingOver={startingOver === item.id}
                 onSkip={() => toggleSkipDraft(item.id)}
@@ -340,18 +351,20 @@ export function DraftsStrip({ search = "" }) {
                 selected={!!sel[item.id]}
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
               {!selecting && (
-                <>
-                  <div className="mt-1.5 flex items-center gap-1.5">
-                    <Button variant="secondary" size="sm" className="flex-1"
+                <div className={cn(list
+                  ? "mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 pl-1"
+                  : "contents")}>
+                  <div className={cn("flex items-center gap-1.5", !list && "mt-1.5")}>
+                    <Button variant="secondary" size="sm" className={cn(!list && "flex-1")}
                       onClick={() => publishOne(item)}
                       loading={!!publishing[item.id]}
-                      disabled={missing.length > 0}
-                      title={missing.length
-                        ? `Missing: ${missing.join(", ")} — open Review & List to finish`
+                      disabled={blockers.length > 0}
+                      title={blockers.length
+                        ? `eBay won't take this yet — ${blockerLabels(blockers)}. Open Review & List to finish.`
                         : undefined}>
                       <Rocket aria-hidden /> Publish
                     </Button>
-                    <Button variant="ghost" size="sm" className="flex-1"
+                    <Button variant="ghost" size="sm" className={cn(!list && "flex-1")}
                       onClick={() => openListing(item.id)}>
                       <PenLine aria-hidden /> Review &amp; List
                     </Button>
@@ -361,9 +374,28 @@ export function DraftsStrip({ search = "" }) {
                       <Trash2 aria-hidden />
                     </Button>
                   </div>
-                  <DraftCategory item={item} />
-                  <DraftShipping item={item} />
-                </>
+                  {/* In a list row this drops to the end of the wrapped line
+                      (order-last); stacked cards keep it under the buttons,
+                      where it reads as the reason Publish is disabled. */}
+                  {blockers.length > 0 && (
+                    <p className={cn(
+                      "flex items-start gap-1.5 text-[12px] font-semibold text-warning",
+                      list ? "w-full order-last" : "mt-1.5")}
+                      title={blockers.map((b) => `${b.label}: ${b.why}`).join("\n")}>
+                      <AlertTriangle size={13} className="shrink-0 mt-px" aria-hidden />
+                      <span className="min-w-0">
+                        Keeping this off eBay: {blockerLabels(blockers)}
+                      </span>
+                    </p>
+                  )}
+                  {/* Category and shipping stay reachable in both layouts —
+                      a wrong category is the AI misfire that costs most, and
+                      hiding it behind a layout switch would bury it. */}
+                  <div className={cn(list && "min-w-0 w-full sm:w-56")}>
+                    <DraftCategory item={item} />
+                  </div>
+                  <DraftShipping item={item} className={cn(list ? "min-w-0" : undefined)} />
+                </div>
               )}
             </motion.div>
           );

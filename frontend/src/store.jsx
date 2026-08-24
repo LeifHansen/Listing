@@ -40,6 +40,20 @@ export function AppProvider({ children }) {
   // editor session (same as the Sell nav's startNew always did) and records
   // the requested tab so the screen can scroll to the right section.
   const [listingsTab, setListingsTab] = useState("active");
+  // Grid (the default) or list, for the listing grids on the Sell screen.
+  // It's a per-device viewing preference, not account data, so it rides
+  // localStorage next to the theme rather than the server.
+  const [listingsLayout, setLayout] = useState(() => {
+    try {
+      return localStorage.getItem("quickflip-listings-layout") === "list"
+        ? "list" : "grid";
+    } catch (e) { return "grid"; }
+  });
+  const setListingsLayout = useCallback((next) => {
+    const mode = next === "list" ? "list" : "grid";
+    setLayout(mode);
+    try { localStorage.setItem("quickflip-listings-layout", mode); } catch (e) {}
+  }, []);
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     if (tab) setListingsTab(tab);
@@ -687,6 +701,7 @@ export function AppProvider({ children }) {
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
+    listingsLayout, setListingsLayout,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
     ebay, loadEbayStatus, canPublishLive,
@@ -703,6 +718,7 @@ export function AppProvider({ children }) {
     bulkRetry, clearBulkRetry,
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
+    listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,

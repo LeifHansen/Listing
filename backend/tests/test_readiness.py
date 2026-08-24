@@ -6,6 +6,8 @@ spinner that never resolved.
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -67,16 +69,64 @@ def test_health_stays_up_even_when_not_ready(client, monkeypatch):
 def test_a_full_inference_queue_gives_up_instead_of_hanging(monkeypatch):
     """The 'appears to hang' bug. One inference runs at a time, and the wait
     for that slot used to be unbounded -- so a studio cutout queued behind a
-    forty-photo batch sat there alive and idle, forever."""
+    forty-photo batch sat there alive and idle, forever.
+
+    An interactive caller passes its own (short) deadline, because there a
+    prompt "busy, try again" is the useful answer."""
     from PIL import Image
 
-    monkeypatch.setattr(images, "INFER_WAIT_SECONDS", 0.05)
     images._INFER_LOCK.acquire()
     try:
         with pytest.raises(images.CutoutBusy):
-            images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)))
+            images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)),
+                               wait=0.05)
     finally:
         images._INFER_LOCK.release()
+
+
+def test_a_batch_photo_queues_for_the_model_instead_of_giving_up(monkeypatch):
+    """The other half of that trade, and the more expensive one to get wrong.
+
+    A photo in a background batch has nobody watching it, so giving up buys
+    nothing: there is no retry, the photo is just SAVED WITH ITS BACKGROUND
+    STILL ON. One deadline used to serve both callers at 25s -- shorter than a
+    single inference on a loaded box -- so in a batch running two photos at a
+    time, the queued one was guaranteed to time out and keep its background.
+    The batch deadline has to outlast a real queue."""
+    from PIL import Image
+
+    assert images.BATCH_INFER_WAIT_SECONDS >= 120, (
+        "the batch deadline has to outlast a slow inference, or queued photos "
+        "silently keep their backgrounds")
+    assert images.BATCH_INFER_WAIT_SECONDS > images.INFER_WAIT_SECONDS
+
+    # With the slot held, a batch caller (no explicit wait) must still be
+    # waiting when the interactive deadline would already have given up.
+    monkeypatch.setattr(images, "BATCH_INFER_WAIT_SECONDS", 30)
+    monkeypatch.setattr(images, "INFER_WAIT_SECONDS", 0.05)
+    settled = threading.Event()
+    outcome = []
+
+    def _queued_photo() -> None:
+        try:
+            images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)))
+            outcome.append("got-the-slot")
+        except images.CutoutBusy:
+            outcome.append("gave-up")
+        except Exception:  # noqa: BLE001 - got the slot, then found no rembg
+            outcome.append("got-the-slot")
+        settled.set()
+
+    images._INFER_LOCK.acquire()
+    try:
+        threading.Thread(target=_queued_photo, daemon=True).start()
+        # Well past the interactive deadline, comfortably short of the batch
+        # one. Neither outcome yet -- still queued -- is the whole point.
+        assert not settled.wait(0.5), f"batch photo settled early: {outcome}"
+    finally:
+        images._INFER_LOCK.release()
+    settled.wait(5)
+    assert outcome == ["got-the-slot"]
 
 
 def test_busy_is_retryable_not_a_crash():
