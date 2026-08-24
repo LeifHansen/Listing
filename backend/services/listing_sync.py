@@ -52,11 +52,38 @@ def is_imported(listing: Listing | dict) -> bool:
     return (source or "").lower() == "ebay"
 
 
+# Stamped on a record when the account it belonged to could not be named. A
+# connection made before the identity scope was granted 403s on the identity
+# call, so a switch away from it is visible (the saved policy ids stop
+# existing) while the account behind it never was. It is deliberately not a
+# username: no account can ever match it, which is the point for reads — a
+# sweep must not re-confirm those listings under whoever is connected now.
+#
+# It is NOT evidence that the seller is on a different account, only that we
+# cannot prove they are on the same one, so nothing that refuses a write the
+# seller explicitly asked for may act on it. `named_account_of` is the reader
+# for those callers; `account_of` keeps the raw value for scoping.
+UNKNOWN_ACCOUNT = "previous account"
+
+
 def account_of(listing: Listing | dict) -> str:
     """The eBay account a record's item id lives on ("" = not recorded)."""
     value = (listing.get("ebay_account") if isinstance(listing, dict)
              else getattr(listing, "ebay_account", ""))
     return (value or "").strip()
+
+
+def named_account_of(listing: Listing | dict) -> str:
+    """The owning account when it has a real name, "" otherwise.
+
+    Callers that block an action on "this belongs to someone else" need a name
+    they can show and compare. UNKNOWN_ACCOUNT is neither: it reads as a
+    username in a sentence ("belongs to @previous account") and it can never
+    equal the connected one, so treating it as a rival account refuses every
+    publish of an imported listing, forever, with no way back.
+    """
+    owner = account_of(listing)
+    return "" if owner == UNKNOWN_ACCOUNT else owner
 
 
 def belongs_to(listing: Listing | dict, account: str) -> bool:

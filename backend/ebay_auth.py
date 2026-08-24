@@ -511,7 +511,12 @@ def fulfillment_policy_lookup(access_token: str,
                          access_token)
         return _policy_services(p), True
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (400, 404):
+        # 404 is eBay saying the policy is not on this account. 400 is eBay
+        # rejecting the REQUEST — a malformed id, a marketplace it won't answer
+        # for — which says nothing about what the account has, and reading it
+        # as absence blocks every live publish behind a shipping-policy error
+        # the seller cannot act on.
+        if exc.response.status_code == 404:
             return [], False
         return [], None
     except Exception:  # noqa: BLE001
