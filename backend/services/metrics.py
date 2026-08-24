@@ -96,7 +96,13 @@ def _traffic(token: str, listing_ids: list[str]) -> dict[str, dict]:
     Analytics getTrafficReport. {listing_id: {'views': n, 'impressions': n}}."""
     if not listing_ids:
         return {}
-    end = datetime.now(timezone.utc).date()
+    # Yesterday, not today. eBay rejects the whole report — "Neither the start
+    # date nor the end date can be in the future" — for any end date it
+    # considers future, and it judges that in Pacific time while the app runs
+    # in UTC: for the seven hours after UTC midnight, "today" here is still
+    # tomorrow there. The report only holds data through yesterday anyway, so
+    # stepping back a day costs nothing and is safe in every timezone.
+    end = datetime.now(timezone.utc).date() - timedelta(days=1)
     start = end - timedelta(days=30)
     filters = [
         "marketplace_ids:{%s}" % config.EBAY_MARKETPLACE_ID,

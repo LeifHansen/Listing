@@ -1,18 +1,18 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
-import { api, pollJob, postJson } from "@/lib/api";
+import { pollJob, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Select } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
+import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
 
@@ -23,21 +23,11 @@ import { blockerLabels, ebayBlockers } from "./blockers";
 
 const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 
-// Shipping service picker right on a draft's card — the same eBay fulfillment
-// policies the editor and bulk queue offer, account default preselected.
-// Saves the moment it's changed.
+// Shipping policy right on a draft's card — the same one control the editor
+// and the bulk queue use (see ShippingPolicySelect). Saves on change.
 function DraftShipping({ item, className }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
   const { toast } = useToast();
   const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
-  if (!ebay.connected) return null;
-  const policies = policiesData?.policies?.fulfillment || [];
-  if (!policies.length) return null;
-  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
   const save = async (id) => {
     setValue(id);
     try {
@@ -45,25 +35,18 @@ function DraftShipping({ item, className }) {
         ...(item.listing || {}), fulfillment_policy_id: id,
       });
     } catch (e) {
-      toast(`Couldn't save the shipping service: ${e.message}`, { kind: "error" });
+      toast(`Couldn't save the shipping policy: ${e.message}`, { kind: "error" });
     }
   };
   return (
     <div className={cn("flex items-center gap-1.5", className || "mt-1.5")}
-      title="Shipping service for this draft">
+      title="Shipping policy for this draft">
       <Truck size={14} className="shrink-0 text-ink-faint" aria-hidden />
-      <Select
-        aria-label="Shipping service"
+      <ShippingPolicySelect
         className="h-9 text-[13px]"
-        value={value || accountDefault}
-        onChange={(e) => save(e.target.value)}
-      >
-        {policies.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}{p.summary ? ` · ${p.summary}` : ""}
-          </option>
-        ))}
-      </Select>
+        value={value}
+        onChange={save}
+      />
     </div>
   );
 }

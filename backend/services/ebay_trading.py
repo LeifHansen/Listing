@@ -47,11 +47,18 @@ class TradingError(ValueError):
     `code` is eBay's own ErrorCode when the failure came back as a rejection
     rather than a transport problem, so callers can branch on a specific
     condition (see AlreadyListedError) instead of matching on message text.
+
+    `detail` is everything else eBay said about the failure: the response's
+    own <Message> element (which is where eBay puts the ACTUAL reason behind
+    its catch-all rejections — see `_failure` below) plus any errors after the
+    first. It rides along separately from `message` so callers can show the
+    seller a clean headline and still have the specifics to act on.
     """
 
-    def __init__(self, message: str, code: str = ""):
+    def __init__(self, message: str, code: str = "", detail: str = ""):
         super().__init__(message)
         self.code = code
+        self.detail = detail
 
 
 class AlreadyListedError(TradingError):
@@ -64,8 +71,9 @@ class AlreadyListedError(TradingError):
     instead of creating a second one.
     """
 
-    def __init__(self, message: str, code: str = "", item_id: str = ""):
-        super().__init__(message, code)
+    def __init__(self, message: str, code: str = "", item_id: str = "",
+                 detail: str = ""):
+        super().__init__(message, code, detail)
         self.item_id = item_id
 
 
@@ -134,16 +142,54 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         errors = [e for e in _findall(root, "Errors")
                   if (_text(e, "SeverityCode") or "").lower() == "error"]
         if errors:
-            first = errors[0]
-            msg = (_text(first, "LongMessage") or _text(first, "ShortMessage")
-                   or "eBay rejected the request.")
-            code = _text(first, "ErrorCode") or ""
-            if code in ("931", "932", "16110", "21917053"):  # auth/token codes
-                raise TradingError(
-                    "eBay didn't accept the account connection — reconnect eBay "
-                    "in Settings and try again.", code=code)
-            raise TradingError(msg.strip()[:300], code=code)
+            raise _failure(call, root, errors)
     return root
+
+
+def _error_line(err: ET.Element) -> str:
+    """One <Errors> entry as a single readable line, code included."""
+    text = (_text(err, "LongMessage") or _text(err, "ShortMessage") or "").strip()
+    code = _text(err, "ErrorCode")
+    return f"{text} (eBay error {code})" if code and text else text or f"eBay error {code}"
+
+
+# eBay's catch-all rejections: the LongMessage lists every reason the code can
+# mean and names none of them, so on its own it sends the seller looking at
+# fields that were never the problem. eBay puts the real one in the response's
+# <Message> element (Trading's AddItemResponse.Message, "returned when the
+# item is not listed"), which this client used to drop on the floor.
+_CATCH_ALL_CODES = {"240"}
+
+
+def _failure(call: str, root: ET.Element, errors: list[ET.Element]) -> TradingError:
+    """Build the TradingError for a failed call, keeping everything eBay said.
+
+    Only the first error became the message before this, and the response-level
+    <Message> was never read at all — which is exactly the detail eBay attaches
+    to error 240 ("The item cannot be listed or modified..."). A seller then saw
+    a sentence listing four possible causes and no way to tell which was theirs.
+    """
+    first = errors[0]
+    code = _text(first, "ErrorCode") or ""
+    headline = (_text(first, "LongMessage") or _text(first, "ShortMessage")
+                or "eBay rejected the request.").strip()
+    # eBay's own detail for this rejection, plus any errors past the first.
+    extras = [_text(root, "Message").strip()]
+    extras += [_error_line(e) for e in errors[1:]]
+    detail = " ".join(x for x in extras if x)[:600]
+    # Always logged in full: a rejection the app can't explain is the one thing
+    # a seller can't debug from the UI, and the fly logs are where it has to be.
+    log.warning("trading: %s rejected — code=%s ack-errors=%d msg=%s detail=%s",
+                call, code or "?", len(errors), headline[:200],
+                detail[:300] or "(none)")
+    if code in ("931", "932", "16110", "21917053"):  # auth/token codes
+        return TradingError(
+            "eBay didn't accept the account connection — reconnect eBay "
+            "in Settings and try again.", code=code, detail=detail)
+    if code in _CATCH_ALL_CODES and detail:
+        # eBay named the real reason — lead with it instead of the catch-all.
+        headline = detail if len(detail) <= 300 else headline
+    return TradingError(headline[:300], code=code, detail=detail)
 
 
 # --- tiny XML helpers (namespace-agnostic) ----------------------------------
@@ -656,7 +702,8 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
                      call, idempotency_key, exc.code)
             raise AlreadyListedError(
                 "This listing was already published to eBay.", code=exc.code,
-                item_id=_item_id_in_error(str(exc))) from exc
+                item_id=_item_id_in_error(str(exc)),
+                detail=getattr(exc, "detail", "")) from exc
         raise
     item_id = _text(root, "ItemID")
     if not item_id:

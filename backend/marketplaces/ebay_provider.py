@@ -17,11 +17,12 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from .. import config, db, ebay_auth, ebay_errors, storage
+from .. import config, db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from ..services import (ebay, ebay_trading, image_import, listing_sync,
-                        preflight, promotions, publish_guard, taxonomy)
+from ..services import (ebay, ebay_account, ebay_trading, image_import,
+                        listing_sync, preflight, promotions, publish_guard,
+                        taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
@@ -65,6 +66,9 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
         return None
     return {
         "access_token": access_token,
+        # Which eBay account this token is for. Everything that reads or writes
+        # a listing on eBay is scoped by it — see listing_sync.belongs_to.
+        "ebay_username": acct.get("ebay_username", "") or "",
         "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
         "payment_policy_id": acct.get("payment_policy_id", ""),
         "return_policy_id": acct.get("return_policy_id", ""),
@@ -225,9 +229,11 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
 
     # What the chosen shipping policy actually ships with (per-service weight
-    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz).
-    services = (ebay_auth.fulfillment_policy_services(creds["access_token"], fulfillment)
-                if creds and fulfillment else [])
+    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz)
+    # — and whether the account still has that policy at all.
+    services, policy_exists = (
+        ebay_auth.fulfillment_policy_lookup(creds["access_token"], fulfillment)
+        if creds and fulfillment else ([], None))
 
     required = None
     if config.taxonomy_ready() and (listing.category_id or "").strip().isdigit():
@@ -237,11 +243,27 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         except Exception:  # noqa: BLE001 - aspects are a best-effort check
             required = None
 
-    return preflight.validate(
+    issues = preflight.validate(
         listing, mode,
         has_fulfillment=bool(fulfillment), has_payment=has_payment,
         has_return=has_return, has_location=has_location, connected=connected,
         policy_services=services, required_aspects=required)
+    if mode == "live" and policy_exists is False:
+        # eBay says this account has no such policy. Almost always a policy id
+        # left over from a different eBay account — publishing with it fails
+        # inside eBay, where nothing points at the shipping card.
+        per_listing = bool((listing.fulfillment_policy_id or "").strip())
+        issues.append({
+            "target": "shipping", "level": "error",
+            "title": "That shipping policy isn't on your eBay account",
+            "fix": ("Pick a shipping policy on the Shipping card"
+                    if per_listing else
+                    "Choose a shipping policy in Settings → Listing defaults")
+            + " — the saved one doesn't exist on the eBay account you're "
+              "connected as, which is what happens to policies carried over "
+              "from another account.",
+        })
+    return issues
 
 
 def _view_url(listing: Listing, listing_id: str) -> str:
@@ -359,6 +381,26 @@ class EbayProvider:
         # API instead of the publish path below.
         if listing_sync.is_imported(listing):
             uid = ctx.uid
+            # This listing lives on an eBay account that is no longer the
+            # connected one. Reviving it here would revise (or relist) another
+            # seller's item under this account's policies — refuse plainly and
+            # say which account owns it.
+            owner = listing_sync.account_of(listing)
+            connected = ((creds or {}).get("ebay_username") or "").strip()
+            if creds and owner and connected and owner != connected:
+                message = (f"This listing belongs to your other eBay account "
+                           f"(@{owner}); you're connected as @{connected}. "
+                           "Reconnect that account to change it.")
+                db.upsert_listing(session_id, listing.model_dump(),
+                                  status=prev_rec.get("status") or "published",
+                                  user_id=uid)
+                return PublishOutcome(
+                    ok=False, message=message,
+                    issues=[{"target": "account", "level": "error",
+                             "title": "That's on a different eBay account",
+                             "fix": message}],
+                    raw={"dry_run": False, "error": True, "mode": mode,
+                         "message": message})
             # The record's REAL lifecycle stage decides what "publish" means
             # here: live → revise in place; ended/sold → relist as a NEW
             # listing (eBay refuses to revise an ended item). Status writes
@@ -415,12 +457,11 @@ class EbayProvider:
                             "relist" if relist else "revise", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status=prev_status, user_id=uid)
+                issues = ebay_account.publish_block_issues(exc, creds)
                 return PublishOutcome(
-                    ok=False, message=str(exc),
-                    issues=ebay_errors.from_response(str(exc)),
+                    ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc),
-                         "issues": ebay_errors.from_response(str(exc))})
+                         "message": str(exc), "issues": issues})
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             if pushed_local:
@@ -510,12 +551,11 @@ class EbayProvider:
                 log.warning("trading publish failed: session=%s: %s", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="draft", user_id=ctx.uid)
+                issues = ebay_account.publish_block_issues(exc, creds)
                 return PublishOutcome(
-                    ok=False, message=str(exc),
-                    issues=ebay_errors.from_response(str(exc)),
+                    ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc),
-                         "issues": ebay_errors.from_response(str(exc))})
+                         "message": str(exc), "issues": issues})
             # Record the item id FIRST. Everything below is optional extra work
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:
