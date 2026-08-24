@@ -14,6 +14,9 @@ import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
+import {
+  ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
+} from "./ShippingPolicySelect";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
@@ -896,20 +899,19 @@ function capIssueFor(services, weightOz) {
   return null;
 }
 
-// Per-listing shipping service = an eBay fulfillment policy on the offer.
-function ShippingServicePicker({ w }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
+// The listing's shipping policy — an override of the Settings default, not a
+// separate setting. See ShippingPolicySelect for why there is only one of
+// these controls now.
+function ShippingPolicyPicker({ w }) {
+  const { connected, policies, accountDefaultId } = useFulfillmentPolicies();
+  const chosen = w.form.fulfillment_policy_id || accountDefaultId;
+  const orphaned = usePolicyIsOrphaned(w.form.fulfillment_policy_id);
 
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
+  if (!connected) return null;
 
-  if (!ebay.connected) return null;
-  const policies = policiesData?.policies?.fulfillment || [];
-  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
-
-  const chosen = w.form.fulfillment_policy_id || accountDefault;
+  // Weight caps come off the policy that will actually be used, so an
+  // override naming a policy this account doesn't have has no services to
+  // check — the orphan warning below is the thing to say instead.
   const services = policies.find((p) => p.id === chosen)?.services || [];
   const weightOz = (parseFloat(w.form.package_weight_lb) || 0) * 16
     + (parseFloat(w.form.package_weight_oz) || 0);
@@ -920,22 +922,24 @@ function ShippingServicePicker({ w }) {
       <Field
         label={
           <span className="inline-flex items-center gap-1.5">
-            <Truck size={14} aria-hidden /> Shipping service
+            <Truck size={14} aria-hidden /> Shipping policy
           </span>
         }
-        help="How this item ships (an eBay shipping policy). USPS Ground Advantage is the cheapest option for most packages — up to 70 lb."
+        help="The eBay shipping policy this listing goes out with — it's what decides the carrier service. Leave it on Default to follow Settings; USPS Ground Advantage is the cheapest for most packages, up to 70 lb."
       >
-        <Select
-          value={chosen}
-          onChange={(e) => w.set("fulfillment_policy_id", e.target.value)}
-        >
-          {policies.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}{p.summary ? ` · ${p.summary}` : ""}
-            </option>
-          ))}
-        </Select>
+        <ShippingPolicySelect
+          value={w.form.fulfillment_policy_id}
+          onChange={(id) => w.set("fulfillment_policy_id", id)}
+        />
       </Field>
+      {orphaned && (
+        <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
+          <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden />
+          This listing points at a shipping policy your connected eBay account
+          doesn’t have — usually one left over from a different account. Pick
+          one from the list, or choose Default.
+        </p>
+      )}
       {capIssue && (
         <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
           <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden /> {capIssue}
@@ -987,7 +991,7 @@ export function ShippingCard({ w }) {
             </Field>
           ))}
         </div>
-        <ShippingServicePicker w={w} />
+        <ShippingPolicyPicker w={w} />
       </div>
     </WorkflowCard>
   );

@@ -982,6 +982,41 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
     return resp
 
 
+# Which saved eBay settings are account-scoped: each is an id minted by ONE
+# eBay seller account and meaningless (rejected, in fact) on another.
+_ACCOUNT_SCOPED = ("fulfillment_policy_id", "payment_policy_id",
+                   "return_policy_id", "merchant_location_key")
+
+
+def _carry_over_settings(access: str, existing: dict, discovered: dict) -> dict:
+    """What to store for the account that just connected.
+
+    A saved choice survives only if it still exists on THIS account; otherwise
+    the auto-discovered default for that slot takes over. When eBay can't tell
+    us what exists (an API blip returns nothing for a kind), the saved value is
+    left alone — an outage must not silently re-pick a seller's shipping.
+    """
+    valid_policies = ebay_auth.policy_ids_on_account(access)
+    valid_locations = ebay_auth.location_keys_on_account(access)
+    out: dict = {}
+    for field in _ACCOUNT_SCOPED:
+        saved = (existing.get(field) or "").strip()
+        kind = field[: -len("_policy_id")] if field.endswith("_policy_id") else ""
+        known = valid_policies.get(kind) if kind else valid_locations
+        if saved and known is not None and saved not in known:
+            out[field] = discovered.get(field, "")  # gone from this account
+        elif not saved and discovered.get(field):
+            out[field] = discovered[field]          # fill the gap
+    return out
+
+
+def _settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
+    """True when a saved account-scoped id didn't survive the reconnect — the
+    tell-tale of a different eBay account even when the name is unreadable."""
+    return any(existing.get(f) and save_kwargs.get(f, existing.get(f)) != existing.get(f)
+               for f in _ACCOUNT_SCOPED)
+
+
 @app.get("/api/ebay/callback")
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
@@ -1006,26 +1041,37 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
             log.warning(f"ebay: identity fetch failed on connect: {exc}")
-        # Preserve the user's saved policy/location choices when reconnecting the
-        # SAME account (or when identity is unreadable — don't risk clobbering
-        # good settings). Only a switch to a DIFFERENT account takes the
-        # auto-discovered defaults fresh, since the old account's policy ids
-        # can't be reused. This is why a reconnect used to silently revert
-        # shipping to eBay Standard Envelope.
         existing = db.get_ebay_account(uid) or {}
-        new_user = ident["username"]
-        keep_saved = (not new_user) or existing.get("ebay_username") == new_user
+        prev_user = (existing.get("ebay_username") or "").strip()
+        new_user = (ident["username"] or "").strip()
         save_kwargs = {
             "refresh_token": tokens["refresh_token"],
-            "ebay_username": ident["username"],
+            "ebay_username": new_user,
             "ebay_email": ident["email"],
         }
-        if keep_saved:
-            for k, v in policies.items():
-                if v and not existing.get(k):
-                    save_kwargs[k] = v  # fill only the gaps
-        else:
-            save_kwargs.update(policies)
+        # Keep a saved policy/location choice only when it still EXISTS on the
+        # account that just connected. Business-policy ids belong to one
+        # seller: eBay rejects another's outright, and a listing published with
+        # one fails for a reason the seller can't see in any field.
+        #
+        # This used to be decided from the account NAME, keeping everything
+        # whenever the name was unreadable — which is the common case, since
+        # connections made before the identity scope was granted 403 on it. A
+        # seller who switched accounts then carried the old account's shipping,
+        # payment, return and location ids straight into the new one.
+        save_kwargs.update(_carry_over_settings(access, existing, policies))
+        switched = bool(prev_user and new_user and prev_user != new_user)
+        if switched or _settings_were_dropped(save_kwargs, existing):
+            # A different store. Label everything already here as the previous
+            # account's, so syncs and publishes stop treating those listings as
+            # this account's (see services/listing_sync.belongs_to).
+            marked = db.stamp_ebay_account(uid, prev_user or "previous account")
+            log.info("ebay connect: account switch for uid=%s (%s -> %s); "
+                     "labelled %d existing listing(s)", uid,
+                     prev_user or "?", new_user or "?", marked)
+            # The old ZIP belonged to the old store; create_on_ebay re-reads it
+            # from eBay when it's blank.
+            save_kwargs.setdefault("ship_from_postal", "")
         db.save_ebay_account(uid, **save_kwargs)
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
@@ -1064,7 +1110,48 @@ def ebay_status(request: Request) -> dict:
             "return": bool(acct and acct.get("return_policy_id")),
             "location": bool(acct and acct.get("merchant_location_key")),
         } if connected else {},
+        # Listings still here from an eBay account that ISN'T the connected
+        # one. They're excluded from every eBay call, but they're visible, so
+        # the UI has to be able to explain them rather than let them read as
+        # "the new account somehow has my old items".
+        "foreign_listings": (db.count_foreign_listings(
+            uid, acct.get("ebay_username") or "") if connected and uid else 0),
     }
+
+
+@app.post("/api/ebay/release-foreign-listings")
+def release_foreign_listings(request: Request) -> dict:
+    """Unlink every listing belonging to a previously-connected eBay account.
+
+    The records stay — they're the seller's own work, photos and all — but the
+    eBay item id, source and live status come off, so they become ordinary
+    local drafts of the current account instead of ghosts of the old store.
+    Nothing is deleted, and nothing is touched on eBay.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    acct = db.get_ebay_account(uid) or {}
+    connected = (acct.get("ebay_username") or "").strip()
+    released = 0
+    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+        data = rec.get("listing") or {}
+        owner = listing_sync.account_of(data)
+        if not owner or owner == connected:
+            continue
+
+        def _unlink(d: dict) -> dict:
+            d.update(ebay_account="", ebay_listing_id="", source="",
+                     view_url="", sku="", image_urls=d.get("image_urls") or [])
+            d.pop("marketplaces", None)
+            return d
+
+        if db.mutate_listing_data(rec["id"], _unlink, status="draft",
+                                  user_id=uid) is not None:
+            released += 1
+    log.info("release-foreign-listings: uid=%s released=%d (connected=%s)",
+             uid, released, connected or "?")
+    return {"released": released}
 
 
 @app.get("/api/ebay/policies")
@@ -3474,6 +3561,16 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     if not (creds or config.ebay_ready()):
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
+    # Never end another eBay account's listing: the item id on this record was
+    # minted by a store that isn't connected any more, and EndItem would either
+    # fail confusingly or (worse) act on the wrong seller's item.
+    owner = listing_sync.account_of(listing)
+    connected = (creds or {}).get("ebay_username", "")
+    if creds and owner and connected and owner != connected:
+        raise HTTPException(
+            400, f"This listing is on your other eBay account (@{owner}) — "
+                 f"you're connected as @{connected}. Reconnect that account "
+                 "to end it.")
     try:
         # Imported listings live outside the Inventory API — end them through
         # the Trading API instead.
@@ -3525,8 +3622,15 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0, "archived": 0}
     force = bool((payload or {}).get("force"))
+    # Only the connected account's listings. A record left behind by a
+    # previously-connected eBay account is another seller's item as far as this
+    # token is concerned — and since eBay answers item lookups for anyone, a
+    # sweep over it doesn't fail, it just keeps reporting the old store as
+    # live and healthy under the new account.
+    account = (creds or {}).get("ebay_username", "")
     live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-            if i.get("status") in ("published", "live")]
+            if i.get("status") in ("published", "live")
+            and listing_sync.belongs_to(i.get("listing") or {}, account)]
     changed = 0
     archived = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
@@ -3537,7 +3641,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if live and creds:
         try:
             got, handled = listing_sync.reconcile_recent(
-                creds["access_token"], user["id"], live)
+                creds["access_token"], user["id"], live, account=account)
             changed += got
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: finished-list reconcile failed: %s", exc)
@@ -3569,7 +3673,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if imported and creds:
         try:
             changed += listing_sync.refresh_statuses(
-                creds["access_token"], user["id"], imported)
+                creds["access_token"], user["id"], imported, account=account)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: imported refresh failed: %s", exc)
 
@@ -3633,7 +3737,7 @@ _IMPORT_JOBS: dict[str, str] = {}
 _IMPORT_LOCK = threading.Lock()
 
 
-def _run_import_job(job_id: str, token: str, uid: str) -> None:
+def _run_import_job(job_id: str, token: str, uid: str, account: str = "") -> None:
     """Background worker for the store mirror. One GetItem per listing means a
     real store takes minutes — far longer than a browser (or the proxy in
     front of us) will hold a request open, which is why this is a job the
@@ -3652,7 +3756,8 @@ def _run_import_job(job_id: str, token: str, uid: str) -> None:
         jobstore.update(job_id, phase=phase, current=done, total_items=total)
     try:
         result = listing_sync.import_active(
-            token, uid, limit=IMPORT_LIMIT, on_progress=_progress)
+            token, uid, limit=IMPORT_LIMIT, on_progress=_progress,
+            account=account)
         jobstore.update(job_id, done=True, phase="done", error=None, **result)
     except ebay_trading.TradingError as exc:
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
@@ -3704,7 +3809,8 @@ def import_listings(request: Request) -> dict:
         "error": None, "current": 0, "total_items": 0,
     }, uid=uid)
     threading.Thread(
-        target=_run_import_job, args=(job_id, creds["access_token"], uid),
+        target=_run_import_job,
+        args=(job_id, creds["access_token"], uid, creds.get("ebay_username", "")),
         daemon=True,
     ).start()
     log.info("import-listings %s: started for user=%s", job_id, uid)
