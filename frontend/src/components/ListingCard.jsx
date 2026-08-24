@@ -217,6 +217,15 @@ export function ListingCard({
                 Relist <ArrowRight size={13} aria-hidden />
               </span>
             )}
+            {/* A sold listing opens as an archive, not as a draft: this is a
+                finished sale, and the way to sell another one is a fresh
+                listing (the archive's "Relist as new listing"). Promising
+                "Relist" here is what made a sold item look publishable. */}
+            {sold && (
+              <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue">
+                View sale <ArrowRight size={13} aria-hidden />
+              </span>
+            )}
           </div>
         </div>
       </motion.button>

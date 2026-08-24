@@ -359,8 +359,8 @@ export function AppProvider({ children }) {
   // shell) can stay open for days, and a listing that ends or sells ON eBay
   // in that time would sit under Active until a manual sync. Quietly re-check
   // live statuses when the app comes back into focus and on a slow heartbeat
-  // while it stays visible, so those records slide into Inactive/Sold on
-  // their own.
+  // while it stays visible, so those records slide into the Inactive
+  // archive on their own.
   //
   // Cadence is a QUOTA decision, not a UI one: every check fans out real eBay
   // calls server-side, and eBay's Trading API is capped per DAY for the whole

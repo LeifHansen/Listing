@@ -18,6 +18,7 @@ import { UploadPhase } from "./listing/UploadPhase";
 import { BulkQueue } from "./listing/BulkMode";
 import { DraftsStrip } from "./listing/DraftsStrip";
 import { ImageEditor } from "./listing/ImageEditor";
+import { SoldArchive } from "./listing/SoldArchive";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
@@ -308,6 +309,15 @@ function Workflow() {
   // the just-posted listing was confusing.
   if (w.publishResult?.published) {
     return <PublishedScreen w={w} />;
+  }
+
+  // A sold listing is an archive record, not a draft. The workflow below is
+  // built to get something ONTO eBay — rendering it for a finished sale is
+  // what left a sold item sitting under "Ready to publish", one tap from
+  // re-listing the thing that already sold. SoldArchive shows what the sale
+  // was and offers the honest alternative: a fresh listing copied from it.
+  if (w.isSold) {
+    return <SoldArchive w={w} />;
   }
 
   return (
