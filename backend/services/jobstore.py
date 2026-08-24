@@ -47,6 +47,13 @@ JOBS_MAX = 200
 MIRROR_FIELDS = (
     "id", "kind", "phase", "done", "error", "current", "total_items",
     "total_photos", "bg_error", "bg_failed", "tokens_exhausted", "_uid",
+    # What a restart needs to pick a photo batch back up: where the uploaded
+    # originals live, whether the seller asked for cutouts, and how many times
+    # we have already tried. See main._resume_interrupted_batches.
+    "_staging_id", "_strip_bg", "_resumes",
+    # AI charges this job took UP FRONT and has not yet earned. See `update`
+    # for the invariant, and main._settle_interrupted_jobs for who reads them.
+    "_refunds",
 )
 # Mirrors are a few hundred bytes each and only ever read at startup, so that
 # is where they're pruned — by age, then by count. A machine that never
@@ -107,12 +114,22 @@ def register(job_id: str, data: dict, uid: Optional[str] = None) -> None:
 
 
 def update(job_id: str, **fields) -> None:
-    """Merge `fields` into a job's status. A no-op for an unknown job."""
+    """Merge `fields` into a job's status. A no-op for an unknown job.
+
+    Finishing a job SETTLES its up-front charges. `_refunds` means "taken from
+    the seller and not yet earned", and a worker that reaches done has already
+    settled up in-process — it either delivered the draft (so the charge was
+    earned) or hit its own except/finally and refunded there. Only a job that
+    never reaches done leaves the record behind for a later boot to act on,
+    which is precisely the case where nothing in this process ever ran.
+    """
     with _LOCK:
         job = _JOBS.get(job_id)
         if job is None:
             return
         job.update(fields)
+        if fields.get("done"):
+            job.pop("_refunds", None)
         job["_rev"] = job.get("_rev", 0) + 1
         # Snapshot under the lock, write outside it: the mirror is disk I/O and
         # every progress tick in the batch would otherwise queue behind it.
@@ -211,25 +228,45 @@ def interrupted_message(record: dict) -> str:
     current = record.get("current") or 0
     photos = record.get("total_photos") or 0
     items = record.get("total_items") or 0
+    if phase == "identifying":
+        where = (f" while identifying item {min(current, items)} of {items}"
+                 if items else "")
+        return (f"The server restarted{where}, so this batch stopped early. "
+                "The items it had already finished are saved in Drafts — "
+                "please run the rest again.")
+    # Everything before "identifying" has drafted NOTHING, so pointing the
+    # seller at Drafts sends them to an empty list and reads as lost work.
+    # A batch stopped here is normally picked straight back up on the next
+    # boot (main._resume_interrupted_batches); this message is what is left
+    # when it could not be — the photos were swept, or it has already failed
+    # this way too many times.
     if phase == "optimizing" and photos:
-        where = f" while optimizing photo {min(current, photos)} of {photos}"
-    elif phase == "identifying" and items:
-        where = f" while identifying item {min(current, items)} of {items}"
+        where = f" while preparing photo {min(current, photos)} of {photos}"
     elif phase == "grouping":
         where = " while sorting the photos into items"
     elif phase == "uploading":
         where = " while receiving the photos"
     else:
-        where = ""
-    return (f"The server restarted{where}, so this batch stopped early. "
-            "Anything it finished is saved in Drafts — please run the rest "
+        # No phase recorded, so we genuinely don't know how far it got. Say
+        # that, rather than guessing — promising drafts that aren't there and
+        # denying drafts that are are both worse than pointing them at the list.
+        return ("The server restarted, so this batch stopped early. Check "
+                "Drafts for anything it finished, then run the rest again.")
+    return (f"The server restarted{where}, so this batch stopped before it "
+            "drafted anything. Nothing was saved — please upload the photos "
             "again.")
 
 
-def adopt_mirrors() -> int:
-    """Load mirrored jobs back into memory at startup and return how many were
-    interrupted. A job still marked running died with the process that owned
-    it, so it is adopted as a finished job carrying that explanation.
+def adopt_mirrors() -> list[dict]:
+    """Load mirrored jobs back into memory at startup and return the records
+    that were interrupted. A job still marked running died with the process
+    that owned it, so it is adopted as a finished job carrying that
+    explanation.
+
+    Returning the records (rather than just a count) is what lets the caller
+    try to RESUME some of them — the verdict here is "this job's process went
+    away", which is a description of what happened, not a decision that the
+    work is lost. Only the caller knows which jobs can be picked up safely.
 
     Two rules keep this from ever destroying a live job: a job already in
     memory is left alone (memory is always fresher than its own mirror), and
@@ -244,12 +281,12 @@ def adopt_mirrors() -> int:
         strays = list(_mirror_dir().glob("*.tmp"))
     except Exception as exc:  # noqa: BLE001 - no mirror dir yet, or unreadable
         log.debug("jobstore: no job mirrors to load (%s)", exc)
-        return 0
+        return []
     cutoff = time.time() - MIRROR_TTL
     fresh = [p for p in files if p.stat().st_mtime > cutoff]
     for path in strays + [p for p in files if p not in fresh] + fresh[:-MIRROR_MAX]:
         path.unlink(missing_ok=True)
-    interrupted = 0
+    interrupted: list[dict] = []
     for path in fresh[-JOBS_MAX:]:
         try:
             record = json.loads(path.read_text())
@@ -263,11 +300,11 @@ def adopt_mirrors() -> int:
             if not record.get("done"):
                 record["done"] = True
                 record["error"] = record.get("error") or interrupted_message(record)
-                interrupted += 1
+                interrupted.append(dict(record))
             _JOBS[record["id"]] = record
     if _JOBS:
         log.info("jobstore: adopted %d job record(s) from disk (%d interrupted "
-                 "by the restart)", len(_JOBS), interrupted)
+                 "by the restart)", len(_JOBS), len(interrupted))
     return interrupted
 
 
