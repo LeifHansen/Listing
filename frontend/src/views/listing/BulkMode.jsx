@@ -34,6 +34,7 @@ const PHASE_MESSAGES = {
 // Duplicate-suspect detection: two drafts whose titles share most of their
 // meaningful words are probably the same item split in two — surface a hint
 // pointing at "Merge into one" instead of silently letting both publish.
+// Ticking either one of them is enough; the merge dialog asks for the other.
 const STOP_WORDS = new Set(["the", "and", "with", "for", "size", "mens", "womens", "new", "vintage"]);
 function titleTokens(t) {
   return new Set((t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
@@ -364,10 +365,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const [publishing, setPublishing] = useState({});
   const [deleting, setDeleting] = useState({});
   // The merge review dialog. `key` bumps on every open so the dialog remounts
-  // with fresh state (which draft is master, which entries win) instead of
-  // reopening on the last merge's answers; `drafts` is the snapshot it was
-  // opened on, so the queue polling underneath can't reshuffle it mid-review.
-  const [merge, setMerge] = useState({ open: false, drafts: [], key: 0 });
+  // with fresh state (which draft merges in, which is master, which entries
+  // win) instead of reopening on the last merge's answers; `drafts` (ticked)
+  // and `candidates` (the rest of the batch, offered as merge partners) are
+  // the snapshot it was opened on, so the queue polling underneath can't
+  // reshuffle it mid-review.
+  const [merge, setMerge] = useState({ open: false, drafts: [], candidates: [], key: 0 });
   // Watching was given up on (job gone, or too many failed polls). Without it
   // the pre-first-poll "Uploading…" state below would spin forever.
   const [unwatched, setUnwatched] = useState(false);
@@ -411,15 +414,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
                 return local ? { ...srv, listing: local.listing ?? srv.listing } : srv;
               });
           });
-          setChecked((c) => {
-            const next = { ...c };
-            j.items.forEach((it) => {
-              if (next[it.session_id] === undefined && it.status === "draft") {
-                next[it.session_id] = true;
-              }
-            });
-            return next;
-          });
+          // Nothing is ticked for you. Selection means "I picked these" — so
+          // the destructive buttons it arms (delete, merge) can never act on
+          // a set the seller didn't choose, and publishing the whole batch is
+          // its own button rather than the accident of leaving boxes alone.
         }
         if (!j.done) {
           timer = setTimeout(poll, 1500);
@@ -631,16 +629,25 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   };
 
-  // Merge duplicate drafts of the SAME item into one listing. Which draft is
-  // the master, and whose entry wins where two drafts disagree, are both the
-  // seller's calls — MergeListingsDialog asks them before anything is written.
+  // Merge duplicate drafts of the SAME item into one listing. One tick is
+  // enough to start: which OTHER draft it merges with, which of them is the
+  // master, and whose entry wins where they disagree are all the seller's
+  // calls — MergeListingsDialog asks them, in that order, before anything is
+  // written.
   const mergeSelected = () => {
-    const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
-    if (targets.length < 2) {
-      toast("Select the duplicate drafts (2 or more) to merge.", { kind: "warning" });
+    const picked = items.filter((it) => it.status === "draft" && checked[it.session_id]);
+    if (!picked.length) {
+      toast("Tick the draft you want to merge.", { kind: "warning" });
       return;
     }
-    setMerge((m) => ({ open: true, drafts: targets, key: m.key + 1 }));
+    // Everything else still in the batch is a candidate to merge it with; the
+    // dialog only asks when the seller hasn't already ticked a second draft.
+    const others = items.filter((it) => it.status === "draft" && !checked[it.session_id]);
+    if (picked.length < 2 && !others.length) {
+      toast("There's no other draft in this batch to merge with.", { kind: "warning" });
+      return;
+    }
+    setMerge((m) => ({ open: true, drafts: picked, candidates: others, key: m.key + 1 }));
   };
 
   // The merge went through: drop the consolidated drafts, take the master's
@@ -665,16 +672,23 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       { kind: "success" });
   };
 
-  const publishSelected = async () => {
-    const targets = items.filter((it) => it.status === "draft" && checked[it.session_id]);
-    if (!targets.length) { toast("Nothing selected to publish.", { kind: "warning" }); return; }
+  // Publish a set of drafts: one request each (the backend fans each out to
+  // every selected marketplace), behind ONE confirm for the whole set — the
+  // point of a batch is not answering the same question twenty times.
+  const publishMany = async (targets, { all = false } = {}) => {
+    if (!targets.length) {
+      toast(all ? "No drafts to publish." : "Tick the drafts you want to publish.",
+        { kind: "warning" });
+      return;
+    }
     const targetNames = effectiveTargets && effectiveTargets.length > 1
       ? effectiveTargets
           .map((k) => (connectedMarketplaces.find((m) => m.key === k) || {}).label || k)
           .join(" and ")
       : "your eBay store";
+    const n = targets.length;
     if (!(await confirm({
-      title: `Publish ${targets.length} listing${targets.length === 1 ? "" : "s"} live?`,
+      title: `Publish ${all ? "all " : ""}${n} listing${n === 1 ? "" : "s"} live?`,
       message: `Each goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return;
@@ -687,6 +701,14 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       + (failed ? ` ${failed} need attention — see the queue.` : ""),
       { kind: failed ? "warning" : "success" });
   };
+
+  // The whole batch, no ticking required — the common ending for a batch the
+  // seller has read through and is happy with.
+  const publishAll = () =>
+    publishMany(items.filter((it) => it.status === "draft"), { all: true });
+
+  const publishSelected = () =>
+    publishMany(items.filter((it) => it.status === "draft" && checked[it.session_id]));
 
   // Busy from the very first frame: the batch screen goes up on the click, so
   // it opens on "Uploading your photo pile…" while the photos are still going
@@ -706,6 +728,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     return 95;
   })());
   const drafts = items.filter((it) => it.status === "draft");
+  // What the selection-driven buttons are armed by. Drafts for publish/merge
+  // (a published or failed item is neither), every ticked item for delete.
+  const selectedDrafts = drafts.filter((d) => checked[d.session_id]).length;
+  const selectedCount = items.filter((it) => checked[it.session_id]).length;
   const blocked = drafts.filter(
     (it) => ebayBlockers(it.listing, { targets: effectiveTargets }).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
@@ -797,12 +823,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           <Card className="py-3.5 border-warning/40 bg-warning-soft">
             <p className="text-sm text-ink flex items-start gap-2">
               <Combine size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-              <span title="If they're the same item, tick just those drafts and hit Merge into one before publishing.">
+              <span title="If they're the same item, tick one of them and hit Merge into one — the dialog asks which draft it merges with before anything is written.">
                 <strong>Possible duplicate{dupes.length > 1 ? "s" : ""}:</strong>{" "}
                 "{(a.listing?.title || a.title || "").slice(0, 40)}…" &amp;{" "}
                 "{(b.listing?.title || b.title || "").slice(0, 40)}…"
-                {dupes.length > 1 ? ` (+${dupes.length - 1} more)` : ""} — select them
-                and <strong>Merge into one</strong>.
+                {dupes.length > 1 ? ` (+${dupes.length - 1} more)` : ""} — tick one
+                and hit <strong>Merge into one</strong>.
               </span>
             </p>
           </Card>
@@ -829,36 +855,51 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           otherConnected={otherConnected} />
       )}
 
+      {/* The batch toolbar. Every selection-driven button STAYS PUT and greys
+          out when nothing is ticked, rather than appearing on the first tick:
+          a control that pops into existence shifts the row under the cursor,
+          and one that is simply grey says what ticking a box is even for. */}
       {drafts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2.5">
-          <Button variant="primary" onClick={publishSelected}>
-            <Rocket aria-hidden /> Publish selected ({drafts.filter((d) => checked[d.session_id]).length})
+          <Button variant="primary" onClick={publishAll}
+            title="Publish every draft in this batch — no ticking required.">
+            <Rocket aria-hidden /> Publish all ({drafts.length})
           </Button>
-          {drafts.filter((d) => checked[d.session_id]).length >= 2 && (
-            <Button variant="secondary" onClick={mergeSelected}
-              title="Same item split into duplicates? Pick the master, choose whose entries win, and combine them into one listing.">
-              <Combine aria-hidden /> Merge into one
-            </Button>
-          )}
+          <Button variant="secondary" onClick={publishSelected}
+            disabled={!selectedDrafts}
+            title={selectedDrafts
+              ? `Publish the ${selectedDrafts} ticked draft${selectedDrafts === 1 ? "" : "s"}.`
+              : "Tick the drafts you want to publish."}>
+            <Rocket aria-hidden /> Publish selected ({selectedDrafts})
+          </Button>
+          <Button variant="secondary" onClick={mergeSelected}
+            disabled={!selectedDrafts}
+            title={selectedDrafts
+              ? "Same item split into duplicates? Pick what it merges with, which draft is the master, and whose entries win."
+              : "Tick a draft to merge it with another."}>
+            <Combine aria-hidden /> Merge into one
+          </Button>
           {/* Duplicates you'd rather drop than merge, and anything the batch
               shouldn't have drafted. */}
-          {items.some((it) => checked[it.session_id]) && (
-            <Button variant="danger" onClick={deleteSelected}
-              title="Permanently delete the selected drafts.">
-              <Trash2 aria-hidden /> Delete selected ({items.filter((it) => checked[it.session_id]).length})
-            </Button>
-          )}
+          <Button variant="danger" onClick={deleteSelected}
+            disabled={!selectedCount}
+            title={selectedCount
+              ? `Permanently delete the ${selectedCount} ticked draft${selectedCount === 1 ? "" : "s"}.`
+              : "Tick the drafts you want to delete."}>
+            <Trash2 aria-hidden /> Delete selected ({selectedCount})
+          </Button>
           <Button variant="ghost" onClick={onExit}>
             <PenLine aria-hidden /> Start another batch
           </Button>
         </div>
       )}
 
-      {merge.drafts.length >= 2 && (
+      {merge.drafts.length > 0 && (
         <MergeListingsDialog
           key={merge.key}
           open={merge.open}
           drafts={merge.drafts}
+          candidates={merge.candidates}
           onClose={() => setMerge((m) => ({ ...m, open: false }))}
           onMerged={onMerged}
         />
