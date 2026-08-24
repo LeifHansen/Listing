@@ -12,6 +12,7 @@ import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
+import { reviewAspectCount } from "./specifics";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
 import { TITLE_MAX } from "./blockers";
@@ -492,8 +493,7 @@ export function SpecificsCard({ w }) {
     || (a.name.trim().toLowerCase() === "brand" && (w.form.brand || "").trim()));
   const missingRequired = required.filter((a) => !isFilled(a)).length;
   const recommendedFilled = recommendedAll.filter(isFilled).length;
-  const reviewCount = w.form.item_specifics
-    .filter((s) => (s.value || "").trim() && s.confidence === "medium").length;
+  const reviewCount = reviewAspectCount(w.form.item_specifics);
 
   const setRow = (i, key, value) => {
     const specs = [...w.form.item_specifics];
