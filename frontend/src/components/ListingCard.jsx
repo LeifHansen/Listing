@@ -121,7 +121,14 @@ function SoldLines({ listing: l, soldFor, knownSale, discount, className }) {
 }
 
 // The one-line "what happens if you click this" for the card's status.
-const CTA = { unlisted: "Finish & list", published: "Edit live", live: "Edit live", ended: "Relist" };
+// Sold says "View sale", never "Relist": it opens as an archive of a finished
+// sale, and selling another one is a fresh listing (the archive's own "Relist
+// as new listing"). Promising a relist here is what made a sold item look
+// publishable.
+const CTA = {
+  unlisted: "Finish & list", published: "Edit live", live: "Edit live",
+  ended: "Relist", sold: "View sale",
+};
 
 function CtaHint({ status, className }) {
   const text = CTA[status];

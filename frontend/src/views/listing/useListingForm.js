@@ -93,11 +93,13 @@ export function useListingForm() {
   // publish actions become Update / End instead of Publish / Save Draft.
   // source==="ebay" alone is NOT enough: every Trading publish sets it, so an
   // ENDED listing opened from the Inactive tab would wrongly show Update/End.
-  // Ended/sold records get the Publish action instead — the server relists
-  // them as a fresh listing (eBay can't revise an ended item).
+  // An ENDED record gets the Publish action instead — the server relists it
+  // as a fresh listing (eBay can't revise an ended item). A SOLD record is
+  // settled too, but it never reaches the publish path at all: the editor
+  // renders SoldArchive for it and the server refuses to publish it.
   const settled = session?.status === "ended" || session?.status === "sold";
-  // A sold listing gets the one field only a finished sale has: what it
-  // actually went for.
+  // A sold listing is an archive record — SoldArchive replaces the whole
+  // workflow rather than the workflow growing a sold-only branch.
   const isSold = session?.status === "sold";
   const isLive = !settled && (session?.status === "published" || session?.status === "live"
     || (session?.listing?.source || "") === "ebay");
@@ -556,8 +558,9 @@ export function useListingForm() {
         ? states.ebay.status === "published"
         : !!session?.listing?.ebay_listing_id;
       let message = "";
-      // Where the record actually landed: "ended" (Inactive) unless eBay
-      // reveals the listing had already SOLD — then it files under Sold.
+      // Where the record actually landed: "ended" unless eBay reveals the
+      // listing had already SOLD. Both file under Inactive — a sale is
+      // archived there rather than left relistable in place.
       let endedAs = "ended";
       for (const key of others) {
         try {
@@ -582,6 +585,54 @@ export function useListingForm() {
       setAiBusy(null);
     }
   }), [sessionId, session, setSession, loadListings, toast]);
+
+  // ---------- the archive (a sold listing) ----------
+  // A sold record is not a draft: it is what one finished sale was, so the
+  // editor shows it read-only and the server refuses to publish it. Two
+  // actions remain, and they are the two an archive needs.
+
+  // Correct the sale's OWN numbers — what it went for and what it cost —
+  // which are the inputs to the profit total and the only fields the
+  // archive can still get wrong (eBay doesn't always report a sale amount).
+  const saveSaleFigures = useMemo(() => once("save-sale-figures", async () => {
+    const listing = collect();
+    try {
+      await postJson(`/api/save/${sessionId}`, listing);
+      // The record keeps its sold status (the server never demotes one) —
+      // patch the cached copy so the archive card's totals update at once.
+      patchListing(sessionId, { listing });
+      setSession((cur) => (cur ? { ...cur, listing } : cur));
+      toast("Sale figures saved.", { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't save: ${e.message}`, { kind: "error" });
+    }
+  }), [collect, sessionId, patchListing, setSession, toast]);
+
+  // Sell another one. The sold listing itself can never go back on eBay, so
+  // this mints a NEW draft from its copy, specifics and surviving photos —
+  // the archive record is left exactly as it is.
+  const relist = useMemo(() => once("relist", async () => {
+    setAiBusy(["Building a fresh listing from this one…"]);
+    try {
+      const res = await postJson(`/api/listings/${sessionId}/relist`, {});
+      await loadListings({ quiet: true });
+      setSession({
+        sessionId: res.id, listing: res.listing, confidence: null, status: "draft",
+      });
+      setPublishResult(null);
+      // Selling PURGES the photos to reclaim storage, so a relist usually
+      // starts with none. Say so — a draft that silently lost its photos
+      // reads as a bug, and the seller has to know to add them.
+      toast(res.photos
+        ? "New draft ready — edit and publish it whenever you like."
+        : "New draft ready. Its photos went with the sale, so add fresh ones.",
+        { kind: res.photos ? "success" : "warning" });
+    } catch (e) {
+      toast(`Couldn't start a relist: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }), [sessionId, loadListings, setSession, toast]);
 
   // Auto-fill eBay's category item specifics from the photos (fixed-value
   // aspects picked from eBay's allowed values), merged without clobbering
@@ -680,6 +731,7 @@ export function useListingForm() {
   return {
     sessionId, form, set, setForm, collect,
     isLive, isSold, ebayListingId, endListing,
+    saveSaleFigures, relist,
     aiBusy, setAiBusy,
     marketTargets, toggleMarketTarget, chipTargets,
     publish, publishResult, setPublishResult, runPreflight,

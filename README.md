@@ -157,6 +157,7 @@ Without them, you can still type a category ID manually in the preview.
 | `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
 | `GET`  | `/api/insights` | Ranked "what to do next" actions across the user's listings |
@@ -518,16 +519,53 @@ stamps two fields on the record:
 - `sold_at` — eBay's transaction date. A record's `updated_at` can't stand in
   for it: an imported listing carries its eBay *start* time.
 
-Both survive re-syncs, and the sale price is editable in the editor's Pricing
-card for a sale eBay never reported (one older than its ~90-day window). Where
-`sold_price` is unknown, the UI falls back to the asking price and marks the
-number approximate (`≈ $30.00`) rather than claiming it as the take.
+Both survive re-syncs, and the sale price is editable under **Sale figures**
+in the sold listing's archive view for a sale eBay never reported (one older
+than its ~90-day window). Where `sold_price` is unknown, the UI falls back to
+the asking price and marks the number approximate (`≈ $30.00`) rather than
+claiming it as the take.
 
 Everything downstream reads that: the sold card shows what it went for with
-the asking price struck through and how far under it landed, the Sold tab's
-profit line measures against the real amount, and the dashboard's **Sold**
-tile totals it over a window the seller picks (24 hours / 7 days / 30 days /
-90 days, defaulting to a week and remembered across visits).
+the asking price struck through and how far under it landed, the Inactive
+tab's profit line measures against the real amount, and the dashboard's
+**Sold** tile totals it over a window the seller picks (24 hours / 7 days /
+30 days / 90 days, defaulting to a week and remembered across visits).
+
+## A sold listing is an archive, not a draft
+
+Selling ends the listing. The record left behind is the app's only memory of
+what that sale was, so it stops behaving like something still on its way to
+eBay:
+
+- It files under **Inactive** with the ended-without-selling ones — one
+  archive of everything finished — and is hidden from **Active** and **All**,
+  where a seller looks for things they can still act on.
+- Opening it gives the archive view (`views/listing/SoldArchive.jsx`), not the
+  publish workflow: what it went for, against the ask and the cost basis, how
+  it was listed, and a link to the sold listing on eBay. Before this, a
+  finished sale opened as a full editor reading *"Ready to publish"*, one tap
+  from re-listing the item that had already gone.
+- `POST /api/publish` **refuses** a record whose stored status is `sold`. The
+  UI no longer offers it, and the server no longer allows it — republishing in
+  place would overwrite the sale's history with a second listing's life, and
+  for an imported item it asks eBay to revise an item that has already ended.
+
+Two things stay possible, because an archive needs them:
+
+- **The sale's own numbers** (`sold_price`, `purchase_price`) remain editable —
+  they are what the profit totals are made of, and eBay doesn't always report
+  a sale amount. Saving them can't move the record off `sold` (`_sticky_status`).
+- **Relist as new listing** (`POST /api/listings/{id}/relist`) copies the
+  listing into a **brand-new draft**: the copy, the specifics and whatever
+  photos survive, with every field describing the finished sale (item id, SKU,
+  sale price, sale date, per-marketplace state) cleared. The sold record is
+  left untouched. Photos are *copied, not moved* — though a sale purges the
+  session's images to reclaim storage, so an app-created listing usually
+  relists with none and the response says so (`photos: 0`); an imported
+  listing's eBay-hosted `image_urls` carry over as they are.
+
+An **ended** listing is unchanged: it still relists in place from Inactive,
+because nothing about it is finished history.
 
 ## Sold notifications & shipping labels
 
