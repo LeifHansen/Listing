@@ -92,8 +92,8 @@ def check_weight_vs_services(listing: Listing, services: list[dict]) -> list[dic
                 "title": f"Too heavy for {name} in your shipping policy",
                 "fix": (f"This package weighs {w:g} oz but {name} maxes out at {pretty_cap}"
                         + (f" ({note})" if note else "") +
-                        ". Pick a different shipping service on the Shipping card — "
-                        "USPS Ground Advantage handles up to 70 lb."),
+                        ". Pick a shipping policy on the Shipping card that uses a "
+                        "different service — USPS Ground Advantage handles up to 70 lb."),
             })
     return issues
 
@@ -189,8 +189,9 @@ def validate(listing: Listing, mode: str, *,
 
     # --- account prerequisites ---
     if not has_fulfillment:
-        add("shipping", "No shipping service selected",
-            "Pick a shipping service on the Shipping card (or a default in Settings).")
+        add("shipping", "No shipping policy selected",
+            "Pick a shipping policy on the Shipping card, or set a default in "
+            "Settings — it's what tells eBay which carrier service to use.")
     if not has_payment:
         add("policies", "No payment policy selected", "Choose a payment policy in Settings.")
     if not has_return:

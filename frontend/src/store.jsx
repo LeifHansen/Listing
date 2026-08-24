@@ -79,7 +79,7 @@ export function AppProvider({ children }) {
   // forward reference there is a temporal-dead-zone crash, not a lint nit.
   const [ebay, setEbay] = useState({
     connected: false, env: "", username: "", email: "", oauth_ready: false,
-    oauth_missing: [], labels_enabled: false,
+    oauth_missing: [], labels_enabled: false, foreign_listings: 0,
   });
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
 
@@ -94,6 +94,9 @@ export function AppProvider({ children }) {
         oauth_ready: !!s.oauth_ready,
         oauth_missing: s.oauth_missing || [],
         labels_enabled: !!s.labels_enabled,
+        // Listings still here from an eBay account other than the connected
+        // one — see the banner in Settings.
+        foreign_listings: s.foreign_listings || 0,
       });
     } catch (e) { /* keep previous */ }
   }, []);

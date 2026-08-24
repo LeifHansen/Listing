@@ -123,6 +123,14 @@ class Listing(BaseModel):
     source: str = ""
     # eBay's SKU for an imported listing, when it has one.
     sku: str = ""
+    # WHICH eBay account `ebay_listing_id` lives on, as the eBay username.
+    # Records predate this field, so "" means "unknown, assume the connected
+    # account". Without it a seller who connects a second eBay account keeps
+    # seeing the first account's store: the records are keyed by APP user, the
+    # item ids stay on the rows, and GetItem answers for any seller's item, so
+    # every sync happily re-confirmed the old account's listings as live under
+    # the new one.
+    ebay_account: str = ""
     # ISO-8601 UTC timestamp of when the listing went live on eBay, carried
     # over on import so "most recent first" can mean what the seller expects.
     ebay_start_time: str = ""

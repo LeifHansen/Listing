@@ -5,6 +5,9 @@ import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
 import { publishListing, usePublishTargets } from "./publishShared";
 import { ebayBlockers, weightOz } from "./blockers";
+import {
+  confirmSpecificRows, specificValues, toggleSpecificValue as toggleValue,
+} from "./specifics";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -159,6 +162,20 @@ export function useListingForm() {
   const getSpecific = useCallback(
     (name) => getSpecificRow(name)?.value || "", [getSpecificRow]);
 
+  // Every value held under one aspect name. A multi-select (checkbox) aspect
+  // — Features, Style, Season — legitimately holds several rows, and the
+  // checkbox group needs all of them, not just the first.
+  const getSpecificValues = useCallback(
+    (name) => specificValues(form.item_specifics, name), [form.item_specifics]);
+
+  // Tick / untick one value of a multi-select aspect (see specifics.js).
+  const toggleSpecificValue = useCallback((name, value, on) => {
+    setForm((f) => {
+      const specs = toggleValue(f.item_specifics, name, value, on);
+      return specs === f.item_specifics ? f : { ...f, item_specifics: specs };
+    });
+  }, []);
+
   // A seller edit clears the AI confidence flag: the value is now theirs, so
   // neither the ✓ (AI high) nor the ⚠ (review) badge applies anymore.
   const upsertSpecific = useCallback((name, value) => {
@@ -178,12 +195,10 @@ export function useListingForm() {
   // the value) is that gesture, and it makes the review count fall as they go.
   const confirmSpecific = useCallback((name) => {
     setForm((f) => {
-      const specs = [...f.item_specifics];
-      const i = specs.findIndex(
-        (s) => s.name.trim().toLowerCase() === name.trim().toLowerCase());
-      if (i < 0) return f;
-      specs[i] = { ...specs[i], confidence: "" };
-      return { ...f, item_specifics: specs };
+      // Every row for the aspect, not just the first: a multi-select aspect
+      // shows one flag for the whole group, so one ✓ has to clear the group.
+      const specs = confirmSpecificRows(f.item_specifics, name);
+      return specs === f.item_specifics ? f : { ...f, item_specifics: specs };
     });
   }, []);
 
@@ -726,8 +741,8 @@ export function useListingForm() {
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,
-    getSpecific, getSpecificRow, upsertSpecific,
-    confirmSpecific, confirmAllSpecifics,
+    getSpecific, getSpecificRow, getSpecificValues, upsertSpecific,
+    toggleSpecificValue, confirmSpecific, confirmAllSpecifics,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
     imageVersions, bumpImageVersion,
     completion, blockers,

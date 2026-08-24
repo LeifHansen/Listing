@@ -17,8 +17,16 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
+// eBay's three business policies. "Shipping policy" is the one that also
+// names the carrier service, so it is the ONLY place the app says "shipping
+// policy" — the per-listing control (ShippingPolicySelect) overrides this
+// exact field and uses the same word. It used to be called a "shipping
+// service" there, which read as a second, separate setting.
 const POLICY_KINDS = [
-  { key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy" },
+  {
+    key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy",
+    help: "Applied to every new listing. It's what sets the carrier service — a listing can override it on its own Shipping card.",
+  },
   { key: "payment", field: "payment_policy_id", label: "Payment policy" },
   { key: "return", field: "return_policy_id", label: "Return policy" },
 ];
@@ -186,6 +194,7 @@ export function SettingsView() {
                   <strong> Disconnect and reconnect</strong> to confirm which account it is.</>
               )}
             </p>
+            <ForeignListingsNotice />
             <div className="flex flex-wrap gap-2.5">
               <Button variant="secondary" onClick={checkPayout} loading={checking}>
                 <Wallet aria-hidden /> Check payout setup
@@ -337,12 +346,12 @@ export function SettingsView() {
                 )}
               </Field>
 
-              {POLICY_KINDS.map(({ key, field, label }) => {
+              {POLICY_KINDS.map(({ key, field, label, help }) => {
                 const opts = data.policies[key] || [];
                 return (
                   <Field
                     key={key} label={label}
-                    help={opts.length ? undefined : `No ${label.toLowerCase()} on eBay yet.`}
+                    help={opts.length ? help : `No ${label.toLowerCase()} on eBay yet.`}
                   >
                     <Select
                       value={selected[field] || ""}
@@ -974,8 +983,70 @@ function NewListingDefaultsFields({ prefs, set }) {
   );
 }
 
-// One-tap "create an eBay shipping policy for any service" — the dropdown of
-// all eBay options; picking one creates (or reuses) a policy on the account.
+/* Listings left over from a previously-connected eBay account.
+ *
+ * Connecting a second eBay account doesn't move the first account's listings
+ * anywhere — records belong to the APP user, not the eBay one — so they stay
+ * in the app looking exactly like listings of the account now connected. They
+ * are excluded from every eBay call (see services/listing_sync.belongs_to),
+ * but "excluded" is invisible; without this notice they simply read as "the
+ * new account somehow has my old items". */
+function ForeignListingsNotice() {
+  const { ebay, loadEbayStatus, loadListings } = useApp();
+  const { toast, confirm } = useToast();
+  const [working, setWorking] = useState(false);
+  const count = ebay.foreign_listings || 0;
+  if (!count) return null;
+
+  const release = async () => {
+    const ok = await confirm({
+      title: `Unlink ${count} listing${count === 1 ? "" : "s"} from your old eBay account?`,
+      message: "They stay here with their photos and details, as drafts you can "
+        + "publish to the account you're connected to now. Nothing is deleted, "
+        + "and nothing changes on eBay.",
+      confirmLabel: "Unlink them",
+    });
+    if (!ok) return;
+    setWorking(true);
+    try {
+      const res = await postJson("/api/ebay/release-foreign-listings", {});
+      toast(`Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`,
+        { kind: "success" });
+      await Promise.all([loadEbayStatus(), loadListings()]);
+    } catch (e) {
+      toast(`Couldn't unlink them: ${e.message}`, { kind: "error" });
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 flex gap-3">
+      <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
+      <div className="text-sm min-w-0">
+        <p className="font-bold text-ink">
+          {count} listing{count === 1 ? "" : "s"} here belong to a different eBay account
+        </p>
+        <p className="text-ink-secondary mt-0.5">
+          They were listed on an account you connected earlier. Thryft Shop
+          leaves them alone — it won’t sync, edit, or end them while
+          {ebay.username ? <strong className="text-ink"> {ebay.username} </strong> : " this account "}
+          is connected. Reconnect that account to manage them again, or unlink
+          them here to keep the drafts and drop the old eBay link.
+        </p>
+        <Button variant="secondary" className="mt-2.5" onClick={release} loading={working}>
+          <Unlink aria-hidden /> Unlink from the old account
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// The shortcut that CREATES a shipping policy, for sellers who don't have one
+// covering the service they want. Deliberately worded as an action on the
+// dropdown above ("Need another one?") rather than as a setting: it writes to
+// the same eBay object the Shipping policy field selects, and presenting it as
+// a peer made the two look like separate things that had to agree.
 function AddShippingServiceRow({ onCreated }) {
   const { toast } = useToast();
   const [services, setServices] = useState([]);
@@ -1010,15 +1081,15 @@ function AddShippingServiceRow({ onCreated }) {
     <Field
       label={
         <span className="inline-flex items-center gap-1.5">
-          <Truck size={14} aria-hidden /> Add a shipping service
+          <Truck size={14} aria-hidden /> Need another shipping policy?
         </span>
       }
-      help="All the eBay options in one dropdown — picking one creates (or reuses) a shipping policy on your eBay account, ready to select as your default above."
+      help="Pick a carrier service and we'll create the matching shipping policy on your eBay account (or reuse one you already have) and select it above."
     >
       <div className="flex gap-2">
         <div className="flex-1 min-w-0">
           <Select value={code} onChange={(e) => setCode(e.target.value)}>
-            <option value="">Choose an eBay shipping service…</option>
+            <option value="">Choose a carrier service…</option>
             {services.map((s) => (
               <option key={s.code} value={s.code}>
                 {s.label}{s.note ? ` — ${s.note}` : ""}

@@ -585,6 +585,61 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
 
 
 
+def stamp_ebay_account(user_id: str, account: str) -> int:
+    """Label every eBay-linked record that has no owning account yet.
+
+    Called the moment a DIFFERENT eBay account connects: until then a record's
+    owner was simply "whoever was connected", which is unrecoverable once the
+    connection changes. Records already labelled are left alone, and records
+    with no eBay item id (plain local drafts) are not eBay-scoped at all.
+    Returns how many rows were labelled. Never raises.
+    """
+    account = (account or "").strip()
+    if not account:
+        return 0
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        stamped = 0
+        with Session(eng) as s:
+            rows = s.execute(select(ListingRecord).where(
+                ListingRecord.user_id == user_id)).scalars().all()
+            for rec in rows:
+                data = dict(rec.data or {})
+                if data.get("ebay_account") or not data.get("ebay_listing_id"):
+                    continue
+                data["ebay_account"] = account
+                rec.data = data  # a new dict is what marks the JSON column dirty
+                stamped += 1
+            if stamped:
+                s.commit()
+        return stamped
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: stamp_ebay_account failed: {exc}")
+        return 0
+
+
+def count_foreign_listings(user_id: str, account: str) -> int:
+    """How many of this user's eBay-linked records belong to some OTHER eBay
+    account than `account` — what the UI needs to explain why a just-connected
+    store looks like it still holds the previous one's items."""
+    account = (account or "").strip()
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        with Session(eng) as s:
+            rows = s.execute(select(ListingRecord.data).where(
+                ListingRecord.user_id == user_id)).scalars().all()
+            return sum(1 for data in rows
+                       if (data or {}).get("ebay_account")
+                       and (data or {}).get("ebay_account") != account)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_foreign_listings failed: {exc}")
+        return 0
+
+
 def disconnect_ebay_account(user_id: str) -> None:
     """Disconnect the live link (clear the refresh token) but KEEP the saved
     policy/location preferences and which account they belonged to, so

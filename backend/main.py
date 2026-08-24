@@ -38,8 +38,8 @@ from .marketplaces.state import STICKY_STATUSES
 from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
-                       ebay_trading, image_import, images, jobstore,
+from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
+                       ebay_orders, ebay_trading, image_import, images, jobstore,
                        listing_merge, listing_sync, metrics, notifications,
                        orient, preflight, pricing, promotions, recommender,
                        sync_guard, taxonomy, tokens)
@@ -395,18 +395,38 @@ def _tag_text_for(paths: list, aspects: list[dict]) -> str:
         return ""
 
 
+# eBay's ceiling on values per aspect (mirrored in services/ebay.py).
+_MAX_ASPECT_VALUES = 30
+
+
 def _merge_filled_specifics(listing: Listing, filled: list,
                             aspects: list[dict]) -> int:
     """Merge AI-filled specifics into the listing without touching anything
-    the seller answered. Aspect-aware: an aspect the listing already has a
-    value for is left alone entirely; an unanswered SINGLE aspect takes the
-    AI's first value; an unanswered MULTI aspect (Season, Features, Theme...)
-    takes ALL the AI's values — eBay accepts a list and buyers filter on each.
+    the seller answered. Aspect-aware:
+
+    - An aspect the seller entered or confirmed (confidence "", per
+      models.ItemSpecific) is left alone entirely.
+    - An unanswered SINGLE aspect takes the AI's first value; one that already
+      holds a value keeps it.
+    - A MULTI aspect (Season, Features, Theme... — eBay's multi-select
+      checkboxes) takes ALL the AI's values, and is TOPPED UP with the ones it
+      doesn't already hold rather than skipped: a single value left over from
+      the first vision pass used to block every further tick, which is why the
+      checkbox specifics reached eBay with one box ticked at most.
+
     Returns how many values were added."""
     multi = {a["name"].strip().lower() for a in aspects
              if (a.get("cardinality") or "SINGLE") == "MULTI"}
-    have = {s.name.strip().lower() for s in listing.item_specifics
-            if (s.value or "").strip()}
+    have: dict[str, set[str]] = {}
+    seller_owned: set[str] = set()
+    for s in listing.item_specifics:
+        value = (s.value or "").strip()
+        if not value:
+            continue
+        k = s.name.strip().lower()
+        have.setdefault(k, set()).add(value.lower())
+        if not (s.confidence or "").strip():
+            seller_owned.add(k)
     grouped: dict[str, list] = {}
     order: list[str] = []
     for f in filled:
@@ -417,9 +437,18 @@ def _merge_filled_specifics(listing: Listing, filled: list,
         grouped[k].append(f)
     added = 0
     for k in order:
-        if k in have:
+        if k in seller_owned:
             continue
-        for f in (grouped[k] if k in multi else grouped[k][:1]):
+        held = have.get(k, set())
+        is_multi = k in multi
+        if held and not is_multi:
+            continue
+        for f in (grouped[k] if is_multi else grouped[k][:1]):
+            value = (f.value or "").strip()
+            if not value or value.lower() in held or len(held) >= _MAX_ASPECT_VALUES:
+                continue
+            held.add(value.lower())
+            have[k] = held
             listing.item_specifics.append(f)
             added += 1
     return added
@@ -1006,26 +1035,38 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
             log.warning(f"ebay: identity fetch failed on connect: {exc}")
-        # Preserve the user's saved policy/location choices when reconnecting the
-        # SAME account (or when identity is unreadable — don't risk clobbering
-        # good settings). Only a switch to a DIFFERENT account takes the
-        # auto-discovered defaults fresh, since the old account's policy ids
-        # can't be reused. This is why a reconnect used to silently revert
-        # shipping to eBay Standard Envelope.
         existing = db.get_ebay_account(uid) or {}
-        new_user = ident["username"]
-        keep_saved = (not new_user) or existing.get("ebay_username") == new_user
+        prev_user = (existing.get("ebay_username") or "").strip()
+        new_user = (ident["username"] or "").strip()
         save_kwargs = {
             "refresh_token": tokens["refresh_token"],
-            "ebay_username": ident["username"],
+            "ebay_username": new_user,
             "ebay_email": ident["email"],
         }
-        if keep_saved:
-            for k, v in policies.items():
-                if v and not existing.get(k):
-                    save_kwargs[k] = v  # fill only the gaps
-        else:
-            save_kwargs.update(policies)
+        # Keep a saved policy/location choice only when it still EXISTS on the
+        # account that just connected. Business-policy ids belong to one
+        # seller: eBay rejects another's outright, and a listing published with
+        # one fails for a reason the seller can't see in any field.
+        #
+        # This used to be decided from the account NAME, keeping everything
+        # whenever the name was unreadable — which is the common case, since
+        # connections made before the identity scope was granted 403 on it. A
+        # seller who switched accounts then carried the old account's shipping,
+        # payment, return and location ids straight into the new one.
+        save_kwargs.update(ebay_account.carry_over_settings(
+            access, existing, policies))
+        switched = bool(prev_user and new_user and prev_user != new_user)
+        if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
+            # A different store. Label everything already here as the previous
+            # account's, so syncs and publishes stop treating those listings as
+            # this account's (see services/listing_sync.belongs_to).
+            marked = db.stamp_ebay_account(uid, prev_user or "previous account")
+            log.info("ebay connect: account switch for uid=%s (%s -> %s); "
+                     "labelled %d existing listing(s)", uid,
+                     prev_user or "?", new_user or "?", marked)
+            # The old ZIP belonged to the old store; create_on_ebay re-reads it
+            # from eBay when it's blank.
+            save_kwargs.setdefault("ship_from_postal", "")
         db.save_ebay_account(uid, **save_kwargs)
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
@@ -1064,7 +1105,48 @@ def ebay_status(request: Request) -> dict:
             "return": bool(acct and acct.get("return_policy_id")),
             "location": bool(acct and acct.get("merchant_location_key")),
         } if connected else {},
+        # Listings still here from an eBay account that ISN'T the connected
+        # one. They're excluded from every eBay call, but they're visible, so
+        # the UI has to be able to explain them rather than let them read as
+        # "the new account somehow has my old items".
+        "foreign_listings": (db.count_foreign_listings(
+            uid, acct.get("ebay_username") or "") if connected and uid else 0),
     }
+
+
+@app.post("/api/ebay/release-foreign-listings")
+def release_foreign_listings(request: Request) -> dict:
+    """Unlink every listing belonging to a previously-connected eBay account.
+
+    The records stay — they're the seller's own work, photos and all — but the
+    eBay item id, source and live status come off, so they become ordinary
+    local drafts of the current account instead of ghosts of the old store.
+    Nothing is deleted, and nothing is touched on eBay.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    acct = db.get_ebay_account(uid) or {}
+    connected = (acct.get("ebay_username") or "").strip()
+    released = 0
+    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+        data = rec.get("listing") or {}
+        owner = listing_sync.account_of(data)
+        if not owner or owner == connected:
+            continue
+
+        def _unlink(d: dict) -> dict:
+            d.update(ebay_account="", ebay_listing_id="", source="",
+                     view_url="", sku="", image_urls=d.get("image_urls") or [])
+            d.pop("marketplaces", None)
+            return d
+
+        if db.mutate_listing_data(rec["id"], _unlink, status="draft",
+                                  user_id=uid) is not None:
+            released += 1
+    log.info("release-foreign-listings: uid=%s released=%d (connected=%s)",
+             uid, released, connected or "?")
+    return {"released": released}
 
 
 @app.get("/api/ebay/policies")
@@ -2055,9 +2137,10 @@ def identify(session_id: str, request: Request) -> dict:
 @app.post("/api/autofill-specifics/{session_id}")
 def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -> dict:
     """Fill eBay's required/recommended item specifics for the listing's
-    category from the product photos — choosing fixed-value ("checkbox")
-    aspects from eBay's own allowed values — and merge them in without
-    overwriting anything the seller already set."""
+    category from the product photos — choosing fixed-value aspects from eBay's
+    own allowed values, and ticking every value that applies on the multi-select
+    ("checkbox") ones — and merge them in without overwriting anything the
+    seller already set."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     _assert_session_owner(session_id, request)
@@ -3681,6 +3764,16 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     if not (creds or config.ebay_ready()):
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
+    # Never end another eBay account's listing: the item id on this record was
+    # minted by a store that isn't connected any more, and EndItem would either
+    # fail confusingly or (worse) act on the wrong seller's item.
+    owner = listing_sync.account_of(listing)
+    connected = (creds or {}).get("ebay_username", "")
+    if creds and owner and connected and owner != connected:
+        raise HTTPException(
+            400, f"This listing is on your other eBay account (@{owner}) — "
+                 f"you're connected as @{connected}. Reconnect that account "
+                 "to end it.")
     try:
         # Imported listings live outside the Inventory API — end them through
         # the Trading API instead.
@@ -3732,8 +3825,15 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0, "archived": 0}
     force = bool((payload or {}).get("force"))
+    # Only the connected account's listings. A record left behind by a
+    # previously-connected eBay account is another seller's item as far as this
+    # token is concerned — and since eBay answers item lookups for anyone, a
+    # sweep over it doesn't fail, it just keeps reporting the old store as
+    # live and healthy under the new account.
+    account = (creds or {}).get("ebay_username", "")
     live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-            if i.get("status") in ("published", "live")]
+            if i.get("status") in ("published", "live")
+            and listing_sync.belongs_to(i.get("listing") or {}, account)]
     changed = 0
     archived = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
@@ -3744,7 +3844,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if live and creds:
         try:
             got, handled = listing_sync.reconcile_recent(
-                creds["access_token"], user["id"], live)
+                creds["access_token"], user["id"], live, account=account)
             changed += got
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: finished-list reconcile failed: %s", exc)
@@ -3776,7 +3876,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if imported and creds:
         try:
             changed += listing_sync.refresh_statuses(
-                creds["access_token"], user["id"], imported)
+                creds["access_token"], user["id"], imported, account=account)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: imported refresh failed: %s", exc)
 
@@ -3840,7 +3940,7 @@ _IMPORT_JOBS: dict[str, str] = {}
 _IMPORT_LOCK = threading.Lock()
 
 
-def _run_import_job(job_id: str, token: str, uid: str) -> None:
+def _run_import_job(job_id: str, token: str, uid: str, account: str = "") -> None:
     """Background worker for the store mirror. One GetItem per listing means a
     real store takes minutes — far longer than a browser (or the proxy in
     front of us) will hold a request open, which is why this is a job the
@@ -3859,7 +3959,8 @@ def _run_import_job(job_id: str, token: str, uid: str) -> None:
         jobstore.update(job_id, phase=phase, current=done, total_items=total)
     try:
         result = listing_sync.import_active(
-            token, uid, limit=IMPORT_LIMIT, on_progress=_progress)
+            token, uid, limit=IMPORT_LIMIT, on_progress=_progress,
+            account=account)
         jobstore.update(job_id, done=True, phase="done", error=None, **result)
     except ebay_trading.TradingError as exc:
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
@@ -3911,7 +4012,8 @@ def import_listings(request: Request) -> dict:
         "error": None, "current": 0, "total_items": 0,
     }, uid=uid)
     threading.Thread(
-        target=_run_import_job, args=(job_id, creds["access_token"], uid),
+        target=_run_import_job,
+        args=(job_id, creds["access_token"], uid, creds.get("ebay_username", "")),
         daemon=True,
     ).start()
     log.info("import-listings %s: started for user=%s", job_id, uid)

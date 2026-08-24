@@ -8,6 +8,8 @@ tests pin the response shapes eBay actually returns.
 """
 from __future__ import annotations
 
+import datetime as _dt
+
 import httpx
 import pytest
 
@@ -168,3 +170,21 @@ def test_no_creds_is_quiet():
     assert metrics.listing_metrics(None, ["42"], status) == {}
     assert status == {"traffic_ok": False, "needs_reconnect": False}
     assert metrics.listing_metrics({"access_token": "tok"}, []) == {}
+
+
+def test_the_report_never_asks_for_a_date_ebay_calls_the_future(monkeypatch):
+    """eBay rejected the whole report — "Neither the start date nor the end
+    date can be in the future" — because the end date was UTC *today* while
+    eBay judges "future" in Pacific time. For the seven hours after UTC
+    midnight the app was asking for tomorrow, so the dashboard lost views and
+    impressions every night. The report only holds data through yesterday
+    anyway, so ending there is both correct and safe in every timezone."""
+    seen = _serve(monkeypatch, _report(_LIVE_HEADER, []))
+    metrics._traffic("tok", ["42"])
+
+    date_filter = next(f for f in seen[0]["params"]["filter"].split(",")
+                       if f.startswith("date_range:"))
+    start, end = date_filter[len("date_range:["):-1].split("..")
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    assert end == f"{today - _dt.timedelta(days=1):%Y%m%d}"
+    assert start < end

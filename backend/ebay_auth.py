@@ -200,6 +200,47 @@ def list_business_policies(access_token: str) -> dict:
     return out
 
 
+def policy_ids_on_account(access_token: str) -> dict[str, set[str]]:
+    """{kind: {policy ids that actually exist on the connected account}}.
+
+    A saved policy id is only usable on the account that owns it: eBay rejects
+    another seller's profile id outright. This is what lets a reconnect keep
+    the seller's choices when they still exist and quietly re-pick a default
+    when they don't, instead of guessing from the account name — which is
+    unreadable on connections made before the identity scope was granted.
+    A kind that couldn't be fetched is absent (not empty), so a transient API
+    failure never reads as "none of your policies exist".
+    """
+    out: dict[str, set[str]] = {}
+    for kind, (path, list_field, id_field) in _POLICY_SPECS.items():
+        try:
+            data = _account_get(path, access_token)
+        except Exception:  # noqa: BLE001 - unknown, not empty
+            continue
+        out[kind] = {p.get(id_field, "") for p in data.get(list_field, [])
+                     if p.get(id_field)}
+    return out
+
+
+def location_keys_on_account(access_token: str) -> Optional[set[str]]:
+    """Every merchantLocationKey on the connected account, or None if the
+    lookup failed (unknown — callers must not treat that as "none")."""
+    try:
+        resp = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Accept": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return None
+        return {loc.get("merchantLocationKey", "")
+                for loc in (resp.json().get("locations") or [])
+                if loc.get("merchantLocationKey")}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _policy_summary(kind: str, p: dict) -> str:
     """A short human hint about what a policy does, for the picker."""
     try:
@@ -448,14 +489,33 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
 def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:
     """[{code, name}] for one fulfillment policy (empty on any failure —
     preflight treats unknown services as unconstrained)."""
+    services, _ = fulfillment_policy_lookup(access_token, policy_id)
+    return services
+
+
+def fulfillment_policy_lookup(access_token: str,
+                              policy_id: str) -> tuple[list[dict], Optional[bool]]:
+    """([{code, name}], exists) for one fulfillment policy.
+
+    `exists` is False only when eBay positively says this account has no such
+    policy (404), True when it returned one, and None when the answer is
+    unknown (network trouble, an unexpected status). The three are kept apart
+    because "this policy isn't on your account" is a real, fixable publish
+    blocker — it's what a policy id left over from a different eBay account
+    looks like — while "we couldn't ask" must never be reported as one.
+    """
     if not policy_id:
-        return []
+        return [], None
     try:
         p = _account_get(f"/sell/account/v1/fulfillment_policy/{policy_id}",
                          access_token)
-        return _policy_services(p)
+        return _policy_services(p), True
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (400, 404):
+            return [], False
+        return [], None
     except Exception:  # noqa: BLE001
-        return []
+        return [], None
 
 
 _SERVICE_FRIENDLY = [
