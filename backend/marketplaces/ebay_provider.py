@@ -17,11 +17,12 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from .. import config, db, ebay_auth, ebay_errors, storage
+from .. import config, db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from ..services import (ebay, ebay_trading, image_import, listing_sync,
-                        preflight, promotions, publish_guard, taxonomy)
+from ..services import (ebay, ebay_account, ebay_trading, image_import,
+                        listing_sync, preflight, promotions, publish_guard,
+                        taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
@@ -116,40 +117,6 @@ def promote(record_id: str, listing: Listing, creds: Optional[dict],
     except Exception as exc:  # noqa: BLE001 - promotion must never break publish
         log.warning("promote failed (%s): %s", record_id, exc)
         return {"promoted": False, "message": f"Promotion failed: {exc}"}
-
-
-def account_block_issues(exc: Exception, creds: Optional[dict]) -> list[dict]:
-    """Issues for a failed publish, and for eBay error 240 a look at WHY.
-
-    240 means "this account can't list right now" without saying what the hold
-    is, and it repeats on every listing, so the one question worth answering is
-    whether it's something the seller can see and clear. Payments onboarding is
-    both the most common cause and the only one the API will state plainly, so
-    it gets one extra call — on the failure path only, where a round-trip costs
-    nothing and a blind seller costs everything.
-    """
-    issues = ebay_errors.from_trading_error(exc)
-    if str(getattr(exc, "code", "")) != "240" or not creds:
-        return issues
-    try:
-        program = ebay_auth.fetch_payments_program(creds["access_token"])
-        status = str(program.get("status", "")).upper()
-    except Exception as exc2:  # noqa: BLE001 - a diagnosis, never a blocker
-        log.info("ebay: payments-program check after a 240 failed: %s", exc2)
-        return issues
-    log.warning("ebay: publish blocked by error 240; payments program = %s",
-                status or "unknown")
-    if status and status != "OPTED_IN":
-        issues.append({
-            "target": "account", "level": "error",
-            "title": "This eBay account hasn't finished payments setup",
-            "fix": ("eBay reports the account as “" + status.replace("_", " ").lower()
-                    + "” for managed payments, and it won't accept new listings "
-                    "until that's done. Finish it on eBay under Seller Hub → "
-                    "Payments (bank details and identity verification), then "
-                    "publish again — the listing itself is fine."),
-        })
-    return issues
 
 
 # Message the seller sees when eBay took the listing but our own record of it
@@ -490,7 +457,7 @@ class EbayProvider:
                             "relist" if relist else "revise", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status=prev_status, user_id=uid)
-                issues = account_block_issues(exc, creds)
+                issues = ebay_account.publish_block_issues(exc, creds)
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
@@ -584,7 +551,7 @@ class EbayProvider:
                 log.warning("trading publish failed: session=%s: %s", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="draft", user_id=ctx.uid)
-                issues = account_block_issues(exc, creds)
+                issues = ebay_account.publish_block_issues(exc, creds)
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",

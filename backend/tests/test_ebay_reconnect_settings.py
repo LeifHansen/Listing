@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import main
+from backend.services import ebay_account
 
 SAVED = {
     "fulfillment_policy_id": "F-old",
@@ -32,58 +32,53 @@ DISCOVERED = {
 
 
 @pytest.fixture
-def account(monkeypatch):
-    """Stub what eBay reports as existing on the connected account."""
-    def setup(policies, locations):
-        monkeypatch.setattr(main.ebay_auth, "policy_ids_on_account",
-                            lambda _t: policies)
-        monkeypatch.setattr(main.ebay_auth, "location_keys_on_account",
-                            lambda _t: locations)
-    return setup
+def carry():
+    """carry_over_settings with eBay's answers about the connected account
+    injected — the lookups are parameters precisely so this needs no network
+    and no app import."""
+    def run(saved, policies, locations):
+        return ebay_account.carry_over_settings(
+            "tok", saved, DISCOVERED,
+            policy_ids=lambda _t: policies, location_keys=lambda _t: locations)
+    return run
 
 
-def test_same_account_keeps_every_saved_choice(account):
-    account({"fulfillment": {"F-old"}, "payment": {"P-old"},
-             "return": {"R-old"}}, {"L-old"})
-    assert main._carry_over_settings("tok", SAVED, DISCOVERED) == {}
+def test_same_account_keeps_every_saved_choice(carry):
+    assert carry(SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"},
+                         "return": {"R-old"}}, {"L-old"}) == {}
 
 
-def test_a_different_account_gets_fresh_defaults(account):
+def test_a_different_account_gets_fresh_defaults(carry):
     """None of the saved ids exist here — every one is replaced."""
-    account({"fulfillment": {"F-new"}, "payment": {"P-new"},
-             "return": {"R-new"}}, {"L-new"})
-    assert main._carry_over_settings("tok", SAVED, DISCOVERED) == DISCOVERED
+    assert carry(SAVED, {"fulfillment": {"F-new"}, "payment": {"P-new"},
+                         "return": {"R-new"}}, {"L-new"}) == DISCOVERED
 
 
-def test_an_unreadable_account_name_no_longer_hides_the_switch(account):
+def test_an_unreadable_account_name_no_longer_hides_the_switch(carry):
     """The whole bug: identity is unreadable, so the old code kept everything.
     Existence answers it without the name."""
-    account({"fulfillment": {"F-new"}, "payment": {"P-new"},
-             "return": {"R-new"}}, {"L-new"})
-    carried = main._carry_over_settings("tok", SAVED, DISCOVERED)
-    assert main._settings_were_dropped({**SAVED, **carried}, SAVED) is True
+    carried = carry(SAVED, {"fulfillment": {"F-new"}, "payment": {"P-new"},
+                            "return": {"R-new"}}, {"L-new"})
+    assert ebay_account.settings_were_dropped({**SAVED, **carried}, SAVED) is True
 
 
-def test_an_api_blip_never_re_picks_a_sellers_shipping(account):
+def test_an_api_blip_never_re_picks_a_sellers_shipping(carry):
     """A kind eBay couldn't report is unknown, not empty — leave it alone."""
-    account({"payment": {"P-old"}, "return": {"R-old"}}, None)
-    carried = main._carry_over_settings("tok", SAVED, DISCOVERED)
+    carried = carry(SAVED, {"payment": {"P-old"}, "return": {"R-old"}}, None)
     assert "fulfillment_policy_id" not in carried
     assert "merchant_location_key" not in carried
-    assert main._settings_were_dropped({**SAVED, **carried}, SAVED) is False
+    assert ebay_account.settings_were_dropped({**SAVED, **carried}, SAVED) is False
 
 
-def test_a_gap_is_filled_from_what_was_discovered(account):
-    account({"fulfillment": set(), "payment": {"P-old"}, "return": {"R-old"}},
-            {"L-old"})
-    saved = {**SAVED, "fulfillment_policy_id": ""}
-    carried = main._carry_over_settings("tok", saved, DISCOVERED)
+def test_a_gap_is_filled_from_what_was_discovered(carry):
+    carried = carry({**SAVED, "fulfillment_policy_id": ""},
+                    {"fulfillment": set(), "payment": {"P-old"},
+                     "return": {"R-old"}}, {"L-old"})
     assert carried["fulfillment_policy_id"] == "F-new"
 
 
-def test_only_one_dropped_id_is_enough_to_call_it_a_switch(account):
-    account({"fulfillment": {"F-new"}, "payment": {"P-old"},
-             "return": {"R-old"}}, {"L-old"})
-    carried = main._carry_over_settings("tok", SAVED, DISCOVERED)
+def test_only_one_dropped_id_is_enough_to_call_it_a_switch(carry):
+    carried = carry(SAVED, {"fulfillment": {"F-new"}, "payment": {"P-old"},
+                            "return": {"R-old"}}, {"L-old"})
     assert carried == {"fulfillment_policy_id": "F-new"}
-    assert main._settings_were_dropped({**SAVED, **carried}, SAVED) is True
+    assert ebay_account.settings_were_dropped({**SAVED, **carried}, SAVED) is True

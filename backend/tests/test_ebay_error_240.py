@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from backend import ebay_errors
-from backend.services import ebay_trading
+from backend.services import ebay_account, ebay_trading
 
 NS = "urn:ebay:apis:eBLBaseComponents"
 
@@ -140,52 +140,41 @@ def test_a_real_ean_still_lands_on_item_specifics():
 
 # --- the diagnosis attached to a 240 ---------------------------------------
 
-def test_a_240_asks_ebay_whether_payments_is_the_hold(monkeypatch):
+def test_a_240_asks_ebay_whether_payments_is_the_hold():
     """240 repeats on every listing and names no cause. Payments onboarding is
     the most common one and the only one the API states plainly, so the failure
     path spends one call to find out."""
-    from backend.marketplaces import ebay_provider
-
-    monkeypatch.setattr(ebay_provider.ebay_auth, "fetch_payments_program",
-                        lambda _t: {"status": "NOT_OPTED_IN"})
-    issues = ebay_provider.account_block_issues(
-        ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"})
+    issues = ebay_account.publish_block_issues(
+        ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"},
+        payments=lambda _t: {"status": "NOT_OPTED_IN"})
     assert any("payments setup" in i["title"] for i in issues)
 
 
-def test_an_opted_in_account_gets_no_payments_claim(monkeypatch):
-    from backend.marketplaces import ebay_provider
-
-    monkeypatch.setattr(ebay_provider.ebay_auth, "fetch_payments_program",
-                        lambda _t: {"status": "OPTED_IN"})
-    issues = ebay_provider.account_block_issues(
-        ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"})
+def test_an_opted_in_account_gets_no_payments_claim():
+    issues = ebay_account.publish_block_issues(
+        ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"},
+        payments=lambda _t: {"status": "OPTED_IN"})
     assert not any("payments setup" in i["title"] for i in issues)
 
 
-def test_the_diagnosis_never_replaces_the_rejection(monkeypatch):
+def test_the_diagnosis_never_replaces_the_rejection():
     """A failing side-check must still leave the seller with eBay's reason."""
-    from backend.marketplaces import ebay_provider
-
     def boom(_t):
         raise RuntimeError("eBay is down")
 
-    monkeypatch.setattr(ebay_provider.ebay_auth, "fetch_payments_program", boom)
-    issues = ebay_provider.account_block_issues(
-        ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"})
+    issues = ebay_account.publish_block_issues(
+        ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"},
+        payments=boom)
     assert issues and issues[0]["target"] == "account"
 
 
-def test_other_rejections_cost_no_extra_call(monkeypatch):
-    from backend.marketplaces import ebay_provider
-
+def test_other_rejections_cost_no_extra_call():
     def boom(_t):
         raise AssertionError("must not be called")
 
-    monkeypatch.setattr(ebay_provider.ebay_auth, "fetch_payments_program", boom)
-    issues = ebay_provider.account_block_issues(
+    issues = ebay_account.publish_block_issues(
         ebay_trading.TradingError("The price is invalid.", code="10008"),
-        {"access_token": "tok"})
+        {"access_token": "tok"}, payments=boom)
     assert issues[0]["target"] == "price"
 
 

@@ -38,8 +38,8 @@ from .marketplaces.state import STICKY_STATUSES
 from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
-                       ebay_trading, image_import, images, jobstore,
+from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
+                       ebay_orders, ebay_trading, image_import, images, jobstore,
                        listing_merge, listing_sync, metrics, notifications,
                        orient, preflight, pricing, promotions, recommender,
                        sync_guard, taxonomy, tokens)
@@ -982,41 +982,6 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
     return resp
 
 
-# Which saved eBay settings are account-scoped: each is an id minted by ONE
-# eBay seller account and meaningless (rejected, in fact) on another.
-_ACCOUNT_SCOPED = ("fulfillment_policy_id", "payment_policy_id",
-                   "return_policy_id", "merchant_location_key")
-
-
-def _carry_over_settings(access: str, existing: dict, discovered: dict) -> dict:
-    """What to store for the account that just connected.
-
-    A saved choice survives only if it still exists on THIS account; otherwise
-    the auto-discovered default for that slot takes over. When eBay can't tell
-    us what exists (an API blip returns nothing for a kind), the saved value is
-    left alone — an outage must not silently re-pick a seller's shipping.
-    """
-    valid_policies = ebay_auth.policy_ids_on_account(access)
-    valid_locations = ebay_auth.location_keys_on_account(access)
-    out: dict = {}
-    for field in _ACCOUNT_SCOPED:
-        saved = (existing.get(field) or "").strip()
-        kind = field[: -len("_policy_id")] if field.endswith("_policy_id") else ""
-        known = valid_policies.get(kind) if kind else valid_locations
-        if saved and known is not None and saved not in known:
-            out[field] = discovered.get(field, "")  # gone from this account
-        elif not saved and discovered.get(field):
-            out[field] = discovered[field]          # fill the gap
-    return out
-
-
-def _settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
-    """True when a saved account-scoped id didn't survive the reconnect — the
-    tell-tale of a different eBay account even when the name is unreadable."""
-    return any(existing.get(f) and save_kwargs.get(f, existing.get(f)) != existing.get(f)
-               for f in _ACCOUNT_SCOPED)
-
-
 @app.get("/api/ebay/callback")
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
@@ -1059,9 +1024,10 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # connections made before the identity scope was granted 403 on it. A
         # seller who switched accounts then carried the old account's shipping,
         # payment, return and location ids straight into the new one.
-        save_kwargs.update(_carry_over_settings(access, existing, policies))
+        save_kwargs.update(ebay_account.carry_over_settings(
+            access, existing, policies))
         switched = bool(prev_user and new_user and prev_user != new_user)
-        if switched or _settings_were_dropped(save_kwargs, existing):
+        if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
             # A different store. Label everything already here as the previous
             # account's, so syncs and publishes stop treating those listings as
             # this account's (see services/listing_sync.belongs_to).
