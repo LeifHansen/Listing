@@ -3,9 +3,14 @@
 eBay recommends square-ish images with the longest side >= 1600px for zoom,
 clean framing, and good lighting.
 
-The pipeline (per photo): auto-orient -> background removal + studio effect
-(the cutout composited on white with our soft contact shadow, then the studio
-enhancement pass) -> subject-aware square crop -> resize to target -> save.
+The pipeline (per photo): auto-orient -> background removal (the cutout
+composited on white with our soft contact shadow) -> subject-aware square
+crop -> resize to target -> a finishing sharpen -> save.
+
+Deliberately nothing else. The photo's own tone is left alone (see _finish):
+what a listing shot has to get right is a clean white background and an item
+that is all there, and no amount of re-levelling the finished canvas moves
+either of those.
 
 Whatever engine produces the matte, the local one's silhouette is solidified
 before anything is composited (_solidify_border): the border is closed into one
@@ -22,15 +27,13 @@ run only when BG_ENGINE explicitly selects them.
 """
 from __future__ import annotations
 
-import math
 import os
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import (Image, ImageEnhance, ImageFile, ImageFilter, ImageOps,
-                 ImageStat)
+from PIL import Image, ImageFile, ImageFilter, ImageOps
 
 from .. import config
 from ..config import log
@@ -122,17 +125,26 @@ _DARK_BG_LUMA = int(os.getenv("DARK_BG_LUMA", "70") or "70")
 # for review rather than unremarked. Above it, a dark surface is just a dark
 # surface and the cutout is reported clean.
 _DARK_REVIEW_COVERAGE = float(os.getenv("DARK_REVIEW_COVERAGE", "0.20") or 0.20)
-# Cap the resolution the background model actually runs at. isnet on a full
-# 1600px image thrashes memory on a 2GB machine and can hang a bulk job for
-# minutes; running on a smaller copy is fast and light, and the resulting mask
-# upscales cleanly (product cutouts don't need pixel-perfect edges). Override
-# with REMBG_MAX_SIDE.
+# Size of the copy handed to the background model. Read the name carefully:
+# this caps OUR image, not the model's work.
+#
+# It is tempting to treat this as an inference-cost dial — halve the side,
+# quarter the pixels, quarter the time — and that is simply not how these
+# models run. Both of the ones shipped here normalize their input to a fixed
+# tensor first (isnet to 1024x1024, u2netp to 320x320), so a smaller copy is
+# upscaled straight back before a single convolution happens. Measured on two
+# pinned cores, 640 and 1024 finish within 2% of each other. Going smaller
+# than the model's own input therefore buys nothing and costs real quality:
+# the matte is then a downscale that got upscaled, and it still has to be
+# resized once more to the photo.
+#
+# What it does control is memory (the working copy, which is why a 2GB box may
+# want it lower) and the resolution the refinement passes run at, since
+# _cutout_on_white refines the matte at its native size.
 _REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
-# The photo-studio 'Remove background' can run the matte at a higher resolution
-# for crisper edges — BUT a 1024px isnet inference peaks well over what the 2GB
-# machine has, so the worker gets OOM-killed (the 502 users hit) before any
-# Python-level fallback can run. Default to the memory-safe bulk size; raise
-# REMBG_STUDIO_MAX_SIDE (e.g. to 1024) only on a machine with more RAM (4GB+).
+# The photo studio can run the matte at a different size from a batch — it
+# does one photo at a time with a seller watching. Defaults to the batch size;
+# per the above, raising it past the model's own input size does nothing.
 _STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", str(_REMBG_MAX_SIDE))
                        or str(_REMBG_MAX_SIDE))
 # Serialize model inference: two isnet runs at once (e.g. a studio cutout during
@@ -143,7 +155,20 @@ _INFER_LOCK = threading.Lock()
 # is alive and doing nothing, behind a bulk job that has forty photos to get
 # through. A bounded wait turns that into an answer — "busy, try again" — which
 # the seller can act on, instead of a spinner that never resolves.
+#
+# That reasoning holds for a person watching a spinner and NOT for a photo in a
+# background batch, which is the distinction this pair of deadlines draws.
+# Giving up is only better than queueing when someone is waiting on the answer:
+# a batch photo that abandons its turn doesn't get a retry, it gets SILENTLY
+# SAVED WITH ITS BACKGROUND STILL ON, which is the one outcome the whole
+# feature exists to avoid. One deadline served both, at 25s — shorter than a
+# single inference on a loaded box — so every photo queued behind another one
+# was guaranteed to time out and keep its background. The batch deadline is
+# therefore long enough to outlast a real queue; the interactive one stays
+# short, because there the fast answer IS the useful one.
 INFER_WAIT_SECONDS = float(os.getenv("REMBG_WAIT_SECONDS", "25") or 25)
+BATCH_INFER_WAIT_SECONDS = float(
+    os.getenv("REMBG_BATCH_WAIT_SECONDS", "300") or 300)
 
 
 class CutoutBusy(RuntimeError):
@@ -614,8 +639,41 @@ def _solidify_border(alpha: Image.Image, source: Image.Image,
                     max(1.0, side * _EDGE_CLOSE_FRAC * 0.5)), dtype=np.uint8) >= 128)
 
 
+def _infer_threads() -> int:
+    """How many threads onnxruntime may use for one inference.
+
+    rembg builds its InferenceSession from OMP_NUM_THREADS when that variable
+    is set, and otherwise lets onnxruntime pick — which means "one thread per
+    core the C++ runtime thinks it can see", i.e. every core on the box. That
+    is the wrong default to leave in place here, for two reasons.
+
+    The photos queued behind the current inference are not idle: inference is
+    serialized (_INFER_LOCK) but the rest of each photo's pipeline is numpy and
+    Pillow, which release the GIL and run concurrently by design. A session
+    sized to the whole box stacks N inference threads on top of that pool and
+    everything context-switches instead of finishing.
+
+    And the box still has an app on it. uvicorn has to keep answering
+    /api/health inside its 5s timeout while a batch runs — a machine that
+    misses those checks gets REPLACED by the platform, which kills the batch
+    outright. Leaving a core for everything that is not inference is what keeps
+    a long batch from ending in a restart.
+
+    REMBG_THREADS overrides. sched_getaffinity (not cpu_count) so a cpuset that
+    pins us to a slice of a bigger host is respected."""
+    forced = int(os.getenv("REMBG_THREADS", "0") or 0)
+    if forced > 0:
+        return forced
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:  # not Linux
+        cpus = os.cpu_count() or 1
+    return max(1, cpus - 1)
+
+
 def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
-                upscale: bool = True) -> Image.Image:
+                upscale: bool = True,
+                wait: Optional[float] = None) -> Image.Image:
     """rembg subject alpha (mode L), computed on a copy capped to `max_side`
     (defaults to the fast bulk size) then upscaled back to img_rgb's size.
     A larger max_side feeds the model more detail = crisper edges.
@@ -623,7 +681,11 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
     `upscale=False` returns the matte at the resolution the model actually
     produced. The refinement passes make their decisions at or below that
     scale anyway, so working on the pre-upscale matte does the same work on
-    ~10x fewer pixels; _refine_alpha upscales once at the end instead."""
+    ~10x fewer pixels; _refine_alpha upscales once at the end instead.
+
+    `wait` is how long to queue for the inference slot before giving up with
+    CutoutBusy; it defaults to the batch deadline. See BATCH_INFER_WAIT_SECONDS
+    for why the two callers want very different answers."""
     global _rembg_session
     cap = max_side or _REMBG_MAX_SIDE
     scale = min(1.0, cap / max(img_rgb.size))
@@ -631,10 +693,11 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
                              max(1, round(img_rgb.height * scale))), Image.LANCZOS)
              if scale < 1 else img_rgb)
     # One inference at a time — concurrent runs would stack peak memory and OOM
-    # — but with a deadline on the wait, so a queue behind a bulk job answers
-    # "busy" instead of hanging.
+    # — but with a deadline on the wait, so a caller who cannot afford to queue
+    # is told "busy" instead of hanging.
     global _last_infer_seconds, _model_ready
-    if not _INFER_LOCK.acquire(timeout=INFER_WAIT_SECONDS):
+    if not _INFER_LOCK.acquire(
+            timeout=BATCH_INFER_WAIT_SECONDS if wait is None else wait):
         raise CutoutBusy(
             "The background remover is working through another batch. "
             "Give it a moment and try again.")
@@ -644,16 +707,25 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
         # full answers "busy" without paying to pull in onnxruntime first.
         from rembg import new_session, remove
         if _rembg_session is None:
+            # Set before the session is built, not after — rembg reads this
+            # when it constructs the SessionOptions and never looks again.
+            os.environ.setdefault("OMP_NUM_THREADS", str(_infer_threads()))
             _rembg_session = new_session(_REMBG_MODEL)
             _model_ready = True
+            log.info("bg-removal: model %s ready (%s inference thread(s), "
+                     "%dpx, %d photo workers)", _REMBG_MODEL,
+                     os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE,
+                     _LOCAL_BATCH_WORKERS)
         alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
     finally:
         _last_infer_seconds = time.monotonic() - started
         _INFER_LOCK.release()
     if _last_infer_seconds > INFER_SLOW_SECONDS:
-        log.warning("bg-removal: inference took %.1fs at %dpx (model=%s) — "
-                    "slow enough that callers will have given up",
-                    _last_infer_seconds, cap, _REMBG_MODEL)
+        log.warning("bg-removal: inference took %.1fs at %dpx (model=%s, "
+                    "%s threads) — a batch will still finish, but anyone "
+                    "watching a spinner has given up",
+                    _last_infer_seconds, cap, _REMBG_MODEL,
+                    os.environ.get("OMP_NUM_THREADS", "auto"))
     if upscale and alpha.size != img_rgb.size:
         # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
         # high-contrast edges, ringing a faint halo of the old background back
@@ -945,7 +1017,7 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
 def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
                      dark_guard: bool = True,
                      result: Optional[matte.CutoutResult] = None,
-                     ) -> Optional[Image.Image]:
+                     wait: Optional[float] = None) -> Optional[Image.Image]:
     """In-house rembg cutout composited on pure white (with a soft drop shadow
     unless BG_SHADOW=off) — or None when the result is clearly a failure
     (subject erased), so callers keep the original photo instead of saving a
@@ -955,7 +1027,10 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     by bailing to None — right for the automatic path, which would otherwise
     silently save a mangled cutout. The photo studio passes dark_guard=False:
     the seller is reviewing the result and can Revert, so it's better to SHOW
-    the cutout than to hard-fail with an error."""
+    the cutout than to hard-fail with an error.
+
+    `wait` is the inference-queue deadline (see BATCH_INFER_WAIT_SECONDS); the
+    default queues like a batch, and the studio passes the interactive one."""
     result = result if result is not None else matte.CutoutResult()
     result.engine = result.engine or f"rembg:{_REMBG_MODEL}"
     rgb = img.convert("RGB")
@@ -963,8 +1038,9 @@ def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
     # every decision in _refine_alpha/_solidify_border happens at or below that
     # scale anyway, so the old full-size median/harden was ~10x the pixels for
     # the same answer. out_size brings the finished matte back to photo size.
-    alpha = _refine_alpha(_alpha_mask(rgb, max_side=max_side, upscale=False),
-                          source=rgb, out_size=rgb.size, result=result)
+    alpha = _refine_alpha(
+        _alpha_mask(rgb, max_side=max_side, upscale=False, wait=wait),
+        source=rgb, out_size=rgb.size, result=result)
     # Put back anything the matte punched out of the item's middle BEFORE the
     # guards below: a matte that ate the interior and left a rim reads as
     # "subject nearly erased" (or as a big dark removed area), and bailing out
@@ -1311,8 +1387,8 @@ def _studio_and_cutout(
     by default the budget Pixian API when configured (with the local model
     behind it), otherwise local alone — the pricey Photoroom/Adobe engines run
     only when BG_ENGINE explicitly picks them. Each engine's cutout goes on
-    white with our soft shadow; the caller's enhancement pass supplies the
-    studio polish (Adobe additionally runs its Lightroom preset first).
+    white with our soft shadow (Adobe additionally runs its Lightroom preset
+    first, which is the one path that retones the photo at all).
 
     When every engine in the chain fails, keep the ORIGINAL photo and surface
     the last reason — a busy background is always better than a shredded item."""
@@ -1422,7 +1498,8 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
                     # dark_guard off: the seller reviews the result and can
                     # Revert, so show the cutout rather than hard-failing on a
                     # borderline shot.
-                    out = _cutout_on_white(img, max_side=side, dark_guard=False)
+                    out = _cutout_on_white(img, max_side=side, dark_guard=False,
+                                           wait=INFER_WAIT_SECONDS)
                 except CutoutBusy:
                     # Not a model problem and not fixable by trying smaller —
                     # the queue was full. Retrying here would just spend
@@ -1666,117 +1743,26 @@ def _fill_square(img: Image.Image) -> Image.Image:
     return rgb.crop((left, top, left + side, top + side))
 
 
-def _auto_tone(img: Image.Image) -> Image.Image:
-    """Lightroom-style auto tone, computed locally (no API): neutralize the
-    color cast using the photo's border — the backdrop/table, which should be
-    neutral — as the gray reference, then stretch levels adaptively.
+def _finish(img: Image.Image) -> Image.Image:
+    """The only tone work the pipeline does: a light sharpen, to put back the
+    micro-contrast that the downscale to TARGET_SIZE costs.
 
-    Conservative by design: white balance only runs when the border looks like
-    a plausible neutral backdrop (bright-ish, mild cast), per-channel gains are
-    clamped, and the levels stretch clips 0.5% outliers with a capped gain —
-    so a colorful item filling the frame is never washed out. Fixes the
-    classic indoor yellow/warm cast on listing photos."""
-    rgb = img.convert("RGB")
-    small = rgb.resize((64, 64), Image.BILINEAR)
+    There used to be an "auto tone" pass here — a border-referenced white
+    balance, an adaptive levels stretch, and brightness/contrast/colour
+    nudges — added on the theory that a better-exposed photo would give the
+    background remover a cleaner edge to find. It cannot: the matte comes from
+    isnet, which sees its own downscaled copy of the SOURCE photo (see
+    _alpha_mask), while this runs after the cutout, on the finished canvas.
+    Every photo paid for a full-frame histogram, a 64x64 border sample and
+    four LUT/enhance passes that changed nothing about where the cut landed.
 
-    # --- white balance from the border ring (outer ~12%) ---
-    # Pixel access rather than getdata(): the latter is deprecated out of
-    # Pillow 14, and this only needs 64x64.
-    px = small.load()
-    ring = [px[x, y] for y in range(64) for x in range(64)
-            if x < 8 or x >= 56 or y < 8 or y >= 56]
-    n = max(1, len(ring))
-    means = [sum(p[c] for p in ring) / n for c in range(3)]
-    mx, mn = max(means), max(1.0, min(means))
-    out = rgb
-    if mx > 90 and mx / mn < 1.6:  # bright-ish border with at most a mild cast
-        target = sum(means) / 3
-        gains = [min(1.3, max(0.8, target / max(1.0, m))) for m in means]
-        if any(abs(g - 1) > 0.02 for g in gains):
-            luts = []
-            for g in gains:
-                luts.extend(min(255, round(v * g)) for v in range(256))
-            out = out.point(luts)
-
-    # --- tone: white point, midtones, and a capped black point, in one LUT ---
-    hist = out.convert("L").histogram()
-    total = max(1, sum(hist))
-
-    # White point. The clip used to be 0.5%, which on a real photo is often
-    # just a specular glint or a sliver of window — one blown highlight put
-    # `hi` at 255 and the whole lift switched itself off, which is why auto
-    # tone looked like it did nothing on most photos. 1.5% steps past that.
-    hi = _percentile(hist, total, 0.985)
-    gain = min(1.4, 255 / hi) if 60 < hi < 250 else 1.0
-
-    # Midtones, measured on the SUBJECT rather than the frame: a white
-    # backdrop (or a background-removal cutout, which is pure white by
-    # construction) dominates the histogram and would otherwise drag the
-    # median up and make us darken the very item being sold.
-    median = _subject_median(hist, total)
-    gamma = 1.0
-    if not 104 <= median <= 150:
-        gamma = math.log(124 / 255) / math.log(max(2, median) / 255)
-        gamma = min(1.30, max(0.72, gamma))
-
-    # Black point, but only for photos that are actually hazy — a lifted floor
-    # (nothing anywhere near black) means flat light, not a dark item. The
-    # shift stays small and the gate stays high, because on a product shot the
-    # dark end IS the item and stretching from there crushes its colors.
-    lo = _percentile(hist, total, 0.005)
-    black = min(12, lo - 6) if lo > 20 else 0
-
-    if black or gain != 1.0 or gamma != 1.0:
-        lut = []
-        denom = max(1, 255 - black)
-        for v in range(256):
-            x = max(0.0, (v - black) / denom)
-            if gamma != 1.0:
-                x = x ** gamma
-            lut.append(min(255, max(0, round(x * gain * 255))))
-        out = out.point(lut * 3)
-    return out
-
-
-def _percentile(hist: list[int], total: int, frac: float) -> int:
-    """Luminance level with `frac` of the histogram's mass at or below it."""
-    want = total * frac
-    acc = 0
-    for v in range(256):
-        acc += hist[v]
-        if acc >= want:
-            return v
-    return 255
-
-
-def _subject_median(hist: list[int], total: int) -> int:
-    """Median luminance ignoring near-white and near-black pixels, so backdrop
-    and cutout white don't decide the exposure of the item."""
-    lo, hi = 6, 249
-    sub = sum(hist[lo:hi + 1])
-    if sub < total * 0.10:  # item fills the frame edge to edge — use it all
-        lo, hi, sub = 0, 255, total
-    acc, half = 0, max(1, sub) / 2
-    for v in range(lo, hi + 1):
-        acc += hist[v]
-        if acc >= half:
-            return v
-    return 128
-
-
-def _enhance(img: Image.Image) -> Image.Image:
-    img = _auto_tone(img)
-    # Scale the finishing nudges to how flat the photo actually is. These used
-    # to be fixed at 4-8% for every photo, which is invisible on a dull one and
-    # unnecessary on a punchy one — the other half of "auto levels does very
-    # little". stddev ~58 is a contrasty photo, ~25 is flat and dingy.
-    spread = ImageStat.Stat(img.convert("L")).stddev[0] or 0.0
-    t = min(1.0, max(0.0, (58 - spread) / 33))
-    img = ImageEnhance.Brightness(img).enhance(1.02 + 0.04 * t)
-    img = ImageEnhance.Contrast(img).enhance(1.06 + 0.16 * t)
-    img = ImageEnhance.Color(img).enhance(1.04 + 0.12 * t)
-    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=3))
-    return img
+    What it did change was the picture, usually for the worse. On a cutout the
+    frame is white by construction, so the levels stretch read a histogram
+    that was mostly backdrop, and the contrast nudge pushed the item darker
+    against a canvas already clipped at 255 — the item came back muddier than
+    the photo the seller actually took.
+    """
+    return img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
 
 
 # Clockwise degrees -> the exact (lossless) Pillow transpose for it.
@@ -1830,13 +1816,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         if img.size[0] != TARGET_SIZE:
             img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
 
-        if studio_applied:
-            # Lightroom already set tone/color — re-cooking it with the local
-            # brightness/contrast boost would double-process. Just a light
-            # sharpen to crisp up the post-resize pixels.
-            img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
-        else:
-            img = _enhance(img)
+        # One finishing sharpen for every path. Adobe's Lightroom preset (when
+        # the adobe engine ran) has already set tone and colour; nothing else
+        # sets it at all, by design — see _finish.
+        img = _finish(img)
 
         dst = dst.with_suffix(".jpg")
         # No exif= argument, deliberately and on the record: the saved file
@@ -1845,7 +1828,19 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         # is to drop it, which makes this a guarantee that could be lost by
         # someone helpfully "preserving metadata" — hence the note and
         # test_export_pipeline.py's assertion.
-        img.save(dst, "JPEG", quality=JPEG_QUALITY, optimize=True)
+        #
+        # Written via a temp file and renamed: a photo that exists is a photo
+        # that is FINISHED. optimize_all treats an existing output as done and
+        # skips it (that is what makes an interrupted batch resumable), so a
+        # torn JPEG left behind by a machine that died mid-save would be
+        # adopted as a good one and shipped to a listing.
+        tmp = dst.with_name(f".{dst.name}.{os.getpid():x}.tmp")
+        try:
+            img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
+            os.replace(tmp, dst)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     out = {
         "file": dst.name,
@@ -1938,7 +1933,16 @@ _LOCAL_BATCH_WORKERS = int(os.getenv("PHOTO_LOCAL_WORKERS", "2") or "2")
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
                  progress=None) -> list[dict]:
     """Optimize every image in src_dir. `progress(done, total)` (optional) is
-    called after each photo so long bulk jobs can show a live count."""
+    called after each photo so long bulk jobs can show a live count.
+
+    Photos whose output already exists are left alone and reported as
+    {"file", "reused"}. That is what lets a batch that died halfway — a deploy,
+    an OOM, a machine the platform decided to replace — be started again
+    without paying for the cutouts it already finished. It is safe to trust an
+    existing output because optimize() renames its result into place, so a
+    file being there means it was written completely (see the save in
+    optimize()). Positions come from the sorted source list, so the same photo
+    maps to the same output name on every run."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
             ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
@@ -1947,34 +1951,59 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     jobs = [(i, src) for i, src
             in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
             if src.suffix.lower() in exts]
-    # One batched vision pass over the whole set decides which photos were shot
-    # with the ITEM lying sideways or upside-down — something EXIF can't tell
-    # us. Done up front so each photo is straightened before its cutout and
-    # square crop, not after.
+    todo = [(i, src, dst) for i, src in jobs
+            if not (dst := dst_dir / f"img_{i:03d}.jpg").exists()]
+    if len(todo) < len(jobs):
+        log.info("images: %d of %d photo(s) already optimized — resuming",
+                 len(jobs) - len(todo), len(jobs))
+    # One batched vision pass over the photos still to do decides which were
+    # shot with the ITEM lying sideways or upside-down — something EXIF can't
+    # tell us. Done up front so each photo is straightened before its cutout
+    # and square crop, not after.
     # Imported here, not at module scope: orient reaches the Anthropic SDK,
     # and everything else in this file is pure Pillow/NumPy. Keeping the AI
     # dependency inside the one function that needs it is what lets the cutout
     # safety suite run in CI without installing an LLM client to check that a
     # mask kept a shoelace.
     from . import orient
-    rotations = orient.detect_rotations([src for _i, src in jobs])
-    return optimize_batch(
-        [(src, dst_dir / f"img_{i:03d}.jpg", rotations.get(src.name, 0))
-         for i, src in jobs],
-        remove_bg=remove_bg, progress=progress)
+    rotations = orient.detect_rotations([src for _i, src, _dst in todo])
+    # A list, not a set: these line up positionally with optimize_batch's
+    # results below, and a set's iteration order is not the job order.
+    pending = [i for i, _src, _dst in todo]
+    results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
+               for i, _src in jobs if i not in set(pending)}
+    if progress and not todo and jobs:
+        # Nothing left to do, so nothing below will ever tick. Report the real
+        # count once rather than leaving a resumed batch's bar reading zero.
+        try:
+            progress(len(jobs), len(jobs))
+        except Exception:  # noqa: BLE001 - progress is display-only
+            pass
+    results.update(zip(pending, optimize_batch(
+        [(src, dst, rotations.get(src.name, 0)) for _i, src, dst in todo],
+        remove_bg=remove_bg, progress=progress,
+        done_already=len(results), grand_total=len(jobs))))
+    # Back into source order, so results still line up with the filenames.
+    return [results[i] for i, _src in jobs]
 
 
 def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
-                   progress=None) -> list[dict]:
+                   progress=None, done_already: int = 0,
+                   grand_total: int = 0) -> list[dict]:
     """Optimize (src, dst, clockwise-rotation) jobs, pooled to fit the engine.
 
     A chain led by a remote API (Pixian/Photoroom/Adobe) gets a wide pool —
     each photo is mostly a network call we wait on. The local engine (and the
     no-cutout path) gets a small pool: inference is serialized by _INFER_LOCK
     either way, but the pipeline around it overlaps. Results come back in job
-    order; a failed photo yields {"file", "error"} instead of raising."""
-    total = len(jobs)
-    done = 0
+    order; a failed photo yields {"file", "error"} instead of raising.
+
+    `done_already`/`grand_total` describe work this call is NOT doing — the
+    photos a resumed batch found already finished. They only shift what
+    `progress` reports, so the seller's count stays "38 of 40" across a
+    restart instead of dropping back to "0 of 2"."""
+    total = grand_total or len(jobs)
+    done = done_already
     done_lock = threading.Lock()
 
     def _tick() -> None:
@@ -1999,13 +2028,15 @@ def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
 
     chain = config.bg_engine_chain() if remove_bg else []
     remote_first = bool(chain) and chain[0] != "local"
+    # Sized to the photos THIS call has to run, not to `total` — which on a
+    # resumed batch also counts the ones already on disk.
     if remote_first:
-        workers = min(_PHOTO_BATCH_WORKERS, total)
+        workers = min(_PHOTO_BATCH_WORKERS, len(jobs))
     elif remove_bg:
         # Local cutouts: model inference releases the GIL (and is serialized
         # by _INFER_LOCK anyway), so a second photo's mask/crop/encode work
         # genuinely overlaps it.
-        workers = min(_LOCAL_BATCH_WORKERS, total)
+        workers = min(_LOCAL_BATCH_WORKERS, len(jobs))
     else:
         # No cutout = pure Pillow CPU with no waits to overlap; measured with
         # the perf harness, a 2-thread pool is ~15% SLOWER than serial here
@@ -2031,7 +2062,9 @@ def _subject_mask(img: Image.Image) -> Image.Image:
     model mistakes for background makes auto-clean whiten a chunk out of the
     middle of the item."""
     rgb = img.convert("RGB")
-    mask, _ = _fill_interior_holes(_alpha_mask(rgb), rgb)
+    # Interactive deadline: these back the editor's Smart crop / Auto clean
+    # buttons, where a prompt "busy, try again" beats a long spinner.
+    mask, _ = _fill_interior_holes(_alpha_mask(rgb, wait=INFER_WAIT_SECONDS), rgb)
     return mask
 
 

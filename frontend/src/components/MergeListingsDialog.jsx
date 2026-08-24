@@ -19,8 +19,11 @@ import { TagPill } from "@/components/ui/badges";
    selected first and delete the rest — so the other drafts' writing went in
    the bin, silently, and the seller found out later.
 
-   So the merge asks two questions, in this order:
+   So the merge asks, in this order:
 
+     0. What does it merge with? Ticking ONE draft in the queue is enough to
+        start — this step offers the rest of the batch as partners. Tick two
+        or more up front and the question is already answered, so it's skipped.
      1. Which draft is the master? Everything is kept under it; the others are
         consolidated into it and deleted.
      2. Where the drafts disagree, whose entry wins? Only fields two drafts
@@ -88,6 +91,46 @@ function MasterRow({ item, selected, onSelect }) {
   );
 }
 
+// One candidate in step zero: another draft in the batch this one could be a
+// duplicate of. A checkbox, not a radio — one item can be split across three
+// drafts as easily as two, and all of them merge in one pass.
+function PartnerRow({ item, selected, onToggle }) {
+  const src = thumbOf(item);
+  const price = formatMoney(item.listing?.price, item.listing?.currency || "USD");
+  const photos = photoCount(item);
+  return (
+    <label
+      className={cn(
+        "flex items-center gap-3 rounded-[13px] border p-3 cursor-pointer",
+        "transition-colors duration-150",
+        selected ? "border-blue bg-blue-soft/40" : "border-line bg-bg hover:border-line-strong",
+      )}
+    >
+      <input
+        type="checkbox"
+        className="size-4 shrink-0 accent-(--brand-blue)"
+        checked={selected}
+        onChange={() => onToggle(item.session_id)}
+      />
+      {src
+        ? <img src={src} alt="" className="size-12 rounded-[10px] object-cover bg-bg-sunken shrink-0" />
+        : <span className="size-12 rounded-[10px] bg-bg-sunken shrink-0" aria-hidden />}
+      <span className="min-w-0 flex-1">
+        <span className="block font-semibold text-sm text-ink line-clamp-2">
+          {titleOf(item)}
+        </span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-ink-secondary tabular-nums">
+          <span className="inline-flex items-center gap-1">
+            <Images size={12} aria-hidden /> {photos} photo{photos === 1 ? "" : "s"}
+          </span>
+          {price && <span>· {price}</span>}
+        </span>
+      </span>
+      {selected && <TagPill tone="blue" className="shrink-0">Merging</TagPill>}
+    </label>
+  );
+}
+
 // One field the drafts disagree about: every distinct entry on offer, labelled
 // with the draft it came from. Long values (a description) are clamped rather
 // than truncated so the picker keeps its shape.
@@ -133,21 +176,41 @@ function ConflictField({ conflict, drafts, chosen, onChoose }) {
   );
 }
 
-export function MergeListingsDialog({ open, drafts, onClose, onMerged }) {
+export function MergeListingsDialog({ open, drafts, candidates = [], onClose, onMerged }) {
+  // One ticked draft can't merge with itself, so the dialog opens by asking
+  // what it merges with. Two or more ticked already answers that — it opens
+  // on the master, exactly as it always did.
+  const needsPartner = drafts.length < 2 && candidates.length > 0;
+  const [partnerIds, setPartnerIds] = useState([]);
   const [masterId, setMasterId] = useState(drafts[0]?.session_id || "");
-  const [step, setStep] = useState("master");
+  const [step, setStep] = useState(needsPartner ? "partner" : "master");
   const [preview, setPreview] = useState(null);
   const [choices, setChoices] = useState({});
   const [loading, setLoading] = useState(false);
   const [merging, setMerging] = useState(false);
   const [error, setError] = useState("");
 
-  const sources = drafts.filter((d) => d.session_id !== masterId);
-  const masterTitle = titleOf(drafts.find((d) => d.session_id === masterId) || drafts[0] || {});
+  // Everything this merge covers: what was ticked in the queue, plus whatever
+  // partners were picked in step zero.
+  const pool = useMemo(
+    () => [...drafts, ...candidates.filter((c) => partnerIds.includes(c.session_id))],
+    [drafts, candidates, partnerIds],
+  );
+  const sources = pool.filter((d) => d.session_id !== masterId);
+  const masterTitle = titleOf(pool.find((d) => d.session_id === masterId) || pool[0] || {});
   // Which draft an entry came from, for the "from …" line under each option.
-  const byId = useMemo(() => Object.fromEntries(drafts.map((d) => [
+  const byId = useMemo(() => Object.fromEntries(pool.map((d) => [
     d.session_id, { title: titleOf(d), master: d.session_id === masterId },
-  ])), [drafts, masterId]);
+  ])), [pool, masterId]);
+
+  // Dropping a partner that had been picked as master hands the role back to
+  // the draft the seller ticked in the queue — the merge must always have a
+  // master that's actually in it.
+  const togglePartner = (id) => {
+    const on = partnerIds.includes(id);
+    setPartnerIds(on ? partnerIds.filter((x) => x !== id) : [...partnerIds, id]);
+    if (on && masterId === id) setMasterId(drafts[0]?.session_id || "");
+  };
 
   const review = async () => {
     setLoading(true);
@@ -191,9 +254,38 @@ export function MergeListingsDialog({ open, drafts, onClose, onMerged }) {
       open={open}
       onClose={merging ? () => {} : onClose}
       wide
-      title={step === "master" ? "Which draft is the master?" : "Which entries win?"}
+      title={step === "partner"
+        ? "Which listing should it merge with?"
+        : step === "master" ? "Which draft is the master?" : "Which entries win?"}
     >
-      {step === "master" ? (
+      {step === "partner" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-ink-secondary">
+            Merging{" "}
+            <strong className="font-semibold text-ink">"{titleOf(drafts[0] || {})}"</strong>{" "}
+            — tick the draft it's a duplicate of{candidates.length > 1
+              ? " (more than one is fine)" : ""}. Which one you keep, and what
+            carries over from the other, you choose next.
+          </p>
+          <div className="flex flex-col gap-2 max-h-[46vh] overflow-y-auto pr-1">
+            {candidates.map((item) => (
+              <PartnerRow
+                key={item.session_id}
+                item={item}
+                selected={partnerIds.includes(item.session_id)}
+                onToggle={togglePartner}
+              />
+            ))}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2 pt-1">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" onClick={() => setStep("master")}
+              disabled={!partnerIds.length}>
+              Next: pick the master <ArrowRight aria-hidden />
+            </Button>
+          </div>
+        </div>
+      ) : step === "master" ? (
         <div className="flex flex-col gap-3">
           <p className="text-sm text-ink-secondary">
             Every photo ends up on the master. The other{" "}
@@ -202,7 +294,7 @@ export function MergeListingsDialog({ open, drafts, onClose, onMerged }) {
             writing from.
           </p>
           <div className="flex flex-col gap-2">
-            {drafts.map((item) => (
+            {pool.map((item) => (
               <MasterRow
                 key={item.session_id}
                 item={item}
@@ -217,7 +309,13 @@ export function MergeListingsDialog({ open, drafts, onClose, onMerged }) {
             </p>
           )}
           <div className="flex flex-wrap justify-end gap-2 pt-1">
-            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            {needsPartner ? (
+              <Button variant="ghost" onClick={() => setStep("partner")} disabled={loading}>
+                <ArrowLeft aria-hidden /> Change what merges
+              </Button>
+            ) : (
+              <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            )}
             <Button variant="primary" onClick={review} loading={loading}
               disabled={!masterId || !sources.length}>
               Next: check the fields <ArrowRight aria-hidden />
@@ -305,7 +403,7 @@ export function MergeListingsDialog({ open, drafts, onClose, onMerged }) {
               <ArrowLeft aria-hidden /> Change master
             </Button>
             <Button variant="primary" onClick={merge} loading={merging}>
-              <Combine aria-hidden /> Merge {drafts.length} drafts
+              <Combine aria-hidden /> Merge {pool.length} drafts
             </Button>
           </div>
         </div>

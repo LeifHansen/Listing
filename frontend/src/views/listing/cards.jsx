@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag,
+  Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
@@ -14,6 +14,7 @@ import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
+import { TITLE_MAX } from "./blockers";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
@@ -176,6 +177,18 @@ export function PhotosCard({ w, onEdit, onDelete }) {
 
 export function TitleCard({ w }) {
   const len = w.form.title.length;
+  // eBay's hard ceiling, enforced as the seller types rather than reported
+  // back as a rejection — the input stops accepting characters at TITLE_MAX,
+  // and the counter goes amber before it gets there so running out of room is
+  // never a surprise. The same limit is enforced server-side for titles that
+  // arrive any other way (see models.TITLE_MAX_CHARS).
+  //
+  // Over the limit is still reachable: a draft written before the limit
+  // existed opens with its original title, which maxLength can shorten only
+  // by being edited. That one is red, not amber — it is a blocker, and the
+  // publish bar is naming it as one.
+  const over = len > TITLE_MAX;
+  const nearLimit = len >= TITLE_MAX - 8;
   return (
     <WorkflowCard
       id="title" icon={Type} title="Title"
@@ -186,13 +199,21 @@ export function TitleCard({ w }) {
         <Field
           label="Title"
           hint={
-            <span className={cn("tabular-nums", len > 72 && "text-warning font-semibold")}>
-              {len}/80
+            <span
+              className={cn("tabular-nums", nearLimit && "font-semibold",
+                over ? "text-error" : nearLimit && "text-warning")}
+              title={over
+                ? `${len - TITLE_MAX} over eBay's ${TITLE_MAX}-character limit — eBay will refuse the listing`
+                : len === TITLE_MAX
+                  ? `eBay's limit — titles stop at ${TITLE_MAX} characters`
+                  : `${TITLE_MAX - len} left of eBay's ${TITLE_MAX}-character limit`}
+            >
+              {len}/{TITLE_MAX}
             </span>
           }
         >
           <Input
-            maxLength={80}
+            maxLength={TITLE_MAX}
             value={w.form.title}
             needsFix={w.fixTarget === "title"}
             onChange={(e) => w.set("title", e.target.value)}
@@ -487,34 +508,41 @@ export function SpecificsCard({ w }) {
       id="specifics" icon={ListChecks} title="Item specifics"
       hint={catAspects.length
         ? `${filledCount} of ${catAspects.length} filled by the AI`
-          + (missingRequired ? ` · ${missingRequired} required still empty` : "")
-          + (reviewCount ? ` · ${reviewCount} to check` : "")
-          + ". Required ones gate publishing; a wrong specific is worse than a "
-          + "missing one, so check anything flagged."
-        : "Details buyers filter by — required ones gate publishing"}
+          + (missingRequired ? ` · ${missingRequired} required still empty — eBay blocks the publish until they're filled` : "")
+          + (reviewCount ? ` · ${reviewCount} AI guess${reviewCount === 1 ? "" : "es"} to check (doesn't block publishing)` : "")
+          + ". A wrong specific is worse than a missing one, so check anything flagged."
+        : "Details buyers filter by — only the required ones gate publishing"}
       state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
     >
       <div className="flex flex-col gap-6">
-        {/* What still needs a human. The AI fills as much as it can, so the
-            seller's actual job here is the exception list — surfacing it at
-            the top is the difference between "scan twenty fields" and "handle
-            these three". Hidden entirely once there's nothing outstanding. */}
-        {(missingRequired > 0 || reviewCount > 0) && (
+        {/* What still needs a human, in two banners rather than one.
+
+            These are the card's two jobs and they are NOT the same job: an
+            empty required aspect stops the listing reaching eBay, while an
+            unreviewed AI guess publishes perfectly well and is merely likely
+            to be wrong. They shared one amber box, which made "eBay will
+            reject this" and "give this a glance" indistinguishable — the
+            seller either treated both as urgent or learned to ignore both.
+            Amber is now reserved for the blocker; the review nudge is blue,
+            and says out loud that it isn't holding anything up. */}
+        {missingRequired > 0 && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-warning/40 bg-warning-soft px-3.5 py-2.5">
             <AlertTriangle size={16} className="text-warning shrink-0" aria-hidden />
             <span className="text-[13px] text-ink flex-1 min-w-0">
-              {missingRequired > 0 && (
-                <strong className="font-bold">
-                  {missingRequired} required {missingRequired === 1 ? "specific is" : "specifics are"} empty
-                </strong>
-              )}
-              {missingRequired > 0 && reviewCount > 0 && " · "}
-              {reviewCount > 0 && (
-                <>
-                  <strong className="font-bold">{reviewCount} AI {reviewCount === 1 ? "guess" : "guesses"}</strong>
-                  {" "}to check — a wrong specific is worse than a missing one
-                </>
-              )}
+              <strong className="font-bold">
+                {missingRequired} required {missingRequired === 1 ? "specific is" : "specifics are"} empty
+              </strong>
+              {" — eBay won't accept the listing until "}
+              {missingRequired === 1 ? "it's filled in" : "they're filled in"}
+            </span>
+          </div>
+        )}
+        {reviewCount > 0 && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-blue/35 bg-blue-soft px-3.5 py-2.5">
+            <Eye size={16} className="text-blue shrink-0" aria-hidden />
+            <span className="text-[13px] text-ink flex-1 min-w-0">
+              <strong className="font-bold">{reviewCount} AI {reviewCount === 1 ? "guess" : "guesses"}</strong>
+              {" to check — nothing blocking, but a wrong specific is worse than a missing one"}
             </span>
             {reviewCount > 1 && (
               // Offered last and worded plainly, never as the primary action:
@@ -535,7 +563,9 @@ export function SpecificsCard({ w }) {
           <SpecGroup
             title="Required to publish"
             count={`${required.length - missingRequired}/${required.length}`}
-            note={missingRequired > 0 ? "eBay rejects the listing without these" : "all set"}
+            note={missingRequired > 0
+              ? "eBay rejects the listing without these"
+              : "all set — nothing here is blocking"}
           >
             <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3.5">
               {required.map(renderAspect)}
@@ -547,7 +577,7 @@ export function SpecificsCard({ w }) {
           <SpecGroup
             title="Recommended"
             count={`${recommendedFilled}/${recommendedAll.length}`}
-            note="buyers filter by these — more filled, more views"
+            note="optional — buyers filter by these, so more filled means more views"
           >
             <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3.5">
               {recommended.map(renderAspect)}

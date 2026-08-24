@@ -108,7 +108,7 @@ def main() -> None:
     timed("_autocrop_borders", lambda: images._autocrop_borders(rgb))
     timed("_fill_square", lambda: images._fill_square(rgb))
     sized = rgb.resize((1600, 1600), Image.LANCZOS)
-    timed("_enhance @1600", lambda: images._enhance(sized))
+    timed("_finish @1600", lambda: images._finish(sized))
 
     # Full no-cutout batch through optimize_all (AUTO_ORIENT=off above keeps
     # it offline). Exercises the PHOTO_LOCAL_WORKERS pool.

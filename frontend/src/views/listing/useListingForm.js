@@ -4,6 +4,7 @@ import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
 import { publishListing, usePublishTargets } from "./publishShared";
+import { ebayBlockers, weightOz } from "./blockers";
 
 /* All state + actions for the listing workflow. The form object mirrors the
    backend Listing model; item_specifics stays the single source of truth for
@@ -665,35 +666,52 @@ export function useListingForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryMeta.aspects, sessionId, session]);
 
+  // ---------- what is stopping this listing from reaching eBay ----------
+  // The editor's copy of the app-wide blocker list, with the one thing only
+  // the editor knows: the category's required item specifics, loaded into
+  // categoryMeta. Everything downstream — the card chips, the publish bar,
+  // the jump buttons — reads this and nothing else, so a card can only be
+  // flagged for a reason that genuinely blocks a publish.
+  const blockers = useMemo(
+    () => ebayBlockers(collect(), {
+      targets: chipTargets,
+      aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
+    }),
+    [collect, categoryMeta.aspects, chipTargets]);
+
   // ---------- completion per workflow card ----------
+  // Three states, and the distinction between the last two is the whole
+  // point: "attention" means eBay refuses the listing until this card is
+  // dealt with, "todo" means the card is simply empty and publishing is
+  // unaffected. Only cards holding a blocker get "attention" — a description
+  // the seller skipped, or specifics the category doesn't require, no longer
+  // wear the same warning as a missing price.
   const completion = useMemo(() => {
-    const requiredAspects = categoryMeta.aspects.filter((a) => a.required);
-    const missingAspects = requiredAspects.filter((a) => !getSpecific(a.name));
-    const weight = (parseFloat(form.package_weight_lb) || 0) * 16
-      + (parseFloat(form.package_weight_oz) || 0);
+    const blocked = new Set(blockers.map((b) => b.target));
+    const state = (target, filled) =>
+      blocked.has(target) ? "attention" : (filled ? "complete" : "todo");
     return {
       // An imported eBay listing has no local files — its photos live on eBay,
       // so image_urls counts as complete.
-      photos: ((form.images || []).length > 0 || (form.image_urls || []).length > 0)
-        ? "complete" : "attention",
-      title: form.title.trim() ? "complete" : "attention",
-      category: form.category_id.trim() ? "complete" : "attention",
-      specifics: missingAspects.length > 0 ? "attention"
-        : (form.item_specifics.some((s) => s.name.trim()) ? "complete" : "todo"),
-      pricing: (
-        form.listing_format === "AUCTION"
-          ? Number(form.auction_start_price) > 0
-          : form.listing_format === "AUCTION_BIN"
-            ? Number(form.auction_start_price) > 0 && Number(form.price) > 0
-            : Number(form.price) > 0
-      ) ? "complete" : "attention",
-      shipping: weight > 0 ? "complete" : "attention",
-      // eBay doesn't require a description (we fall back to the title), so an
-      // empty one is "todo" (grey), never "attention" — it must not count
-      // toward the publish bar's "N fields left to finish".
+      photos: state("photos",
+        (form.images || []).length > 0 || (form.image_urls || []).length > 0),
+      title: state("title", form.title.trim()),
+      category: state("category", form.category_id.trim()),
+      specifics: state("specifics",
+        form.item_specifics.some((s) => s.name.trim())),
+      // Price and condition share the Pricing card; either one blocking
+      // flags it.
+      pricing: (blocked.has("price") || blocked.has("condition"))
+        ? "attention"
+        : (Number(form.price) > 0 || Number(form.auction_start_price) > 0
+          ? "complete" : "todo"),
+      shipping: state("weight", weightOz(form) > 0),
+      // eBay doesn't require a description — we fall back to the title — so
+      // an empty one is grey, never a warning, and never counts toward the
+      // publish bar's blocker count.
       description: form.description.trim() ? "complete" : "todo",
     };
-  }, [form, categoryMeta.aspects, getSpecific]);
+  }, [form, blockers]);
 
   return {
     sessionId, form, set, setForm, collect,
@@ -712,6 +730,6 @@ export function useListingForm() {
     confirmSpecific, confirmAllSpecifics,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
     imageVersions, bumpImageVersion,
-    completion,
+    completion, blockers,
   };
 }

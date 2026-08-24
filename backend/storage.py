@@ -251,6 +251,30 @@ def prune_exports(max_age_seconds: int) -> int:
     return freed
 
 
+def session_touched_at(d: Path) -> float:
+    """When anything in this session last changed.
+
+    A session's own mtime is NOT that. A directory's mtime only moves when an
+    entry is added or removed from it directly, and photos land one level down
+    in original/ and optimized/ — so a session dir's mtime is really "when the
+    session was created", and it never moves again no matter how long the batch
+    runs. The sweep used that as its idle test, which meant a batch still
+    working through its photos looked idle from the moment it passed the age
+    cutoff, and could have the staging photos it was mid-way through reading
+    deleted out from under it.
+
+    Checking the immediate children fixes it, because adding a photo to
+    original/ does move original/'s mtime. One level deep is enough for the
+    shape we actually write, and keeps this to a handful of stats per session.
+    """
+    times = [d.stat().st_mtime]
+    try:
+        times.extend(child.stat().st_mtime for child in d.iterdir())
+    except OSError:  # vanished mid-scan, or unreadable — the dir's own is fine
+        pass
+    return max(times)
+
+
 def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> list[str]:
     """Delete session dirs that aren't a known listing and haven't been touched
     in `max_age_seconds` — i.e. leftover bulk staging and abandoned uploads that
@@ -274,7 +298,7 @@ def sweep_orphan_sessions(valid_ids: set[str], max_age_seconds: int) -> list[str
             try:
                 if not d.is_dir() or d.name in valid_ids:
                     continue
-                if d.stat().st_mtime > cutoff:
+                if session_touched_at(d) > cutoff:
                     continue  # too recent — may be an in-flight upload/session
                 shutil.rmtree(d, ignore_errors=True)
                 removed.append(d.name)

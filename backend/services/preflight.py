@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..models import Listing
+from ..models import TITLE_MAX_CHARS, Listing
 
 # Per-service package weight caps, in ounces, matched case-insensitively as
 # substrings of eBay's shippingServiceCode. Only services with caps BELOW the
@@ -40,6 +40,23 @@ SERVICE_WEIGHT_CAPS_OZ: list[tuple[str, float, str, str]] = [
 
 EBAY_MIN_PRICE = 0.99  # EBAY_US fixed-price minimum
 MAX_PHOTOS = 24
+
+# The short name of each thing an issue can point at, by target. This is
+# what a seller sees on the publish bar's jump chips ("Package weight"),
+# so it names the FIELD they have to touch — not the rule that failed.
+FIELD_LABELS: dict[str, str] = {
+    "photos": "Photos",
+    "title": "Title",
+    "condition": "Condition",
+    "price": "Price",
+    "category": "eBay category",
+    "specifics": "Required item specifics",
+    "weight": "Package weight",
+    "shipping": "Shipping service",
+    "policies": "Business policies",
+    "location": "Ship-from location",
+    "description": "Description",
+}
 
 
 def weight_oz(listing: Listing) -> float:
@@ -70,6 +87,8 @@ def check_weight_vs_services(listing: Listing, services: list[dict]) -> list[dic
             issues.append({
                 "target": "shipping",
                 "level": "error",
+                "blocking": True,
+                "field": FIELD_LABELS["shipping"],
                 "title": f"Too heavy for {name} in your shipping policy",
                 "fix": (f"This package weighs {w:g} oz but {name} maxes out at {pretty_cap}"
                         + (f" ({note})" if note else "") +
@@ -88,12 +107,28 @@ def validate(listing: Listing, mode: str, *,
 
     Draft mode checks only what createOrReplaceInventoryItem needs (title,
     photo); live mode checks the full publishOffer contract. Each issue is
-    {target, level ('error'|'warn'), title, fix}.
+    {target, level ('error'|'warn'), blocking, field, title, fix} — see add()
+    for what `blocking` and `field` are for.
     """
     issues: list[dict] = []
 
-    def add(target: str, title: str, fix: str, level: str = "error") -> None:
-        issues.append({"target": target, "level": level, "title": title, "fix": fix})
+    def add(target: str, title: str, fix: str, level: str = "error",
+            field: str = "") -> None:
+        """One checklist entry.
+
+        `blocking` is the whole point of the list: True means eBay refuses
+        the listing until this is fixed, False means it publishes fine and
+        this is only advice. The UI shows the two in separate groups and
+        counts only the blocking ones, so a seller never hunts through
+        suggestions looking for what actually stopped the publish.
+
+        `field` is the short name of the thing to fix ("Title", "Package
+        weight") — what the publish bar's jump chips are labelled with.
+        """
+        issues.append({"target": target, "level": level,
+                       "blocking": level != "warn",
+                       "field": field or FIELD_LABELS.get(target, ""),
+                       "title": title, "fix": fix})
 
     # --- inventory item ---
     # An imported eBay listing has no local files — its photos are the
@@ -105,9 +140,11 @@ def validate(listing: Listing, mode: str, *,
         add("photos", f"Too many photos ({len(listing.images)})",
             f"eBay allows up to {MAX_PHOTOS} photos — remove a few.")
     if not (listing.title or "").strip():
-        add("title", "A title is required", "Give the listing a title (up to 80 characters).")
-    elif len(listing.title) > 80:
-        add("title", "The title is over 80 characters", "Shorten the title to 80 characters or fewer.")
+        add("title", "A title is required",
+            f"Give the listing a title (up to {TITLE_MAX_CHARS} characters).")
+    elif len(listing.title) > TITLE_MAX_CHARS:
+        add("title", f"The title is over {TITLE_MAX_CHARS} characters",
+            f"Shorten the title to {TITLE_MAX_CHARS} characters or fewer.")
     if not (listing.condition or "").strip():
         add("condition", "A condition is required", "Pick a condition on the Pricing card.")
 

@@ -127,7 +127,7 @@ def test_a_mirror_failure_never_breaks_the_job(store, monkeypatch, tmp_path):
     store.update("abc123", current=1)
 
     assert store.snapshot("abc123")["current"] == 1
-    assert store.adopt_mirrors() == 0  # and reading it back is just as quiet
+    assert store.adopt_mirrors() == []  # and reading it back is just as quiet
 
 
 # ------------------------------------------- what comes back from a restart
@@ -139,12 +139,30 @@ def test_a_batch_killed_mid_run_comes_back_finished(store, tmp_path):
     store.update("abc123", current=37, total_photos=38)
 
     jobstore.reset()                     # the restart
-    assert store.adopt_mirrors() == 1
+    assert len(store.adopt_mirrors()) == 1
 
     snap = store.snapshot("abc123", "owner")
     assert snap["done"] is True
     assert "37 of 38" in snap["error"]
-    assert "Drafts" in snap["error"]
+
+
+def test_a_batch_that_never_reached_drafting_does_not_promise_drafts():
+    """A batch killed during the photo pass has written NOTHING to Drafts —
+    it drafts only in the identify phase, which it never got to. Sending that
+    seller to Drafts sends them to an empty list, which reads as lost work."""
+    for phase in ("uploading", "optimizing", "grouping"):
+        message = jobstore.interrupted_message(
+            {"phase": phase, "total_photos": 38})
+        assert "Drafts" not in message, phase
+        assert "upload the photos again" in message, phase
+
+
+def test_a_batch_that_did_reach_drafting_points_at_them():
+    """The other half: once identifying starts, each finished item IS saved,
+    so the seller needs to know they are there before re-running the rest."""
+    message = jobstore.interrupted_message(
+        {"phase": "identifying", "current": 4, "total_items": 12})
+    assert "Drafts" in message and "item 4 of 12" in message
 
 
 def test_an_adopted_job_keeps_its_owner(store):
@@ -161,7 +179,7 @@ def test_a_batch_that_finished_is_adopted_as_it_was(store):
     store.register("abc123", {"phase": "identifying", "done": False})
     store.update("abc123", phase="done", done=True)
     jobstore.reset()
-    assert store.adopt_mirrors() == 0
+    assert store.adopt_mirrors() == []
     snap = store.snapshot("abc123")
     assert snap["done"] is True and snap.get("error") is None
 
@@ -176,7 +194,7 @@ def test_a_batch_that_failed_keeps_its_own_reason(store):
 
 
 @pytest.mark.parametrize("phase, fields, expected", [
-    ("optimizing", {"current": 37, "total_photos": 38}, "optimizing photo 37 of 38"),
+    ("optimizing", {"current": 37, "total_photos": 38}, "preparing photo 37 of 38"),
     ("identifying", {"current": 4, "total_items": 12}, "identifying item 4 of 12"),
     ("grouping", {}, "sorting the photos into items"),
     ("uploading", {}, "receiving the photos"),
@@ -193,7 +211,9 @@ def test_a_single_item_identify_gets_its_own_reason():
 
 
 def test_the_reason_survives_a_job_with_no_progress_yet():
-    """A job killed before it recorded a phase still gets a usable sentence."""
+    """A job killed before it recorded a phase still gets a usable sentence.
+    With no phase we cannot tell whether it drafted anything, so this is the
+    one case that should point at Drafts without claiming what is in there."""
     message = jobstore.interrupted_message({})
     assert message.startswith("The server restarted,") and "Drafts" in message
 
@@ -211,7 +231,7 @@ def test_adopting_never_clobbers_a_live_job(store):
     store.register("abc123", {"phase": "optimizing", "done": False})
     store.update("abc123", current=37, total_photos=38)
 
-    assert store.adopt_mirrors() == 0
+    assert store.adopt_mirrors() == []
 
     snap = store.snapshot("abc123")
     assert snap["done"] is False and snap["current"] == 37
@@ -228,7 +248,7 @@ def test_the_verdict_is_not_written_back_to_the_mirror(store, tmp_path):
     assert on_disk["done"] is False
 
     jobstore.reset()  # a second restart derives the same answer
-    assert store.adopt_mirrors() == 1
+    assert len(store.adopt_mirrors()) == 1
     assert store.snapshot("abc123")["done"] is True
 
 
@@ -256,7 +276,7 @@ def test_a_torn_mirror_is_skipped_not_fatal(store, tmp_path):
 
 def test_adopting_with_no_mirror_dir_is_quiet(store, tmp_path):
     """First boot on a fresh volume."""
-    assert store.adopt_mirrors() == 0
+    assert store.adopt_mirrors() == []
 
 
 def test_old_mirrors_are_pruned_at_startup(store, tmp_path):

@@ -49,6 +49,25 @@ jobs:
         run: pytest backend/tests/test_matte.py -q
       - name: Cutout regression suite
         run: pytest backend/tests/test_cutout_regression.py backend/tests/test_bg_border.py -q
+      # The photo pass's durability invariants: outputs are renamed into place,
+      # and an existing one is trusted as finished. They are the same kind of
+      # rule as the mask-safety ones — get them wrong and a torn photo ships to
+      # a listing — and they need only Pillow, so this is where they belong.
+      #
+      # Failing on a SKIP is the point. Every test here importorskips, because
+      # the fast `checks` job collects the whole directory without the image
+      # stack. That is also how a suite quietly stops running: the deps drift,
+      # the file skips in the one job built for it, and green stops meaning
+      # anything. This job asserts it actually ran.
+      - name: Photo-pass resume rules
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest backend/tests/test_photo_resume.py -q -rs | tee /tmp/photo-resume.log
+          if grep -qE '[0-9]+ skipped' /tmp/photo-resume.log; then
+            echo "::error::test_photo_resume.py skipped in the job built to run it"
+            exit 1
+          fi
       - name: Export contract
         run: pytest backend/tests/test_export_pipeline.py backend/tests/test_orientation.py -q
 
@@ -117,8 +136,20 @@ jobs:
       # only place these can run at all. In `checks` they importorskip on the
       # missing Pillow and in `cutout` there is no fastapi — which meant they
       # were passing by never executing.
+      # Same skip guard as the cutout job's, and for the same reason: this is
+      # the only job with fastapi AND Pillow, so a skip here means these ran
+      # nowhere at all.
       - name: API tests
-        run: pytest backend/tests/test_readiness.py backend/tests/test_image_order.py backend/tests/test_sold_archive.py -q
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
+                 backend/tests/test_bulk_resume.py backend/tests/test_sold_archive.py \
+                 -q -rs | tee /tmp/api-tests.log
+          if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
+            echo "::error::API tests skipped in the only job that can run them"
+            exit 1
+          fi
       - name: Boot
         run: |
           SECRET_KEY=ci-smoke nohup python -m uvicorn backend.main:app --port 8099 \

@@ -191,9 +191,11 @@ const FOLDED_TARGETS = ["specifics", "weight", "shipping", "description"];
 function MoreDetails({ w, children }) {
   const reviewCount = (w.form.item_specifics || [])
     .filter((s) => (s.value || "").trim() && s.confidence === "medium").length;
-  const attention = ["specifics", "shipping", "description"]
-    .filter((k) => w.completion[k] === "attention").length;
-  const auto = attention > 0 || reviewCount > 0;
+  // What's behind the fold that a seller can't afford to leave folded: a card
+  // eBay is blocking the listing over, or an AI guess nobody has looked at.
+  const blocking = ["specifics", "shipping", "description"]
+    .filter((k) => w.completion[k] === "attention");
+  const auto = blocking.length > 0 || reviewCount > 0;
   // null = follow `auto`. Seeded from the current fix target so a fold that
   // mounts already flagged starts open.
   const [manual, setManual] = useState(
@@ -223,8 +225,13 @@ function MoreDetails({ w, children }) {
         {!open && (
           <span className="text-[13px] text-ink-secondary truncate">
             Description · Item specifics · Shipping · Promote
-            {reviewCount > 0 && (
+            {blocking.length > 0 && (
               <span className="ml-2 font-semibold text-warning">
+                {blocking.length === 1 ? "1 field is" : `${blocking.length} fields are`} blocking publish
+              </span>
+            )}
+            {reviewCount > 0 && (
+              <span className="ml-2 font-semibold text-blue">
                 {reviewCount} specific{reviewCount === 1 ? "" : "s"} to review
               </span>
             )}
