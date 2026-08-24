@@ -16,8 +16,8 @@ import time as _time
 import uuid as _uuid
 from typing import Optional
 
-from sqlalchemy import (DateTime, JSON, String, create_engine, delete, select,
-                        text)
+from sqlalchemy import (DateTime, JSON, String, create_engine, delete, func,
+                        or_, select, text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -584,6 +584,21 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
         return None
 
 
+def _json_text(column, key: str):
+    """`column ->> key` as a comparable string, in whichever dialect is in use.
+
+    Postgres renders this as ->> and SQLite as JSON_EXTRACT; both yield NULL
+    for an absent key, so `!= ''` drops missing and blank alike.
+
+    Only safe to compare as text for a field the Listing model types as `str`
+    — which the two callers below both do (models.Listing.ebay_account and
+    .ebay_listing_id, defaulting to ""), and every write goes through the
+    model. For a field that could hold a number or a bool, `->>` would render
+    it as "0"/"false" and a text comparison would disagree with Python's
+    truth test.
+    """
+    return column[key].as_string()
+
 
 def stamp_ebay_account(user_id: str, account: str) -> int:
     """Label every eBay-linked record that has no owning account yet.
@@ -603,10 +618,25 @@ def stamp_ebay_account(user_id: str, account: str) -> int:
             return 0
         stamped = 0
         with Session(eng) as s:
-            rows = s.execute(select(ListingRecord).where(
-                ListingRecord.user_id == user_id)).scalars().all()
+            # Select the rows this can actually stamp, not the whole store.
+            # These are the two conditions the loop used to re-check in Python
+            # after dragging every listing's JSON blob across the wire — a
+            # mirrored store is thousands of them, and on the common case (a
+            # reconnect where everything is already labelled) every single one
+            # was fetched only to be skipped.
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            item_col = _json_text(ListingRecord.data, "ebay_listing_id")
+            rows = s.execute(
+                select(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(or_(account_col.is_(None), account_col == ""))
+                .where(item_col != "")
+            ).scalars().all()
             for rec in rows:
                 data = dict(rec.data or {})
+                # Still re-checked here: the SQL narrows the read, but a
+                # non-string value in either field (a number, a nested object)
+                # can satisfy the predicate without satisfying this rule.
                 if data.get("ebay_account") or not data.get("ebay_listing_id"):
                     continue
                 data["ebay_account"] = account
@@ -630,11 +660,18 @@ def count_foreign_listings(user_id: str, account: str) -> int:
         if eng is None:
             return 0
         with Session(eng) as s:
-            rows = s.execute(select(ListingRecord.data).where(
-                ListingRecord.user_id == user_id)).scalars().all()
-            return sum(1 for data in rows
-                       if (data or {}).get("ebay_account")
-                       and (data or {}).get("ebay_account") != account)
+            # Counted in the database, not in Python. This runs on
+            # /api/ebay/status, which the app calls on every boot, and the
+            # Python version fetched every listing's whole JSON blob — a
+            # mirrored store is megabytes of it, over a cross-region link,
+            # to produce one integer nothing else in the response needs.
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            return int(s.execute(
+                select(func.count())
+                .select_from(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(account_col != "", account_col != account)
+            ).scalar_one() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: count_foreign_listings failed: {exc}")
         return 0
