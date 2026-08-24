@@ -3,7 +3,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# eBay's hard ceiling on a listing title. Every editable title in the app
+# is capped at this — the editor and the bulk queue stop typing at it, and
+# the validator below is the backstop for every other write path (AI
+# drafts, refine, merge, import, a client that never enforced it). eBay
+# rejects the whole publish over a title one character too long, and the
+# rejection arrives after the photos have uploaded, so this is the one
+# limit worth holding in the model rather than at the API boundary.
+TITLE_MAX_CHARS = 80
 
 
 class ItemSpecific(BaseModel):
@@ -57,7 +66,8 @@ class DepopFields(BaseModel):
 class Listing(BaseModel):
     """A full eBay listing draft, editable by the user before publishing."""
 
-    title: str = Field(default="", description="eBay title, max 80 chars")
+    title: str = Field(default="",
+                       description=f"eBay title, max {TITLE_MAX_CHARS} chars")
     subtitle: str = ""
     brand: str = ""
     condition: str = "USED_EXCELLENT"  # eBay condition enum
@@ -141,6 +151,21 @@ class Listing(BaseModel):
     # Marketplace-specific listing fields, edited in their own cards.
     etsy: EtsyFields = Field(default_factory=EtsyFields)
     depop: DepopFields = Field(default_factory=DepopFields)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _cap_title(cls, value):
+        """Trim to TITLE_MAX_CHARS wherever a title enters the model.
+
+        Truncating rather than raising is deliberate: the sources that can
+        overrun are the AI draft, a refine, and an old record — none of
+        them a seller in a position to fix a 422, and all of them better
+        served by a title eBay will accept. The editable surfaces stop at
+        80 as the seller types, so a truncation here is never their
+        keystrokes being cut off mid-word."""
+        if not isinstance(value, str):
+            return value
+        return value.strip()[:TITLE_MAX_CHARS]
 
 
 class IdentifyResult(BaseModel):
