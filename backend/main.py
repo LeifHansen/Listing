@@ -3364,6 +3364,76 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> None:
                     listing_id, exc)
 
 
+# Fields that describe THIS sale and THIS eBay item, and so must never ride
+# along into the fresh draft a relist creates: carrying any of them over
+# would make the copy look like the sold listing it came from — and let a
+# publish try to revise an eBay item that is already finished.
+_SALE_ONLY_FIELDS = {
+    "ebay_listing_id": "", "sku": "", "source": "", "ebay_start_time": "",
+    "view_url": "", "watch_count": 0, "sold_quantity": 0,
+    "sold_price": None, "sold_at": "",
+}
+
+
+@app.post("/api/listings/{listing_id}/relist")
+def relist_listing(listing_id: str, request: Request) -> dict:
+    """Copy a settled (sold / ended) listing into a BRAND-NEW draft.
+
+    A sold listing is an archive record: what one finished sale was. The app
+    no longer lets it be edited back onto eBay (/api/publish refuses it), so
+    selling another of the same item is a NEW listing — which is what this
+    makes. The draft carries the copy, the specifics and whatever photos
+    survive; every field belonging to the finished sale (item id, sale price,
+    sale date, per-marketplace state) is cleared. The sold record itself is
+    left exactly as it was.
+
+    Photos: a sale purges the session's images to reclaim storage, so a
+    relist of an app-created listing usually starts with none — `photos: 0`
+    says so, and the editor opens on the upload card. Listings imported from
+    eBay keep their eBay-hosted `image_urls`, which the copy carries as-is.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    uid = _uid(request)
+    if rec.get("user_id") and rec["user_id"] != uid:
+        raise HTTPException(404, "Listing not found")
+
+    data = dict(rec.get("listing") or {})
+    data.update(_SALE_ONLY_FIELDS)
+    data["marketplaces"] = {}
+    listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
+
+    new_id = storage.new_session_id()
+    # Photos are COPIED, never moved: the sold record keeps whatever it still
+    # has, and a copy that fails leaves the seller a draft to re-upload into
+    # rather than no draft at all.
+    src_dir = storage.optimized_dir(listing_id)
+    names = [n for n in (listing.images or storage.list_optimized(listing_id))
+             if (src_dir / n).is_file()]
+    copied: list[str] = []
+    if names:
+        dst_dir = storage.optimized_dir(new_id)
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            try:
+                shutil.copyfile(src_dir / name, dst_dir / name)
+            except OSError as exc:
+                raise HTTPException(
+                    507, "The server is out of storage space — try again shortly.") from exc
+            copied.append(name)
+        objstore.upload_optimized(new_id, dst_dir, copied)
+    listing.images = copied
+
+    storage.save_listing(new_id, listing)
+    db.upsert_listing(new_id, listing.model_dump(), status="draft", user_id=uid)
+    log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
+             listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
+    return {"ok": True, "id": new_id, "from": listing_id,
+            "photos": len(copied) + len(listing.image_urls or []),
+            "listing": listing.model_dump()}
+
+
 @app.delete("/api/listings/{listing_id}")
 def delete_listing(listing_id: str, request: Request) -> dict:
     """Remove a saved listing/draft and clean up its files. A missing (or
@@ -3546,6 +3616,16 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     _assert_session_owner(req.session_id, request)
     uid = _uid(request)
     prev_rec = db.get_listing(req.session_id) or {}
+    # A sold listing is an archive record, not a draft: it says what one
+    # finished sale was, and republishing it in place would overwrite that
+    # history with a second listing's life (and, for an imported item, ask
+    # eBay to revise an item that has already ended). Selling another of the
+    # same thing is a NEW listing — POST /api/listings/{id}/relist makes one
+    # from this record's copy and photos, leaving the sale intact.
+    if (prev_rec.get("status") or "") == "sold":
+        raise HTTPException(
+            409, "This listing has sold — it's archived under Inactive. "
+                 "Use Relist as new listing to sell another one.")
 
     # The server owns per-marketplace state: whatever map the client sent is
     # replaced with the stored record's before anything reads it (or gets

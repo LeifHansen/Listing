@@ -23,7 +23,7 @@ import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
    drafts have their own strip above it (DraftsStrip), so there is no Drafts
    tab here (the "All" tab still mirrors every status, drafts included). */
 
-const TABS = [
+export const TABS = [
   {
     id: "active", label: "Active", statuses: ["published", "live"],
     sub: "Everything currently live on eBay — created here or imported",
@@ -43,25 +43,18 @@ const TABS = [
     },
   },
   {
-    id: "inactive", label: "Inactive", statuses: ["ended"],
-    sub: "Ended listings — no longer on eBay; open one to relist it fresh",
+    id: "inactive", label: "Inactive", statuses: ["ended", "sold"],
+    sub: "The archive: everything that's finished on eBay — sold, and ended without selling",
     empty: {
-      illustration: ListingsIllustration, title: "No inactive listings",
-      message: "Listings you end (the ⊘ button on an active card) and eBay listings that "
-        + "end without selling both collect here, one tap from a fresh relist.",
+      illustration: ListingsIllustration, title: "Nothing finished yet",
+      message: "Anything that sells, plus listings you end (the ⊘ button on an active card) "
+        + "and eBay listings that end without selling, collects here.",
     },
   },
   {
-    id: "sold", label: "Sold", statuses: ["sold"],
-    sub: "Sold on eBay — nice work",
-    empty: {
-      illustration: ListingsIllustration, title: "No sales recorded yet",
-      message: "When something sells on eBay, the mirror moves it here automatically.",
-    },
-  },
-  {
-    id: "all", label: "All", statuses: null,
-    sub: "A live mirror of your whole eBay store — every status at once",
+    id: "all", label: "All", statuses: null, hide: ["sold"],
+    sub: "A live mirror of your whole eBay store — every status still in play "
+      + "(sold items are archived under Inactive)",
     empty: {
       illustration: ListingsIllustration, title: "No listings yet",
       message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
@@ -69,6 +62,19 @@ const TABS = [
     },
   },
 ];
+
+// Which items a tab shows. `statuses` is a whitelist; `hide` subtracts from
+// the everything-tab. Sold items are hidden outside Inactive on purpose — a
+// finished sale is not something the seller can still act on, and leaving it
+// among the live listings is what made a sold item look publishable.
+export const inTab = (tab, item) => (tab.statuses
+  ? tab.statuses.includes(item.status)
+  : !(tab.hide || []).includes(item.status));
+
+// Tab ids this pipeline used to have, and where each one goes now. The
+// selection is remembered across visits, so a seller who last left the app on
+// a since-removed tab has to land somewhere sensible rather than on nothing.
+export const STALE_TABS = { drafts: "active", sold: "inactive" };
 
 // Active listings older than this get the amber "stale" clock: relisting
 // fresh mints a new item id and a search-placement boost.
@@ -90,17 +96,15 @@ export function ListingsView({ search = "" }) {
     ? "flex flex-col gap-2"
     : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4";
 
-  // "drafts" was a tab here before the drafts strip existed; a stale saved
-  // selection lands on Active.
-  const tabId = (listingsTab === "drafts" ? "active" : listingsTab) || "active";
+  // Stale saved selections from earlier versions of this pipeline: "drafts"
+  // was a tab here before the drafts strip existed (→ Active), and "sold" was
+  // its own tab before sold items were folded into the archive (→ Inactive).
+  const tabId = STALE_TABS[listingsTab] || listingsTab || "active";
   const tab = TABS.find((t) => t.id === tabId) || TABS[0];
   const pick = (t) => setListingsTab(t);
 
   const counts = Object.fromEntries(TABS.map((t) => [
-    t.id,
-    t.statuses
-      ? listingsState.items.filter((i) => t.statuses.includes(i.status)).length
-      : listingsState.items.length,
+    t.id, listingsState.items.filter((i) => inTab(t, i)).length,
   ]));
 
   // Manual re-run of the store mirror (the mirror itself runs at app load).
@@ -153,10 +157,10 @@ export function ListingsView({ search = "" }) {
     try {
       const res = await postJson("/api/ebay/end-listing", { session_id: item.id });
       await loadListings({ quiet: true });
-      // Ending can discover the listing already finished on eBay — say where
-      // it actually went (a sale files under Sold, not Inactive).
+      // Ending can discover the listing already finished on eBay — say which
+      // way it went, since a sale is archived rather than left relistable.
       toast(res.status === "sold"
-        ? "Turns out this one sold on eBay — it's filed under Sold. 🎉"
+        ? "Turns out this one sold on eBay — it's archived under Inactive. 🎉"
         : "Listing ended — find it under Inactive.", { kind: "success" });
     } catch (e) {
       toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
@@ -167,7 +171,7 @@ export function ListingsView({ search = "" }) {
 
   const q = search.trim().toLowerCase();
   const items = listingsState.items
-    .filter((i) => (tab.statuses ? tab.statuses.includes(i.status) : true))
+    .filter((i) => inTab(tab, i))
     .filter((i) => !q
       || (i.listing?.title || i.title || "").toLowerCase().includes(q)
       || (i.listing?.brand || "").toLowerCase().includes(q)
@@ -311,13 +315,16 @@ export function ListingsView({ search = "" }) {
         ))}
       </div>
 
-      {/* Profit framework: on the Sold tab, total up what the items with a
-          recorded cost basis made (sale − purchase price, before fees). */}
-      {tabId === "sold" && hasItems && (() => {
+      {/* Profit framework: on the archive tab, total up what the SOLD items
+          with a recorded cost basis made (sale − purchase price, before
+          fees). Ended-unsold listings share this tab and made nothing, so
+          they are excluded rather than counted as zeroes. */}
+      {tabId === "inactive" && hasItems && (() => {
         // Counts what the buyers PAID — an accepted offer settles below the
         // asking price, so totalling `price` here overstated every profit.
         const withCost = items.filter(
-          (i) => i.listing?.purchase_price != null && saleProceeds(i.listing) > 0);
+          (i) => i.status === "sold" && i.listing?.purchase_price != null
+            && saleProceeds(i.listing) > 0);
         if (!withCost.length) return null;
         const profit = withCost.reduce(
           (sum, i) => sum + (saleProceeds(i.listing)
@@ -332,7 +339,7 @@ export function ListingsView({ search = "" }) {
             {approx > 0 && (
               <span>· {approx} at the asking price</span>
             )}
-            <InfoTip text="What each item sold for minus what you paid, before fees & shipping — only items with a 'You paid' amount count. Where eBay hasn't reported the sale amount, the asking price stands in; set the real one in the editor's Pricing card." />
+            <InfoTip text="What each item sold for minus what you paid, before fees & shipping — only items with a 'You paid' amount count. Where eBay hasn't reported the sale amount, the asking price stands in; open the sold listing and set the real one under Sale figures." />
           </p>
         );
       })()}
