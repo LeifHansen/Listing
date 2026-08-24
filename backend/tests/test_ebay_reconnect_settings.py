@@ -13,8 +13,10 @@ account that just connected actually has it.
 """
 from __future__ import annotations
 
+import httpx
 import pytest
 
+from backend import ebay_auth
 from backend.services import ebay_account
 
 SAVED = {
@@ -82,3 +84,52 @@ def test_only_one_dropped_id_is_enough_to_call_it_a_switch(carry):
                             "return": {"R-old"}}, {"L-old"})
     assert carried == {"fulfillment_policy_id": "F-new"}
     assert ebay_account.settings_were_dropped({**SAVED, **carried}, SAVED) is True
+
+
+# --- "does this account have that policy?" -----------------------------------
+#
+# The answer gates a publish: preflight turns a definitive no into a blocking
+# shipping-policy error. So the three states have to stay apart — a rejected
+# REQUEST is not a missing policy, and reading it as one blocks every live
+# publish behind an error about a policy that is fine.
+
+def _http_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://api.ebay.com/policy")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError("boom", request=request, response=response)
+
+
+@pytest.fixture()
+def lookup(monkeypatch):
+    """fulfillment_policy_lookup with eBay's answer stubbed."""
+    def run(outcome):
+        def fake_get(path, token):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(ebay_auth, "_account_get", fake_get)
+        return ebay_auth.fulfillment_policy_lookup("tok", "F-1")
+    return run
+
+
+def test_a_404_means_the_account_really_lacks_the_policy(lookup):
+    assert lookup(_http_error(404)) == ([], False)
+
+
+def test_a_400_is_a_rejected_request_not_a_missing_policy(lookup):
+    """eBay refusing the request says nothing about what the account has.
+
+    Treating it as absence blocked every live publish behind "that shipping
+    policy isn't on your eBay account" — for a policy the seller could see on
+    eBay the whole time.
+    """
+    _services, exists = lookup(_http_error(400))
+    assert exists is None
+
+
+def test_a_server_error_leaves_the_answer_unknown(lookup):
+    assert lookup(_http_error(503)) == ([], None)
+
+
+def test_no_policy_id_asks_nothing(lookup):
+    assert ebay_auth.fulfillment_policy_lookup("tok", "") == ([], None)

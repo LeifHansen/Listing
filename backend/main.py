@@ -1060,7 +1060,13 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             # A different store. Label everything already here as the previous
             # account's, so syncs and publishes stop treating those listings as
             # this account's (see services/listing_sync.belongs_to).
-            marked = db.stamp_ebay_account(uid, prev_user or "previous account")
+            #
+            # Dropped settings alone say the store changed, not who it was: a
+            # policy the seller deleted looks the same, and the previous name
+            # is often unreadable. UNKNOWN_ACCOUNT records that honestly rather
+            # than inventing a username the sweeps would compare against.
+            marked = db.stamp_ebay_account(
+                uid, prev_user or listing_sync.UNKNOWN_ACCOUNT)
             log.info("ebay connect: account switch for uid=%s (%s -> %s); "
                      "labelled %d existing listing(s)", uid,
                      prev_user or "?", new_user or "?", marked)

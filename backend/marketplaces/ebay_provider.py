@@ -385,7 +385,11 @@ class EbayProvider:
             # connected one. Reviving it here would revise (or relist) another
             # seller's item under this account's policies — refuse plainly and
             # say which account owns it.
-            owner = listing_sync.account_of(listing)
+            # Only a NAMED other account refuses the write: an owner we could
+            # not name is not proof of a different store, and blocking on it
+            # strands every imported listing the seller has (see
+            # listing_sync.UNKNOWN_ACCOUNT).
+            owner = listing_sync.named_account_of(listing)
             connected = ((creds or {}).get("ebay_username") or "").strip()
             if creds and owner and connected and owner != connected:
                 message = (f"This listing belongs to your other eBay account "

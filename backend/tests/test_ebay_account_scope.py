@@ -106,6 +106,33 @@ def test_no_connected_account_scopes_nothing_out():
     assert listing_sync.belongs_to({"ebay_account": "old-seller"}, "")
 
 
+# --- an owner we could not name ---------------------------------------------
+
+def test_an_unnamed_owner_is_still_scoped_out_of_reads():
+    """The sentinel exists to stop the sweeps re-confirming those listings
+    under whoever is connected now; that job is unchanged."""
+    unknown = {"ebay_account": listing_sync.UNKNOWN_ACCOUNT}
+    assert not listing_sync.belongs_to(unknown, "new-seller")
+
+
+def test_an_unnamed_owner_never_reads_as_a_rival_account():
+    """Callers that refuse a write need a name they can show and compare.
+
+    The sentinel is neither a username nor proof of a different store, and
+    treating it as one refused every publish of an imported listing — the
+    seller's whole store, with no way back short of unlinking it from eBay.
+    """
+    assert listing_sync.named_account_of(
+        {"ebay_account": listing_sync.UNKNOWN_ACCOUNT}) == ""
+    assert listing_sync.named_account_of({"ebay_account": "old-seller"}) == "old-seller"
+    assert listing_sync.named_account_of({"ebay_account": ""}) == ""
+
+
+def test_the_sentinel_is_not_a_plausible_username():
+    """It is compared against real eBay usernames, which have no spaces."""
+    assert " " in listing_sync.UNKNOWN_ACCOUNT
+
+
 # --- import -----------------------------------------------------------------
 
 def test_import_leaves_the_other_accounts_records_untouched(wired):
