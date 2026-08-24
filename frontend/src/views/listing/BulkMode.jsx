@@ -17,9 +17,8 @@ import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
 import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
-import {
-  MarketTargetChips, missingRequired, publishListing, usePublishTargets,
-} from "./publishShared";
+import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
    identifies each item, and (optionally) publishes them; this component polls
@@ -108,9 +107,11 @@ function BulkItemCard({
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
   const isAuction = fmt.startsWith("AUCTION");
-  // Target-aware: an Etsy-only publish must not be gated on eBay-only
-  // fields (package weight, eBay category).
-  const missing = item.status === "draft" ? missingRequired(l, targets) : [];
+  // What is stopping THIS item from reaching eBay — the same rules the
+  // editor and the drafts strip use (blockers.js). Target-aware: an
+  // Etsy-only publish must not be gated on eBay-only fields (package weight,
+  // eBay category).
+  const blockers = item.status === "draft" ? ebayBlockers(l, { targets }) : [];
   // All of the item's photos, not just the first. An item that failed before
   // a listing existed still has the server-picked `thumb`.
   const photos = l.images?.length
@@ -183,8 +184,13 @@ function BulkItemCard({
             </TagPill>
           )}
           {item.status === "draft" && (
-            missing.length
-              ? <TagPill tone="yellow"><AlertTriangle size={12} aria-hidden /> Needs info</TagPill>
+            blockers.length
+              ? (
+                <TagPill tone="yellow"
+                  title={`eBay won't take this yet: ${blockerLabels(blockers)}`}>
+                  <AlertTriangle size={12} aria-hidden /> Blocked
+                </TagPill>
+              )
               : <TagPill tone="blue">Draft</TagPill>
           )}
           {item.status === "error" && (
@@ -195,11 +201,22 @@ function BulkItemCard({
 
       {editable ? (
         <>
-          <Input
-            value={l.title || item.title || ""}
-            placeholder="Title"
-            onChange={(e) => onChange({ ...l, title: e.target.value })}
-          />
+          <div className="flex flex-col gap-1">
+            <Input
+              maxLength={TITLE_MAX}
+              value={l.title || item.title || ""}
+              placeholder="Title"
+              aria-label="Title"
+              onChange={(e) => onChange({ ...l, title: e.target.value })}
+            />
+            {/* Only once it starts to matter — these cards are dense, and a
+                counter on every one of forty drafts is noise. */}
+            {(l.title || item.title || "").length >= TITLE_MAX - 8 && (
+              <span className="self-end text-[11px] font-semibold tabular-nums text-warning">
+                {(l.title || item.title || "").length}/{TITLE_MAX}
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-2 gap-2.5">
             <Input
               type="number" step="0.01" min="0"
@@ -293,10 +310,10 @@ function BulkItemCard({
           {item.error || "Couldn't identify this item."}
         </p>
       )}
-      {item.status === "draft" && missing.length > 0 && (
+      {item.status === "draft" && blockers.length > 0 && (
         <p className="text-xs text-warning font-medium"
-          title="eBay requires these before this item can publish">
-          Missing: {missing.join(", ")}
+          title={blockers.map((b) => `${b.label}: ${b.why}`).join("\n")}>
+          Keeping this off eBay: {blockerLabels(blockers)}
         </p>
       )}
       {item.status === "draft" && item.error && (
@@ -689,8 +706,8 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     return 95;
   })());
   const drafts = items.filter((it) => it.status === "draft");
-  const needInfo = drafts.filter(
-    (it) => missingRequired(it.listing, effectiveTargets).length > 0);
+  const blocked = drafts.filter(
+    (it) => ebayBlockers(it.listing, { targets: effectiveTargets }).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
   // in a card, and the pairwise scan is quadratic in the size of the batch.
   const dupes = useMemo(() => duplicateSuspects(drafts),
@@ -792,13 +809,16 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         );
       })()}
 
-      {job?.done && needInfo.length > 0 && (
+      {job?.done && blocked.length > 0 && (
         <Card className="py-3.5 border-warning/40 bg-warning-soft">
           <p className="text-sm text-ink flex items-start gap-2">
             <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-            <span title="eBay requires title, price, weight, and category. Fill them in on the card or in the full editor before publishing.">
-              <strong>{needInfo.length}</strong> of {drafts.length} draft{drafts.length === 1 ? "" : "s"}{" "}
-              missing required info — flagged <strong className="text-warning">Needs info</strong> below.
+            {/* Each card names its OWN blocking fields — this banner only
+                says how many are affected, so it can't contradict them. */}
+            <span title="Each blocked card lists the fields eBay is refusing it over. Fill them in on the card or in the full editor.">
+              <strong>{blocked.length}</strong> of {drafts.length} draft{drafts.length === 1 ? "" : "s"}{" "}
+              can&apos;t reach eBay yet — each one is marked{" "}
+              <strong className="text-warning">Blocked</strong> below, with the fields that are holding it.
             </span>
           </p>
         </Card>

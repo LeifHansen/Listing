@@ -19,7 +19,7 @@ from anthropic import Anthropic
 from .. import config
 from ..config import log
 from . import taxonomy
-from ..models import IdentifyResult, ItemSpecific, Listing
+from ..models import TITLE_MAX_CHARS, IdentifyResult, ItemSpecific, Listing
 
 # eBay's well-known condition enum values (subset most listings use).
 EBAY_CONDITIONS = [
@@ -247,7 +247,7 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
     cond = str(data.get("condition", "USED_EXCELLENT")).upper()
     if cond not in EBAY_CONDITIONS:
         cond = "USED_EXCELLENT"
-    title = (data.get("title") or "").strip()[:80]
+    title = (data.get("title") or "").strip()[:TITLE_MAX_CHARS]
     price = data.get("price")
     try:
         price = round(float(price), 2) if price is not None else None
