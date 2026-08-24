@@ -1,7 +1,7 @@
 import { CheckCircle2, AlertCircle, Circle } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
 
-export function TagPill({ children, tone = "neutral", className }) {
+export function TagPill({ children, tone = "neutral", className, title }) {
   const tones = {
     neutral: "bg-bg-sunken text-ink-secondary",
     blue: "bg-blue-soft text-blue",
@@ -11,6 +11,7 @@ export function TagPill({ children, tone = "neutral", className }) {
   };
   return (
     <span
+      title={title}
       className={cn(
         "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 font-display text-xs font-semibold",
         tones[tone] || tones.neutral,
@@ -55,7 +56,12 @@ export function StatusBadge({ status, className }) {
   return <TagPill tone={meta.tone} className={className}>{meta.label}</TagPill>;
 }
 
-// ProgressChip — the "✔ Complete / Needs attention" chip on workflow cards.
+// ProgressChip — the state chip on each workflow card, in exactly three
+// meanings. The amber one is the load-bearing distinction: it says eBay
+// refuses this listing until the card is dealt with, so it may only appear on
+// a card holding a real blocker (see blockers.js). "Needs attention" is what
+// it used to say, and it sat on merely-unfinished cards too — which is how a
+// seller ended up unable to tell a rejection from a suggestion.
 export function ProgressChip({ state = "todo", className }) {
   if (state === "complete") {
     return (
@@ -66,8 +72,9 @@ export function ProgressChip({ state = "todo", className }) {
   }
   if (state === "attention") {
     return (
-      <TagPill tone="yellow" className={className}>
-        <AlertCircle size={13} strokeWidth={2.5} aria-hidden /> Needs attention
+      <TagPill tone="yellow" className={className}
+        title="eBay won't accept the listing until this is fixed">
+        <AlertCircle size={13} strokeWidth={2.5} aria-hidden /> Blocks publish
       </TagPill>
     );
   }

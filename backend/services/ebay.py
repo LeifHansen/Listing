@@ -18,7 +18,7 @@ import httpx
 
 from .. import config, ebay_errors, objstore, storage
 from ..config import log
-from ..models import Listing
+from ..models import TITLE_MAX_CHARS, Listing
 
 
 def _prune(value):
@@ -203,7 +203,7 @@ def build_inventory_item(session_id: str, listing: Listing, base_url: str,
         mpn = "Does Not Apply"
 
     product = {
-        "title": listing.title[:80],
+        "title": listing.title[:TITLE_MAX_CHARS],
         "description": listing.description or listing.title,
         "aspects": aspects,
         "imageUrls": image_urls or _image_urls(session_id, listing.images, base_url),

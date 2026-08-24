@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck,
+  FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
 import { api, pollJob, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -11,9 +11,8 @@ import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { CategoryQuickPick } from "./CategoryQuickPick";
-import {
-  MarketTargetChips, missingRequired, publishListing, usePublishTargets,
-} from "./publishShared";
+import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { blockerLabels, ebayBlockers } from "./blockers";
 
 /* The drafts experience on the merged Sell screen: every draft one click
    from Publish or Review & List, plus select-mode bulk publish/delete.
@@ -127,11 +126,13 @@ export function DraftsStrip({ search = "" }) {
   // Both bulk actions work on the drafts you can actually see: narrowing the
   // search after selecting must not publish or delete something off-screen.
   const selectedDrafts = drafts.filter((d) => sel[d.id]);
-  // eBay refuses a listing that's missing title/price/weight/category, so the
-  // per-card Publish button is disabled for those. Bulk publish holds the same
-  // line: they're left selected and named, not fired off to fail one by one.
+  // A draft eBay would refuse can't be published from here — the per-card
+  // Publish button is disabled and says which field is holding it (see
+  // blockers.js, the same rules the editor and the bulk queue use). Bulk
+  // publish holds the same line: those drafts are left selected and counted,
+  // not fired off to fail one at a time.
   const readyToPublish = selectedDrafts.filter(
-    (d) => missingRequired(d.listing || {}).length === 0);
+    (d) => ebayBlockers(d.listing || {}, { targets: effectiveTargets }).length === 0);
   const allSelected = drafts.length > 0 && selectedDrafts.length === drafts.length;
   const exitSelect = () => { setSelecting(false); setSel({}); };
   const toggleAll = () => setSel(allSelected
@@ -201,7 +202,7 @@ export function DraftsStrip({ search = "" }) {
     }
     const notReady = selectedDrafts.length - readyToPublish.length;
     if (!readyToPublish.length) {
-      toast(`${notReady === 1 ? "That draft is" : `All ${notReady} selected drafts are`} missing required info — open them to fill in what eBay needs.`,
+      toast(`${notReady === 1 ? "That draft has" : `All ${notReady} selected drafts have`} fields eBay won't accept without — open them to see which.`,
         { kind: "warning" });
       return;
     }
@@ -209,7 +210,7 @@ export function DraftsStrip({ search = "" }) {
       title: `Publish ${readyToPublish.length} draft${readyToPublish.length === 1 ? "" : "s"} live?`,
       message: `Each goes straight to ${targetNames}.`
         + (notReady
-          ? ` ${notReady} of the ${selectedDrafts.length} selected ${notReady === 1 ? "is" : "are"} missing required info and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
+          ? ` ${notReady} of the ${selectedDrafts.length} selected ${notReady === 1 ? "is" : "are"} still blocked by a field eBay requires, and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
           : ""),
       confirmLabel: "Publish live",
     }))) return;
@@ -227,7 +228,7 @@ export function DraftsStrip({ search = "" }) {
     exitSelect();
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
       + (failed ? ` ${failed} need attention — open them to fix.` : "")
-      + (notReady ? ` ${notReady} skipped for missing info.` : ""),
+      + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
       { kind: failed || notReady ? "warning" : "success" });
   };
 
@@ -318,7 +319,7 @@ export function DraftsStrip({ search = "" }) {
               disabled={!selectedDrafts.length || !!bulkProgress}
               loading={!!bulkProgress}
               title={selectedDrafts.length && !readyToPublish.length
-                ? "Every selected draft is missing required info — open them to finish"
+                ? "Every selected draft is blocked by a field eBay requires — open them to finish"
                 : undefined}>
               <Rocket aria-hidden />
               {bulkProgress
@@ -337,7 +338,7 @@ export function DraftsStrip({ search = "" }) {
       )}
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {drafts.map((item, i) => {
-          const missing = missingRequired(item.listing || {}, effectiveTargets);
+          const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
           return (
             <motion.div
               key={item.id}
@@ -362,9 +363,9 @@ export function DraftsStrip({ search = "" }) {
                     <Button variant="secondary" size="sm" className="flex-1"
                       onClick={() => publishOne(item)}
                       loading={!!publishing[item.id]}
-                      disabled={missing.length > 0}
-                      title={missing.length
-                        ? `Missing: ${missing.join(", ")} — open Review & List to finish`
+                      disabled={blockers.length > 0}
+                      title={blockers.length
+                        ? `eBay won't take this yet — ${blockerLabels(blockers)}. Open Review & List to finish.`
                         : undefined}>
                       <Rocket aria-hidden /> Publish
                     </Button>
@@ -378,6 +379,15 @@ export function DraftsStrip({ search = "" }) {
                       <Trash2 aria-hidden />
                     </Button>
                   </div>
+                  {blockers.length > 0 && (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-[12px] font-semibold text-warning"
+                      title={blockers.map((b) => `${b.label}: ${b.why}`).join("\n")}>
+                      <AlertTriangle size={13} className="shrink-0 mt-px" aria-hidden />
+                      <span className="min-w-0">
+                        Keeping this off eBay: {blockerLabels(blockers)}
+                      </span>
+                    </p>
+                  )}
                   <DraftCategory item={item} />
                   <DraftShipping item={item} />
                 </>

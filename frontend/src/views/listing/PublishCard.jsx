@@ -16,6 +16,64 @@ function nameFor(data, key, field) {
   return ((data.policies[key] || []).find((p) => p.id === data.selected[field]) || {}).name || "not set";
 }
 
+// An issue is blocking unless it says otherwise. Preflight marks its advice
+// with level "warn" (and, on newer servers, blocking:false); an eBay
+// rejection carries neither, and every one of those stopped the publish.
+const isBlocking = (it) => it.blocking !== false && it.level !== "warn";
+
+// One issue: what's wrong, how to fix it, and a button that jumps to the
+// field. `generic` issues have no field to jump to (an account-wide problem,
+// an eBay outage) so they get no button.
+function IssueRow({ it, onFix }) {
+  return (
+    <li className="text-sm">
+      <p className="font-semibold text-ink">{it.title}</p>
+      {it.fix && <p className="text-ink-secondary mt-0.5">{it.fix}</p>}
+      {it.target && it.target !== "generic" && (
+        <Button variant="soft" size="sm" className="mt-2" onClick={() => onFix(it.target)}>
+          Fix this <ArrowRight aria-hidden />
+        </Button>
+      )}
+    </li>
+  );
+}
+
+/* The fix-it list, in two groups that must never be mixed.
+
+   The blocking group is the answer to "why isn't this on eBay?" — nothing
+   else belongs in it. Suggestions (a missing description, anything the
+   server sends as a warning) come after, under their own heading, and are
+   hidden entirely while something is still blocking: a seller who can't
+   publish should not have to read past advice to find the reason. */
+function IssueList({ issues, onFix }) {
+  const blocking = issues.filter(isBlocking);
+  const advice = issues.filter((it) => !isBlocking(it));
+  return (
+    <>
+      {blocking.length > 0 && (
+        <>
+          <p className="mt-3 text-[12px] font-bold uppercase tracking-wide text-warning">
+            {blocking.length === 1 ? "Blocking this listing" : `Blocking this listing (${blocking.length})`}
+          </p>
+          <ul className="mt-2 flex flex-col gap-3">
+            {blocking.map((it, i) => <IssueRow key={i} it={it} onFix={onFix} />)}
+          </ul>
+        </>
+      )}
+      {advice.length > 0 && blocking.length === 0 && (
+        <>
+          <p className="mt-3 text-[12px] font-bold uppercase tracking-wide text-ink-faint">
+            Optional — eBay accepts the listing without these
+          </p>
+          <ul className="mt-2 flex flex-col gap-3">
+            {advice.map((it, i) => <IssueRow key={i} it={it} onFix={onFix} />)}
+          </ul>
+        </>
+      )}
+    </>
+  );
+}
+
 // One row per marketplace after a multi-marketplace publish: ok/fail icon,
 // the marketplace's own message, a "View on X" link when it's live, and each
 // marketplace's fix-it issues with the same jump buttons the eBay panel has.
@@ -65,24 +123,7 @@ function MultiResultPanel({ r, onFix }) {
               </a>
             )}
             {(res.issues || []).length > 0 && (
-              <ul className="mt-2 flex flex-col gap-2.5">
-                {res.issues.map((it, i) => (
-                  <li key={i} className="text-sm">
-                    <p className="font-semibold text-ink">
-                      {it.title}
-                      {it.level === "warn" && (
-                        <span className="ml-2 text-xs font-medium text-ink-faint">nice to have</span>
-                      )}
-                    </p>
-                    {it.fix && <p className="text-ink-secondary mt-0.5">{it.fix}</p>}
-                    {it.target && it.target !== "generic" && (
-                      <Button variant="soft" size="sm" className="mt-2" onClick={() => onFix(it.target)}>
-                        Fix this <ArrowRight aria-hidden />
-                      </Button>
-                    )}
-                  </li>
-                ))}
-              </ul>
+              <IssueList issues={res.issues} onFix={onFix} />
             )}
           </li>
         ))}
@@ -183,27 +224,12 @@ export function PublishCard({ w }) {
               <AlertTriangle size={17} className="text-warning" aria-hidden />
               {r.message || "eBay couldn't publish this yet"}
             </p>
-            <ul className="mt-3 flex flex-col gap-3">
-              {(r.issues?.length
+            <IssueList
+              issues={r.issues?.length
                 ? r.issues
-                : [{ target: "generic", title: r.message || "eBay rejected the listing", fix: typeof r.detail === "string" ? r.detail : "" }]
-              ).map((it, i) => (
-                <li key={i} className="text-sm">
-                  <p className="font-semibold text-ink">
-                    {it.title}
-                    {it.level === "warn" && (
-                      <span className="ml-2 text-xs font-medium text-ink-faint">nice to have</span>
-                    )}
-                  </p>
-                  {it.fix && <p className="text-ink-secondary mt-0.5">{it.fix}</p>}
-                  {it.target && it.target !== "generic" && (
-                    <Button variant="soft" size="sm" className="mt-2" onClick={() => onFix(it.target)}>
-                      Fix this <ArrowRight aria-hidden />
-                    </Button>
-                  )}
-                </li>
-              ))}
-            </ul>
+                : [{ target: "generic", title: r.message || "eBay rejected the listing", fix: typeof r.detail === "string" ? r.detail : "" }]}
+              onFix={onFix}
+            />
             {r.detail && (
               <details className="mt-3">
                 <summary className="cursor-pointer text-xs font-semibold text-ink-secondary">
@@ -220,25 +246,6 @@ export function PublishCard({ w }) {
     </WorkflowCard>
   );
 }
-
-// PublishBar — the primary action, pinned to the bottom of the workflow so
-// Save/Publish is always one tap away instead of stranded at the end of a long
-// form. Readiness count comes from the same per-card completion the cards show.
-// For a LIVE listing the actions flip to revise mode: Update Live Listing +
-// End listing (Save Draft disappears — on a published offer any eBay save
-// goes straight to the live listing, so a "draft" would mislead).
-// What each unfinished card is called in the publish bar, and which fix-it
-// target jumps to it (flagging a card scrolls to it and pops the More Details
-// fold open if it lives in there).
-const GAP_META = {
-  photos: { label: "Photos", target: "photos" },
-  title: { label: "Title", target: "title" },
-  category: { label: "eBay category", target: "category" },
-  specifics: { label: "Required item specifics", target: "specifics" },
-  pricing: { label: "Price", target: "price" },
-  shipping: { label: "Package weight", target: "weight" },
-  description: { label: "Description", target: "description" },
-};
 
 // Where this publish goes: one toggle chip per connected marketplace. The
 // chips themselves are MarketTargetChips in publishShared — the drafts strip
@@ -257,17 +264,26 @@ function MarketplaceChips({ w }) {
   );
 }
 
+// PublishBar — the primary action, pinned to the bottom of the workflow so
+// Save/Publish is always one tap away instead of stranded at the end of a long
+// form. For a LIVE listing the actions flip to revise mode: Update Live
+// Listing + End listing (Save Draft disappears — on a published offer any
+// eBay save goes straight to the live listing, so a "draft" would mislead).
+//
+// What the bar reports is ONE thing: what is stopping this listing from
+// reaching eBay. It used to count "fields left to finish" off the per-card
+// completion map, which swept in anything merely unfinished — so a seller
+// chasing that number could tidy every card the bar named and still be told
+// the listing wasn't ready. Now it lists w.blockers and nothing else: every
+// chip is a field eBay itself refuses the listing over, each carrying its own
+// label and jump target, and an empty list means Publish will go through.
 export function PublishBar({ w }) {
   const { canPublishLive, deleteListing, setSession, openListings } = useApp();
   const { confirm } = useToast();
-  const gaps = Object.entries(w.completion)
-    .filter(([, s]) => s === "attention")
-    .map(([k]) => GAP_META[k])
-    .filter(Boolean);
-  const attention = gaps.length;
-  const ready = attention === 0;
-  // Never say "N fields left" without SAYING WHICH — these chips name each
-  // gap and clicking one scrolls straight to the field that needs finishing.
+  const blockers = w.blockers;
+  const ready = blockers.length === 0;
+  // Never name a count without SAYING WHICH — these chips name each blocking
+  // field and clicking one scrolls straight to it.
   const jumpTo = (target) => {
     w.setFixTarget(null);
     requestAnimationFrame(() => w.setFixTarget(target));
@@ -308,16 +324,25 @@ export function PublishBar({ w }) {
     })) w.endListing();
   };
 
+  // The headline names the obstacle, not the workload: "1 field left to
+  // finish" reads like a chore list and says nothing about consequence. A
+  // listing that's already live gets its own wording — it plainly IS on eBay,
+  // so the thing at risk is the update, not the listing.
+  const n = blockers.length;
+  const many = n === 1 ? "1 field" : `${n} fields`;
   const status = w.isLive
     ? {
-        head: ready ? "Live on eBay" : `${attention} field${attention === 1 ? "" : "s"} left to finish`,
-        sub: "Your edits publish straight to the live listing.",
+        head: ready ? "Live on eBay" : `${many} eBay won't accept`,
+        sub: ready
+          ? "Your edits publish straight to the live listing."
+          : "Fix these before updating the live listing.",
       }
     : {
-        head: ready ? "Ready to publish" : `${attention} field${attention === 1 ? "" : "s"} left to finish`,
+        head: ready ? "Ready to publish"
+          : `${many} ${n === 1 ? "is" : "are"} keeping this off eBay`,
         sub: ready
           ? "List it live on eBay, or keep it as a draft for now."
-          : "Finish the flagged fields — or save a draft for now.",
+          : "That's the whole list — fix them and it goes live.",
       };
 
   const targetCount = (w.chipTargets || []).length;
@@ -353,14 +378,15 @@ export function PublishBar({ w }) {
               </span>
             ) : (
               <span className="flex flex-wrap items-center gap-1.5 mt-1">
-                {gaps.map((g) => (
+                {blockers.map((b) => (
                   <button
-                    key={g.target}
+                    key={b.key}
                     type="button"
-                    onClick={() => jumpTo(g.target)}
+                    onClick={() => jumpTo(b.target)}
+                    title={b.why}
                     className="inline-flex items-center gap-1 rounded-full bg-warning-soft border border-warning/40 px-2.5 py-0.5 text-[12px] font-bold text-warning cursor-pointer hover:border-warning transition-colors"
                   >
-                    {g.label} <ArrowRight size={11} aria-hidden />
+                    {b.label} <ArrowRight size={11} aria-hidden />
                   </button>
                 ))}
                 <span className="text-[12px] text-ink-faint">tap to jump — or save a draft</span>
