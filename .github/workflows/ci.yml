@@ -118,7 +118,7 @@ jobs:
       # missing Pillow and in `cutout` there is no fastapi — which meant they
       # were passing by never executing.
       - name: API tests
-        run: pytest backend/tests/test_readiness.py backend/tests/test_image_order.py -q
+        run: pytest backend/tests/test_readiness.py backend/tests/test_image_order.py backend/tests/test_sold_archive.py -q
       - name: Boot
         run: |
           SECRET_KEY=ci-smoke nohup python -m uvicorn backend.main:app --port 8099 \
