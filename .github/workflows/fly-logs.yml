@@ -1,4 +1,5 @@
 name: Fetch Fly logs
+# last verification: build-stamp check after 6ec9fa6 (2026-08-26T22:22Z)
 # Ops helper: push to this branch (or run manually) to dump recent production
 # logs + live-site ground truth into the Actions run output for debugging.
 on:
