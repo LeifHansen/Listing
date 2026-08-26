@@ -132,3 +132,68 @@ def test_stamping_then_counting_agree(dbmod):
     # Connected as a brand-new account: alice's, bob's, and the two just
     # labelled are all somebody else's now.
     assert dbmod.count_foreign_listings("u1", "newaccount") == 5
+
+
+# --- the pool with no owner at all -------------------------------------------
+#
+# Stamping began in #176 (imports) and at publish alongside these tests, so a
+# store that predates both holds eBay-linked records with ebay_account absent
+# or blank. After an UNDETECTED account switch those are the old account's
+# items wearing no label: count_foreign_listings cannot see them (it requires
+# a non-empty label) and the release endpoint's default pass skips them. The
+# seller ended up staring at another store's listings with no way to detect
+# OR remove them — both counted and releasable now, but only explicitly.
+
+
+def test_unowned_counts_ebay_linked_records_with_no_label(dbmod):
+    _seed(dbmod)
+    # blank ("") and absent (no field) both carry item ids -> 2. The plain
+    # draft has no eBay identity, so it is not "unowned eBay", just local.
+    assert dbmod.count_unowned_ebay_listings("u1") == 2
+
+
+def test_unowned_is_scoped_to_the_user(dbmod):
+    _seed(dbmod)
+    dbmod.upsert_listing("someone-elses",
+                         {"title": "x", "ebay_listing_id": "999"},
+                         status="published", user_id="u2")
+    assert dbmod.count_unowned_ebay_listings("u1") == 2
+    assert dbmod.count_unowned_ebay_listings("u2") == 1
+
+
+def test_labelled_records_are_never_unowned(dbmod):
+    _seed(dbmod)
+    # alice's and bob's stamped records belong to somebody; the count answers
+    # a different question than count_foreign_listings and must not overlap
+    # it, or the UI would double-count a record in its banner.
+    assert (dbmod.count_unowned_ebay_listings("u1")
+            + dbmod.count_foreign_listings("u1", "alice")) == 4  # 2 + 2, disjoint
+
+
+# --- what the release endpoint may unlink ------------------------------------
+
+def _releasable(data, connected, include_unowned=False):
+    from backend.services import ebay_account
+    return ebay_account.releasable(data, connected, include_unowned)
+
+
+def test_release_default_touches_only_labelled_foreigners(dbmod):
+    # The exact records the endpoint released before include_unowned existed.
+    assert _releasable({"ebay_account": "bob", "ebay_listing_id": "1"}, "alice")
+    assert _releasable({"ebay_account": "previous account",
+                        "ebay_listing_id": "1"}, "alice")
+    assert not _releasable({"ebay_account": "alice", "ebay_listing_id": "1"}, "alice")
+    assert not _releasable({"ebay_listing_id": "1"}, "alice")
+    assert not _releasable({"ebay_account": "", "ebay_listing_id": "1"}, "alice")
+
+
+def test_release_unowned_is_opt_in_and_needs_an_ebay_identity(dbmod):
+    # The flag reaches the unlabelled pool...
+    assert _releasable({"ebay_listing_id": "1"}, "alice", include_unowned=True)
+    assert _releasable({"ebay_account": "", "marketplaces": {"ebay": {"listing_id": "1"}}},
+                       "alice", include_unowned=True)
+    # ...but never a plain local draft: there is nothing to unlink.
+    assert not _releasable({"title": "just a draft"}, "alice", include_unowned=True)
+    # ...and never relabels a record stamped as the CONNECTED account's own.
+    assert not _releasable({"ebay_account": "alice", "ebay_listing_id": "1"},
+                           "alice", include_unowned=True)

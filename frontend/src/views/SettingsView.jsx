@@ -995,7 +995,15 @@ function ForeignListingsNotice() {
   const { ebay, loadEbayStatus, loadListings } = useApp();
   const { toast, confirm } = useToast();
   const [working, setWorking] = useState(false);
-  const count = ebay.foreign_listings || 0;
+  const foreign = ebay.foreign_listings || 0;
+  // eBay-linked records from before the app tracked which account listed
+  // them. After a switch these are the OLD account's items wearing no label —
+  // but a seller who never switched has the same shape for their own older
+  // imports, so nothing but the seller can say whose they are. That's why
+  // their unlink rides the same button but only when they exist, and the
+  // request says so explicitly (include_unowned).
+  const unowned = ebay.unowned_listings || 0;
+  const count = foreign + unowned;
   if (!count) return null;
 
   const release = async () => {
@@ -1003,13 +1011,19 @@ function ForeignListingsNotice() {
       title: `Unlink ${count} listing${count === 1 ? "" : "s"} from your old eBay account?`,
       message: "They stay here with their photos and details, as drafts you can "
         + "publish to the account you're connected to now. Nothing is deleted, "
-        + "and nothing changes on eBay.",
+        + "and nothing changes on eBay."
+        + (unowned
+          ? ` ${unowned} of them ${unowned === 1 ? "was" : "were"} linked before `
+            + "the app tracked accounts — only unlink if those items aren't "
+            + "on the account you're connected to now."
+          : ""),
       confirmLabel: "Unlink them",
     });
     if (!ok) return;
     setWorking(true);
     try {
-      const res = await postJson("/api/ebay/release-foreign-listings", {});
+      const res = await postJson("/api/ebay/release-foreign-listings",
+        unowned ? { include_unowned: true } : {});
       toast(`Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`,
         { kind: "success" });
       await Promise.all([loadEbayStatus(), loadListings()]);
@@ -1025,7 +1039,8 @@ function ForeignListingsNotice() {
       <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
       <div className="text-sm min-w-0">
         <p className="font-bold text-ink">
-          {count} listing{count === 1 ? "" : "s"} here belong to a different eBay account
+          {count} listing{count === 1 ? "" : "s"} here {count === 1 ? "is" : "are"} linked
+          to an eBay account that isn&apos;t the one connected
         </p>
         <p className="text-ink-secondary mt-0.5">
           They were listed on an account you connected earlier. Thryft Shop
