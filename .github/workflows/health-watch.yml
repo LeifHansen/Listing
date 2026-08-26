@@ -1,0 +1,51 @@
+name: Health watch
+
+# The alarm for a system with no telemetry. /api/ready and /api/health already
+# report everything needed to see trouble coming -- readiness returns 503 below
+# READY_MIN_DISK_MB, health reports disk_free_mb, objstore_error and db state --
+# but nothing ever calls them. fly-logs.yml curls both and is
+# workflow_dispatch-only, so it runs when a human remembers, which is never
+# before an incident. On 2026-08-10 the volume sat at 61% and the reclaim
+# daemon went aggressive; that was only ever visible to someone going to look.
+#
+# A failed scheduled run emails and push-notifies through the GitHub mobile
+# app -- a channel this project's operator demonstrably watches, since PRs get
+# merged from it.
+#
+# Deliberately needs no FLY_API_TOKEN: both endpoints are public, so this
+# workflow cannot leak a credential and keeps working across a token rotation.
+#
+# NOT in the fly-deploy concurrency group on purpose. fly-logs.yml shares that
+# group so a log dump cannot interleave with a deploy; a read-only probe has no
+# such conflict and must never be able to hold a deploy up.
+on:
+  schedule:
+    - cron: '17 */2 * * *'   # every 2 hours, off the hour to dodge the rush
+  workflow_dispatch:
+
+env:
+  SITE: https://listing-lfwjrg.fly.dev
+  # Warn ABOVE main.py's _LOW_DISK_BYTES (250MB) so this fires while reclaim is
+  # still coping, rather than after it has gone desperate.
+  MIN_FREE_MB: '400'
+
+jobs:
+  probe:
+    name: Probe readiness and disk headroom
+    runs-on: ubuntu-latest
+    steps:
+      - name: Readiness (503 = not serving)
+        run: |
+          code=$(curl -sS -m 20 -o /tmp/ready.json -w '%{http_code}' "$SITE/api/ready" || echo 000)
+          echo "HTTP $code"
+          tr ',' '\n' < /tmp/ready.json || true
+          if [ "$code" != "200" ]; then
+            echo "::error::/api/ready returned $code - the app cannot do photo work right now"
+            exit 1
+          fi
+
+      - name: Disk headroom, storage and database
+        run: |
+          curl -sS -m 20 -o /tmp/health.json "$SITE/api/health"
+          tr ',' '\n' < /tmp/health.json
+          python3 .github/scripts/check_health.py /tmp/health.json "$MIN_FREE_MB"

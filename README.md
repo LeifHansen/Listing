@@ -82,6 +82,38 @@ listing's images into eBay's opaque 25001 error. Fly health-checks
 > **Production** keysets only, and the app now ships the endpoint for it (see
 > below).
 
+### Deploy credentials — and the one that must NOT be on the app
+
+CI deploys with `FLY_API_TOKEN`, read from the **GitHub Actions secret** by
+`.github/workflows/deploy.yml` and `fly-logs.yml` (`${{ secrets.FLY_API_TOKEN }}`).
+That is the only place it belongs.
+
+> **Never `fly secrets set FLY_API_TOKEN` on the app.** Nothing in this
+> codebase reads it — `grep -rn FLY_ backend/` returns nothing — so it buys the
+> running container no capability at all, while handing anything that can read
+> the process environment full control of the Fly account: every other secret
+> here (`NEON_PRODUCTION_DATABASE_URL`, `ANTHROPIC_API_KEY`, `R2_*`,
+> `SENDGRID_API_KEY`), plus the ability to destroy or redeploy any app on it.
+> The container also has Fly's own API proxy mounted at `/.fly/api`. If it is
+> ever set, take it back off — nothing depends on it:
+>
+> ```bash
+> fly secrets list -a <app>                       # is FLY_API_TOKEN there?
+> fly secrets unset FLY_API_TOKEN -a <app> --stage # --stage: no restart now
+> ```
+>
+> `--stage` matters on this app: it runs a single machine with
+> `min_machines_running = 1`, so an unstaged `secrets set`/`unset` restarts
+> production immediately and kills any in-flight photo batch. Staged changes
+> apply on the next deploy instead.
+
+Prefer an app-scoped deploy token over a personal one, so a leak cannot reach
+anything else in the account:
+
+```bash
+fly tokens create deploy -a <app>   # only deploys this app; cannot read others
+```
+
 ### Marketplace Account Deletion endpoint (Production keysets)
 
 eBay refuses to enable a Production keyset until you register a validated
