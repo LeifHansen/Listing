@@ -171,6 +171,13 @@ _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # 250 MB is roughly one full bulk batch of headroom, which is the amount that
 # actually predicts an ENOSPC.
 _LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
+# How long the housekeeping daemon waits between passes. A volume with room to
+# spare only needs the slow pass; one that is low - or that will not answer how
+# much is left - has to be revisited soon, because the next bulk batch is what
+# fills it. The loop used to sleep three hours either way, so a volume that
+# filled mid-batch stayed broken until the next pass happened to come round.
+_RECLAIM_INTERVAL = 3 * 3600
+_RECLAIM_INTERVAL_LOW = 15 * 60
 
 
 def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
@@ -252,17 +259,46 @@ def reclaim_space(aggressive: bool = False) -> int:
     return freed
 
 
+def _reclaim_plan(free: int) -> tuple[bool, int]:
+    """Decide (aggressive, seconds until the next pass) from a free-space reading.
+
+    `free` is storage.disk_free_bytes(), which reports 0 both for a genuinely
+    full volume and for a stat it could not take (it swallows the error and
+    returns 0). Those are the two states aggressive reclaim exists for, so 0
+    has to count as low. Reading it as "no reason to hurry" is what
+    `bool(free) and free < limit` did: the guard was meant to say "if we know
+    the free space", but its effect was to switch the emergency off at exactly
+    the moment it needed to fire.
+
+    A stat that fails on a healthy volume therefore reclaims early rather than
+    late. That trade is deliberate: short TTLs cost a round trip to R2 for an
+    edit, while being wrong the other way is ENOSPC, which fails every upload.
+    """
+    low = free < _LOW_DISK_BYTES
+    return low, (_RECLAIM_INTERVAL_LOW if low else _RECLAIM_INTERVAL)
+
+
 def _reclaim_loop() -> None:
     """Housekeeping daemon: reclaim space every few hours, and sooner when the
     volume is running low. Without this the volume only ever got swept at
     startup, so a busy day of bulk batches could fill it mid-flight."""
     while True:
+        delay = _RECLAIM_INTERVAL_LOW
         try:
             free = storage.disk_free_bytes()
-            reclaim_space(aggressive=bool(free) and free < _LOW_DISK_BYTES)
+            aggressive, delay = _reclaim_plan(free)
+            freed = reclaim_space(aggressive=aggressive)
+            # The one state this daemon cannot fix by itself: the volume is
+            # low and there is nothing left to free. Nothing else reports it
+            # - reclaim_space only logs when it actually frees something - and
+            # with no metrics stack anywhere, this log line is the alert.
+            if aggressive and not freed:
+                log.warning(
+                    "reclaim: volume low (%d MB free) and nothing left to "
+                    "reclaim - the volume needs more room", round(free / 1e6))
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
-        time.sleep(3 * 3600)
+        time.sleep(delay)
 
 
 def _warm_models() -> None:

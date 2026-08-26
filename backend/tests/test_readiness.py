@@ -141,3 +141,42 @@ def test_the_engine_state_a_probe_reads_is_cheap_and_complete():
     state = images.engine_state()
     assert set(state) == {"model", "loaded", "busy", "last_inference_seconds"}
     assert state["busy"] is False
+
+
+# --- the housekeeping daemon's decision ------------------------------------
+#
+# reclaim_space() had tests for what it frees; nothing covered when the daemon
+# decides to run it, which is where the defect was.
+
+
+def test_a_full_or_unreadable_volume_counts_as_low():
+    """disk_free_bytes() reports 0 for BOTH a genuinely full volume and a stat
+    it could not take -- it swallows the error and returns 0. Neither is
+    evidence of room, so both have to escalate.
+
+    The guard used to be `bool(free) and free < limit`, meaning to say "if we
+    know the free space". Its actual effect was to read 0 as "no reason to
+    hurry" and switch aggressive reclaim off at the one moment it exists for.
+    """
+    aggressive, delay = main._reclaim_plan(0)
+    assert aggressive is True
+    assert delay == main._RECLAIM_INTERVAL_LOW
+
+
+def test_a_low_volume_is_revisited_sooner():
+    """The docstring has always promised "sooner when the volume is running
+    low"; the loop slept three hours either way, so a volume that filled
+    mid-batch stayed broken until the next pass came round on its own."""
+    aggressive, delay = main._reclaim_plan(main._LOW_DISK_BYTES - 1)
+    assert aggressive is True
+    assert delay == main._RECLAIM_INTERVAL_LOW
+    assert delay < main._RECLAIM_INTERVAL
+
+
+def test_a_healthy_volume_keeps_the_slow_pass():
+    """The other half of the trade: room to spare must NOT shorten the TTLs.
+    Aggressive mode drops originals after 15 minutes, so leaving it on costs
+    every subsequent edit a round trip to R2 for bytes that were local."""
+    aggressive, delay = main._reclaim_plan(main._LOW_DISK_BYTES + 1)
+    assert aggressive is False
+    assert delay == main._RECLAIM_INTERVAL
