@@ -58,6 +58,20 @@ jobs:
           done
           echo "=== health ==="
           curl -sS https://listing-lfwjrg.fly.dev/api/health || true
+      # Today's incident: publishes rejected with eBay's error-240 catch-all
+      # after an account reconnect, old account's listings still showing. The
+      # lines that decide the fix: which Trading call was rejected (AddItem =
+      # real account hold; ReviseItem = stale item id from the old account),
+      # and whether the connect callback detected the switch and stamped
+      # anything.
+      - name: eBay account-switch and publish-rejection trail
+        run: |
+          flyctl logs -a listing-lfwjrg --no-tail \
+            | grep -iE 'ebay connect|account switch|labelled|release-foreign|stamp|trading: .* rejected|code=240|publish blocked|payments program' \
+            | tail -80 || echo "(no matching lines in the retained window)"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
       - name: Recent logs
         run: flyctl logs -a listing-lfwjrg --no-tail | tail -120
         env:
