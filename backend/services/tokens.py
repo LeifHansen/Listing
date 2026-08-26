@@ -310,14 +310,28 @@ def verify_stripe_signature(payload: bytes, sig_header: str, secret: str,
                             tolerance: int = 300,
                             now: Optional[float] = None) -> bool:
     """Verify a Stripe-Signature header (t=...,v1=...) over the raw body.
-    Pure — unit-testable without Stripe."""
+    Pure — unit-testable without Stripe.
+
+    EVERY v1 candidate is checked, not just one. The header carries a v1 per
+    active endpoint secret, and Stripe's documented way to rotate a webhook
+    secret is to serve both for a while — during which each delivery arrives
+    signed twice. Parsing the header into a dict kept whichever came last, so
+    for the whole rotation window half the deliveries verified and half were
+    rejected as forged: token purchases silently not credited, refunds not
+    clawed back, and Stripe retrying against the same coin flip.
+    """
     if not sig_header or not secret:
         return False
-    parts = dict(
-        kv.split("=", 1) for kv in sig_header.split(",") if "=" in kv
-    )
-    ts, sig = parts.get("t"), parts.get("v1")
-    if not ts or not sig:
+    ts = ""
+    sigs: list[str] = []
+    for kv in sig_header.split(","):
+        key, _, value = kv.partition("=")
+        key, value = key.strip(), value.strip()
+        if key == "t" and not ts:
+            ts = value
+        elif key == "v1" and value:
+            sigs.append(value)
+    if not ts or not sigs:
         return False
     try:
         ts_val = int(ts)
@@ -327,7 +341,10 @@ def verify_stripe_signature(payload: bytes, sig_header: str, secret: str,
         return False
     expected = hmac.new(secret.encode(), f"{ts}.".encode() + payload,
                         hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, sig)
+    # compare_digest against each candidate rather than `expected in sigs`:
+    # the whole point of this comparison is that it does not leak, through
+    # timing, how much of a forged signature was right.
+    return any(hmac.compare_digest(expected, sig) for sig in sigs)
 
 
 # Events that mean the buyer's money went back to them. A refund is usually

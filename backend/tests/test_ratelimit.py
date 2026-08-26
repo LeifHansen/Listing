@@ -53,3 +53,34 @@ def test_key_table_does_not_grow_without_bound():
     ratelimit.check("login:everyone-else-is-cold",
                     now=1000.0 + ratelimit.WINDOW_SECONDS + 1)
     assert len(ratelimit._hits) < ratelimit._MAX_KEYS
+
+
+def test_the_cap_holds_DURING_a_spray_not_only_after_it():
+    """The case above lets time pass, which is what makes the cheap sweep
+    work. A real spray does not: thousands of distinct keys arrive inside one
+    window, nothing is expired, and the sweep finds no candidates at all.
+
+    That was the hole. The eviction pass collected only keys older than the
+    window, so under exactly the traffic _MAX_KEYS exists to survive it
+    collected nothing and the dict grew for as long as the flood lasted — the
+    cap was a comment rather than a bound.
+    """
+    for i in range(ratelimit._MAX_KEYS * 2):
+        # One fixed instant: no key is ever old enough to expire.
+        ratelimit.check(f"login:10.1.{i // 256}.{i % 256}", now=1000.0)
+    assert len(ratelimit._hits) <= ratelimit._MAX_KEYS
+
+
+def test_eviction_never_drops_the_caller_being_counted():
+    """Evicting a key forgives its attempts. Dropping the key we are in the
+    middle of counting would hand an attacker a fresh allowance on the very
+    request that triggered the eviction."""
+    attacker = "login:9.9.9.9"
+    for _ in range(ratelimit.MAX_ATTEMPTS + 1):
+        ratelimit.check(attacker, now=1000.0)
+    assert not ratelimit.check(attacker, now=1000.0)
+    # Now flood past the cap from everywhere else, then come back.
+    for i in range(ratelimit._MAX_KEYS * 2):
+        ratelimit.check(f"login:10.2.{i // 256}.{i % 256}", now=1000.0)
+    assert not ratelimit.check(attacker, now=1000.0), \
+        "the flood bought the attacker a clean slate"

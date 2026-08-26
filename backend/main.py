@@ -17,6 +17,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -46,7 +47,28 @@ from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
-app = FastAPI(title="eBay Listing Generator")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Everything that has to happen before the first request is served.
+
+    Replaces the two startup hooks this used to register with Starlette's
+    deprecated event API, which warned on every boot and every test run. Both
+    bodies moved here verbatim, in their original registration order — and
+    that order matters: warming the model and probing the bucket are
+    fire-and-forget threads, while the job mirrors must be adopted before a
+    client can poll for one.
+
+    The names below are defined further down the module. That resolves fine —
+    this body runs at startup, not at import — and keeps each hook's own
+    documentation next to the machinery it starts.
+    """
+    _warm_models()
+    _adopt_job_mirrors()
+    yield
+
+
+app = FastAPI(title="eBay Listing Generator", lifespan=_lifespan)
 
 # The iOS/Android shell bundles the web build (guideline 4.2 forbids a bare
 # remote-webview app), so its pages live on capacitor://localhost and call
@@ -243,7 +265,6 @@ def _reclaim_loop() -> None:
         time.sleep(3 * 3600)
 
 
-@app.on_event("startup")
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
     background-removal model, resolve the R2 bucket check so /api/health tells
@@ -863,7 +884,11 @@ def account_summary(request: Request) -> dict:
     if not user:
         raise HTTPException(401, "Log in first.")
     counted = db.db_status().get("connected", False)
-    rows = db.list_listings(limit=1000, user_id=user["id"]) if counted else []
+    # LIST_CAP, not a number of its own: every other read of the store uses it,
+    # and a lower cap here would quietly under-report the very seller this
+    # dialog exists to warn — someone with more listings than the cap is told
+    # they are about to delete fewer than they have, live ones included.
+    rows = db.list_listings(limit=LIST_CAP, user_id=user["id"]) if counted else []
     live = sum(1 for r in rows
                if (r.get("status") or "") in ("published", "live"))
     return {
@@ -1025,8 +1050,12 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
         return _finish_connect(request, "/?ebay=error")
     try:
-        tokens = ebay_auth.exchange_code(code)
-        access = tokens["access_token"]
+        # NOT `tokens` — that is the billing module, imported at the top of
+        # this file. Shadowing it here left the handler one added
+        # tokens.spend() call away from an AttributeError on a dict, inside a
+        # try whose except turns anything at all into a bare "/?ebay=error".
+        grant = ebay_auth.exchange_code(code)
+        access = grant["access_token"]
         policies = ebay_auth.fetch_policies_and_location(access)
         # Record WHICH eBay account this is, so the user can confirm they
         # connected the right one (best-effort — never block connect on it).
@@ -1039,7 +1068,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         prev_user = (existing.get("ebay_username") or "").strip()
         new_user = (ident["username"] or "").strip()
         save_kwargs = {
-            "refresh_token": tokens["refresh_token"],
+            "refresh_token": grant["refresh_token"],
             "ebay_username": new_user,
             "ebay_email": ident["email"],
         }
@@ -2524,7 +2553,6 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
     return resumed
 
 
-@app.on_event("startup")
 def _adopt_job_mirrors() -> None:
     """Re-adopt mirrored jobs before the first request is served, so a client
     that polls straight through a restart is told its batch was interrupted
@@ -3867,7 +3895,13 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
                     if listing_sync.is_imported(i.get("listing") or {})}
     imported = [i for i in live if i["id"] in imported_ids]
     items = [i for i in live if i["id"] not in imported_ids]
-    if not sync_guard.sweep_due(user["id"], force):
+    # Ask for the cooldown only when there is actually something to sweep.
+    # sweep_due() STARTS the cooldown on the call that says yes, so asking
+    # first and finding nothing to do spent the whole six hours on zero eBay
+    # calls — and the next sync, the one with real work, was refused. The
+    # cooldown exists to ration eBay's daily quota, so it should only ever be
+    # consumed by a run that spends some of it.
+    if (imported or items) and not sync_guard.sweep_due(user["id"], force):
         # Cooled down: the finished-list reconcile above already ran (and is
         # what actually moves ended/sold records), so skip the ~100-call
         # per-item sweeps rather than spending the account's daily eBay quota

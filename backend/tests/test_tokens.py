@@ -94,6 +94,58 @@ def test_stripe_signature_roundtrip():
     assert not tokens.verify_stripe_signature(payload, "t=abc,v1=zz", secret)
 
 
+def _sign_multi(payload: bytes, secrets: list[str], ts: int) -> str:
+    """The header Stripe sends while a webhook secret is being rotated: one
+    v1 per active endpoint secret, over the same timestamp and body."""
+    macs = [hmac.new(sec.encode(), f"{ts}.".encode() + payload,
+                     hashlib.sha256).hexdigest() for sec in secrets]
+    return ",".join([f"t={ts}"] + [f"v1={m}" for m in macs])
+
+
+def test_a_rotating_secret_verifies_whichever_v1_is_ours():
+    """Rotating a webhook secret means both are live for a while, and every
+    delivery in that window arrives signed twice.
+
+    Parsing the header into a dict kept only the LAST v1, so verification
+    became a coin flip decided by which order Stripe listed them: half the
+    deliveries were rejected as forged. Rejected deliveries are not cosmetic
+    here — that is a paid token pack never credited, or a refund never
+    clawed back, with Stripe retrying against the same coin flip.
+    """
+    payload = b'{"type":"checkout.session.completed"}'
+    ours, theirs = "whsec_ours", "whsec_the_new_one"
+    now = int(time.time())
+    # Ours first, then ours last: both orders must verify.
+    assert tokens.verify_stripe_signature(
+        payload, _sign_multi(payload, [ours, theirs], now), ours)
+    assert tokens.verify_stripe_signature(
+        payload, _sign_multi(payload, [theirs, ours], now), ours)
+
+
+def test_multiple_signatures_do_not_weaken_the_check():
+    """Accepting any of several candidates must not become accepting
+    anything: a header full of signatures, none of them ours, is still a
+    forgery — and the timestamp still has to be fresh."""
+    payload = b'{"type":"checkout.session.completed"}'
+    now = int(time.time())
+    header = _sign_multi(payload, ["whsec_a", "whsec_b", "whsec_c"], now)
+    assert not tokens.verify_stripe_signature(payload, header, "whsec_ours")
+    # Right secret, wrong body.
+    good = _sign_multi(payload, ["whsec_a", "whsec_ours"], now)
+    assert not tokens.verify_stripe_signature(b'{"type":"other"}', good, "whsec_ours")
+    # Right secret, replayed from an hour ago.
+    stale = _sign_multi(payload, ["whsec_a", "whsec_ours"], now - 3600)
+    assert not tokens.verify_stripe_signature(payload, stale, "whsec_ours")
+
+
+def test_a_header_with_no_usable_signature_is_rejected():
+    payload = b"{}"
+    now = int(time.time())
+    assert not tokens.verify_stripe_signature(payload, f"t={now}", "whsec_ours")
+    assert not tokens.verify_stripe_signature(payload, f"t={now},v1=", "whsec_ours")
+    assert not tokens.verify_stripe_signature(payload, "v1=abc", "whsec_ours")
+
+
 # --- balance invariants against the real DB code (SQLite) -------------------
 
 @pytest.fixture

@@ -36,6 +36,12 @@ COOLDOWN_SECONDS = float(
 _last_sweep: dict[str, float] = {}
 _lock = threading.Lock()
 
+# Nothing ever removed from this dict, so on an always-on machine it gained a
+# row per account that ever synced and never gave one back. An entry older
+# than the cooldown answers exactly the same as no entry at all, so past this
+# many they are dropped on the next call rather than kept forever.
+_MAX_TRACKED = 4096
+
 
 def sweep_due(user_id: str, force: bool = False) -> bool:
     """True when the per-item probe sweeps may run for this account.
@@ -44,12 +50,19 @@ def sweep_due(user_id: str, force: bool = False) -> bool:
     cooldown so the next background check doesn't immediately sweep again.
     Records the timestamp when it returns True, so concurrent callers (two
     tabs polling at once) can't both get a yes.
+
+    Ask only when there is something to sweep: a call that returns True STARTS
+    the cooldown, so asking speculatively spends the whole window on nothing.
     """
     now = time.time()
     with _lock:
         if not force and now - _last_sweep.get(user_id, 0.0) < COOLDOWN_SECONDS:
             return False
         _last_sweep[user_id] = now
+        if len(_last_sweep) > _MAX_TRACKED:
+            for key in [k for k, t in _last_sweep.items()
+                        if now - t >= COOLDOWN_SECONDS]:
+                _last_sweep.pop(key, None)
         return True
 
 

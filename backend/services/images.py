@@ -1968,10 +1968,15 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     from . import orient
     rotations = orient.detect_rotations([src for _i, src, _dst in todo])
     # A list, not a set: these line up positionally with optimize_batch's
-    # results below, and a set's iteration order is not the job order.
+    # results below, and a set's iteration order is not the job order. The
+    # membership test gets its own set, built once — inside the comprehension
+    # it was rebuilt per job, which on a 250-photo batch resumed after a
+    # restart is a quarter of a million comparisons to answer "which of these
+    # are already done".
     pending = [i for i, _src, _dst in todo]
+    pending_set = set(pending)
     results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
-               for i, _src in jobs if i not in set(pending)}
+               for i, _src in jobs if i not in pending_set}
     if progress and not todo and jobs:
         # Nothing left to do, so nothing below will ever tick. Report the real
         # count once rather than leaving a resumed batch's bar reading zero.

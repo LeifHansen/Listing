@@ -195,6 +195,7 @@ def find(records: list[dict]) -> list[dict]:
         # Oldest first: the original is what the seller usually keeps, and it
         # reads as "this one, then the accidental second one".
         group = sorted(seen.values(), key=lambda r: _listed_at(r) or _FAR_FUTURE)
+        listed_at = [_listed_at(r) for r in group]
         reasons, caveats = _evidence(group)
         groups.append({
             "title": (group[0].get("listing") or {}).get("title")
@@ -208,10 +209,13 @@ def find(records: list[dict]) -> list[dict]:
                 "price": _price(r),
                 "currency": (r.get("listing") or {}).get("currency") or "USD",
                 "view_url": (r.get("listing") or {}).get("view_url") or "",
-                "listed_at": (_listed_at(r).isoformat() if _listed_at(r) else None),
+                # Parsed once above, not twice here — the ternary called
+                # _listed_at again just to ask whether the first call
+                # returned anything.
+                "listed_at": when.isoformat() if when else None,
                 "created_here": not _is_mirror(r),
                 "watch_count": (r.get("listing") or {}).get("watch_count") or 0,
-            } for r in group],
+            } for r, when in zip(group, listed_at)],
         })
 
     groups.sort(key=lambda g: (_RANK[g["confidence"]], -len(g["listings"]),
