@@ -301,9 +301,11 @@ def _reclaim_loop() -> None:
         time.sleep(delay)
 
 
-# Just under db._STATUS_TTL (30s), so the cache /api/health reads is always
-# inside its window and the probe never has to go and fetch it.
-_DB_STATUS_REFRESH = 20
+# Well under db._STATUS_TTL (30s), so the cache /api/health reads stays inside
+# its window and the probe never has to go and fetch it. The gap is the slack:
+# at 10s a refresh has 20s to complete before the cache goes stale and a
+# request handler would have to take the round trip itself.
+_DB_STATUS_REFRESH = 10
 
 
 def _db_status_loop() -> None:
@@ -317,6 +319,8 @@ def _db_status_loop() -> None:
     out. Refreshing on this thread means a slow probe costs a daemon nobody is
     waiting on, and the request handler is always served from cache.
     """
+    if not db.enabled():
+        return   # nothing to refresh; don't wake 8,640 times a day to no-op
     while True:
         try:
             db.db_status(refresh=True)

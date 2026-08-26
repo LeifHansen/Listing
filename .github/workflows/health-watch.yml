@@ -5,8 +5,8 @@ name: Health watch
 # READY_MIN_DISK_MB, health reports disk_free_mb, objstore_error and db state --
 # but nothing ever calls them. fly-logs.yml curls both and is
 # workflow_dispatch-only, so it runs when a human remembers, which is never
-# before an incident. On 2026-08-10 the volume sat at 61% and the reclaim
-# daemon went aggressive; that was only ever visible to someone going to look.
+# before an incident. On 2026-08-10 the volume sat at 61% with the reclaim
+# daemon in aggressive mode, and that was visible only to someone going to look.
 #
 # A failed scheduled run emails and push-notifies through the GitHub mobile
 # app -- a channel this project's operator demonstrably watches, since PRs get
@@ -34,18 +34,42 @@ jobs:
     name: Probe readiness and disk headroom
     runs-on: ubuntu-latest
     steps:
+      # Required: the threshold logic below lives in the repo. Without this the
+      # job runs in an empty workspace and fails on every schedule, which turns
+      # the alarm into noise that trains the operator to ignore it.
+      - uses: actions/checkout@v4
+
       - name: Readiness (503 = not serving)
         run: |
-          code=$(curl -sS -m 20 -o /tmp/ready.json -w '%{http_code}' "$SITE/api/ready" || echo 000)
-          echo "HTTP $code"
-          tr ',' '\n' < /tmp/ready.json || true
+          # Retried, because min_machines_running = 1 means a deploy replaces
+          # the ONLY machine: a probe landing in that window sees a refused
+          # connection or a 503 from a perfectly healthy deploy. fly-logs.yml
+          # loops its live-site check for the same reason. Only a reading that
+          # stays bad across all attempts is real.
+          code=000
+          for i in 1 2 3; do
+            code=$(curl -sS -m 20 -o /tmp/ready.json -w '%{http_code}' "$SITE/api/ready" || echo 000)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = "200" ] && break
+            [ "$i" != "3" ] && sleep 20
+          done
+          tr ',' '\n' < /tmp/ready.json 2>/dev/null || true
           if [ "$code" != "200" ]; then
-            echo "::error::/api/ready returned $code - the app cannot do photo work right now"
+            echo "::error::/api/ready returned $code on 3 attempts - the app cannot do photo work right now"
             exit 1
           fi
 
       - name: Disk headroom, storage and database
+        # always(): when readiness fails is exactly when the diagnosis matters.
+        # Without this the operator gets "/api/ready returned 503" and nothing
+        # about disk, storage or the database to explain it.
+        if: always()
         run: |
-          curl -sS -m 20 -o /tmp/health.json "$SITE/api/health"
-          tr ',' '\n' < /tmp/health.json
+          code=$(curl -sS -m 20 -o /tmp/health.json -w '%{http_code}' "$SITE/api/health" || echo 000)
+          echo "HTTP $code"
+          cat /tmp/health.json 2>/dev/null | tr ',' '\n' || true
+          if [ "$code" != "200" ]; then
+            echo "::error::/api/health returned $code - the app is not answering"
+            exit 1
+          fi
           python3 .github/scripts/check_health.py /tmp/health.json "$MIN_FREE_MB"
