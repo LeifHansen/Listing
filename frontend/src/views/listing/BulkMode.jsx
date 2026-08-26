@@ -18,7 +18,7 @@ import { useToast } from "@/components/ui/Toaster";
 import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
-import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
 import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
@@ -520,7 +520,9 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             error: res.published
               ? (res.multi && Object.values(res.results || {}).some((r) => !r.ok)
                   ? `${summary} — open the full editor to fix the rest.` : null)
-              : (res.message || "Publish blocked — open the full editor to fix."),
+              // blockedReason, not res.message — see publishShared: eBay's
+              // catch-all for an account-level hold blames the title.
+              : blockedReason(res, "Publish blocked — open the full editor to fix."),
           }
         : x));
       return !!res.published;

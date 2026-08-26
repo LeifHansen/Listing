@@ -3,7 +3,7 @@ import { api, postJson, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
-import { publishListing, usePublishTargets } from "./publishShared";
+import { publishListing, usePublishTargets, blockedReason } from "./publishShared";
 import { ebayBlockers, weightOz } from "./blockers";
 import {
   confirmSpecificRows, specificValues, toggleSpecificValue as toggleValue,
@@ -519,9 +519,12 @@ export function useListingForm() {
       // registering. The result banner explains the details; this is the
       // part you can't miss.
       if (mode === "live" && !result.published) {
-        toast(result.message
-          || "That didn't go live — check the publish card for what to fix.",
-          { kind: "error" });
+        // blockedReason, not result.message: eBay's catch-all for an
+        // account-level hold blames the title, and this toast is the one piece
+        // of the outcome a seller cannot miss.
+        toast(blockedReason(
+          result, "That didn't go live — check the publish card for what to fix."),
+        { kind: "error" });
       }
       // Reflect the outcome on the card immediately. loadListings is the
       // authority and lands a moment later, but a listing that just went
