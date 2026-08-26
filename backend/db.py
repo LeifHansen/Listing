@@ -12,6 +12,7 @@ whether the DB is actually reachable.
 from __future__ import annotations
 
 import datetime as _dt
+import threading
 import time as _time
 import uuid as _uuid
 from typing import Optional
@@ -26,6 +27,14 @@ from .config import log
 
 _engine = None
 _initialized = False
+# _get_engine() assigns _engine BEFORE create_all() has finished, so an
+# unguarded second caller saw a non-None engine, found _initialized still
+# False, and issued create_all() concurrently -- both emitting plain CREATE
+# TABLE, so the loser raises. Startup now has three daemons that reach the DB
+# within microseconds of each other (db-status, reclaim's orphan sweep) plus
+# the first request, which is exactly the race. Serialize the init; the fast
+# path below skips the lock once it is warm.
+_engine_lock = threading.Lock()
 
 
 class Base(DeclarativeBase):
@@ -176,41 +185,63 @@ def _get_engine():
     global _engine, _initialized
     if not enabled():
         return None
-    if _engine is None:
-        # Pool sized against the concurrency that can actually reach it, and
-        # set to fail fast rather than hang. Almost every route here is a sync
-        # `def`, so FastAPI runs it in anyio's 40-thread pool, and background
-        # daemons (bulk, identify, the R2 pushes, the store sync) add more on
-        # top. Against SQLAlchemy's default 5+10 that meant callers past the
-        # fifteenth queued for the default 30s checkout and then hit a timeout
-        # that db.py swallows into []/None — a half-minute hang followed by a
-        # confidently empty answer. pool_recycle matters for Neon specifically:
-        # it drops idle connections, and a stale one surfaces as a failed query
-        # on somebody's next request.
-        _engine = create_engine(
-            _normalize_url(config.DATABASE_URL),
-            pool_pre_ping=True, pool_size=10, max_overflow=20,
-            pool_timeout=5, pool_recycle=300,
-        )
-    if not _initialized:
-        Base.metadata.create_all(_engine)  # may raise if DB unreachable
-        # Lightweight migrations for DBs created before a column existed. Each
-        # ALTER is separately guarded so an already-applied one doesn't skip
-        # the rest.
-        for stmt in (
-            "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
-            "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
-            "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
-            "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN prefs JSON",
-        ):
-            try:
-                with _engine.begin() as conn:
-                    conn.execute(text(stmt))
-            except Exception:  # noqa: BLE001 - column already exists
-                pass
-        _initialized = True
+    if _engine is not None and _initialized:
+        return _engine          # warm: no lock on the common path
+    with _engine_lock:
+        if _engine is None:
+            # Pool sized against the concurrency that can actually reach it,
+            # and set to fail fast rather than hang. Almost every route here is
+            # a sync `def`, so FastAPI runs it in anyio's 40-thread pool, and
+            # background daemons (bulk, identify, the R2 pushes, the store
+            # sync) add more on top. Against SQLAlchemy's default 5+10 that
+            # meant callers past the fifteenth queued for the default 30s
+            # checkout and then hit a timeout that db.py swallows into []/None
+            # — a half-minute hang followed by a confidently empty answer.
+            # pool_recycle matters for Neon specifically: it drops idle
+            # connections, and a stale one surfaces as a failed query on
+            # somebody's next request.
+            url = _normalize_url(config.DATABASE_URL)
+            # pool_timeout bounds the wait for a pool SLOT, not the TCP
+            # connect. Without a connect timeout a new connection inherits the
+            # OS default and can hang for minutes on an unreachable host - and
+            # /api/health round-trips the DB inside Fly's 5s liveness timeout.
+            # A Neon stall therefore became a failed health check, and on a
+            # single-machine app Fly answers that by replacing the machine,
+            # killing whatever batch was running. Bound it well under 5s.
+            #
+            # This bounds the CONNECT only; a server that accepts and then
+            # stalls is handled on the other side, by keeping /api/health on
+            # the warm cache (see db_status and main._db_status_loop).
+            #
+            # libpq-only: SQLite's connect() rejects the keyword outright, and
+            # the test suite runs the billing invariants on SQLite.
+            connect_args = ({"connect_timeout": 3}
+                            if url.startswith("postgresql") else {})
+            _engine = create_engine(
+                url,
+                pool_pre_ping=True, pool_size=10, max_overflow=20,
+                pool_timeout=5, pool_recycle=300,
+                connect_args=connect_args,
+            )
+        if not _initialized:
+            Base.metadata.create_all(_engine)  # may raise if DB unreachable
+            # Lightweight migrations for DBs created before a column existed.
+            # Each ALTER is separately guarded so an already-applied one
+            # doesn't skip the rest.
+            for stmt in (
+                "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
+                "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
+                "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
+                "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN prefs JSON",
+            ):
+                try:
+                    with _engine.begin() as conn:
+                        conn.execute(text(stmt))
+                except Exception:  # noqa: BLE001 - column already exists
+                    pass
+            _initialized = True
     return _engine
 
 
@@ -1186,13 +1217,20 @@ _STATUS_TTL = 30  # seconds
 _status_cache: tuple[float, dict] | None = None
 
 
-def db_status() -> dict:
+def db_status(refresh: bool = False) -> dict:
     """Health probe: is a DB configured, and can we actually reach it?
-    Cached briefly (see _STATUS_TTL)."""
+    Cached briefly (see _STATUS_TTL).
+
+    `refresh` takes a new reading regardless of the cache. It exists for the
+    background refresher in main, which keeps this cache warm so that request
+    handlers - /api/health above all - are always served from it and never
+    pay for the round trip themselves.
+    """
     global _status_cache
     if not enabled():
         return {"configured": False, "connected": False}
-    if _status_cache and _time.time() - _status_cache[0] < _STATUS_TTL:
+    if (not refresh and _status_cache
+            and _time.time() - _status_cache[0] < _STATUS_TTL):
         return _status_cache[1]
     try:
         eng = _get_engine()

@@ -171,6 +171,13 @@ _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # 250 MB is roughly one full bulk batch of headroom, which is the amount that
 # actually predicts an ENOSPC.
 _LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
+# How long the housekeeping daemon waits between passes. A volume with room to
+# spare only needs the slow pass; one that is low - or that will not answer how
+# much is left - has to be revisited soon, because the next bulk batch is what
+# fills it. The loop used to sleep three hours either way, so a volume that
+# filled mid-batch stayed broken until the next pass happened to come round.
+_RECLAIM_INTERVAL = 3 * 3600
+_RECLAIM_INTERVAL_LOW = 15 * 60
 
 
 def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
@@ -252,25 +259,85 @@ def reclaim_space(aggressive: bool = False) -> int:
     return freed
 
 
+def _reclaim_plan(free: int) -> tuple[bool, int]:
+    """Decide (aggressive, seconds until the next pass) from a free-space reading.
+
+    `free` is storage.disk_free_bytes(), which reports 0 both for a genuinely
+    full volume and for a stat it could not take (it swallows the error and
+    returns 0). Those are the two states aggressive reclaim exists for, so 0
+    has to count as low. Reading it as "no reason to hurry" is what
+    `bool(free) and free < limit` did: the guard was meant to say "if we know
+    the free space", but its effect was to switch the emergency off at exactly
+    the moment it needed to fire.
+
+    A stat that fails on a healthy volume therefore reclaims early rather than
+    late. That trade is deliberate: short TTLs cost a round trip to R2 for an
+    edit, while being wrong the other way is ENOSPC, which fails every upload.
+    """
+    low = free < _LOW_DISK_BYTES
+    return low, (_RECLAIM_INTERVAL_LOW if low else _RECLAIM_INTERVAL)
+
+
 def _reclaim_loop() -> None:
     """Housekeeping daemon: reclaim space every few hours, and sooner when the
     volume is running low. Without this the volume only ever got swept at
     startup, so a busy day of bulk batches could fill it mid-flight."""
     while True:
+        delay = _RECLAIM_INTERVAL_LOW
         try:
             free = storage.disk_free_bytes()
-            reclaim_space(aggressive=bool(free) and free < _LOW_DISK_BYTES)
+            aggressive, delay = _reclaim_plan(free)
+            freed = reclaim_space(aggressive=aggressive)
+            # The one state this daemon cannot fix by itself: the volume is
+            # low and there is nothing left to free. Nothing else reports it
+            # - reclaim_space only logs when it actually frees something - and
+            # with no metrics stack anywhere, this log line is the alert.
+            if aggressive and not freed:
+                log.warning(
+                    "reclaim: volume low (%d MB free) and nothing left to "
+                    "reclaim - the volume needs more room", round(free / 1e6))
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
-        time.sleep(3 * 3600)
+        time.sleep(delay)
+
+
+# Well under db._STATUS_TTL (30s), so the cache /api/health reads stays inside
+# its window and the probe never has to go and fetch it. The gap is the slack:
+# at 10s a refresh has 20s to complete before the cache goes stale and a
+# request handler would have to take the round trip itself.
+_DB_STATUS_REFRESH = 10
+
+
+def _db_status_loop() -> None:
+    """Keep db_status()'s cache warm, off the request path.
+
+    /api/health reports db state, and db_status() only caches for 30s while
+    Fly's liveness check runs every 15s - so roughly every other check was
+    making a live round trip to Neon inside a 5s timeout. Fly answers a missed
+    check by replacing the machine, and with one machine that kills whatever
+    batch is running, which is the restart loop fly.toml says was designed
+    out. Refreshing on this thread means a slow probe costs a daemon nobody is
+    waiting on, and the request handler is always served from cache.
+    """
+    if not db.enabled():
+        return   # nothing to refresh; don't wake 8,640 times a day to no-op
+    while True:
+        try:
+            db.db_status(refresh=True)
+        except Exception as exc:  # noqa: BLE001 - housekeeping never dies
+            log.warning("db status refresh: %s", exc)
+        time.sleep(_DB_STATUS_REFRESH)
 
 
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
     background-removal model, resolve the R2 bucket check so /api/health tells
-    the truth from the first request, and keep the volume from filling up."""
+    the truth from the first request, keep the db-status cache warm so the
+    liveness probe never blocks on Postgres, and keep the volume from filling
+    up."""
     threading.Thread(target=images.warm, daemon=True).start()
     threading.Thread(target=objstore.probe, daemon=True).start()
+    threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
 
 
@@ -861,8 +928,16 @@ async def tokens_webhook(request: Request) -> dict:
     the raw body; a DB outage returns 503 so Stripe retries the delivery."""
     payload = await request.body()
     try:
-        return tokens.handle_webhook(payload,
-                                     request.headers.get("Stripe-Signature", ""))
+        # handle_webhook verifies the signature and then writes the credit
+        # through db.token_credit - a synchronous SELECT ... FOR UPDATE +
+        # INSERT + COMMIT against Neon. Called directly it blocks the event
+        # loop for the whole round trip, stalling every other request on this
+        # single-machine app, the liveness check included. Stripe delivers
+        # these unattended and retries on 5xx, so nobody is watching when it
+        # happens.
+        return await run_in_threadpool(
+            tokens.handle_webhook, payload,
+            request.headers.get("Stripe-Signature", ""))
     except PermissionError as exc:
         raise HTTPException(400, "Invalid signature") from exc
     except Exception as exc:  # noqa: BLE001
