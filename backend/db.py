@@ -187,10 +187,24 @@ def _get_engine():
         # confidently empty answer. pool_recycle matters for Neon specifically:
         # it drops idle connections, and a stale one surfaces as a failed query
         # on somebody's next request.
+        url = _normalize_url(config.DATABASE_URL)
+        # pool_timeout bounds the wait for a pool SLOT, not the TCP connect.
+        # Without a connect timeout a new connection inherits the OS default
+        # and can hang for minutes on an unreachable host - and /api/health
+        # round-trips the DB inside Fly's 5s liveness timeout. A Neon stall
+        # therefore became a failed health check, and on a single-machine app
+        # Fly answers that by replacing the machine, killing whatever batch was
+        # running. Bound it well under 5s.
+        #
+        # libpq-only: SQLite's connect() rejects the keyword outright, and the
+        # test suite runs the billing invariants on SQLite.
+        connect_args = ({"connect_timeout": 3}
+                        if url.startswith("postgresql") else {})
         _engine = create_engine(
-            _normalize_url(config.DATABASE_URL),
+            url,
             pool_pre_ping=True, pool_size=10, max_overflow=20,
             pool_timeout=5, pool_recycle=300,
+            connect_args=connect_args,
         )
     if not _initialized:
         Base.metadata.create_all(_engine)  # may raise if DB unreachable
@@ -1186,13 +1200,20 @@ _STATUS_TTL = 30  # seconds
 _status_cache: tuple[float, dict] | None = None
 
 
-def db_status() -> dict:
+def db_status(refresh: bool = False) -> dict:
     """Health probe: is a DB configured, and can we actually reach it?
-    Cached briefly (see _STATUS_TTL)."""
+    Cached briefly (see _STATUS_TTL).
+
+    `refresh` takes a new reading regardless of the cache. It exists for the
+    background refresher in main, which keeps this cache warm so that request
+    handlers - /api/health above all - are always served from it and never
+    pay for the round trip themselves.
+    """
     global _status_cache
     if not enabled():
         return {"configured": False, "connected": False}
-    if _status_cache and _time.time() - _status_cache[0] < _STATUS_TTL:
+    if (not refresh and _status_cache
+            and _time.time() - _status_cache[0] < _STATUS_TTL):
         return _status_cache[1]
     try:
         eng = _get_engine()

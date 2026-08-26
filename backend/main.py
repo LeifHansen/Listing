@@ -301,12 +301,39 @@ def _reclaim_loop() -> None:
         time.sleep(delay)
 
 
+# Just under db._STATUS_TTL (30s), so the cache /api/health reads is always
+# inside its window and the probe never has to go and fetch it.
+_DB_STATUS_REFRESH = 20
+
+
+def _db_status_loop() -> None:
+    """Keep db_status()'s cache warm, off the request path.
+
+    /api/health reports db state, and db_status() only caches for 30s while
+    Fly's liveness check runs every 15s - so roughly every other check was
+    making a live round trip to Neon inside a 5s timeout. Fly answers a missed
+    check by replacing the machine, and with one machine that kills whatever
+    batch is running, which is the restart loop fly.toml says was designed
+    out. Refreshing on this thread means a slow probe costs a daemon nobody is
+    waiting on, and the request handler is always served from cache.
+    """
+    while True:
+        try:
+            db.db_status(refresh=True)
+        except Exception as exc:  # noqa: BLE001 - housekeeping never dies
+            log.warning("db status refresh: %s", exc)
+        time.sleep(_DB_STATUS_REFRESH)
+
+
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
     background-removal model, resolve the R2 bucket check so /api/health tells
-    the truth from the first request, and keep the volume from filling up."""
+    the truth from the first request, keep the db-status cache warm so the
+    liveness probe never blocks on Postgres, and keep the volume from filling
+    up."""
     threading.Thread(target=images.warm, daemon=True).start()
     threading.Thread(target=objstore.probe, daemon=True).start()
+    threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
 
 
