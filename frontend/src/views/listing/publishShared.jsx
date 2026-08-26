@@ -68,6 +68,34 @@ export async function publishListing(id, listing, effectiveTargets, mode = "live
   return postJson("/api/publish", body);
 }
 
+// What to TELL the seller when a publish did not go live.
+//
+// res.message is eBay's own sentence, and for its catch-all rejections that
+// sentence is actively misleading. Error 240 -- "The item cannot be listed or
+// modified. The title and/or description may contain improper words or the
+// listing or seller may be in violation of eBay policy" -- is an ACCOUNT-level
+// hold: it repeats on every listing, names four possible causes and none of
+// them the real one, and the first thing it blames is the title.
+//
+// The backend already resolves that. ebay_errors.explain() files a 240 under
+// target "account" (there is a test asserting it must not point at the title),
+// and ebay_account.publish_block_issues() spends one call asking eBay whether
+// payments onboarding is the hold, appending a plain-language answer when it
+// is. All of that arrives in res.issues.
+//
+// Leading with res.message threw it away and sent the seller editing titles
+// that were never the problem. Prefer what the app worked out; fall back to
+// eBay's words only when there is nothing better to say.
+export function blockedReason(res, fallback) {
+  const issues = [
+    ...(res?.issues || []),
+    ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),
+  ];
+  const errors = issues.filter((i) => i && i.level !== "warn" && i.title);
+  const best = errors.find((i) => i.target && i.target !== "generic") || errors[0];
+  return best?.title || res?.message || fallback;
+}
+
 // "Post to" toggle chips — one per connected marketplace. Render only when
 // otherConnected is non-empty (eBay-only sellers never see the selector).
 export function MarketTargetChips({ selected, toggle, otherConnected }) {

@@ -180,3 +180,12 @@ def test_a_healthy_volume_keeps_the_slow_pass():
     aggressive, delay = main._reclaim_plan(main._LOW_DISK_BYTES + 1)
     assert aggressive is False
     assert delay == main._RECLAIM_INTERVAL
+
+
+def test_api_answers_are_never_cached(client):
+    """Account-state answers (/api/ebay/status above all) went out with NO
+    cache directive, leaving heuristic caching to the browser and anything in
+    between -- and a stale copy of "which eBay account is connected" had a
+    seller debugging an account switch against yesterday's answer."""
+    res = client.get("/api/health")
+    assert res.headers.get("Cache-Control") == "no-store"

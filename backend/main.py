@@ -123,6 +123,14 @@ async def _cache_headers(request: Request, call_next):
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
     elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
         response.headers["Cache-Control"] = "no-cache"
+    elif path.startswith("/api/"):
+        # API responses had NO cache directive at all, leaving heuristic
+        # caching to browsers and any intermediary. These answers are
+        # per-account state -- which eBay account is connected, what the
+        # listings are -- and a stale copy of one is how a seller ends up
+        # debugging an account switch against yesterday's answer. no-store,
+        # not no-cache: there is nothing here worth revalidating.
+        response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 
@@ -366,6 +374,11 @@ def _rate_limit_auth(request: Request, bucket: str) -> None:
 def health() -> dict:
     return {
         "ok": True,
+        # The commit actually running. A deploy can report success while the
+        # image serving traffic is older (a poisoned builder cache has done
+        # this here before), and without this the only way to tell was to
+        # diff response shapes against git history and guess.
+        "build": config.BUILD_SHA or "unknown",
         "anthropic_configured": config.anthropic_ready(),
         "ebay_configured": config.ebay_ready(),
         "ebay_missing": config.ebay_status()["missing"],

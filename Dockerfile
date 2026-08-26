@@ -27,6 +27,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # selects via REMBG_MODEL in fly.toml (needs the 4GB VM).
 RUN python -c "from rembg import new_session; new_session('u2netp'); new_session('isnet-general-use')"
 
+# Which commit this image was built from. Deploys report success on the
+# workflow side while the running code is something else -- a poisoned builder
+# cache did exactly that here before (see the builder-destroy in git history) --
+# and there was no way to ask the app what it was running. /api/health reports
+# this, so "is production current?" is one field instead of an investigation.
+# Last, so it never invalidates the model bake above.
+ARG GIT_SHA=""
+ENV BUILD_SHA=$GIT_SHA
+
 COPY backend ./backend
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 

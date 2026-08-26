@@ -13,7 +13,7 @@ import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
-import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
 
 /* The drafts experience on the merged Sell screen: every draft one click
@@ -178,7 +178,9 @@ export function DraftsStrip({ search = "" }) {
         : (res.message || "Published! It's live now."),
         { kind: partial ? "warning" : "success" });
     } else {
-      toast(res.message || "Publish blocked — open the draft to see what to fix.",
+      // blockedReason, not res.message — see publishShared: eBay's catch-all
+      // for an account-level hold blames the title.
+      toast(blockedReason(res, "Publish blocked — open the draft to see what to fix."),
         { kind: "warning" });
     }
     await loadListings({ quiet: true });

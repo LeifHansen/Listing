@@ -361,6 +361,10 @@ EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.
 # before it must reconnect once to grant it (their existing refresh token only
 # carries the scopes they originally approved). Same for sell.fulfillment
 # (reading sold orders + posting tracking numbers for the shipping workflow).
+# The commit this image was built from, stamped in by the Dockerfile's
+# GIT_SHA build arg. Empty for a local run or a build that didn't pass it.
+BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
+
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
