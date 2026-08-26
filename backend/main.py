@@ -924,8 +924,16 @@ async def tokens_webhook(request: Request) -> dict:
     the raw body; a DB outage returns 503 so Stripe retries the delivery."""
     payload = await request.body()
     try:
-        return tokens.handle_webhook(payload,
-                                     request.headers.get("Stripe-Signature", ""))
+        # handle_webhook verifies the signature and then writes the credit
+        # through db.token_credit - a synchronous SELECT ... FOR UPDATE +
+        # INSERT + COMMIT against Neon. Called directly it blocks the event
+        # loop for the whole round trip, stalling every other request on this
+        # single-machine app, the liveness check included. Stripe delivers
+        # these unattended and retries on 5xx, so nobody is watching when it
+        # happens.
+        return await run_in_threadpool(
+            tokens.handle_webhook, payload,
+            request.headers.get("Stripe-Signature", ""))
     except PermissionError as exc:
         raise HTTPException(400, "Invalid signature") from exc
     except Exception as exc:  # noqa: BLE001
