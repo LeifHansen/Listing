@@ -466,6 +466,15 @@ class EbayProvider:
                     ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
                          "message": str(exc), "issues": issues})
+            # The record's owner. Publishing through this account's creds IS
+            # the ownership fact, so write it down — without this the record's
+            # ebay_account stayed empty forever and the account-switch
+            # bookkeeping (count_foreign_listings, release) could never see
+            # it. Fills a blank only: a stamped record's history is not this
+            # call's to rewrite.
+            if not listing.ebay_account:
+                listing.ebay_account = ((creds or {}).get("ebay_username")
+                                        or "").strip()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             if pushed_local:
@@ -564,6 +573,15 @@ class EbayProvider:
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:
             # an id that never lands is indistinguishable from "never listed".
+            # The record's owner. Publishing through this account's creds IS
+            # the ownership fact, so write it down — without this the record's
+            # ebay_account stayed empty forever and the account-switch
+            # bookkeeping (count_foreign_listings, release) could never see
+            # it. Fills a blank only: a stamped record's history is not this
+            # call's to rewrite.
+            if not listing.ebay_account:
+                listing.ebay_account = ((creds or {}).get("ebay_username")
+                                        or "").strip()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", ctx.uid)
             storage.save_listing(session_id, listing)

@@ -1234,29 +1234,45 @@ def ebay_status(request: Request) -> dict:
         # "the new account somehow has my old items".
         "foreign_listings": (db.count_foreign_listings(
             uid, acct.get("ebay_username") or "") if connected and uid else 0),
+        # eBay-linked records with no owner recorded — they predate ownership
+        # stamping, so after an undetected switch they are the old account's
+        # items wearing no label. Reported separately because only the seller
+        # can say whose they are (see release_foreign_listings).
+        "unowned_listings": (db.count_unowned_ebay_listings(uid)
+                             if connected and uid else 0),
     }
 
 
 @app.post("/api/ebay/release-foreign-listings")
-def release_foreign_listings(request: Request) -> dict:
+def release_foreign_listings(request: Request,
+                             payload: Optional[dict] = None) -> dict:
     """Unlink every listing belonging to a previously-connected eBay account.
 
     The records stay — they're the seller's own work, photos and all — but the
     eBay item id, source and live status come off, so they become ordinary
     local drafts of the current account instead of ghosts of the old store.
     Nothing is deleted, and nothing is touched on eBay.
+
+    `include_unowned` additionally unlinks eBay-linked records with NO owner
+    recorded. Those predate ownership stamping, so after an undetected switch
+    the app cannot tell them from the connected account's own imports — which
+    is why they never release by default, and why releasing them is the
+    seller's explicit call: only they know whether the store behind those
+    items is still the one connected. Publishes stamp the owner now, so this
+    legacy pool only ever shrinks.
     """
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
+    include_unowned = bool((payload or {}).get("include_unowned"))
     acct = db.get_ebay_account(uid) or {}
     connected = (acct.get("ebay_username") or "").strip()
-    released = 0
+    released = unowned = 0
     for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
         data = rec.get("listing") or {}
-        owner = listing_sync.account_of(data)
-        if not owner or owner == connected:
+        if not ebay_account.releasable(data, connected, include_unowned):
             continue
+        legacy = not listing_sync.account_of(data)
 
         def _unlink(d: dict) -> dict:
             d.update(ebay_account="", ebay_listing_id="", source="",
@@ -1267,9 +1283,11 @@ def release_foreign_listings(request: Request) -> dict:
         if db.mutate_listing_data(rec["id"], _unlink, status="draft",
                                   user_id=uid) is not None:
             released += 1
-    log.info("release-foreign-listings: uid=%s released=%d (connected=%s)",
-             uid, released, connected or "?")
-    return {"released": released}
+            if legacy:
+                unowned += 1
+    log.info("release-foreign-listings: uid=%s released=%d (unowned=%d, "
+             "connected=%s)", uid, released, unowned, connected or "?")
+    return {"released": released, "released_unowned": unowned}
 
 
 @app.get("/api/ebay/policies")

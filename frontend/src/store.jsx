@@ -80,6 +80,7 @@ export function AppProvider({ children }) {
   const [ebay, setEbay] = useState({
     connected: false, env: "", username: "", email: "", oauth_ready: false,
     oauth_missing: [], labels_enabled: false, foreign_listings: 0,
+    unowned_listings: 0,
   });
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
 
@@ -97,6 +98,7 @@ export function AppProvider({ children }) {
         // Listings still here from an eBay account other than the connected
         // one — see the banner in Settings.
         foreign_listings: s.foreign_listings || 0,
+        unowned_listings: s.unowned_listings || 0,
       });
     } catch (e) { /* keep previous */ }
   }, []);

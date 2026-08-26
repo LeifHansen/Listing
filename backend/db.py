@@ -708,6 +708,35 @@ def count_foreign_listings(user_id: str, account: str) -> int:
         return 0
 
 
+def count_unowned_ebay_listings(user_id: str) -> int:
+    """eBay-linked records with NO owner recorded at all.
+
+    These predate ownership stamping (imports began labelling in #176, and
+    app publishes only started stamping alongside this helper), so after an
+    UNDETECTED account switch they are the previous account's listings with
+    nothing marking them so — invisible to count_foreign_listings, which
+    requires a non-empty label, and skipped by the release endpoint's default
+    pass. The UI needs this number to offer the seller the explicit way out.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        with Session(eng) as s:
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            item_col = _json_text(ListingRecord.data, "ebay_listing_id")
+            return int(s.execute(
+                select(func.count())
+                .select_from(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(or_(account_col.is_(None), account_col == ""))
+                .where(item_col != "")
+            ).scalar_one() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_unowned_ebay_listings failed: {exc}")
+        return 0
+
+
 def disconnect_ebay_account(user_id: str) -> None:
     """Disconnect the live link (clear the refresh token) but KEEP the saved
     policy/location preferences and which account they belonged to, so

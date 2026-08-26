@@ -75,6 +75,28 @@ def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
                for f in ACCOUNT_SCOPED)
 
 
+def releasable(data: dict, connected: str,
+               include_unowned: bool = False) -> bool:
+    """Should release-foreign-listings unlink this record?
+
+    A record STAMPED with some other account (the previous-account sentinel
+    included) always releases: its item id belongs to another store. A record
+    with NO owner recorded is the hard case — it predates ownership stamping,
+    so after a switch the app cannot tell it from the connected account's own
+    imports. Only the seller knows whether the store behind it is still the
+    one connected, so those release only on their explicit say-so
+    (`include_unowned`), and only when the record actually carries an eBay
+    identity — a plain local draft has nothing to unlink.
+    """
+    owner = (data.get("ebay_account") or "").strip()
+    if owner and owner != (connected or "").strip():
+        return True
+    if owner or not include_unowned:
+        return False
+    return bool((data.get("ebay_listing_id") or "").strip()
+                or (data.get("marketplaces") or {}).get("ebay"))
+
+
 # eBay's "this account can't list right now" code. It carries no field to fix
 # and repeats on every listing, so the only useful follow-up is to ask what
 # the hold actually is.
