@@ -1,5 +1,4 @@
 name: Fetch Fly logs
-# last verification: capture live publish rejection + build stamp (user reports same failures)
 # Ops helper: push to this branch (or run manually) to dump recent production
 # logs + live-site ground truth into the Actions run output for debugging.
 on:
@@ -97,6 +96,12 @@ jobs:
           flyctl ssh console -a listing-lfwjrg -C "df -h /data" 2>/dev/null | tail -1 || true
           flyctl ssh console -a listing-lfwjrg -C "du -sh /data/sessions /data/exports" 2>/dev/null | tail -2 || true
           flyctl ssh console -a listing-lfwjrg -C "du -sh /data/* 2>/dev/null | sort -h | tail -5" 2>/dev/null | tail -5 || true
+          echo "--- WHAT COMMIT IS ACTUALLY RUNNING ---"
+          curl -sS https://listing-lfwjrg.fly.dev/api/health | tr ',' '\n' \
+            | grep -E '"build"' || echo 'NO build FIELD -> image predates the build stamp (#183)'
+          curl -sS https://listing-lfwjrg.fly.dev/api/ebay/status | tr ',' '\n' \
+            | grep -E 'unowned_listings|foreign_listings' \
+            || echo 'NO foreign/unowned fields -> image predates #176'
           curl -sS https://listing-lfwjrg.fly.dev/api/health | tr ',' '\n' | grep -E 'objstore|disk_free' || true
           echo "===== END ====="
         env:
