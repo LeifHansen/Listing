@@ -76,17 +76,49 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
         return acct
     try:
         discovered = ebay_auth.fetch_policies_and_location(access_token)
-        changes = ebay_account.carry_over_settings(access_token, acct, discovered)
+        # fill_blanks=False: this is a REPAIR, not a setup. Connecting fills an
+        # empty slot from eBay's default because a fresh account needs somewhere
+        # to start; here, an empty slot is the seller's own "— none —" choice
+        # from Settings, and writing eBay's first return policy back over it
+        # every ten minutes would be a working seller broken by this code.
+        changes, conclusive = ebay_account.reconcile_account_settings(
+            access_token, acct, discovered, fill_blanks=False)
     except Exception as exc:  # noqa: BLE001 - never block a publish on this
         log.warning("ebay: policy verification failed for %s: %s", uid, exc)
         return acct
-    # Only now: a pass that threw is not a pass, and must not start the clock.
-    ebay_account.note_verified(uid)
+    # Only a pass eBay actually answered counts. Neither lookup raises when it
+    # fails, so "no changes" alone cannot tell a healthy account apart from an
+    # eBay outage -- and starting the clock on an outage would suppress the
+    # next TTL of repairs for the seller who most needs them.
+    if conclusive:
+        ebay_account.note_verified(uid)
     if not changes:
         return acct
     log.warning("ebay: account-scoped settings did not belong to @%s — "
                 "repaired %s", acct.get("ebay_username") or "?",
                 ", ".join(sorted(changes)))
+    # Replacing an id that HELD a value is the tell-tale of a different eBay
+    # account (see ebay_account.settings_were_dropped) -- the same signal the
+    # connect handler acts on, so it has to do the same two things here, or the
+    # repair is half a repair.
+    if ebay_account.settings_were_dropped(changes, acct):
+        # 1. Label what is already here as the previous account's. Without it
+        #    listing_sync.belongs_to treats every unstamped record as this
+        #    account's, and syncs and revises keep operating on the PREVIOUS
+        #    seller's item ids.
+        marked = db.stamp_ebay_account(
+            uid, acct.get("ebay_username") or listing_sync.UNKNOWN_ACCOUNT)
+        # 2. Drop the old store's ZIP. This one is not housekeeping: on a live
+        #    publish, ebay_provider re-ensures the ship-from location from
+        #    ship_from_postal and writes the returned key back over
+        #    merchant_location_key. Left set, that stale ZIP would force our
+        #    location to the old store's address and undo the location half of
+        #    this repair inside the same request. Blank makes listing_sync
+        #    re-read it from the account that is actually connected.
+        changes["ship_from_postal"] = ""
+        log.info("ebay: account switch detected on publish for uid=%s; "
+                 "labelled %d existing listing(s), cleared ship-from", uid,
+                 marked)
     db.save_ebay_account(uid, **changes)
     return {**acct, **changes}
 

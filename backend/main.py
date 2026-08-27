@@ -1170,8 +1170,9 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # connections made before the identity scope was granted 403 on it. A
         # seller who switched accounts then carried the old account's shipping,
         # payment, return and location ids straight into the new one.
-        save_kwargs.update(ebay_account.carry_over_settings(
-            access, existing, policies))
+        carried, conclusive = ebay_account.reconcile_account_settings(
+            access, existing, policies)
+        save_kwargs.update(carried)
         switched = bool(prev_user and new_user and prev_user != new_user)
         if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
             # A different store. Label everything already here as the previous
@@ -1192,8 +1193,18 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             save_kwargs.setdefault("ship_from_postal", "")
         db.save_ebay_account(uid, **save_kwargs)
         # This connect just reconciled the account-scoped ids against the
-        # account that authorised; the publish path need not redo it at once.
-        ebay_account.note_verified(uid)
+        # account that authorised, so the publish path need not redo it at
+        # once -- but ONLY if eBay actually answered for every one of them.
+        #
+        # Neither lookup raises when it fails, so a connect made during an eBay
+        # outage keeps the previous account's ids and looks, from here, exactly
+        # like a connect where everything already matched. Marking that
+        # verified would suppress the publish-path repair for the whole TTL in
+        # precisely the case the repair exists for -- and because a seller's
+        # instinct is to disconnect and reconnect, every retry would re-arm the
+        # suppression and they would never reach it at all.
+        if conclusive:
+            ebay_account.note_verified(uid)
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
