@@ -1972,7 +1972,16 @@ async def upload_more(
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
-    return {"added": new_names, "optimized": storage.list_optimized(session_id)}
+    # optimize_results carries each photo's bg_error, exactly as /api/upload
+    # returns it. It was computed here already -- the token refund above counts
+    # it -- and then dropped on the floor, so a photo that kept its background
+    # reached the seller with nothing said about it. The refund is not the
+    # message; it is invisible.
+    return {"added": new_names, "optimized": storage.list_optimized(session_id),
+            "optimize_results": [
+                {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
+                for (idx, _src), res in zip(staged, results)
+                if not res.get("error") and res.get("bg_error")]}
 
 
 @app.post("/api/edit-image")

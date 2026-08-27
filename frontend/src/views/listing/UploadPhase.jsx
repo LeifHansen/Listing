@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Sparkles, FolderOpen, Trash2, Camera } from "lucide-react";
 import { cn, once } from "@/lib/utils";
+import { lastRemoveBg, rememberRemoveBg } from "@/lib/photoPrefs";
 import {
   api, pollJob, downscaleAllForUpload, IMAGE_EXT_RE, UPLOAD_TIMEOUT_MS,
 } from "@/lib/api";
@@ -48,7 +49,14 @@ export function UploadPhase() {
   // A bulk upload that failed hands its pile back here — this component was
   // unmounted while it ran, so the photos would otherwise be gone.
   const [files, setFiles] = useState(() => bulkRetry?.files || []); // { file, url }
-  const [removeBg, setRemoveBg] = useState(() => !!bulkRetry?.removeBg);
+  // Seeded from the seller's last choice so it is not re-ticked every visit,
+  // and remembered so "Add photos" later gives the same treatment.
+  const [removeBg, setRemoveBg] = useState(
+    () => (bulkRetry ? !!bulkRetry.removeBg : lastRemoveBg()));
+  const chooseRemoveBg = useCallback((on) => {
+    setRemoveBg(on);
+    rememberRemoveBg(on);
+  }, []);
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -251,7 +259,7 @@ export function UploadPhase() {
 
               <Toggle
                 checked={removeBg}
-                onChange={setRemoveBg}
+                onChange={chooseRemoveBg}
                 label="Remove background & replace with white"
                 help="Cleaner, eBay-friendly product shots. Adds a few seconds per photo."
               />
