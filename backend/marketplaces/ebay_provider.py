@@ -76,13 +76,21 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
         return acct
     try:
         discovered = ebay_auth.fetch_policies_and_location(access_token)
-        # fill_blanks=False: this is a REPAIR, not a setup. Connecting fills an
-        # empty slot from eBay's default because a fresh account needs somewhere
-        # to start; here, an empty slot is the seller's own "— none —" choice
-        # from Settings, and writing eBay's first return policy back over it
-        # every ten minutes would be a working seller broken by this code.
-        changes, conclusive = ebay_account.reconcile_account_settings(
-            access_token, acct, discovered, fill_blanks=False)
+        # Sync from whatever the connected eBay account actually has -- an id
+        # that belongs to someone else is replaced, and an EMPTY slot is filled
+        # from this account's own default.
+        #
+        # Filling blanks here is a deliberate reversal of #188, made on the
+        # seller's instruction ("sync from whatever is set in ebay, or if unset,
+        # prompt user to set"). #188 kept blanks alone to protect the "- none -"
+        # option the Settings screen offers; the seller would rather the app
+        # track eBay by itself and be told when it cannot. So a slot that is
+        # STILL empty after this now means one thing only -- eBay has none of
+        # that kind -- which is exactly the case `absent` reports and the
+        # publish checklist turns into an instruction the seller can act on.
+        result = ebay_account.reconcile_account_settings(
+            access_token, acct, discovered, fill_blanks=True)
+        changes, conclusive = result.changes, result.conclusive
     except Exception as exc:  # noqa: BLE001 - never block a publish on this
         log.warning("ebay: policy verification failed for %s: %s", uid, exc)
         return acct
@@ -92,6 +100,8 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
     # next TTL of repairs for the seller who most needs them.
     if conclusive:
         ebay_account.note_verified(uid)
+        # Only a conclusive pass may claim eBay has none of something.
+        ebay_account.note_absent(uid, result.absent)
     if not changes:
         return acct
     log.warning("ebay: account-scoped settings did not belong to @%s — "
@@ -322,6 +332,32 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         has_fulfillment=bool(fulfillment), has_payment=has_payment,
         has_return=has_return, has_location=has_location, connected=connected,
         policy_services=services, required_aspects=required)
+    # A slot still empty after the sync above means eBay has none of that kind
+    # -- there is nothing to sync from, and no dropdown in this app can fix it.
+    # Saying "choose one in Settings" here sends the seller to an empty list;
+    # the only thing that helps is telling them to create it on eBay.
+    ABSENT_COPY = {
+        "fulfillment_policy_id": ("shipping", "shipping"),
+        "payment_policy_id": ("policies", "payment"),
+        "return_policy_id": ("policies", "return"),
+    }
+    if mode == "live" and creds:
+        for field in ebay_account.absent_for(uid or ""):
+            target_kind = ABSENT_COPY.get(field)
+            if not target_kind or (creds.get(field) or "").strip():
+                continue
+            target, kind = target_kind
+            issues.append({
+                "target": target, "level": "error",
+                "title": f"Your eBay account has no {kind} policy yet",
+                "fix": (f"eBay won't accept a listing without one, and there "
+                        f"isn't a {kind} policy on the account you're connected "
+                        f"as (@{creds.get('ebay_username') or 'your account'}) "
+                        f"for us to use. Create one on eBay under Seller Hub → "
+                        f"Account → Business policies, then publish again — "
+                        f"we'll pick it up automatically."),
+            })
+
     if mode == "live" and policy_exists is False:
         # eBay says this account has no such policy. Almost always a policy id
         # left over from a different eBay account — publishing with it fails
