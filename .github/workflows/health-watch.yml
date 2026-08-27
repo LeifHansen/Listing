@@ -37,7 +37,11 @@ jobs:
       # Required: the threshold logic below lives in the repo. Without this the
       # job runs in an empty workspace and fails on every schedule, which turns
       # the alarm into noise that trains the operator to ignore it.
+      # fetch-depth: the build-drift step below needs recent history to decide
+      # whether the commit production reports is one of ours.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
 
       - name: Readiness (503 = not serving)
         run: |
@@ -73,3 +77,41 @@ jobs:
             exit 1
           fi
           python3 .github/scripts/check_health.py /tmp/health.json "$MIN_FREE_MB"
+
+      - name: Build drift (is production running what we shipped?)
+        # always(): a machine serving old code often looks perfectly healthy,
+        # which is the whole problem -- readiness and disk both pass while the
+        # app is weeks behind.
+        if: always()
+        run: |
+          # On 2026-08-27 production spent 14 hours back on a pre-Aug-24 image.
+          # Every check was green, the deploy that put the current code there
+          # had verified itself, and nothing anywhere was watching the one
+          # signal that would have caught it: WHICH COMMIT is answering. It was
+          # found only because a seller reported the same bug twice.
+          #
+          # The deploy workflow verifies the build at deploy time. That proves
+          # the code arrived; it cannot prove it stayed. A release made outside
+          # CI -- a `fly deploy` from a checkout that is behind, a rollback, a
+          # machine recreated from an older release -- silently replaces it, and
+          # until this step existed nothing said so.
+          build=$(curl -sS -m 20 "$SITE/api/health" \
+            | python3 -c 'import json,sys;print((json.load(sys.stdin).get("build") or "").strip())' \
+            2>/dev/null || echo '')
+          echo "production build: ${build:-<none>}"
+          echo "main HEAD:        $(git rev-parse HEAD)"
+          if [ -z "$build" ]; then
+            echo "::error::/api/health reports no build commit at all. The image predates the build stamp, so production is running code from before 2026-08-26 regardless of what the last deploy said."
+            exit 1
+          fi
+          # Not "equals HEAD": a deploy can legitimately be in flight, and the
+          # schedule must not cry wolf for the few minutes that takes. Being
+          # anywhere in recent main is the honest bar -- it still catches the
+          # case that matters, an image from outside this history entirely.
+          if git merge-base --is-ancestor "$build" HEAD 2>/dev/null \
+             && [ "$(git rev-list --count "$build".."HEAD")" -le 20 ]; then
+            echo "OK: production is running $build, within the last 20 commits of main."
+          else
+            echo "::error::Production is running $build, which is not a recent commit on main. Something deployed over CI -- run 'fly releases -a listing-lfwjrg' and look for a release with no matching Actions run."
+            exit 1
+          fi
