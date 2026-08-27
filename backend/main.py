@@ -2426,8 +2426,9 @@ def _restore_server_state(session_id: str, listing: Listing,
                           prev_rec: Optional[dict] = None) -> dict:
     """Replace the client's per-marketplace publish state with the stored one.
 
-    The server owns `marketplaces` and its legacy `ebay_listing_id` mirror:
-    only publish/end/sync write them. Any client round-trip can be stale — a
+    The server owns `marketplaces`, its legacy `ebay_listing_id` mirror, and
+    the identity fields in state.SERVER_OWNED_FIELDS: only publish/end/sync
+    write them. Any client round-trip can be stale — a
     second browser tab, or the editor's image-edit auto-save whose copy was
     loaded before a publish — and honoring a stale copy ERASES live listing
     ids. The damage is silent and expensive: the next publish finds no
@@ -2437,10 +2438,18 @@ def _restore_server_state(session_id: str, listing: Listing,
     Returns the record it read so callers don't have to re-query.
     """
     rec = prev_rec if prev_rec is not None else (db.get_listing(session_id) or {})
+    stored = rec.get("listing") or {}
     states, ebay_id = marketplace_state.owned_state_from(
-        rec.get("listing") or {}, listing.ebay_listing_id)
+        stored, listing.ebay_listing_id)
     listing.marketplaces = {k: MarketplaceState(**v) for k, v in states.items()}
     listing.ebay_listing_id = ebay_id
+    # `marketplaces` was protected here; `source` was not, and it decides
+    # whether the next publish revises the live listing or creates a second
+    # one. Same list the publish path restores from.
+    changed = marketplace_state.restore_server_fields(listing, stored)
+    if changed:
+        log.info("save: kept server-owned %s for session=%s",
+                 ", ".join(changed), session_id)
     return rec
 
 

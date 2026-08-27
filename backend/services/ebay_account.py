@@ -18,12 +18,11 @@ Deliberately importable without backend.main — same rule as sync_guard: the CI
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
 from typing import Callable, NamedTuple, Optional
 
-from .. import ebay_auth, ebay_errors
+from .. import config, ebay_auth, ebay_errors
 from ..config import log
 
 # The saved eBay settings that belong to one account. Each is an id eBay
@@ -125,7 +124,7 @@ def carry_over_settings(access: str, existing: dict, discovered: dict,
 # publish re-checks them against eBay. The check costs three account-API calls;
 # at this interval that is a rounding error next to what a publish already
 # spends, and it bounds how long a stale id can survive.
-VERIFY_TTL = float(os.getenv("EBAY_POLICY_VERIFY_TTL", "600") or 600)
+VERIFY_TTL = config.env_float("EBAY_POLICY_VERIFY_TTL", 600.0)
 
 _verified: dict[str, float] = {}
 _verified_lock = threading.Lock()

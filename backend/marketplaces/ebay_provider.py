@@ -12,6 +12,7 @@ the orchestrator can return it verbatim on single-eBay publishes.
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -26,6 +27,7 @@ from ..services import (ebay, ebay_account, ebay_trading, image_import,
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
+from . import state as marketplace_state
 from .state import STICKY_STATUSES
 
 # Access tokens live ~2 hours; refreshing one per request added a serial
@@ -33,6 +35,30 @@ from .state import STICKY_STATUSES
 # fires several). Keyed by the refresh token itself, so a reconnect (new
 # refresh token) naturally misses the cache.
 _TOKEN_CACHE: dict[str, tuple[float, str]] = {}
+_TOKEN_CACHE_MAX = 50
+_TOKEN_CACHE_LOCK = threading.Lock()
+
+
+def _make_room() -> None:
+    """Keep _TOKEN_CACHE bounded without flushing it.
+
+    The cap used to be enforced with `.clear()`, which on a busy instance
+    threw away every connected seller's token the moment the 51st arrived —
+    so all of them paid a fresh ~300-600ms eBay round-trip on their next
+    request, together, and the instance that was busy enough to fill the
+    cache is exactly the one that could least afford it.
+
+    Expired entries go first (they were dead anyway, and that alone almost
+    always makes room). Only if the cache is still full does anything live
+    get dropped, and then it is whatever expires soonest — the seller who was
+    closest to paying for a refresh regardless.
+    """
+    now = time.time()
+    for key in [k for k, (expires, _) in _TOKEN_CACHE.items() if expires <= now]:
+        _TOKEN_CACHE.pop(key, None)
+    while len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+        soonest = min(_TOKEN_CACHE, key=lambda k: _TOKEN_CACHE[k][0])
+        _TOKEN_CACHE.pop(soonest, None)
 
 
 def access_token_for(refresh_token: str) -> str:
@@ -43,10 +69,11 @@ def access_token_for(refresh_token: str) -> str:
     # Drop the cached token 90s before eBay's expiry so an in-flight request
     # never carries one that dies mid-call.
     expires = float(fresh.get("expires_at") or (time.time() + 1800))
-    if len(_TOKEN_CACHE) > 50:
-        _TOKEN_CACHE.clear()
-    _TOKEN_CACHE[refresh_token] = (max(time.time() + 60, expires - 90),
-                                   fresh["access_token"])
+    with _TOKEN_CACHE_LOCK:
+        if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+            _make_room()
+        _TOKEN_CACHE[refresh_token] = (max(time.time() + 60, expires - 90),
+                                       fresh["access_token"])
     return fresh["access_token"]
 
 
@@ -264,9 +291,6 @@ def refresh_eps_urls(listing_id: str, token: str, item_id: str,
 # outright — the browser only ever echoes back what a previous publish told it,
 # and an echo that lost them reads as "never listed". Believing that costs a
 # duplicate live listing, so the stored record wins on every one of them.
-_IDENTITY_FIELDS = ("ebay_listing_id", "source", "view_url")
-
-
 def _with_stored_identity(ctx: PublishContext) -> PublishContext:
     """`ctx` with the eBay identity fields taken from the stored record, and
     prev_record re-read inside the publish lock.
@@ -281,12 +305,17 @@ def _with_stored_identity(ctx: PublishContext) -> PublishContext:
         # there is. The idempotency key still guards the create itself.
         return ctx
     stored = fresh.get("listing") or {}
-    for field_name in _IDENTITY_FIELDS:
-        value = stored.get(field_name)
-        if value and value != getattr(ctx.listing, field_name, None):
-            log.info("publish: taking %s from the stored record for session=%s",
-                     field_name, ctx.session_id)
-            setattr(ctx.listing, field_name, value)
+    # The item id is this function's own: it is what the create-vs-revise
+    # decision reads, and a stored one always wins over the payload's.
+    stored_id = stored.get("ebay_listing_id")
+    if stored_id and stored_id != ctx.listing.ebay_listing_id:
+        log.info("publish: taking ebay_listing_id from the stored record "
+                 "for session=%s", ctx.session_id)
+        ctx.listing.ebay_listing_id = stored_id
+    changed = marketplace_state.restore_server_fields(ctx.listing, stored)
+    if changed:
+        log.info("publish: taking %s from the stored record for session=%s",
+                 ", ".join(changed), ctx.session_id)
     return PublishContext(
         session_id=ctx.session_id, listing=ctx.listing, mode=ctx.mode,
         base_url=ctx.base_url, uid=ctx.uid, prev_record=fresh)

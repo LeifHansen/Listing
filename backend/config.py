@@ -160,6 +160,23 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float) -> float:
+    """A float from the environment that can't stop the app from booting.
+
+    Public because services parse their own tunables at module scope. A value
+    that isn't a number there ("10m", "600s", a stray quote) raised ValueError
+    while the module was still importing, which takes the WHOLE app down at
+    boot — not just the one feature the setting belongs to. A typo in a tuning
+    knob should cost its default and a log line.
+    """
+    raw = os.getenv(name, "")
+    try:
+        return max(0.0, float(raw or default))
+    except ValueError:
+        log.warning("%s=%r is not a number — using %s", name, raw, default)
+        return default
+
+
 FREE_TOKENS_PER_MONTH = _env_int("FREE_TOKENS_PER_MONTH", 50)
 
 # Stripe (payments). Secret key sk_live_/sk_test_; the webhook signing secret
