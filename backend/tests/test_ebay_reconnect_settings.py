@@ -186,3 +186,87 @@ def test_one_users_check_says_nothing_about_another():
     ebay_account.note_verified("u-a", now=1000.0)
     assert ebay_account.verify_due("u-a", now=1000.0 + 1) is False
     assert ebay_account.verify_due("u-b", now=1000.0 + 1) is True
+
+
+# --- the repair must not be suppressed by the outage that caused it ----------
+#
+# Everything above is about WHAT to store. These are about who is allowed to
+# say "this account has been checked", and they exist because neither lookup
+# raises when it fails: policy_ids_on_account skips a kind it could not fetch,
+# location_keys_on_account returns None. So a total eBay outage and a healthy
+# account where everything already matches both produce {} changes, and the
+# first version of this code could not tell them apart -- it marked the outage
+# verified, which suppressed the repair for the whole TTL in exactly the case
+# the repair was written for.
+
+
+@pytest.fixture
+def reconcile():
+    def run(saved, policies, locations, **kw):
+        return ebay_account.reconcile_account_settings(
+            "tok", saved, DISCOVERED,
+            policy_ids=lambda _t: policies, location_keys=lambda _t: locations,
+            **kw)
+    return run
+
+
+def test_an_answered_lookup_is_conclusive(reconcile):
+    _, conclusive = reconcile(
+        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"},
+                "return": {"R-old"}}, {"L-old"})
+    assert conclusive is True
+
+
+def test_a_total_outage_is_not_conclusive(reconcile):
+    """The case that matters: eBay answered nothing, so nothing changed --
+    and that must NOT read as "checked, all fine"."""
+    changes, conclusive = reconcile(SAVED, {}, None)
+    assert changes == {}
+    assert conclusive is False
+
+
+def test_one_missing_policy_kind_is_enough_to_withhold_the_pass(reconcile):
+    _, conclusive = reconcile(
+        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"}}, {"L-old"})
+    assert conclusive is False
+
+
+def test_an_unreadable_location_alone_withholds_the_pass(reconcile):
+    _, conclusive = reconcile(
+        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"},
+                "return": {"R-old"}}, None)
+    assert conclusive is False
+
+
+# --- "— none —" is a choice, and a repair pass must not overrule it ----------
+#
+# Settings offers an explicit "— none —" for all three business policies. The
+# connect path fills an empty slot from eBay's default, which is right for a
+# fresh account. Reusing that on the publish path would rewrite a seller's
+# deliberate "no return policy" back to eBay's first one on a timer, with
+# nothing in the UI to explain it -- a working seller broken by the repair.
+
+
+def test_connecting_still_fills_an_empty_slot(reconcile):
+    changes, _ = reconcile(
+        {**SAVED, "return_policy_id": ""},
+        {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": {"R-new"}},
+        {"L-old"})
+    assert changes == {"return_policy_id": "R-new"}
+
+
+def test_the_publish_path_leaves_a_deliberate_none_alone(reconcile):
+    changes, _ = reconcile(
+        {**SAVED, "return_policy_id": ""},
+        {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": {"R-new"}},
+        {"L-old"}, fill_blanks=False)
+    assert changes == {}
+
+
+def test_not_filling_blanks_still_replaces_a_foreign_id(reconcile):
+    """fill_blanks only governs EMPTY slots. An id that belongs to someone
+    else is still the thing this whole module exists to replace."""
+    changes, _ = reconcile(
+        SAVED, {"fulfillment": {"F-new"}, "payment": {"P-new"},
+                "return": {"R-new"}}, {"L-new"}, fill_blanks=False)
+    assert changes == DISCOVERED

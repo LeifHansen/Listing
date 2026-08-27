@@ -33,15 +33,15 @@ ACCOUNT_SCOPED = ("fulfillment_policy_id", "payment_policy_id",
                   "return_policy_id", "merchant_location_key")
 
 
-def carry_over_settings(access: str, existing: dict, discovered: dict, *,
-                        policy_ids: Optional[Callable[[str], dict]] = None,
-                        location_keys: Optional[Callable[[str], Optional[set]]] = None,
-                        ) -> dict:
-    """What to store for the account that just connected.
+def reconcile_account_settings(
+        access: str, existing: dict, discovered: dict, *,
+        policy_ids: Optional[Callable[[str], dict]] = None,
+        location_keys: Optional[Callable[[str], Optional[set]]] = None,
+        fill_blanks: bool = True) -> tuple[dict, bool]:
+    """(what to store for this account, did eBay actually answer).
 
     A saved choice survives only if it still EXISTS on this account; otherwise
-    the auto-discovered default for that slot takes over, and an empty slot is
-    filled from the same place.
+    the auto-discovered default for that slot takes over.
 
     This used to be decided from the account NAME, which kept every saved id
     whenever the name was unreadable — the common case, because a connection
@@ -52,19 +52,44 @@ def carry_over_settings(access: str, existing: dict, discovered: dict, *,
     When eBay can't say what exists (a kind that failed to fetch comes back
     absent, not empty), the saved value is left alone: an outage must never
     silently re-pick a seller's shipping.
+
+    `fill_blanks` also fills an EMPTY slot from the discovered default. That is
+    right while connecting — a fresh account needs somewhere to start — and
+    wrong everywhere else, because "— none —" is a choice the Settings screen
+    offers for all three business policies. A seller who deliberately turns
+    their return policy off must not have eBay's first one written back over it
+    by a later pass.
+
+    The second return value is the one the caller usually gets wrong. Neither
+    lookup RAISES on failure — policy_ids_on_account skips a kind it couldn't
+    fetch, location_keys_on_account returns None — so a total eBay outage is
+    indistinguishable, from the changes alone, from "everything already
+    matches": both produce {}. It is False unless every account-scoped field
+    got a definite answer, and only a True licenses a caller to record that
+    this account has been checked.
     """
     valid_policies = (policy_ids or ebay_auth.policy_ids_on_account)(access)
     valid_locations = (location_keys or ebay_auth.location_keys_on_account)(access)
     out: dict = {}
+    conclusive = valid_locations is not None
     for field in ACCOUNT_SCOPED:
         saved = (existing.get(field) or "").strip()
         kind = field[: -len("_policy_id")] if field.endswith("_policy_id") else ""
         known = valid_policies.get(kind) if kind else valid_locations
+        if known is None:
+            conclusive = False
         if saved and known is not None and saved not in known:
             out[field] = discovered.get(field, "")  # gone from this account
-        elif not saved and discovered.get(field):
+        elif not saved and fill_blanks and discovered.get(field):
             out[field] = discovered[field]          # fill the gap
-    return out
+    return out, conclusive
+
+
+def carry_over_settings(access: str, existing: dict, discovered: dict,
+                        **kwargs) -> dict:
+    """reconcile_account_settings' changes alone, for callers that don't need
+    to know whether eBay answered."""
+    return reconcile_account_settings(access, existing, discovered, **kwargs)[0]
 
 
 # How long a verified set of account-scoped ids is trusted before the next
