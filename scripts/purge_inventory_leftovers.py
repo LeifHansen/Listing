@@ -98,9 +98,24 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="actually delete (default: dry run)")
     args = ap.parse_args()
 
+    # db.get_ebay_account swallows every failure and answers None, so without
+    # this a DB that is unreachable, unconfigured, or refusing the connection
+    # is reported as "no connected eBay account" — a sentence that sends you
+    # looking in entirely the wrong place.
+    if not config.DATABASE_URL:
+        print("DATABASE_URL is not set, so there are no stored accounts to "
+              "read. Run this with the app's environment.")
+        return 1
+    try:
+        db._get_engine()
+    except Exception as exc:  # noqa: BLE001 - report it, don't traceback
+        print(f"Could not reach the database: {exc}")
+        return 1
+
     account = db.get_ebay_account(args.user)
     if not account or not account.get("refresh_token"):
-        print(f"No connected eBay account for user {args.user}.")
+        print(f"No connected eBay account for user {args.user}. "
+              "(Pass the app user id, not the eBay username.)")
         return 1
     token = ebay_auth.refresh_access_token(account["refresh_token"])["access_token"]
     who = account.get("ebay_username") or "(username not recorded)"
