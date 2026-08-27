@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, postJson, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
@@ -417,6 +418,11 @@ export function useListingForm() {
     try {
       const fd = new FormData();
       files.forEach((f) => fd.append("files", f));
+      // Photos joining a listing get the same treatment its existing photos
+      // got. Sending nothing here left the server on its `false` default, so
+      // "Add photos" quietly produced originals-with-backgrounds alongside
+      // cut-outs, with no toggle on the card and no word about it afterwards.
+      fd.append("remove_bg", lastRemoveBg() ? "true" : "false");
       const res = await api(`/api/upload-more/${sessionId}`,
         { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       const added = res.added || [];
@@ -426,6 +432,15 @@ export function useListingForm() {
         setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
         postJson(`/api/save/${sessionId}`, { ...collect(), images: next }).catch(() => {});
         toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`, { kind: "success" });
+        // A cutout that failed keeps the original photo, background and all.
+        // That is the right fallback -- a photo is better than no photo -- but
+        // it has to be SAID, or the seller is left wondering why two of their
+        // photos look nothing like the others.
+        const kept = (res.optimize_results || []).filter((r) => r.bg_error);
+        if (kept.length) {
+          toast(`${kept.length} photo${kept.length === 1 ? " kept its" : "s kept their"} `
+                + `background: ${kept[0].bg_error}`, { kind: "warning" });
+        }
       }
     } catch (e) {
       toast(`Couldn't add photos: ${e.message}`, { kind: "error" });

@@ -6,7 +6,7 @@ import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
-import { api } from "@/lib/api";
+import { api, MODEL_TIMEOUT_MS } from "@/lib/api";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
@@ -271,7 +271,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     setAiBusy("Removing the background…");
     try {
       const blob = await canvasBlob(canvas);
-      const res = await studioCall("/api/image/remove-bg", sessionId, name, blob);
+      const res = await studioCall("/api/image/remove-bg", sessionId, name, blob,
+                                   MODEL_TIMEOUT_MS);
       await applyPreview(res.image);
       toast(
         `Background removed${res.engine === "adobe" ? " with Adobe Photoshop" : res.engine === "photoroom" ? " with Photoroom" : res.engine === "pixian" ? " with Pixian" : " (on-server model)"} — review and Save to keep it.`,
