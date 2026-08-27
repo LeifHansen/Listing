@@ -50,6 +50,47 @@ def access_token_for(refresh_token: str) -> str:
     return fresh["access_token"]
 
 
+def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
+    """Keep the saved account-scoped ids honest, without anyone asking.
+
+    Business policy ids and merchant location keys belong to ONE eBay seller
+    account. eBay rejects another account's outright, and the rejection names
+    no field — the seller sees a generic "this listing or seller may be in
+    violation of eBay policy" on EVERY publish, with nothing on screen that
+    looks wrong, because the app's own Settings happily reports the ids as
+    "set". Set is not the same as ours.
+
+    These were only ever checked while connecting an account, and that check
+    keeps the saved value whenever eBay cannot say what exists — correct on its
+    own terms (an outage must never silently re-pick a seller's shipping) but
+    it means a connect during any eBay hiccup leaves the PREVIOUS account's ids
+    in place permanently, with no later pass to correct them.
+
+    So re-check here, on the path every publish already takes, at most once per
+    VERIFY_TTL per user. Anything that no longer exists on the connected
+    account is replaced with that account's own default and written back, so
+    the repair happens once rather than on every publish. A failed lookup still
+    changes nothing, for the same reason as before.
+    """
+    if not ebay_account.verify_due(uid):
+        return acct
+    try:
+        discovered = ebay_auth.fetch_policies_and_location(access_token)
+        changes = ebay_account.carry_over_settings(access_token, acct, discovered)
+    except Exception as exc:  # noqa: BLE001 - never block a publish on this
+        log.warning("ebay: policy verification failed for %s: %s", uid, exc)
+        return acct
+    # Only now: a pass that threw is not a pass, and must not start the clock.
+    ebay_account.note_verified(uid)
+    if not changes:
+        return acct
+    log.warning("ebay: account-scoped settings did not belong to @%s — "
+                "repaired %s", acct.get("ebay_username") or "?",
+                ", ".join(sorted(changes)))
+    db.save_ebay_account(uid, **changes)
+    return {**acct, **changes}
+
+
 def creds_for(uid: Optional[str]) -> Optional[dict]:
     """Build live eBay creds for this user, or None if not connected."""
     if not uid:
@@ -64,6 +105,7 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
         # and silently dry-runs a live publish; log so it's debuggable.
         log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
         return None
+    acct = _with_current_policies(uid, acct, access_token)
     return {
         "access_token": access_token,
         # Which eBay account this token is for. Everything that reads or writes
@@ -329,6 +371,10 @@ class EbayProvider:
         return creds_for(uid)
 
     def disconnect(self, uid: str) -> None:
+        # Forget the "checked recently" mark too: the next connect may be a
+        # different seller, and trusting the previous account's pass is exactly
+        # how another account's policy ids survive a switch.
+        ebay_account.forget_verified(uid)
         db.disconnect_ebay_account(uid)
 
     # --- listing lifecycle -----------------------------------------------

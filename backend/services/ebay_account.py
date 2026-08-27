@@ -18,6 +18,9 @@ Deliberately importable without backend.main — same rule as sync_guard: the CI
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
 from typing import Callable, Optional
 
 from .. import ebay_auth, ebay_errors
@@ -62,6 +65,46 @@ def carry_over_settings(access: str, existing: dict, discovered: dict, *,
         elif not saved and discovered.get(field):
             out[field] = discovered[field]          # fill the gap
     return out
+
+
+# How long a verified set of account-scoped ids is trusted before the next
+# publish re-checks them against eBay. The check costs three account-API calls;
+# at this interval that is a rounding error next to what a publish already
+# spends, and it bounds how long a stale id can survive.
+VERIFY_TTL = float(os.getenv("EBAY_POLICY_VERIFY_TTL", "600") or 600)
+
+_verified: dict[str, float] = {}
+_verified_lock = threading.Lock()
+
+
+def verify_due(uid: str, now: Optional[float] = None,
+               ttl: float = VERIFY_TTL) -> bool:
+    """Has this user's account gone long enough without a check?
+
+    Deliberately a plain time gate rather than anything cleverer: the cost of
+    checking too often is three cheap API calls, and the cost of checking too
+    rarely is every publish rejected by eBay for a reason no field on screen
+    explains.
+    """
+    now = time.time() if now is None else now
+    with _verified_lock:
+        return (now - _verified.get(uid, 0.0)) >= ttl
+
+
+def note_verified(uid: str, now: Optional[float] = None) -> None:
+    now = time.time() if now is None else now
+    with _verified_lock:
+        _verified[uid] = now
+
+
+def forget_verified(uid: Optional[str] = None) -> None:
+    """Drop the "checked recently" memory — on disconnect, so the next connect
+    re-verifies immediately instead of trusting the previous account's pass."""
+    with _verified_lock:
+        if uid is None:
+            _verified.clear()
+        else:
+            _verified.pop(uid, None)
 
 
 def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
