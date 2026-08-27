@@ -1430,6 +1430,47 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     return out
 
 
+@app.post("/api/ebay/opt-in-policies")
+def ebay_opt_in_policies(request: Request) -> dict:
+    """Turn on eBay's business-policy program for the connected account.
+
+    Business policies are a seller PROGRAM, not a default. Until an account is
+    opted in, every policy list comes back empty and every policy id is
+    rejected — the "my dropdowns are empty and I can't publish" state, with
+    nothing on screen naming the cause. The app could read the program's
+    status but never set it, so the only fix was a Seller Hub page the seller
+    had to be told to find.
+
+    eBay documents the opt-in as taking up to 24 hours and returns no payload,
+    so a success here means "eBay has the request", never "your policies are
+    ready". The response says which, because promising the second and
+    delivering the first is worse than not offering the button.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds or not creds.get("access_token"):
+        raise HTTPException(400, "Connect eBay first.")
+    token = creds["access_token"]
+    already = ebay_auth.opted_in_programs(token)
+    if already is not None and ebay_auth.SELLING_POLICY_MANAGEMENT in already:
+        return {"ok": True, "already": True, "pending": False,
+                "message": "Business policies are already switched on for this "
+                           "eBay account."}
+    try:
+        ebay_auth.opt_in_to_program(token, ebay_auth.SELLING_POLICY_MANAGEMENT)
+    except ebay_auth.OAuthError as exc:
+        log.warning("ebay opt-in refused for uid=%s: %s | %s", _uid(request),
+                    exc, exc.description)
+        raise HTTPException(
+            502, "eBay wouldn't switch business policies on for this account. "
+                 "You can turn them on directly in eBay: Seller Hub → Account "
+                 "→ Business policies.") from exc
+    log.info("ebay: business-policy opt-in requested for uid=%s", _uid(request))
+    return {"ok": True, "already": False, "pending": True,
+            "message": "Asked eBay to switch business policies on. eBay can "
+                       "take up to 24 hours, after which your shipping, "
+                       "payment and return policies will show up here."}
+
+
 @app.get("/api/ebay/account-overview")
 def ebay_account_overview(request: Request) -> dict:
     """A live mirror of the seller's most-updated eBay account settings —

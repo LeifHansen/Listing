@@ -179,6 +179,87 @@ def fetch_payments_program(access_token: str) -> dict:
     return resp.json()
 
 
+# Business policies are a seller PROGRAM on eBay, not a default. Until an
+# account is opted in, every policy list comes back empty and every policy id
+# is rejected — which is exactly the "the dropdowns are empty and I can't
+# publish" state, with nothing on screen naming the cause.
+SELLING_POLICY_MANAGEMENT = "SELLING_POLICY_MANAGEMENT"
+
+
+def opted_in_programs(access_token: str) -> Optional[set[str]]:
+    """The programs this account is opted into, or None when eBay didn't say.
+
+    None is deliberately not an empty set. "We couldn't ask" and "opted into
+    nothing" lead to opposite advice — the second tells a seller to opt in, the
+    first tells them nothing is known — and collapsing them is the mistake this
+    integration has made in four other places.
+    """
+    try:
+        data = _account_get("/sell/account/v1/program/get_opted_in_programs",
+                            access_token)
+    except Exception as exc:  # noqa: BLE001 - unknown, not "none"
+        log.info("ebay: couldn't read opted-in programs: %s", exc)
+        return None
+    return {p.get("programType") for p in (data.get("programs") or [])
+            if p.get("programType")}
+
+
+def opt_in_to_program(access_token: str,
+                      program: str = SELLING_POLICY_MANAGEMENT) -> None:
+    """Opt the connected account into an eBay seller program.
+
+    eBay documents this as taking up to 24 hours to take effect, and it
+    returns no payload, so a 2xx means "accepted", never "in force". Callers
+    must not tell the seller their policies are ready — only that eBay has the
+    request. Raises on refusal so the caller can say what eBay said.
+    """
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}/sell/account/v1/program/opt_in",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={"programType": program},
+        timeout=30,
+    )
+    if not resp.is_success:
+        raise OAuthError(
+            f"eBay refused the opt-in ({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
+    log.info("ebay: opted in to %s", program)
+
+
+def fetch_privileges(access_token: str) -> Optional[dict]:
+    """{registration_complete, selling_limit} for the connected seller, or
+    None when eBay didn't answer.
+
+    Both halves are things that stop a publish for a reason no listing field
+    explains: an unfinished registration, and the monthly selling limit —
+    error 21919188, which this app spent a release reporting as a duplicate
+    submission. Knowing them BEFORE a publish is the difference between a
+    checklist item and a rejection.
+
+    `sellingLimit` is absent for accounts eBay does not cap, which is why it
+    is None rather than zero: a missing cap is not a cap of nothing.
+    """
+    try:
+        data = _account_get("/sell/account/v1/privilege", access_token)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        log.info("ebay: couldn't read selling privileges: %s", exc)
+        return None
+    limit = data.get("sellingLimit") or {}
+    amount = limit.get("amount") or {}
+    return {
+        "registration_complete": bool(data.get("sellerRegistrationCompleted")),
+        "selling_limit": {
+            "amount": amount.get("value"),
+            "currency": amount.get("currency"),
+            "quantity": limit.get("quantity"),
+        } if limit else None,
+    }
+
+
 def ensure_inventory_location(access_token: str, postal_code: str,
                               country: str = "US") -> str:
     """Ensure our own ship-from location holds exactly the seller's ZIP+country
@@ -392,7 +473,8 @@ def account_overview(access_token: str) -> dict:
     Every section is fetched independently, so one failing leaves the rest
     intact (e.g. a seller with no business policies still gets locations)."""
     out: dict = {"policies": {"fulfillment": [], "payment": [], "return": []},
-                 "locations": [], "programs": [], "payments": {}}
+                 "locations": [], "programs": [], "payments": {},
+                 "programs_known": False, "privileges": None}
     try:
         out["policies"] = list_business_policies(access_token)
     except Exception:  # noqa: BLE001
@@ -407,12 +489,13 @@ def account_overview(access_token: str) -> dict:
             out["locations"] = resp.json().get("locations", []) or []
     except Exception:  # noqa: BLE001
         pass
-    try:
-        data = _account_get("/sell/account/v1/program/get_opted_in_programs", access_token)
-        out["programs"] = [p.get("programType") for p in (data.get("programs") or [])
-                           if p.get("programType")]
-    except Exception:  # noqa: BLE001
-        pass
+    programs = opted_in_programs(access_token)
+    # `programs_known` is the whole point of the tri-state: an empty list here
+    # used to mean both "opted into nothing" and "eBay didn't answer", and the
+    # UI can only offer "turn on business policies" honestly for the first.
+    out["programs_known"] = programs is not None
+    out["programs"] = sorted(programs or ())
+    out["privileges"] = fetch_privileges(access_token)
     try:
         out["payments"] = fetch_payments_program(access_token)
     except Exception:  # noqa: BLE001
