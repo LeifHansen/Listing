@@ -1157,9 +1157,18 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         new_user = (ident["username"] or "").strip()
         save_kwargs = {
             "refresh_token": grant["refresh_token"],
-            "ebay_username": new_user,
-            "ebay_email": ident["email"],
         }
+        # Only write identity we actually learned. The fetch above is
+        # best-effort and 403s on connections made before the identity scope
+        # was granted, so it hands back "" far more often than it hands back a
+        # wrong name — and "" is not a name, it is "we don't know". Writing it
+        # anyway erased a username the app already had, and a blank username
+        # makes listing_sync.belongs_to scope nothing (every account's listings
+        # look like this one's) while count_foreign_listings reports every
+        # labelled record as foreign. db.save_ebay_account skips None, so None
+        # is how "leave what's there" is spelled.
+        save_kwargs["ebay_username"] = new_user or None
+        save_kwargs["ebay_email"] = ident["email"] or None
         # Keep a saved policy/location choice only when it still EXISTS on the
         # account that just connected. Business-policy ids belong to one
         # seller: eBay rejects another's outright, and a listing published with
@@ -1209,6 +1218,11 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
     except Exception:  # noqa: BLE001
+        # Every failure here — a bad state, an eBay outage, a DB write, a bug —
+        # reaches the seller as the same "?ebay=error". Without the traceback
+        # there is nothing left to tell them apart afterwards, and a connect
+        # that won't stick is the one problem a seller cannot debug from the UI.
+        log.exception("ebay: connect callback failed for uid=%s", uid)
         return _finish_connect(request, "/?ebay=error")
 
 

@@ -292,6 +292,28 @@ def _with_stored_identity(ctx: PublishContext) -> PublishContext:
         base_url=ctx.base_url, uid=ctx.uid, prev_record=fresh)
 
 
+def has_stored_connection(uid: Optional[str]) -> bool:
+    """True when this user has connected eBay, whatever `creds_for` just said.
+
+    `creds_for` answers None for two very different situations: "this seller
+    never connected eBay" and "this seller is connected but the token refresh
+    just failed". The first is the dry-run case. The second must never fall
+    through to the env-configured operator credentials — that publishes one
+    seller's listing onto the account whose refresh token is in the
+    deployment's environment.
+
+    Deliberately a plain lookup with no refresh of its own. Asking `creds_for`
+    again would re-attempt the token exchange, and an attempt that happened to
+    succeed on the retry would answer "not broken" — reopening the fallback
+    this exists to close. Paired with a known-None `creds`, the stored token
+    IS the answer: it is there, and it did not work a moment ago.
+    """
+    if not uid:
+        return False
+    acct = db.get_ebay_account(uid)
+    return bool(acct and acct.get("refresh_token"))
+
+
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = creds_for(uid)
@@ -537,6 +559,40 @@ class EbayProvider:
             if not creds:
                 raise HTTPException(400, "Connect eBay first.")
             relist = prev_status in ("ended", "sold")
+            # The checklist runs on this route too. It used to gate only the
+            # Inventory publish below, but every listing this app creates is
+            # stamped source="ebay" the moment it goes live, so from the second
+            # publish onward a seller took this route and got no checklist at
+            # all — the one path where an eBay rejection is guaranteed to be
+            # the seller's first sign of a problem.
+            #
+            # A relist IS a new listing (same create_on_ebay call as a first
+            # publish), so it answers to the full live contract. A revise only
+            # has to satisfy what it actually sends — see preflight.validate.
+            problems = preflight.errors_only(
+                preflight_issues(uid, listing, "live" if relist else "revise"))
+            if problems and not relist and not config.EBAY_PREFLIGHT_BLOCKS_REVISE:
+                # Observing, not blocking yet — see EBAY_PREFLIGHT_BLOCKS_REVISE.
+                log.info("revise would be blocked by preflight: session=%s "
+                         "issues=%s", session_id,
+                         [p.get("title") for p in problems])
+                problems = []
+            if problems:
+                db.upsert_listing(session_id, listing.model_dump(),
+                                  status=prev_status, user_id=uid)
+                log.info("%s blocked by preflight: session=%s issues=%d",
+                         "relist" if relist else "revise", session_id,
+                         len(problems))
+                return PublishOutcome(
+                    ok=False, issues=problems,
+                    message=f"Not quite ready — {len(problems)} thing"
+                            f"{'s' if len(problems) != 1 else ''} to fix "
+                            "before eBay will accept it:",
+                    raw={"dry_run": False, "error": True, "mode": mode,
+                         "message": f"Not quite ready — {len(problems)} thing"
+                                    f"{'s' if len(problems) != 1 else ''} to "
+                                    "fix before eBay will accept it:",
+                         "issues": problems})
             # Captured before the create overwrites it: a relist mints a new
             # item id, and the OLD one is what makes this relist's idempotency
             # key distinct from the publish that first listed the item.
@@ -722,6 +778,24 @@ class EbayProvider:
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),
                 message=result["message"], raw=result)
+
+        # Below here a live publish with no creds falls back to the env-config
+        # single-tenant path, which carries the OPERATOR's refresh token and
+        # policy ids. That is the right behaviour for a deployment with no
+        # accounts at all, and completely wrong for a signed-in seller whose
+        # token refresh happened to fail a moment ago — their listing would go
+        # live on the operator's eBay account. `creds_for` returns None for
+        # both, so ask which one this is before letting it through.
+        if mode == "live" and not creds and has_stored_connection(ctx.uid):
+            log.warning("publish refused: session=%s eBay token refresh failed "
+                        "for uid=%s", session_id, ctx.uid)
+            msg = ("We couldn't reach your eBay account just now, so nothing "
+                   "was published. Try again in a minute — if it keeps "
+                   "happening, reconnect eBay in Settings.")
+            return PublishOutcome(
+                ok=False, message=msg,
+                raw={"dry_run": False, "error": True, "mode": mode,
+                     "message": msg})
 
         log.info("publish request: session=%s mode=%s connected=%s", session_id,
                  mode, bool(creds))

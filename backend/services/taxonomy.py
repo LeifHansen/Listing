@@ -167,8 +167,11 @@ def best_category_id(query: str, marketplace_id: Optional[str] = None) -> dict:
     return suggs[0] if suggs else {}
 
 
-# eBay conditionId -> the Inventory API condition enum the offer must send.
-_CONDITION_ID_TO_ENUM = {
+# eBay conditionId -> the condition enum this app stores on Listing.condition.
+# The single source of truth for that direction: ebay_trading imports it for
+# import/GetItem too. A second copy there disagreed on 2750, so a "Like New"
+# listing imported as USED_EXCELLENT and every revise pushed 3000 back to eBay.
+CONDITION_ID_TO_ENUM = {
     "1000": "NEW", "1500": "NEW_OTHER", "1750": "NEW_WITH_DEFECTS",
     "2000": "CERTIFIED_REFURBISHED", "2010": "CERTIFIED_REFURBISHED",
     "2020": "SELLER_REFURBISHED", "2030": "SELLER_REFURBISHED",
@@ -212,7 +215,7 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
     for pol in policies:
         for c in pol.get("itemConditions", []) or []:
             cid = str(c.get("conditionId", ""))
-            enum = _CONDITION_ID_TO_ENUM.get(cid)
+            enum = CONDITION_ID_TO_ENUM.get(cid)
             if not enum or enum in seen:
                 continue
             seen.add(enum)

@@ -387,6 +387,20 @@ if EBAY_LOGISTICS_ENABLED:
     EBAY_OAUTH_SCOPES.append("https://api.ebay.com/oauth/api_scope/sell.logistics")
 
 
+# Whether the pre-publish checklist BLOCKS a revise of an already-live listing,
+# or only reports what it would have blocked. A relist is always blocked on —
+# it creates a new listing, so it answers to the same contract a first publish
+# does. A revise is the risky one: these listings are live and selling, some
+# were created outside this app, and a checklist that has never run against
+# them will find things eBay accepted years ago. So it ships observing first —
+# read the "would block" lines out of the logs, confirm they are real, then set
+# EBAY_PREFLIGHT_BLOCKS_REVISE=1. Blocking a seller out of editing a live
+# listing is worse than the rejection the check is trying to save them from.
+EBAY_PREFLIGHT_BLOCKS_REVISE = (
+    os.getenv("EBAY_PREFLIGHT_BLOCKS_REVISE", "").strip().lower()
+    in ("1", "true", "yes", "on"))
+
+
 def ebay_oauth_ready() -> bool:
     """Enough config to run the 'Sign in with eBay' flow."""
     return bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET and EBAY_RUNAME)

@@ -106,7 +106,10 @@ def validate(listing: Listing, mode: str, *,
     """Everything eBay will reject at publish time, as UI-ready issues.
 
     Draft mode checks only what createOrReplaceInventoryItem needs (title,
-    photo); live mode checks the full publishOffer contract. Each issue is
+    photo); live mode checks the full publishOffer contract; revise mode sits
+    between the two — the content an edit pushes to an already-live listing,
+    without the account/package prerequisites that listing already met. Each
+    issue is
     {target, level ('error'|'warn'), blocking, field, title, fix} — see add()
     for what `blocking` and `field` are for.
     """
@@ -148,7 +151,7 @@ def validate(listing: Listing, mode: str, *,
     if not (listing.condition or "").strip():
         add("condition", "A condition is required", "Pick a condition on the Pricing card.")
 
-    if mode != "live":
+    if mode not in ("live", "revise"):
         return issues
 
     # --- offer ---
@@ -180,6 +183,16 @@ def validate(listing: Listing, mode: str, *,
         add("description", "No description yet",
             "eBay accepts it (we fall back to the title), but a real description sells better.",
             level="warn")
+
+    if mode != "live":
+        # "revise" edits a listing eBay has already accepted. Everything above
+        # is content this app is about to send, so it still has to be valid.
+        # Everything below is about the package and the account setup, which
+        # the live listing already satisfies — a revise doesn't resend the
+        # business policies, and an imported listing often never carried a
+        # local package weight or the category's full aspect list. Demanding
+        # them here would block edits to listings that are publishing fine.
+        return issues
 
     # --- shipping ---
     if weight_oz(listing) <= 0:
