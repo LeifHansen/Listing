@@ -46,7 +46,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
+      # --no-cache and an immediate replace, because a deploy that reports
+      # success while production keeps serving the previous image is the
+      # failure this pipeline actually had: on 2026-08-26 six consecutive
+      # deploys built the right code (COPY backend ran fresh, the frontend
+      # emitted a new bundle hash) and the app went on answering with a build
+      # from days earlier. A slower deploy is worth far less than a deploy you
+      # cannot trust.
       - name: Deploy to Fly
-        run: flyctl deploy --remote-only --build-arg GIT_SHA=${{ github.sha }}
+        run: |
+          flyctl deploy --remote-only --no-cache \
+            --strategy immediate \
+            --build-arg GIT_SHA=${{ github.sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # The gate. /api/health reports the commit its image was built from, so
+      # "did this deploy actually reach production" is answerable instead of
+      # assumed. Without it the pipeline is free to report success forever
+      # while sellers use week-old code -- which is exactly what happened.
+      - name: Verify production is running this commit
+        run: |
+          want='${{ github.sha }}'
+          for i in $(seq 1 20); do
+            got=$(curl -sS -m 15 https://listing-lfwjrg.fly.dev/api/health \
+                  | python3 -c 'import json,sys;print((json.load(sys.stdin).get("build") or "").strip())' \
+                  2>/dev/null || echo '')
+            echo "attempt $i: running=${got:-<none>} want=$want"
+            [ "$got" = "$want" ] && echo "OK: production is running $want" && exit 0
+            sleep 15
+          done
+          echo "::error::Deploy reported success but production is NOT running $want (last saw '${got:-none}')."
+          echo "::error::The image was built and pushed; the machine is serving something else."
+          exit 1
