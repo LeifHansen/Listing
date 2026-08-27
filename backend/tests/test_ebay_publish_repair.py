@@ -126,12 +126,35 @@ def test_a_conclusive_pass_is_not_repeated_on_the_next_publish(repair):
     assert ebay_account.verify_due("u1") is False
 
 
-def test_a_deliberate_none_survives_the_repair(repair):
-    """Settings offers "— none —" for each business policy. A repair pass that
-    filled it back in from eBay's default would break a working seller."""
+def test_an_empty_slot_is_filled_from_the_connected_account(repair):
+    """Reverses #188 on the seller's instruction: "sync from whatever is set in
+    ebay, or if unset, prompt user to set". #188 left blanks alone to protect
+    the "- none -" option in Settings; the seller would rather the app track
+    eBay by itself. The prompt half (below) is what makes the trade safe."""
     acct = {**ACCT, "return_policy_id": ""}
     out, saved, _ = repair(
         {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": {"R-new"}},
         {"L-old"}, acct=acct)
+    assert saved["return_policy_id"] == "R-new"
+    assert out["return_policy_id"] == "R-new"
+
+
+def test_a_slot_the_account_cannot_fill_is_recorded_for_the_publish_prompt(
+        repair):
+    """Nothing to sync from, so the slot stays empty -- and the account is
+    marked as having none, which is what turns the publish blocker from "choose
+    one in Settings" (an empty dropdown) into "create one on eBay"."""
+    acct = {**ACCT, "return_policy_id": ""}
+    out, saved, _ = repair(
+        {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": set()},
+        {"L-old"}, acct=acct)
     assert "return_policy_id" not in saved
     assert out["return_policy_id"] == ""
+    assert "return_policy_id" in ebay_account.absent_for("u1")
+
+
+def test_an_ebay_outage_never_claims_the_account_is_missing_a_policy(repair):
+    """The one that would be actively harmful: telling a seller to go create a
+    return policy they already have, because eBay was down when we asked."""
+    repair({}, None)
+    assert ebay_account.absent_for("u1") == []

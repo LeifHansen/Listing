@@ -74,9 +74,22 @@ def test_an_api_blip_never_re_picks_a_sellers_shipping(carry):
 
 def test_a_gap_is_filled_from_what_was_discovered(carry):
     carried = carry({**SAVED, "fulfillment_policy_id": ""},
-                    {"fulfillment": set(), "payment": {"P-old"},
+                    {"fulfillment": {"F-new"}, "payment": {"P-old"},
                      "return": {"R-old"}}, {"L-old"})
     assert carried["fulfillment_policy_id"] == "F-new"
+
+
+def test_a_gap_is_never_filled_with_an_id_the_account_does_not_have(carry):
+    """This fixture used to say `"fulfillment": set()` -- the account has NO
+    fulfillment policies -- while still expecting F-new to be written in. The
+    two lookups are separate calls and can disagree (a per-kind failure leaves a
+    stale value in the discovered set), and honouring `discovered` over a
+    definite "this account has none" would recreate, from inside the repair,
+    exactly the foreign-id state the repair exists to remove."""
+    carried = carry({**SAVED, "fulfillment_policy_id": ""},
+                    {"fulfillment": set(), "payment": {"P-old"},
+                     "return": {"R-old"}}, {"L-old"})
+    assert "fulfillment_policy_id" not in carried
 
 
 def test_only_one_dropped_id_is_enough_to_call_it_a_switch(carry):
@@ -211,62 +224,105 @@ def reconcile():
 
 
 def test_an_answered_lookup_is_conclusive(reconcile):
-    _, conclusive = reconcile(
+    assert reconcile(
         SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"},
-                "return": {"R-old"}}, {"L-old"})
-    assert conclusive is True
+                "return": {"R-old"}}, {"L-old"}).conclusive is True
 
 
 def test_a_total_outage_is_not_conclusive(reconcile):
     """The case that matters: eBay answered nothing, so nothing changed --
     and that must NOT read as "checked, all fine"."""
-    changes, conclusive = reconcile(SAVED, {}, None)
-    assert changes == {}
-    assert conclusive is False
+    result = reconcile(SAVED, {}, None)
+    assert result.changes == {}
+    assert result.conclusive is False
 
 
 def test_one_missing_policy_kind_is_enough_to_withhold_the_pass(reconcile):
-    _, conclusive = reconcile(
-        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"}}, {"L-old"})
-    assert conclusive is False
+    assert reconcile(
+        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"}},
+        {"L-old"}).conclusive is False
 
 
 def test_an_unreadable_location_alone_withholds_the_pass(reconcile):
-    _, conclusive = reconcile(
+    assert reconcile(
         SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"},
-                "return": {"R-old"}}, None)
-    assert conclusive is False
+                "return": {"R-old"}}, None).conclusive is False
 
 
-# --- "— none —" is a choice, and a repair pass must not overrule it ----------
+# --- an unreadable kind and an EMPTY kind are different answers --------------
 #
-# Settings offers an explicit "— none —" for all three business policies. The
-# connect path fills an empty slot from eBay's default, which is right for a
-# fresh account. Reusing that on the publish path would rewrite a seller's
-# deliberate "no return policy" back to eBay's first one on a timer, with
-# nothing in the UI to explain it -- a working seller broken by the repair.
+# "We could not ask" and "we asked, and this account has none" look identical
+# in the changes -- both leave the slot alone -- but they need opposite
+# handling. The first is a transient we retry; the second is a standing fact
+# only the seller can change, on eBay. `absent` is what carries that apart, and
+# the publish checklist turns it into "create one on eBay" instead of "choose
+# one in Settings", which points at an empty dropdown.
 
 
-def test_connecting_still_fills_an_empty_slot(reconcile):
-    changes, _ = reconcile(
-        {**SAVED, "return_policy_id": ""},
-        {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": {"R-new"}},
+def test_an_unreadable_kind_is_not_reported_absent(reconcile):
+    """The dangerous confusion: an outage must never be reported to the seller
+    as "your eBay account has no return policy"."""
+    assert reconcile(SAVED, {}, None).absent == []
+
+
+def test_a_kind_the_account_genuinely_has_none_of_is_reported(reconcile):
+    result = reconcile(
+        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": set()},
         {"L-old"})
-    assert changes == {"return_policy_id": "R-new"}
+    assert result.absent == ["return_policy_id"]
 
 
-def test_the_publish_path_leaves_a_deliberate_none_alone(reconcile):
-    changes, _ = reconcile(
+def test_an_account_with_everything_reports_nothing_absent(reconcile):
+    assert reconcile(
+        SAVED, {"fulfillment": {"F-old"}, "payment": {"P-old"},
+                "return": {"R-old"}}, {"L-old"}).absent == []
+
+
+# --- syncing from eBay ------------------------------------------------------
+#
+# fill_blanks governs EMPTY slots only. Connect has always filled them, because
+# a fresh account needs somewhere to start.
+#
+# The publish path fills them too, now. #188 deliberately did NOT -- it kept
+# blanks alone to protect the "- none -" option the Settings screen offers for
+# each business policy. The seller reversed that ("sync from whatever is set in
+# ebay, or if unset, prompt user to set"): they would rather the app track eBay
+# on its own. The trade is explicit and the second half is what makes it safe --
+# a slot still empty after a sync can now only mean eBay has none of that kind,
+# and `absent` above is what says so out loud instead of failing the publish
+# with eBay's unhelpful error 240.
+
+
+def test_connecting_fills_an_empty_slot(reconcile):
+    assert reconcile(
         {**SAVED, "return_policy_id": ""},
         {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": {"R-new"}},
-        {"L-old"}, fill_blanks=False)
-    assert changes == {}
+        {"L-old"}).changes == {"return_policy_id": "R-new"}
+
+
+def test_the_publish_path_also_fills_an_empty_slot_from_the_account(reconcile):
+    assert reconcile(
+        {**SAVED, "return_policy_id": ""},
+        {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": {"R-new"}},
+        {"L-old"}, fill_blanks=True).changes == {"return_policy_id": "R-new"}
+
+
+def test_a_blank_stays_blank_when_the_account_has_nothing_to_fill_it_with(
+        reconcile):
+    """...and is reported absent, so the seller is told to make one rather than
+    left with a publish that fails inside eBay."""
+    result = reconcile(
+        {**SAVED, "return_policy_id": ""},
+        {"fulfillment": {"F-old"}, "payment": {"P-old"}, "return": set()},
+        {"L-old"}, fill_blanks=True)
+    assert "return_policy_id" not in result.changes
+    assert "return_policy_id" in result.absent
 
 
 def test_not_filling_blanks_still_replaces_a_foreign_id(reconcile):
     """fill_blanks only governs EMPTY slots. An id that belongs to someone
     else is still the thing this whole module exists to replace."""
-    changes, _ = reconcile(
+    assert reconcile(
         SAVED, {"fulfillment": {"F-new"}, "payment": {"P-new"},
-                "return": {"R-new"}}, {"L-new"}, fill_blanks=False)
-    assert changes == DISCOVERED
+                "return": {"R-new"}}, {"L-new"},
+        fill_blanks=False).changes == DISCOVERED

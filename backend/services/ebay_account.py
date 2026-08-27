@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from .. import ebay_auth, ebay_errors
 from ..config import log
@@ -31,6 +31,20 @@ from ..config import log
 # rejected.
 ACCOUNT_SCOPED = ("fulfillment_policy_id", "payment_policy_id",
                   "return_policy_id", "merchant_location_key")
+
+
+class Reconciled(NamedTuple):
+    """What one pass against eBay learned about the account-scoped settings.
+
+    changes    -- what to store (empty when everything already matches AND when
+                  eBay could not be read; `conclusive` is what tells them apart)
+    conclusive -- eBay answered for every account-scoped field
+    absent     -- fields eBay positively has NONE of. Nothing can be synced into
+                  these; only the seller can create them, on eBay.
+    """
+    changes: dict
+    conclusive: bool
+    absent: list
 
 
 def reconcile_account_settings(
@@ -71,6 +85,7 @@ def reconcile_account_settings(
     valid_policies = (policy_ids or ebay_auth.policy_ids_on_account)(access)
     valid_locations = (location_keys or ebay_auth.location_keys_on_account)(access)
     out: dict = {}
+    absent: list[str] = []
     conclusive = valid_locations is not None
     for field in ACCOUNT_SCOPED:
         saved = (existing.get(field) or "").strip()
@@ -78,11 +93,25 @@ def reconcile_account_settings(
         known = valid_policies.get(kind) if kind else valid_locations
         if known is None:
             conclusive = False
+        elif not known:
+            # eBay answered, and the answer is "this account has none of these".
+            # Distinct from an unreadable lookup: there is nothing to sync from,
+            # and no amount of retrying will produce one. Only the seller can,
+            # on eBay.
+            absent.append(field)
         if saved and known is not None and saved not in known:
             out[field] = discovered.get(field, "")  # gone from this account
-        elif not saved and fill_blanks and discovered.get(field):
-            out[field] = discovered[field]          # fill the gap
-    return out, conclusive
+        elif (not saved and fill_blanks and discovered.get(field)
+                and (known is None or discovered[field] in known)):
+            # Fill the gap -- but never with an id this account provably does
+            # not have. `discovered` is a separate lookup and can disagree with
+            # `known` (it is derived per-kind and a partial failure leaves a
+            # stale value in it); writing one in would recreate, from inside
+            # the repair itself, exactly the foreign-id state the repair exists
+            # to remove. When known is None we have no opinion, which is the
+            # long-standing connect-time behaviour.
+            out[field] = discovered[field]
+    return Reconciled(out, conclusive, absent)
 
 
 def carry_over_settings(access: str, existing: dict, discovered: dict,
@@ -122,14 +151,37 @@ def note_verified(uid: str, now: Optional[float] = None) -> None:
         _verified[uid] = now
 
 
+# Which account-scoped settings eBay says this seller has NONE of, from the
+# last conclusive pass. Cached beside the verify clock and for the same reason:
+# it is the answer to "why is this slot still empty after a sync", and the
+# publish checklist needs it to tell the seller the truth. "Choose one in
+# Settings" is a dead end when the dropdown it points at is empty.
+_absent: dict[str, list] = {}
+
+
+def note_absent(uid: str, fields: list) -> None:
+    with _verified_lock:
+        _absent[uid] = list(fields)
+
+
+def absent_for(uid: str) -> list:
+    """Fields eBay had none of at the last conclusive pass. Empty when we have
+    not looked, which reads the same as "nothing missing" on purpose: an
+    unknown must never produce a scary message we cannot stand behind."""
+    with _verified_lock:
+        return list(_absent.get(uid, ()))
+
+
 def forget_verified(uid: Optional[str] = None) -> None:
     """Drop the "checked recently" memory — on disconnect, so the next connect
     re-verifies immediately instead of trusting the previous account's pass."""
     with _verified_lock:
         if uid is None:
             _verified.clear()
+            _absent.clear()
         else:
             _verified.pop(uid, None)
+            _absent.pop(uid, None)
 
 
 def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
