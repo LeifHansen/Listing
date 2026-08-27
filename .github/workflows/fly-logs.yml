@@ -73,8 +73,8 @@ jobs:
       - name: eBay account-switch and publish-rejection trail
         run: |
           flyctl logs -a listing-lfwjrg --no-tail \
-            | grep -iE 'ebay connect|account switch|labelled|release-foreign|stamp|trading: .* rejected|code=240|publish blocked|payments program' \
-            | tail -80 || echo "(no matching lines in the retained window)"
+            | grep -iE 'ebay connect|account switch|labelled|release-foreign|stamp|trading:|code=240|publish blocked|payments program|policy|AddItem|ReviseItem|repaired|did not belong|verification failed' \
+            | tail -120 || echo "(no matching lines in the retained window)"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
