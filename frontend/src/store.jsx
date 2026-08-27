@@ -17,6 +17,26 @@ const AppContext = createContext(null);
 const NO_METRICS = {};
 const NO_METRICS_STATUS = { trafficOk: false, needsReconnect: false };
 
+// The rest of "nobody is signed in": the shapes each per-account cache starts
+// at, and the shapes logout() puts them back to. They are the same values, so
+// they are written once — a signed-out app has to look identical whether it
+// just booted or someone just left, and two copies of these drift.
+const NO_EBAY = {
+  connected: false, env: "", username: "", email: "", oauth_ready: false,
+  oauth_missing: [], labels_enabled: false, foreign_listings: 0,
+  unowned_listings: 0,
+};
+const NO_NOTIFICATIONS = { items: [], unread: 0 };
+const NO_STORE_SYNC = {
+  syncing: false, lastSynced: null, error: null, progress: null,
+};
+// `authed` starts true and only logout sets it false: on boot we have not
+// asked yet, and guessing "signed out" there would flash the logged-out empty
+// state at every returning user before /api/auth/me answers.
+const NO_LISTINGS = {
+  loaded: false, loading: false, authed: false, dbConfigured: true, items: [],
+};
+
 export function AppProvider({ children }) {
   const { toast } = useToast();
 
@@ -74,14 +94,12 @@ export function AppProvider({ children }) {
   }, []);
 
   // ---------- eBay connection ----------
-  // Declared ahead of auth: logout() lists loadEbayStatus as a dependency,
-  // and a useCallback dependency array is evaluated during render — a
-  // forward reference there is a temporal-dead-zone crash, not a lint nit.
-  const [ebay, setEbay] = useState({
-    connected: false, env: "", username: "", email: "", oauth_ready: false,
-    oauth_missing: [], labels_enabled: false, foreign_listings: 0,
-    unowned_listings: 0,
-  });
+  // Declared ahead of auth because `canPublishLive` below reads it. logout()
+  // also names loadEbayStatus in its dependency array, and a useCallback
+  // dependency array is evaluated during render — a forward reference there is
+  // a temporal-dead-zone crash, not a lint nit — but logout has moved down to
+  // the bottom of the file, past everything it touches.
+  const [ebay, setEbay] = useState(NO_EBAY);
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
 
   const loadEbayStatus = useCallback(async () => {
@@ -125,13 +143,6 @@ export function AppProvider({ children }) {
     setAuthOpen(true);
   }, []);
 
-  const logout = useCallback(async () => {
-    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
-    storeToken(null); // native shell's bearer token — no-op on the web
-    setUser(null);
-    loadEbayStatus();
-  }, [loadEbayStatus]);
-
   // ---------- AI tokens (monetization) ----------
   // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
   // installs) hides the whole surface. The dialog opens from the TopBar chip
@@ -162,9 +173,9 @@ export function AppProvider({ children }) {
   // Polled while logged in so "your item sold" reaches the seller without a
   // refresh. The bell in the TopBar renders items + the unread badge; a sold
   // notification's primary action opens the shipping dialog for that listing.
-  const [notifications, setNotifications] = useState({ items: [], unread: 0 });
+  const [notifications, setNotifications] = useState(NO_NOTIFICATIONS);
   const loadNotifications = useCallback(async () => {
-    if (!user) { setNotifications({ items: [], unread: 0 }); return; }
+    if (!user) { setNotifications(NO_NOTIFICATIONS); return; }
     try {
       const res = await api("/api/notifications");
       setNotifications({ items: res.notifications || [], unread: res.unread || 0 });
@@ -279,9 +290,7 @@ export function AppProvider({ children }) {
   // reconciles live statuses — so the dashboard and Listings ARE the store.
   // Runs once per app session; `syncStore({ force: true })` re-runs it (the
   // "Sync with eBay" button).
-  const [storeSync, setStoreSync] = useState({
-    syncing: false, lastSynced: null, error: null, progress: null,
-  });
+  const [storeSync, setStoreSync] = useState(NO_STORE_SYNC);
   const syncedOnce = useRef(false);
   const lastReconcile = useRef(0); // ms — throttles the quiet status re-checks
   // The import is a background job now (one eBay GetItem per listing takes
@@ -504,6 +513,7 @@ export function AppProvider({ children }) {
   // pick every one of them again.
   const [bulkRetry, setBulkRetry] = useState(null); // { files, removeBg }
   const clearBulkRetry = useCallback(() => setBulkRetry(null), []);
+
   // Job finished: stop persisting (a reload shouldn't restore a done batch) but
   // keep it in memory so the results stay on screen until the user moves on.
   // Marking it done is what stops the shell's banner from claiming the batch is
@@ -586,6 +596,73 @@ export function AppProvider({ children }) {
       toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
     }
   }, [beginBulk, startBulk, clearBulk, toast]);
+
+  // ---------- signing out ----------
+  // Signing out has to take the SESSION with it, not just the name in the
+  // sidebar. Clearing `user` alone was the whole of logout, and everything one
+  // account's sign-in had loaded stayed exactly where it was: their store on
+  // the dashboard, their sold alerts in the bell, their eBay username in
+  // Settings, their token balance in the TopBar, a batch of their photos still
+  // running. On a shared machine the next person saw all of it.
+  //
+  // The clears are SYNCHRONOUS, in the same commit that drops the user, rather
+  // than left to the refetches the `user` change kicks off. Those refetches are
+  // the wrong instrument twice over: they land a commit or more later, so the
+  // previous seller's listings stay on screen — and clickable — in between; and
+  // the ones that keep their previous value on failure (loadListings' catch
+  // does exactly that) never clear it at all in the case that matters most, a
+  // network that has just taken the session away.
+  //
+  // It sits this far down the file so it can name each of those caches without
+  // a forward reference. That is not only a temporal-dead-zone question — the
+  // React Compiler's analysis of this component degraded when it read the
+  // clears above their own declarations, and five unrelated effects quietly
+  // stopped being checked for cascading setState. Keep it below the state it
+  // resets; it is wired into the context at the bottom like everything else,
+  // so its position in the file costs nothing.
+  const logout = useCallback(async () => {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+    storeToken(null); // native shell's bearer token — no-op on the web
+    setUser(null);
+    afterLogin.current = null; // nothing to resume into a session that ended
+
+    // Every cache below is one account's.
+    setListingsState(NO_LISTINGS);
+    setSession(null);
+    setSkippedDraftIds(new Set());
+    setNotifications(NO_NOTIFICATIONS);
+    setEbay(NO_EBAY);
+    setPoliciesData(null);
+    setMarketplaces([]);
+    setStoreSync(NO_STORE_SYNC);
+    setTokens((t) => ({ ...t, total: 0 })); // balance is theirs; the catalog isn't
+    // The store mirror imports once per app session and latches to say so, and
+    // the status re-check throttles on when it last ran. Left alone, the next
+    // person to sign in on this tab would get neither: their store would never
+    // import, because someone else's already had.
+    syncedOnce.current = false;
+    lastReconcile.current = 0;
+
+    // Dialogs and screens belonging to the session that just ended.
+    setTokensOpen(false);
+    setShipping(null);
+    setBulkRetry(null);
+    setActiveBulk(null);
+    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    setListingsTab("active");
+    listingsJumpRef.current = null;
+
+    // ...and land where signing back in is the obvious next move. There is no
+    // separate /login route to send anyone to — the sign-in prompt IS a dialog
+    // over the shell — so "back to the login screen" means the dashboard in its
+    // signed-out state with that prompt already open. Logging out from the Sell
+    // screen used to leave the seller sitting in an editor they no longer had
+    // an account for.
+    setView("dashboard");
+    setAuthOpen(true);
+
+    loadEbayStatus();
+  }, [loadEbayStatus]);
 
   // ---------- OAuth redirect landing (eBay + generic marketplaces) ----------
   useEffect(() => {
