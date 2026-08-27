@@ -7,6 +7,14 @@ on:
       - ops/fetch-logs
   workflow_dispatch:
 
+# Share the deploy's concurrency group. This job SSHes into the machine and
+# reads the live site, so letting it interleave with a deploy of the same app
+# reads half-migrated state and reports it as fact. A diagnostic that races the
+# thing it is diagnosing is worse than no diagnostic.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
 jobs:
   logs:
     name: Dump app status, live-site check, logs
