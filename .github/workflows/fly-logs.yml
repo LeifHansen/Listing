@@ -121,6 +121,16 @@ jobs:
           flyctl ssh console -a listing-lfwjrg -C "df -h /data" 2>/dev/null | tail -1 || true
           flyctl ssh console -a listing-lfwjrg -C "du -sh /data/sessions /data/exports" 2>/dev/null | tail -2 || true
           flyctl ssh console -a listing-lfwjrg -C "du -sh /data/* 2>/dev/null | sort -h | tail -5" 2>/dev/null | tail -5 || true
+          echo "--- MACHINES (a second machine on an old image serves stale code) ---"
+          flyctl status -a listing-lfwjrg 2>/dev/null | tail -12 || true
+          echo "--- RELEASES ---"
+          flyctl releases -a listing-lfwjrg 2>/dev/null | head -6 || true
+          echo "--- BUILD, SAMPLED 6x (round-robin across machines) ---"
+          for i in 1 2 3 4 5 6; do
+            curl -sS -m 10 https://listing-lfwjrg.fly.dev/api/health \
+              | python3 -c 'import json,sys;d=json.load(sys.stdin);print("build=",(d.get("build") or "<none>"))' \
+              2>/dev/null || echo "build= <request failed>"
+          done
           echo "--- WHAT COMMIT IS ACTUALLY RUNNING ---"
           curl -sS https://listing-lfwjrg.fly.dev/api/health | tr ',' '\n' \
             | grep -E '"build"' || echo 'NO build FIELD -> image predates the build stamp (#183)'
