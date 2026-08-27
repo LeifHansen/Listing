@@ -20,21 +20,19 @@ jobs:
           flyctl releases -a listing-lfwjrg | head -8 || true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      # The Fly remote builder's Docker layer cache got poisoned with a stale
-      # frontend stage — any plain `fly deploy` (no --no-cache) from any
-      # machine re-published the old UI. Destroying the builder app wipes that
-      # cache for good; Fly recreates a fresh builder on the next deploy.
-      # Idempotent and safe to run every time.
-      - name: Destroy remote builder (wipe poisoned build cache)
-        run: |
-          builders=$(flyctl apps list | awk '{print $1}' | grep '^fly-builder' || true)
-          if [ -z "$builders" ]; then echo "no builder apps found"; fi
-          for b in $builders; do
-            echo "destroying $b"
-            flyctl apps destroy "$b" --yes || true
-          done
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # A "destroy the remote builder" step used to live here, on the theory
+      # that a poisoned Docker layer cache was what kept re-publishing the old
+      # UI. It is REMOVED, for two reasons.
+      #
+      # It is no longer the remedy: the deploy workflow passes --no-cache now
+      # (#185), so no layer from a previous build can survive into a new one
+      # whether or not the builder is fresh.
+      #
+      # And it was dangerous here. This is a LOG-READING job — something you
+      # reach for precisely when production is misbehaving, which is also when
+      # a deploy is most likely to be in flight. Destroying the builder out
+      # from under a running `fly deploy` kills that deploy. A diagnostic must
+      # never be able to break the thing it is diagnosing.
       - name: Secret names (values are never shown)
         run: flyctl secrets list -a listing-lfwjrg || true
         env:
@@ -69,6 +67,25 @@ jobs:
           flyctl logs -a listing-lfwjrg --no-tail \
             | grep -iE 'ebay connect|account switch|labelled|release-foreign|stamp|trading: .* rejected|code=240|publish blocked|payments program' \
             | tail -80 || echo "(no matching lines in the retained window)"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Photos are saving with their original (dark) background instead of the
+      # white cutout. Every success path composites onto a white canvas, so a
+      # dark result means the cutout never got applied and the original was
+      # kept — and the app keeps the original silently, on several different
+      # paths. This prints which one actually fires: the inference queue giving
+      # up (CutoutBusy), the subject-survived guard rejecting the matte, a
+      # thrown error, or inference simply running long enough that the client
+      # hung up first.
+      - name: Background-removal trail (why photos keep their background)
+        run: |
+          flyctl logs -a listing-lfwjrg --no-tail \
+            | grep -iE 'bg-removal|cutout|CutoutBusy|matte|inference took|subject|remove background|rembg|onnx' \
+            | tail -80 || echo "(no bg-removal lines in the retained window)"
+          echo "--- how the model is configured on the running machine ---"
+          curl -sS https://listing-lfwjrg.fly.dev/api/ready | tr ',' '\n' \
+            | grep -iE 'model|loaded|busy|inference|engine' || true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
