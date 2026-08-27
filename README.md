@@ -47,11 +47,47 @@ cp .env.example .env
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
 
-## Deploy to Fly.io
+## Shipping an update
+
+**Merging to `main` is the deploy.** There is no other step, and no button to
+press:
+
+```
+work on a branch  →  push  →  PR  →  CI goes green  →  merge to main
+                                                          ↓
+                             GitHub Actions builds, ships to Fly, then polls
+                             /api/health until production reports that exact
+                             commit — and fails the run if it never does.
+```
+
+> ### Do not run `fly deploy` by hand
+>
+> `fly deploy` uploads **the files on your machine**. It does not read GitHub.
+> Run it from a checkout that is behind `main` and it silently replaces the
+> released code with whatever you happen to have — skipping the tests, the
+> commit stamp, and the verification, with nothing anywhere reporting it.
+>
+> On 2026-08-27 that put a build from before Aug 24 back into production
+> minutes before a seller hit publish. The eBay failure it caused was
+> indistinguishable from the bug that had just been fixed, and the deploy that
+> had shipped the fix twelve hours earlier had verified itself and passed.
+>
+> When you genuinely cannot use CI, use **`./deploy.sh`** instead. It refuses
+> unless you are on `main`, clean, and exactly level with `origin/main`; it
+> passes the `GIT_SHA` build arg that makes the release identifiable; and it
+> runs the same verification afterwards. `./deploy.sh --check` reports what it
+> would object to and changes nothing.
+>
+> A hand deploy that skips the stamp is caught either way: `health-watch.yml`
+> compares production's build against recent `main` every two hours.
+
+## First-time Fly setup
 
 A `Dockerfile` and `fly.toml` are included. eBay requires **publicly reachable
 HTTPS image URLs**, so deploying (vs. running on localhost) is what makes real
 publishing work — the app uses its public origin for `imageUrls`.
+
+The steps below create the app. Everything after that goes through `main`.
 
 ```bash
 fly launch --no-deploy        # or: fly apps create <name> ; edit fly.toml `app`
@@ -63,7 +99,7 @@ fly secrets set ANTHROPIC_API_KEY=sk-ant-...
 fly secrets set EBAY_OAUTH_TOKEN=... \
   EBAY_FULFILLMENT_POLICY_ID=... EBAY_PAYMENT_POLICY_ID=... \
   EBAY_RETURN_POLICY_ID=... EBAY_MERCHANT_LOCATION_KEY=...
-fly deploy
+./deploy.sh                   # first release; after this, merge to main
 ```
 
 > **`fly.toml` sets `EBAY_ENV=production`** — a deploy publishes REAL, fee-
