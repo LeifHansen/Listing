@@ -24,7 +24,13 @@ from __future__ import annotations
 
 import pytest
 
+# Importing backend.main pulls the whole app in. `checks` has neither of these,
+# so it skips the file; the smoke job's "API tests" step is where it runs, and
+# that step fails on a skip so this can never quietly stop running.
 pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend import auth, main  # noqa: E402
