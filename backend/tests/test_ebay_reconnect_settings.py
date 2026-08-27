@@ -133,3 +133,56 @@ def test_a_server_error_leaves_the_answer_unknown(lookup):
 
 def test_no_policy_id_asks_nothing(lookup):
     assert ebay_auth.fulfillment_policy_lookup("tok", "") == ([], None)
+
+
+# --- the ids do not stay wrong once the connect is over ----------------------
+#
+# carry_over_settings only ever ran while an account was CONNECTING, and it
+# keeps a saved id whenever eBay cannot say what exists -- right on its own
+# terms (an outage must never silently re-pick a seller's shipping), but it
+# leaves a connect made during any eBay hiccup carrying the PREVIOUS account's
+# ids forever, with no later pass to correct them. eBay then rejects every
+# publish with a message naming no field, while Settings reports the ids as
+# "set", because set was never the same as ours.
+#
+# The publish path re-checks them now, on a timer. These pin the timer, since
+# the repair itself is carry_over_settings and is already covered above.
+
+
+def test_a_fresh_account_is_checked_immediately():
+    ebay_account.forget_verified("u-fresh")
+    assert ebay_account.verify_due("u-fresh", now=1000.0) is True
+
+
+def test_a_recent_check_is_not_repeated_on_every_publish():
+    """The check costs three eBay calls. A publish burst must not pay it
+    repeatedly -- that is the whole reason it is time-gated."""
+    ebay_account.forget_verified("u-hot")
+    ebay_account.note_verified("u-hot", now=1000.0)
+    assert ebay_account.verify_due("u-hot", now=1000.0 + 1) is False
+    assert ebay_account.verify_due(
+        "u-hot", now=1000.0 + ebay_account.VERIFY_TTL - 1) is False
+
+
+def test_the_check_comes_back_round():
+    ebay_account.forget_verified("u-old")
+    ebay_account.note_verified("u-old", now=1000.0)
+    assert ebay_account.verify_due(
+        "u-old", now=1000.0 + ebay_account.VERIFY_TTL) is True
+
+
+def test_disconnecting_forgets_the_previous_account_passed():
+    """The next connect may be a different seller. Trusting the last account's
+    pass is exactly how another account's ids survive a switch."""
+    ebay_account.forget_verified("u-switch")
+    ebay_account.note_verified("u-switch", now=1000.0)
+    assert ebay_account.verify_due("u-switch", now=1000.0 + 1) is False
+    ebay_account.forget_verified("u-switch")
+    assert ebay_account.verify_due("u-switch", now=1000.0 + 1) is True
+
+
+def test_one_users_check_says_nothing_about_another():
+    ebay_account.forget_verified()
+    ebay_account.note_verified("u-a", now=1000.0)
+    assert ebay_account.verify_due("u-a", now=1000.0 + 1) is False
+    assert ebay_account.verify_due("u-b", now=1000.0 + 1) is True

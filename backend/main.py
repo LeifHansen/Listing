@@ -1191,6 +1191,9 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             # from eBay when it's blank.
             save_kwargs.setdefault("ship_from_postal", "")
         db.save_ebay_account(uid, **save_kwargs)
+        # This connect just reconciled the account-scoped ids against the
+        # account that authorised; the publish path need not redo it at once.
+        ebay_account.note_verified(uid)
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
@@ -1653,6 +1656,7 @@ def ebay_disconnect(request: Request) -> dict:
         raise HTTPException(401, "Log in first.")
     # Keep saved policy/location prefs so reconnecting the same account restores
     # them; a different account overwrites them on connect (see the callback).
+    ebay_account.forget_verified(uid)
     db.disconnect_ebay_account(uid)
     return {"ok": True}
 
