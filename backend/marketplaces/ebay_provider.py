@@ -680,6 +680,31 @@ class EbayProvider:
         # in our records just because a revise attempt was blocked or errored —
         # the listing is still live on eBay either way.
         was_live = already_live
+        # A draft belongs to this app, not to eBay. Saving one used to fall
+        # through to the Inventory engine with do_publish=False, which created
+        # an inventory item and an UNPUBLISHED offer on the seller's account.
+        # Nothing good came of that: inventory-based listings don't appear in
+        # Seller Hub, so the seller could neither find nor delete them, and the
+        # live publish that follows goes out through Trading and mints an
+        # entirely different item — the offer is never claimed. Every draft
+        # save on a connected account left one behind.
+        if mode == "draft":
+            db.upsert_listing(session_id, listing.model_dump(),
+                              status="published" if was_live else "draft",
+                              user_id=ctx.uid)
+            message = ("Saved to your drafts. It is NOT on eBay — press "
+                       "Publish Live when you're ready to list it."
+                       if (creds or config.ebay_ready()) else
+                       "Saved to your drafts — find it under Drafts. It is "
+                       "NOT on eBay: connect your eBay account and press "
+                       "Publish Live when you're ready to list it.")
+            log.info("draft saved locally: session=%s connected=%s",
+                     session_id, bool(creds))
+            return PublishOutcome(
+                ok=True, status="published" if was_live else "draft",
+                message=message,
+                raw={"dry_run": False, "draft": True, "mode": "draft",
+                     "message": message})
         # Pre-publish checklist: catch everything eBay would reject BEFORE the
         # round-trip, with field-targeted fixes. Only gates a real (connected)
         # live publish — dry-runs and drafts stay permissive.
