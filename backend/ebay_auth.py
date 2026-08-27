@@ -27,6 +27,53 @@ def authorize_url(state: str) -> str:
     return f"{config.EBAY_AUTH_BASE}/oauth2/authorize?{urlencode(params)}"
 
 
+class OAuthError(RuntimeError):
+    """A token request eBay refused, carrying the reason eBay gave.
+
+    `raise_for_status()` alone reduces every refusal to a status code, and the
+    body it discards is the only thing that says WHICH of the half-dozen
+    causes it was. Connecting is the one flow a seller cannot debug from the
+    UI — a bare "connection failed" leaves nobody, seller or operator, with
+    anywhere to start.
+    """
+
+    def __init__(self, message: str, *, code: str = "", description: str = "",
+                 status: int = 0):
+        super().__init__(message)
+        self.code = code
+        self.description = description
+        self.status = status
+
+    @property
+    def reason(self) -> str:
+        """A short bucket for the UI: what the seller can actually do.
+
+        `invalid_client` is the app's own credentials, and `invalid_grant` on
+        this flow is nearly always a redirect_uri (RuName) that doesn't match
+        the keyset — neither is the seller's to fix, and both look identical
+        when the app is pointed at sandbox while they signed in to production
+        eBay, so they share one bucket.
+        """
+        if self.code in ("invalid_client", "unauthorized_client"):
+            return "config"
+        if self.code == "invalid_grant":
+            return "expired"
+        return "unknown"
+
+
+def _oauth_error(resp: httpx.Response) -> OAuthError:
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    code = str(body.get("error") or "")
+    description = str(body.get("error_description") or "")[:300]
+    return OAuthError(
+        f"eBay refused the token request ({resp.status_code}"
+        + (f", {code}" if code else "") + ")",
+        code=code, description=description, status=resp.status_code)
+
+
 def _token_request(data: dict) -> dict:
     resp = httpx.post(
         f"{config.EBAY_API_BASE}/identity/v1/oauth2/token",
@@ -35,7 +82,15 @@ def _token_request(data: dict) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        err = _oauth_error(resp)
+        # eBay's own words, at WARNING, against the environment in use: the
+        # single most common cause of a connect that will not stick is an app
+        # pointed at sandbox while the seller signs in to production (or the
+        # reverse), and that is invisible from the status code alone.
+        log.warning("ebay oauth: %s [env=%s] %s", err, config.EBAY_ENV,
+                    err.description)
+        raise err
     return resp.json()
 
 

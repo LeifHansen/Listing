@@ -377,6 +377,14 @@ EBAY_VERIFICATION_TOKEN = os.getenv("EBAY_VERIFICATION_TOKEN", "").strip()
 # sits behind a proxy that rewrites scheme/host.
 EBAY_DELETION_ENDPOINT = os.getenv("EBAY_DELETION_ENDPOINT", "").strip()
 
+# Anything that is not exactly "production" means sandbox. That is a quiet
+# footgun: EBAY_ENV=prod (or a typo) silently points the whole integration at
+# sandbox, where a seller's real eBay sign-in cannot work and the only symptom
+# is a connect that fails with no reason. Say so at boot.
+if EBAY_ENV not in ("sandbox", "production"):
+    log.warning("EBAY_ENV=%r is not 'sandbox' or 'production' — treating it as "
+                "SANDBOX. Real eBay accounts cannot connect against sandbox.",
+                EBAY_ENV)
 _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"

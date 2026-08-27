@@ -37,6 +37,17 @@ const NO_LISTINGS = {
   loaded: false, loading: false, authed: false, dbConfigured: true, items: [],
 };
 
+// What the eBay callback's ?why= means, in words a seller can act on. The
+// backend picks the bucket from eBay's own error code; "eBay connection
+// failed. Please try again." was the whole message before, which is advice
+// that cannot work for two of these three.
+const EBAY_CONNECT_ERRORS = {
+  expired: "That eBay connection link expired or was already used. Start it again from Settings.",
+  config: "eBay rejected this app's credentials, so this isn't something you can fix by retrying — the app's eBay setup needs attention.",
+  network: "Couldn't reach eBay just now. Try again in a moment.",
+  unknown: "eBay connection failed. Please try again.",
+};
+
 export function AppProvider({ children }) {
   const { toast } = useToast();
 
@@ -669,7 +680,7 @@ export function AppProvider({ children }) {
     const params = new URLSearchParams(window.location.search);
     const e = params.get("ebay");
     if (e === "connected") toast("eBay connected! You can now publish real listings.", { kind: "success" });
-    else if (e === "error") toast("eBay connection failed. Please try again.", { kind: "error" });
+    else if (e === "error") toast(EBAY_CONNECT_ERRORS[params.get("why")] || EBAY_CONNECT_ERRORS.unknown, { kind: "error" });
     // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy.
     const ok = params.get("connected");
     const bad = params.get("connect_error");

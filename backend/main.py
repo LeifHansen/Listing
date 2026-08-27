@@ -1128,15 +1128,21 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
     if not code or not verified:
-        return _finish_connect(request, "/?ebay=error")
+        # An unreadable state is a signature that no longer verifies (SECRET_KEY
+        # rotated), a stale link, or a tampered one. All three want the same
+        # thing from the seller: start again.
+        log.warning("ebay callback: %s", "no code" if not code
+                    else "state did not verify")
+        return _finish_connect(request, "/?ebay=error&why=expired")
     uid, nonce = verified
     # The nonce in the signed state must match the cookie set at connect time,
     # so a callback can only bind an eBay account to the browser that started
     # the flow (blocks CSRF authorization-code injection).
     cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
     if not cookie_nonce or cookie_nonce != nonce:
-        log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
-        return _finish_connect(request, "/?ebay=error")
+        log.warning("ebay callback: nonce mismatch (uid=%s) — cookie %s", uid,
+                    "missing" if not cookie_nonce else "did not match")
+        return _finish_connect(request, "/?ebay=error&why=expired")
     try:
         # NOT `tokens` — that is the billing module, imported at the top of
         # this file. Shadowing it here left the handler one added
@@ -1217,13 +1223,22 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
+    except ebay_auth.OAuthError as exc:
+        # eBay told us why. Pass the bucket to the UI so the seller is told
+        # whether to try again or that it is not theirs to fix, and keep
+        # eBay's own words in the log for whoever has to fix it.
+        log.warning("ebay: connect refused for uid=%s: %s | %s", uid, exc,
+                    exc.description)
+        return _finish_connect(request, f"/?ebay=error&why={exc.reason}")
+    except httpx.RequestError as exc:
+        log.warning("ebay: connect could not reach eBay for uid=%s: %s", uid, exc)
+        return _finish_connect(request, "/?ebay=error&why=network")
     except Exception:  # noqa: BLE001
-        # Every failure here — a bad state, an eBay outage, a DB write, a bug —
-        # reaches the seller as the same "?ebay=error". Without the traceback
-        # there is nothing left to tell them apart afterwards, and a connect
-        # that won't stick is the one problem a seller cannot debug from the UI.
+        # Anything left — a DB write, a bug. Without the traceback there is
+        # nothing to tell these apart afterwards, and a connect that won't
+        # stick is the one problem a seller cannot debug from the UI.
         log.exception("ebay: connect callback failed for uid=%s", uid)
-        return _finish_connect(request, "/?ebay=error")
+        return _finish_connect(request, "/?ebay=error&why=unknown")
 
 
 @app.get("/api/ebay/status")
