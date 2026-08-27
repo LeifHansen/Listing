@@ -148,3 +148,43 @@ def test_a_policy_the_seller_already_chose_is_not_overwritten(connected, monkeyp
     connected.post("/api/ebay/ensure-all-policies", json={})
     assert "fulfillment_policy_id" not in saved
     assert saved == {"payment_policy_id": "PP-1", "return_policy_id": "RP-1"}
+
+
+# --- the ship-from ZIP can be cleared ---------------------------------------
+
+def test_clearing_the_zip_actually_clears_it(connected, monkeypatch):
+    """It used to be a silent no-op reported as success: the field showed
+    empty, the stored value never changed, and the old ZIP came back on the
+    next load."""
+    saved = {}
+    monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: saved.update(kw))
+    connected.post("/api/ebay/policies", json={"ship_from_postal": ""})
+    assert saved["ship_from_postal"] == ""
+
+
+def test_clearing_the_zip_keeps_the_location_key(connected, monkeypatch):
+    """Publishing needs a ship-from ZIP, and with no typed one create_on_ebay
+    reads it off the seller's eBay location via that key. Dropping both would
+    leave the account unable to publish for having emptied a text box."""
+    saved = {}
+    monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: saved.update(kw))
+    connected.post("/api/ebay/policies", json={"ship_from_postal": ""})
+    assert "merchant_location_key" not in saved
+
+
+def test_a_request_that_omits_the_zip_leaves_it_alone(connected, monkeypatch):
+    """Saving only a policy selection must not wipe the ZIP — the key is
+    absence of the field, not emptiness of it."""
+    saved = {}
+    monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: saved.update(kw))
+    connected.post("/api/ebay/policies", json={"payment_policy_id": "PP-1"})
+    assert "ship_from_postal" not in saved
+
+
+def test_setting_a_zip_still_creates_the_location(connected, monkeypatch):
+    saved = {}
+    monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: saved.update(kw))
+    monkeypatch.setattr(main.ebay_auth, "ensure_inventory_location",
+                        lambda token, postal: "LOC-1")
+    connected.post("/api/ebay/policies", json={"ship_from_postal": "97201"})
+    assert saved == {"merchant_location_key": "LOC-1", "ship_from_postal": "97201"}

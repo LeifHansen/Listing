@@ -42,6 +42,7 @@ export function SettingsView() {
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
   const [optingIn, setOptingIn] = useState(false);
+  const [creatingPolicies, setCreatingPolicies] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
   const [prefs, setPrefs] = useState(null); // new-listing defaults (null = loading)
@@ -95,8 +96,12 @@ export function SettingsView() {
         setPrefs(r.prefs || {});
       }
       if (ebay.connected && data) {
-        const payload = { ...selected };
-        if (postal.trim()) payload.ship_from_postal = postal.trim();
+        // Always sent, including empty. Omitting a blank made clearing the
+        // ZIP a silent no-op reported as "Defaults saved": the field showed
+        // empty, the stored value never changed, and it reappeared on the
+        // next load. `data` is loaded here (the enclosing check), so this
+        // cannot fire mid-load with a value the seller never saw.
+        const payload = { ...selected, ship_from_postal: postal.trim() };
         await postJson("/api/ebay/policies", payload);
         setPoliciesData(null); // refresh the publish-step summary next time
         load();
@@ -370,10 +375,16 @@ export function SettingsView() {
               })}
 
               <AddShippingServiceRow
-                onCreated={(pol) => {
-                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
+                onCreated={async (pol) => {
+                  // Re-apply AFTER the reload, not before. load() ends with
+                  // setSelected(d.selected), and the server only stores this
+                  // policy as the default when the account had none — so for
+                  // a seller who already had one, the optimistic selection
+                  // was overwritten a moment later and the toast's "selected
+                  // it above" was simply false.
                   setPoliciesData(null);
-                  load();
+                  await load();
+                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
                 }}
               />
 
@@ -408,6 +419,42 @@ export function SettingsView() {
                       }}
                     >
                       {optingIn ? "Asking eBay…" : "Turn on business policies"}
+                    </Button>
+                    {/* Opting in is necessary and not sufficient: the account
+                        still needs one shipping, one payment and one return
+                        policy. This makes whichever are missing. Separate
+                        button because eBay's opt-in takes up to 24h, so right
+                        after opting in this one will legitimately fail — and
+                        saying which is missing beats one button that hides
+                        which half went wrong. */}
+                    <Button
+                      size="sm" variant="soft" disabled={creatingPolicies}
+                      onClick={async () => {
+                        setCreatingPolicies(true);
+                        try {
+                          const r = await postJson("/api/ebay/ensure-all-policies", {});
+                          const made = (r.created || []).length;
+                          const failed = Object.keys(r.errors || {});
+                          if (failed.length) {
+                            toast(
+                              `Couldn't create your ${failed.join(" and ")} policy. `
+                              + `eBay said: ${r.errors[failed[0]]}`,
+                              { kind: "error" });
+                          } else {
+                            toast(made
+                              ? `Created your ${(r.created || []).join(", ")} policy — you can publish now.`
+                              : "You already had all three policies.",
+                              { kind: "success" });
+                          }
+                          load();
+                        } catch (e) {
+                          toast(e.message, { kind: "error" });
+                        } finally {
+                          setCreatingPolicies(false);
+                        }
+                      }}
+                    >
+                      {creatingPolicies ? "Creating…" : "Create my policies"}
                     </Button>
                     <a
                       href={data.manage_url} target="_blank" rel="noopener noreferrer"

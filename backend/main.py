@@ -1575,7 +1575,14 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         if k in payload
     }
     postal = str(payload.get("ship_from_postal") or "").strip()
-    if postal:
+    if "ship_from_postal" in payload and not postal:
+        # Clearing it is allowed and has to actually clear. The saved
+        # merchantLocationKey stays: publishing needs a ship-from ZIP, and with
+        # no typed one create_on_ebay reads it off the seller's eBay location
+        # via that key. Dropping both would leave the account unable to publish
+        # for having emptied a text box.
+        fields["ship_from_postal"] = ""
+    elif postal:
         creds = _ebay_creds_for(request)
         if not creds:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
