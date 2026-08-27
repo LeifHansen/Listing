@@ -96,6 +96,15 @@ def _load_secret_key() -> str:
 
 SECRET_KEY = _load_secret_key()
 
+# Encrypts the marketplace refresh tokens held in the database (see
+# backend/crypto.py). A Fernet key -- generate one with:
+#   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Left unset, a key is derived from SECRET_KEY, so a self-hosted or local
+# deployment is protected with no extra configuration. Set it explicitly if
+# SECRET_KEY might ever be rotated: rotating the key a token was written under
+# makes that token unreadable, and the seller has to reconnect.
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
+
 # --- Object storage (Cloudflare R2 / any S3, optional) ---------------------
 # Store optimized images in R2 so they survive restarts and are reliably
 # fetchable by eBay. Only the three credentials are required: the bucket

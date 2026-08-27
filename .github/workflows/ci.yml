@@ -23,7 +23,7 @@ jobs:
       # stack (rembg/onnxruntime/Pillow), which these tests never touch.
       # fastapi is here because backend/auth.py imports it for Request/Response.
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
       - name: Ruff
         run: ruff check backend
       - name: Tests
