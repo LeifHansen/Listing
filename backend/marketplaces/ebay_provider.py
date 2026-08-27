@@ -833,14 +833,14 @@ class EbayProvider:
                 url=_view_url(listing, listing_id),
                 message=result["message"], raw=result)
 
-        # Below here a live publish with no creds falls back to the env-config
+        # A live publish with no creds used to fall through to the env-config
         # single-tenant path, which carries the OPERATOR's refresh token and
         # policy ids. That is the right behaviour for a deployment with no
         # accounts at all, and completely wrong for a signed-in seller whose
         # token refresh happened to fail a moment ago — their listing would go
         # live on the operator's eBay account. `creds_for` returns None for
         # both, so ask which one this is before letting it through.
-        if mode == "live" and not creds and has_stored_connection(ctx.uid):
+        if not creds and has_stored_connection(ctx.uid):
             log.warning("publish refused: session=%s eBay token refresh failed "
                         "for uid=%s", session_id, ctx.uid)
             msg = ("We couldn't reach your eBay account just now, so nothing "
@@ -851,68 +851,63 @@ class EbayProvider:
                 raw={"dry_run": False, "error": True, "mode": mode,
                      "message": msg})
 
-        log.info("publish request: session=%s mode=%s connected=%s", session_id,
-                 mode, bool(creds))
-        result = ebay.publish(session_id, listing, mode, ctx.base_url,
-                              creds=creds, is_revise=was_live)
-        # Record the outcome: published (live), draft, or dry-run. An errored
-        # attempt never demotes a live listing, and never records "live" for a
-        # listing that isn't (the old status=req.mode did exactly that).
-        if result.get("published"):
-            status = "published"
-            log.info("publish OK: session=%s listing_id=%s revised=%s",
-                     session_id, result.get("listing_id"), result.get("revised"))
-        elif result.get("error"):
-            status = "published" if was_live else "draft"
-            log.warning("publish error: session=%s step=%s", session_id,
-                        result.get("step"))
-        elif result.get("dry_run"):
-            status = "dry_run"
-        else:
-            status = "published" if was_live else mode
-        dump = listing.model_dump()
-        # Persist the eBay item id so the app can link to (and keep tracking)
-        # the live listing across sessions.
-        if result.get("listing_id"):
-            dump["ebay_listing_id"] = str(result["listing_id"])
-        recorded = (_record_published(session_id, dump, status, ctx.uid)
-                    if result.get("published")
-                    else db.upsert_listing(session_id, dump, status=status,
-                                           user_id=ctx.uid))
-        # Promoted Listings: once the item is live, best-effort create/refresh
-        # its ad. Runs when the listing's Promote toggle is on OR the
-        # account's auto-promote default (Settings) is — at the chosen rate,
-        # else eBay's recommended rate. Never blocks or fails the publish; the
-        # status is attached for the UI to show (incl. 'reconnect to grant ad
-        # permissions').
-        if result.get("published") and (listing.promote
-                                        or auto_promote_enabled(ctx.uid)):
-            result["promote_status"] = promote(
-                session_id, listing, creds,
-                rate=listing.ad_rate_percent,
-                ebay_listing_id=result.get("listing_id"))
-            if result["promote_status"].get("promoted"):
-                # Re-record with the promote flag + actual rate so the
-                # Dashboard and recommender see it as promoted.
-                dump = listing.model_dump()
-                if result.get("listing_id"):
-                    dump["ebay_listing_id"] = str(result["listing_id"])
-                db.upsert_listing(session_id, dump, status=status,
-                                  user_id=ctx.uid)
-        if result.get("published") and not recorded:
-            result["record_warning"] = RECORD_WARNING
-        listing_id = str(result.get("listing_id") or "")
+        if not creds:
+            # No eBay account anywhere: render what a publish WOULD send so the
+            # payload can be inspected without one.
+            return self._dry_run(ctx)
+
+        # Connected, live, and neither a new listing (handled above) nor an
+        # imported one (returned far above). What's left is a record that
+        # claims to be live but carries no source="ebay" stamp — only an
+        # Inventory-API listing from an older build of this app can be that.
+        # eBay refuses to let the Trading API revise those and offers no way to
+        # convert one, so say what actually works instead of sending a call
+        # that comes back in eBay's words.
+        log.warning("publish: no route for session=%s (already_live=%s "
+                    "item_id=%s) — legacy inventory-managed record",
+                    session_id, already_live, bool(listing.ebay_listing_id))
+        db.upsert_listing(session_id, listing.model_dump(),
+                          status="published" if was_live else "draft",
+                          user_id=ctx.uid)
+        msg = ("This listing was published by an older version of the app, and "
+               "eBay won't let it be edited from here. End it on eBay, then "
+               "use Relist to publish it fresh.")
+        issues = [{"target": "account", "level": "error",
+                   "title": "This listing can't be edited from here",
+                   "fix": msg}]
         return PublishOutcome(
-            ok=not result.get("error"),
-            listing_id=listing_id,
-            url=_view_url(listing, listing_id) if result.get("published") else "",
-            message=str(result.get("message") or ""),
-            dry_run=bool(result.get("dry_run")),
-            status=("published" if result.get("published")
-                    else "draft" if status == "draft" and not result.get("error")
-                    else ""),
-            issues=list(result.get("issues") or []),
-            raw=result)
+            ok=False, message=msg, issues=issues,
+            raw={"dry_run": False, "error": True, "mode": mode,
+                 "message": msg, "issues": issues})
+
+    def _dry_run(self, ctx: PublishContext) -> PublishOutcome:
+        """The request a publish would make, for a deployment with no account.
+
+        Renders the Trading XML through the same builder create_listing uses.
+        The old dry run rendered an Inventory item + offer, which after the
+        Trading switch described a call this app never makes — a payload a
+        seller could act on and still be surprised by the real publish.
+        """
+        listing = ctx.listing
+        urls = ebay.image_urls_for(ctx.session_id, listing, ctx.base_url)
+        call, body = ebay_trading.build_add_item(
+            listing, urls,
+            policies={"fulfillment_policy_id": config.EBAY_FULFILLMENT_POLICY_ID,
+                      "payment_policy_id": config.EBAY_PAYMENT_POLICY_ID,
+                      "return_policy_id": config.EBAY_RETURN_POLICY_ID})
+        # No postal code: a dry run has no connected account to read a
+        # ship-from ZIP from, and build_add_item omits the element rather than
+        # inventing one. create_listing is what refuses a real publish without
+        # it, so the preview stays an honest picture of an unconfigured app.
+        payload = {"call": call, "xml": body, "mode": "live"}
+        export_path = storage.write_export(ctx.session_id, "ebay_payload", payload)
+        message = ("eBay not connected — generated the "
+                   f"{call} request instead of publishing. Connect eBay (or "
+                   "add credentials) to go live.")
+        return PublishOutcome(
+            ok=True, dry_run=True, status="dry_run", message=message,
+            raw={"dry_run": True, "mode": "live", "message": message,
+                 "export_path": str(export_path), "payload": payload})
 
 
 register(EbayProvider())

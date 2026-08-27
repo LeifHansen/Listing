@@ -639,6 +639,41 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         raise TradingError(
             "eBay needs to know where this ships from. Add your ship-from ZIP "
             "in Settings → Listing settings and publish again.")
+    call, body = build_add_item(listing, image_urls, policies, postal_code,
+                                idempotency_key)
+    try:
+        root = _call(call, token, body)
+    except TradingError as exc:
+        if idempotency_key and _is_duplicate_rejection(exc):
+            # eBay has already processed this exact publish. Surfacing its raw
+            # wording ("UUID has already been used") would read as a failure to
+            # a seller whose listing is in fact live.
+            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
+                     call, idempotency_key, exc.code)
+            raise AlreadyListedError(
+                "This listing was already published to eBay.", code=exc.code,
+                item_id=_item_id_in_error(str(exc)),
+                detail=getattr(exc, "detail", "")) from exc
+        raise
+    item_id = _text(root, "ItemID")
+    if not item_id:
+        raise TradingError("eBay accepted the listing but returned no item id.")
+    log.info("trading: %s ok item=%s", call, item_id)
+    return {"published": True, "listing_id": item_id,
+            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+
+
+def build_add_item(listing: Listing, image_urls: list[str],
+                   policies: Optional[dict] = None,
+                   postal_code: str = "",
+                   idempotency_key: str = "") -> tuple[str, str]:
+    """(call name, <Item> XML) for a NEW listing.
+
+    Exactly the body create_listing sends, built without touching the network
+    or validating anything — so the dry-run preview and the real publish can
+    never describe two different requests. An empty postal_code simply omits
+    the element here; create_listing is what refuses to publish without one.
+    """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
     parts = _item_fields(listing, image_urls)
@@ -690,26 +725,7 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         parts.append(f"<UUID>{_esc(_uuid_form(idempotency_key))}</UUID>")
 
     call = "AddItem" if is_auction else "AddFixedPriceItem"
-    try:
-        root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
-    except TradingError as exc:
-        if idempotency_key and _is_duplicate_rejection(exc):
-            # eBay has already processed this exact publish. Surfacing its raw
-            # wording ("UUID has already been used") would read as a failure to
-            # a seller whose listing is in fact live.
-            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
-                     call, idempotency_key, exc.code)
-            raise AlreadyListedError(
-                "This listing was already published to eBay.", code=exc.code,
-                item_id=_item_id_in_error(str(exc)),
-                detail=getattr(exc, "detail", "")) from exc
-        raise
-    item_id = _text(root, "ItemID")
-    if not item_id:
-        raise TradingError("eBay accepted the listing but returned no item id.")
-    log.info("trading: %s ok item=%s", call, item_id)
-    return {"published": True, "listing_id": item_id,
-            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    return call, f"<Item>{''.join(parts)}</Item>"
 
 
 # eBay's error codes for "you already sent this": a reused UUID, and an

@@ -3948,7 +3948,11 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
     creds = _ebay_creds_for(request)
-    if not (creds or config.ebay_ready()):
+    # Ending goes through EndItem, which needs the seller's own token. The
+    # env-configured single-tenant credentials used to serve here via
+    # withdrawOffer; they are the OPERATOR's, and with the Inventory engine
+    # gone there is nothing they could end that this app created.
+    if not creds:
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
     # Never end another eBay account's listing: the item id on this record was
@@ -3962,14 +3966,16 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
                  f"you're connected as @{connected}. Reconnect that account "
                  "to end it.")
     try:
-        # Imported listings live outside the Inventory API — end them through
-        # the Trading API instead.
-        if listing_sync.is_imported(listing):
-            if not creds:
-                raise HTTPException(400, "Connect eBay first.")
-            res = listing_sync.end(creds["access_token"], listing)
+        # One ending for every listing: EndItem. The old branch sent
+        # non-imported records to withdrawOffer, but everything this app
+        # publishes goes out through Trading and is stamped source="ebay", so
+        # that branch only ever served Inventory-API listings from an older
+        # build. A record with no item id has nothing on eBay to end.
+        if not listing.ebay_listing_id:
+            res = {"ended": False, "not_live": True,
+                   "message": "This listing isn't on eBay — nothing to end."}
         else:
-            res = ebay.withdraw(req.session_id, listing, creds=creds)
+            res = listing_sync.end(creds["access_token"], listing)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     if res.get("ended") or res.get("not_live"):
@@ -4010,7 +4016,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     creds = _ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
-        return {"checked": 0, "changed": 0, "archived": 0}
+        return {"checked": 0, "changed": 0}
     force = bool((payload or {}).get("force"))
     # Only the connected account's listings. A record left behind by a
     # previously-connected eBay account is another seller's item as far as this
@@ -4022,7 +4028,6 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
             if i.get("status") in ("published", "live")
             and listing_sync.belongs_to(i.get("listing") or {}, account)]
     changed = 0
-    archived = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
     # lists name every item that finished recently, so a listing that ended
     # (or sold) ON eBay moves off Active on this very sync — it never has to
@@ -4036,90 +4041,47 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: finished-list reconcile failed: %s", exc)
     live = [i for i in live if i["id"] not in handled]
-    # Imported listings are reconciled through the Trading API (the Inventory
-    # API can't see them at all); app-created ones keep the offer check below.
-    # EVERY imported listing must be excluded from `items` — not just the ones
-    # this run refreshes — or the offer check would call an eBay listing it
-    # can't see "ended". Each side is capped so one sync click can't fan out
-    # into hundreds of eBay calls — SAMPLED, not sliced, so on a store bigger
-    # than the cap every record still gets its turn across a few syncs instead
-    # of the same first N being re-checked forever.
-    imported_ids = {i["id"] for i in live
-                    if listing_sync.is_imported(i.get("listing") or {})}
-    imported = [i for i in live if i["id"] in imported_ids]
-    items = [i for i in live if i["id"] not in imported_ids]
+    # One sweep for every record. The old code split these in two: imported
+    # listings went through the Trading API, and "app-created" ones through an
+    # Inventory offer lookup keyed by SKU. That second path only ever served
+    # listings the Inventory engine published, and it is gone — everything this
+    # app puts live now goes out through Trading and carries an item id.
+    #
+    # Capped so one sync click can't fan out into hundreds of eBay calls —
+    # SAMPLED, not sliced, so on a store bigger than the cap every record still
+    # gets its turn across a few syncs instead of the same first N being
+    # re-checked forever.
+    #
     # Ask for the cooldown only when there is actually something to sweep.
     # sweep_due() STARTS the cooldown on the call that says yes, so asking
     # first and finding nothing to do spent the whole six hours on zero eBay
     # calls — and the next sync, the one with real work, was refused. The
     # cooldown exists to ration eBay's daily quota, so it should only ever be
     # consumed by a run that spends some of it.
-    if (imported or items) and not sync_guard.sweep_due(user["id"], force):
+    if live and not sync_guard.sweep_due(user["id"], force):
         # Cooled down: the finished-list reconcile above already ran (and is
-        # what actually moves ended/sold records), so skip the ~100-call
-        # per-item sweeps rather than spending the account's daily eBay quota
-        # on a background poll.
+        # what actually moves ended/sold records), so skip the per-item sweeps
+        # rather than spending the account's daily eBay quota on a background
+        # poll.
         log.debug("ebay sync: per-item sweeps skipped (cooldown) for user=%s",
                   user["id"])
-        imported, items = [], []
-    if len(imported) > 60:
-        imported = random.sample(imported, 60)
-    if len(items) > 40:
-        items = random.sample(items, 40)
-    if imported and creds:
+        live = []
+    if len(live) > 100:
+        live = random.sample(live, 100)
+    if live and creds:
         try:
             changed += listing_sync.refresh_statuses(
-                creds["access_token"], user["id"], imported, account=account)
+                creds["access_token"], user["id"], live, account=account)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
-            log.info("ebay sync: imported refresh failed: %s", exc)
-
-    # Each check is its own eBay round-trip; serially that pinned a request
-    # thread for up to ~40x the API latency right at app load (architect #15).
-    # Fetch in parallel, write to the DB serially below.
-    def _check(it):
-        try:
-            return it, ebay.live_status(
-                it["id"], Listing(**(it.get("listing") or {})), creds=creds)
-        except Exception as exc:  # noqa: BLE001 - one blip must not stop the sweep
-            log.info("ebay sync: status check failed for %s: %s", it["id"], exc)
-            return it, (None, "")
-
-    checked = []
-    if items:
-        with ThreadPoolExecutor(max_workers=min(6, len(items))) as pool:
-            checked = list(pool.map(_check, items))
-    # What each sale actually settled at, fetched once and only if something
-    # sold — the offer a seller accepted lives on the transaction, never on
-    # the listing's own price.
-    sales: Optional[dict] = None
-    for it, (status, lid) in checked:
-        if status == "sold":
-            data = it.get("listing") or {}
-            if sales is None:
-                sales = (listing_sync.recent_sales(creds["access_token"])
-                         if creds else {})
-            data = listing_sync.stamp_sale(
-                data, sales.get(str(data.get("ebay_listing_id") or "")),
-                mark_now=True)
-            db.upsert_listing(it["id"], data, status="sold", user_id=user["id"])
-            notifications.notify_sold(user["id"], it["id"], data,
-                                      sold_quantity=data.get("sold_quantity") or 0)
-            _purge_session_images(it["id"])  # archived — reclaim the storage
-            changed += 1
-            archived += 1
-        elif status == "ended":
-            db.upsert_listing(it["id"], it.get("listing") or {},
-                              status="ended", user_id=user["id"])
-            changed += 1
-        elif (status == "published" and lid
-              and not (it.get("listing") or {}).get("ebay_listing_id")):
-            data = {**(it.get("listing") or {}), "ebay_listing_id": lid}
-            db.upsert_listing(it["id"], data, status="published", user_id=user["id"])
+            log.info("ebay sync: status refresh failed: %s", exc)
     if changed:
-        log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
-                 changed, archived, user["id"])
-    return {"checked": len(items) + len(imported) + len(handled),
-            "changed": changed, "archived": archived}
+        log.info("ebay sync: %d listing(s) updated for user=%s",
+                 changed, user["id"])
+    # `archived` used to ride along here, counted by the per-item Inventory
+    # loop that no longer exists. refresh_statuses does the archiving now and
+    # reports only a change count, and nothing read the field — the frontend
+    # uses `changed` alone — so it is gone rather than reported as a constant 0.
+    return {"checked": len(live) + len(handled), "changed": changed}
 
 
 # Bounds one import run. A store bigger than this imports across repeated

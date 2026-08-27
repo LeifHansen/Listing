@@ -42,7 +42,6 @@ def no_ebay_calls(monkeypatch):
     """Every door out to eBay from the draft path, wired to fail loudly."""
     def _boom(*a, **k):
         raise AssertionError("a draft save reached eBay")
-    monkeypatch.setattr(ebay_provider.ebay, "publish", _boom)
     monkeypatch.setattr(ebay_provider.listing_sync, "create_on_ebay", _boom)
     monkeypatch.setattr(ebay_provider.listing_sync, "push_edit", _boom)
     monkeypatch.setattr(ebay_provider.ebay_auth, "ensure_inventory_location", _boom)
