@@ -1383,6 +1383,66 @@ def ensure_policy(request: Request, payload: dict) -> dict:
     return pol
 
 
+@app.post("/api/ebay/ensure-all-policies")
+def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dict:
+    """Give the account the three business policies a publish needs.
+
+    Being opted into the policy program is necessary and not sufficient: the
+    account still needs one shipping, one payment and one return policy before
+    eBay will accept a listing. Only the fulfillment half of that existed here
+    (ensure-policy, one shipping service at a time) — payment and return could
+    be listed and never created, so a seller with none was sent to Seller Hub
+    to hand-build two policies whose contents this app already assumes.
+
+    Each is found-or-created independently and each result says which it was,
+    so a partial success is legible rather than an all-or-nothing failure. Ids
+    are saved as the account defaults only where none is set: a seller who
+    deliberately chose a policy keeps it.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    token, opts = creds["access_token"], (payload or {})
+    svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
+           or ebay_auth.service_by_code("USPSGroundAdvantage"))
+    steps = {
+        "fulfillment": lambda: ebay_auth.ensure_service_policy(token, svc),
+        "payment": lambda: ebay_auth.ensure_payment_policy(token),
+        "return": lambda: ebay_auth.ensure_return_policy(
+            token,
+            days=int(opts.get("return_days") or ebay_auth.DEFAULT_RETURN_DAYS),
+            payer=str(opts.get("return_payer")
+                      or ebay_auth.DEFAULT_RETURN_PAYER)),
+    }
+    out: dict = {"policies": {}, "errors": {}}
+    save: dict = {}
+    for kind, run in steps.items():
+        try:
+            pol = run()
+        except (ebay_auth.AccountApiError, httpx.HTTPError) as exc:
+            # One policy eBay won't make must not cost the other two. The most
+            # common reason is the account not being opted in yet, which is a
+            # different button on the same screen.
+            detail = getattr(exc, "description", "") or str(exc)
+            log.warning("ensure-all-policies: %s failed for uid=%s: %s",
+                        kind, _uid(request), detail)
+            out["errors"][kind] = detail[:300]
+            continue
+        out["policies"][kind] = pol
+        field = f"{kind}_policy_id"
+        if pol.get("id") and not creds.get(field):
+            save[field] = pol["id"]
+    if save:
+        db.save_ebay_account(creds["_uid"], **save)
+        # These ids were just read back from the account that owns them, so the
+        # publish path need not re-verify them for the TTL.
+        ebay_account.note_verified(creds["_uid"])
+    out["ok"] = not out["errors"]
+    out["created"] = sorted(k for k, v in out["policies"].items()
+                            if v.get("created"))
+    return out
+
+
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     return ebay_provider.preflight_issues(_uid(request), listing, mode)
@@ -1457,7 +1517,7 @@ def ebay_opt_in_policies(request: Request) -> dict:
                            "eBay account."}
     try:
         ebay_auth.opt_in_to_program(token, ebay_auth.SELLING_POLICY_MANAGEMENT)
-    except ebay_auth.OAuthError as exc:
+    except ebay_auth.AccountApiError as exc:
         log.warning("ebay opt-in refused for uid=%s: %s | %s", _uid(request),
                     exc, exc.description)
         raise HTTPException(

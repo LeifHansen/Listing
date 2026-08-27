@@ -27,6 +27,21 @@ def authorize_url(state: str) -> str:
     return f"{config.EBAY_AUTH_BASE}/oauth2/authorize?{urlencode(params)}"
 
 
+class AccountApiError(RuntimeError):
+    """A Sell Account API write eBay refused, carrying eBay's own words.
+
+    Separate from OAuthError because these fail for entirely different reasons
+    — not eligible for a program, a policy name already taken, a category type
+    the account can't use — and the caller's job is to relay eBay's sentence
+    rather than map it to an auth bucket.
+    """
+
+    def __init__(self, message: str, *, description: str = "", status: int = 0):
+        super().__init__(message)
+        self.description = description
+        self.status = status
+
+
 class OAuthError(RuntimeError):
     """A token request eBay refused, carrying the reason eBay gave.
 
@@ -224,7 +239,7 @@ def opt_in_to_program(access_token: str,
         timeout=30,
     )
     if not resp.is_success:
-        raise OAuthError(
+        raise AccountApiError(
             f"eBay refused the opt-in ({resp.status_code})",
             description=resp.text[:300], status=resp.status_code)
     log.info("ebay: opted in to %s", program)
@@ -622,6 +637,105 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
              created.get("fulfillmentPolicyId", ""))
     return {"id": created.get("fulfillmentPolicyId", ""),
             "name": created.get("name", name), "created": True}
+
+
+# Defaults for the policies the app creates. They are arguments rather than
+# constants so the Settings screen can own them next; these are the values a
+# small seller wants on day one, not opinions worth hard-coding forever.
+DEFAULT_RETURN_DAYS = 30
+DEFAULT_RETURN_PAYER = "BUYER"
+PAYMENT_POLICY_NAME = "Immediate payment (Thryft Shop)"
+RETURN_POLICY_NAME = "30-day returns (Thryft Shop)"
+
+
+def _create_policy(kind: str, access_token: str, body: dict) -> dict:
+    """POST one business policy, returning {id, name}. Raises AccountApiError
+    with eBay's own words, which for policy writes is the whole story — "name
+    already used", "not opted in", "category type not allowed" all arrive as
+    the same 400 otherwise."""
+    path, _list_field, id_field = _POLICY_SPECS[kind]
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}{path}",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=30,
+    )
+    if not resp.is_success:
+        raise AccountApiError(
+            f"eBay refused to create the {kind} policy ({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
+    created = resp.json()
+    log.info("ebay: created %s policy %s", kind, created.get(id_field, ""))
+    return {"id": created.get(id_field, ""),
+            "name": created.get("name", body.get("name", ""))}
+
+
+def _first_existing_policy(kind: str, access_token: str) -> Optional[dict]:
+    """The account's first policy of this kind, or None.
+
+    None covers both "none exist" and "couldn't ask" on purpose here: the only
+    caller creates one either way, and creating a second policy is recoverable
+    while publishing with none is not.
+    """
+    path, list_field, id_field = _POLICY_SPECS[kind]
+    try:
+        items = _account_get(path, access_token).get(list_field) or []
+    except Exception as exc:  # noqa: BLE001
+        log.info("ebay: couldn't list %s policies: %s", kind, exc)
+        return None
+    if not items:
+        return None
+    return {"id": items[0].get(id_field, ""), "name": items[0].get("name", "")}
+
+
+def ensure_payment_policy(access_token: str,
+                          immediate_pay: bool = True) -> dict:
+    """Find — or create — a payment policy. Returns {id, name, created}.
+
+    On a managed-payments account eBay handles the money, so the policy is
+    little more than a name and the immediate-pay setting; sending
+    paymentMethods here is what gets these rejected. Immediate pay is on by
+    default because an unpaid fixed-price sale is the small seller's most
+    common headache.
+    """
+    existing = _first_existing_policy("payment", access_token)
+    if existing and existing["id"]:
+        return {**existing, "created": False}
+    body = {
+        "name": PAYMENT_POLICY_NAME,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "immediatePay": immediate_pay,
+    }
+    return {**_create_policy("payment", access_token, body), "created": True}
+
+
+def ensure_return_policy(access_token: str,
+                         days: int = DEFAULT_RETURN_DAYS,
+                         payer: str = DEFAULT_RETURN_PAYER) -> dict:
+    """Find — or create — a return policy. Returns {id, name, created}.
+
+    `returnPeriod` is required whenever returns are accepted, and refundMethod
+    is deprecated to MONEY_BACK (any other value is rejected), so it is sent
+    as the only legal value rather than left out and defaulted server-side.
+    """
+    existing = _first_existing_policy("return", access_token)
+    if existing and existing["id"]:
+        return {**existing, "created": False}
+    body = {
+        "name": RETURN_POLICY_NAME,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "returnsAccepted": True,
+        "returnPeriod": {"value": int(days), "unit": "DAY"},
+        "returnShippingCostPayer": payer,
+        "refundMethod": "MONEY_BACK",
+    }
+    return {**_create_policy("return", access_token, body), "created": True}
 
 
 def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:

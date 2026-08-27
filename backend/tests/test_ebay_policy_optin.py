@@ -74,7 +74,7 @@ def test_the_opt_in_sends_the_program_eBay_expects(monkeypatch):
 def test_a_refused_opt_in_raises_with_ebays_words(monkeypatch):
     monkeypatch.setattr(ebay_auth.httpx, "post",
                         lambda url, **kw: _response(403, text="not eligible"))
-    with pytest.raises(ebay_auth.OAuthError) as caught:
+    with pytest.raises(ebay_auth.AccountApiError) as caught:
         ebay_auth.opt_in_to_program("tok")
     assert caught.value.status == 403
     assert "not eligible" in caught.value.description

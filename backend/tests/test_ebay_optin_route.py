@@ -29,7 +29,10 @@ PROGRAM = "SELLING_POLICY_MANAGEMENT"
 
 @pytest.fixture
 def connected(monkeypatch):
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {"access_token": "tok"})
+    # `_uid` rides along in the real creds dict — the existing ensure-policy
+    # route reads it the same way.
+    monkeypatch.setattr(main, "_ebay_creds_for",
+                        lambda request: {"access_token": "tok", "_uid": "u1"})
     monkeypatch.setattr(main, "_uid", lambda request: "u1")
     return TestClient(main.app)
 
@@ -87,7 +90,7 @@ def test_a_refusal_points_somewhere_the_seller_can_go(connected, monkeypatch):
     monkeypatch.setattr(main.ebay_auth, "opted_in_programs", lambda t: set())
 
     def _refuse(t, p=PROGRAM):
-        raise main.ebay_auth.OAuthError("nope", status=403, description="not eligible")
+        raise main.ebay_auth.AccountApiError("nope", status=403, description="not eligible")
     monkeypatch.setattr(main.ebay_auth, "opt_in_to_program", _refuse)
 
     resp = _post(connected)
@@ -98,3 +101,50 @@ def test_a_refusal_points_somewhere_the_seller_can_go(connected, monkeypatch):
 def test_a_disconnected_account_is_told_to_connect(monkeypatch):
     monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)
     assert _post(TestClient(main.app)).status_code == 400
+
+
+# --- ensure-all-policies ----------------------------------------------------
+#
+# One policy eBay won't make must not cost the other two: the most common
+# reason is the account not being opted in yet, which is a different button on
+# the same screen, and an all-or-nothing failure hides which part worked.
+
+def test_a_partial_failure_still_reports_what_was_created(connected, monkeypatch):
+    monkeypatch.setattr(main.ebay_auth, "ensure_service_policy",
+                        lambda t, svc: {"id": "FP-1", "name": "Ship", "created": True})
+    monkeypatch.setattr(main.ebay_auth, "ensure_payment_policy",
+                        lambda t: {"id": "PP-1", "name": "Pay", "created": False})
+
+    def _refuse(t, **kw):
+        raise main.ebay_auth.AccountApiError("no", status=400,
+                                             description="not opted in")
+    monkeypatch.setattr(main.ebay_auth, "ensure_return_policy", _refuse)
+    monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: None)
+    monkeypatch.setattr(main.ebay_account, "note_verified", lambda uid: None)
+
+    body = connected.post("/api/ebay/ensure-all-policies", json={}).json()
+    assert body["ok"] is False
+    assert body["created"] == ["fulfillment"]
+    assert "not opted in" in body["errors"]["return"]
+    assert set(body["policies"]) == {"fulfillment", "payment"}
+
+
+def test_a_policy_the_seller_already_chose_is_not_overwritten(connected, monkeypatch):
+    """Ids are saved as defaults only where none is set. Overwriting a
+    deliberate choice with eBay's first policy is the bug #186 was about."""
+    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {
+        "access_token": "tok", "_uid": "u1",
+        "fulfillment_policy_id": "chosen-by-the-seller"})
+    for name, pol in (("ensure_service_policy", {"id": "FP-new", "created": True}),
+                      ("ensure_payment_policy", {"id": "PP-1", "created": True}),
+                      ("ensure_return_policy", {"id": "RP-1", "created": True})):
+        monkeypatch.setattr(main.ebay_auth, name,
+                            lambda *a, _p=pol, **k: dict(_p, name="x"))
+    saved = {}
+    monkeypatch.setattr(main.db, "save_ebay_account",
+                        lambda uid, **kw: saved.update(kw))
+    monkeypatch.setattr(main.ebay_account, "note_verified", lambda uid: None)
+
+    connected.post("/api/ebay/ensure-all-policies", json={})
+    assert "fulfillment_policy_id" not in saved
+    assert saved == {"payment_policy_id": "PP-1", "return_policy_id": "RP-1"}
