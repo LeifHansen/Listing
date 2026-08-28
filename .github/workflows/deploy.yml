@@ -32,8 +32,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # Keep in sync with ci.yml's `checks` job install list — these two gates
+      # run the same suite and drift apart silently. cryptography is not
+      # optional here despite the name: backend/db.py imports backend/crypto.py
+      # at module scope, so without it every test that touches the DB fails at
+      # COLLECTION, which is what took this job down.
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
       - name: Ruff
         run: ruff check backend
       - name: Tests
