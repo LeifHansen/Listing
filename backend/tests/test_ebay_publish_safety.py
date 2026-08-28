@@ -168,3 +168,93 @@ def test_blocking_a_revise_is_off_until_the_logs_say_it_is_safe():
     accepted years ago, and locking sellers out of editing is worse than the
     rejection the check is meant to prevent."""
     assert config.EBAY_PREFLIGHT_BLOCKS_REVISE is False
+
+
+# --- what the route DOES with problems, not just that it asks ---------------
+#
+# test_the_imported_route_consults_the_checklist_at_all above stubs the
+# checklist to return [], so it only ever proves the route CALLED it — an
+# assertion on a mock's arguments. The gate itself ran in no test. Two
+# mutations were shown to leave the whole suite green: hard-blocking a revise
+# despite the flag being off, and dropping the problems entirely so a blocked
+# publish goes to eBay. These cover both.
+
+def _imported_ctx(prev_status):
+    return PublishContext(
+        session_id="s1", listing=_live_listing(), mode="live",
+        base_url="https://example.test", uid="u1",
+        prev_record={"status": prev_status})
+
+
+@pytest.fixture
+def route(monkeypatch):
+    """The imported route with one blocking problem and eBay stubbed out."""
+    sent = []
+    monkeypatch.setattr(
+        ebay_provider, "preflight_issues",
+        lambda uid, listing, mode: [{"target": "weight", "level": "error",
+                                     "title": "Package weight is missing",
+                                     "fix": "Enter it."}])
+    monkeypatch.setattr(ebay_provider.listing_sync, "push_edit",
+                        lambda *a, **k: sent.append("revise") or {"listing_id": "1"})
+    monkeypatch.setattr(ebay_provider.listing_sync, "create_on_ebay",
+                        lambda *a, **k: sent.append("relist") or {"listing_id": "2"})
+    monkeypatch.setattr(ebay_provider, "_record_published", lambda *a, **k: True)
+    monkeypatch.setattr(ebay_provider.db, "upsert_listing", lambda *a, **k: True)
+    monkeypatch.setattr(ebay_provider.image_import, "images_changed",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(ebay_provider.storage, "optimized_dir",
+                        lambda sid: __import__("pathlib").Path("/nonexistent"))
+    return sent
+
+
+CREDS = {"access_token": "tok", "ebay_username": "", "_uid": "u1"}
+
+
+def test_with_the_flag_off_a_failing_revise_still_reaches_ebay(route, monkeypatch):
+    """Observe-first is the shipped behaviour. Hard-blocking here would lock
+    sellers out of editing listings eBay accepted years ago."""
+    monkeypatch.setattr(ebay_provider.config, "EBAY_PREFLIGHT_BLOCKS_REVISE", False)
+    out = ebay_provider.EbayProvider()._publish_locked(
+        _imported_ctx("published"), dict(CREDS))
+    assert out.ok and route == ["revise"]
+
+
+def test_with_the_flag_off_a_failing_relist_also_reaches_ebay(route, monkeypatch):
+    """A relist is the same population of records as a revise — an imported
+    listing that ended — so it gets the same observe period. It used to block
+    with no flag at all, which stranded sellers on the Inactive tab's own
+    promise that they can relist any time."""
+    monkeypatch.setattr(ebay_provider.config, "EBAY_PREFLIGHT_BLOCKS_REVISE", False)
+    out = ebay_provider.EbayProvider()._publish_locked(
+        _imported_ctx("ended"), dict(CREDS))
+    assert out.ok and route == ["relist"]
+
+
+def test_with_the_flag_on_a_failing_revise_is_blocked(route, monkeypatch):
+    """The other half: when the flag is turned on, the gate must actually
+    stop the publish rather than merely log."""
+    monkeypatch.setattr(ebay_provider.config, "EBAY_PREFLIGHT_BLOCKS_REVISE", True)
+    out = ebay_provider.EbayProvider()._publish_locked(
+        _imported_ctx("published"), dict(CREDS))
+    assert not out.ok and route == []
+    assert [i["target"] for i in out.issues] == ["weight"]
+
+
+def test_with_the_flag_on_a_failing_relist_is_blocked(route, monkeypatch):
+    monkeypatch.setattr(ebay_provider.config, "EBAY_PREFLIGHT_BLOCKS_REVISE", True)
+    out = ebay_provider.EbayProvider()._publish_locked(
+        _imported_ctx("ended"), dict(CREDS))
+    assert not out.ok and route == []
+
+
+def test_a_blocked_revise_does_not_demote_the_live_record(route, monkeypatch):
+    """It is still live on eBay whatever the checklist thinks."""
+    written = []
+    monkeypatch.setattr(ebay_provider.config, "EBAY_PREFLIGHT_BLOCKS_REVISE", True)
+    monkeypatch.setattr(
+        ebay_provider.db, "upsert_listing",
+        lambda sid, dump, status="", user_id=None, **k: written.append(status) or True)
+    ebay_provider.EbayProvider()._publish_locked(
+        _imported_ctx("published"), dict(CREDS))
+    assert written == ["published"]

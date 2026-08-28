@@ -604,11 +604,28 @@ class EbayProvider:
             # has to satisfy what it actually sends — see preflight.validate.
             problems = preflight.errors_only(
                 preflight_issues(uid, listing, "live" if relist else "revise"))
-            if problems and not relist and not config.EBAY_PREFLIGHT_BLOCKS_REVISE:
+            if problems and not config.EBAY_PREFLIGHT_BLOCKS_REVISE:
                 # Observing, not blocking yet — see EBAY_PREFLIGHT_BLOCKS_REVISE.
-                log.info("revise would be blocked by preflight: session=%s "
-                         "issues=%s", session_id,
-                         [p.get("title") for p in problems])
+                #
+                # A RELIST is covered by the same flag, which it was not at
+                # first. The flag exists because these listings are live (or
+                # were), some were made outside this app, and a checklist that
+                # has never run against them will find things eBay accepted
+                # years ago. A relist is the SAME population — an imported
+                # listing that ended — so it has the same problem, and blocking
+                # it strands the seller on the Inactive tab's own promise that
+                # they can relist any time.
+                #
+                # The concrete misfire is the package weight. Imported records
+                # take it from GetItem's ShippingPackageDetails, which eBay
+                # omits for flat-rate listings, so it lands at 0 — and the app's
+                # own Trading builder proves it is optional, emitting no
+                # <ShippingPackageDetails> at all when there is none. The
+                # checklist would block "eBay needs a package weight" on a
+                # listing demonstrably live on eBay without one.
+                log.info("%s would be blocked by preflight: session=%s "
+                         "issues=%s", "relist" if relist else "revise",
+                         session_id, [p.get("title") for p in problems])
                 problems = []
             if problems:
                 db.upsert_listing(session_id, listing.model_dump(),

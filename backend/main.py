@@ -1384,9 +1384,12 @@ def ensure_policy(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "Unknown shipping service.")
     try:
         pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
-    except httpx.HTTPStatusError as exc:
+    except ebay_auth.AccountApiError as exc:
         raise HTTPException(
-            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
+            502, f"eBay couldn't create the policy: {exc.description}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            502, f"Couldn't reach eBay to create the policy: {exc}") from exc
     if pol.get("id") and not creds.get("fulfillment_policy_id"):
         db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
     return pol
@@ -1443,9 +1446,18 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
             save[field] = pol["id"]
     if save:
         db.save_ebay_account(creds["_uid"], **save)
-        # These ids were just read back from the account that owns them, so the
-        # publish path need not re-verify them for the TTL.
-        ebay_account.note_verified(creds["_uid"])
+        # Deliberately NOT note_verified() here. That starts the whole account's
+        # EBAY_POLICY_VERIFY_TTL clock, and the clock is the only thing gating
+        # _with_current_policies -- which is the only thing that ever repairs a
+        # policy id left behind by a previously connected seller. This route
+        # establishes provenance only for the slots it FILLED (`save` is
+        # populated exactly where the account had no id yet); an id that was
+        # already set is left untouched and never compared against the
+        # connected account. Starting the clock on that basis would suppress
+        # the cross-account repair for a full TTL over ids whose owner was
+        # never checked -- and it did so even when two of the three lookups had
+        # just failed. One extra verification round-trip is the cheaper side of
+        # that trade.
     out["ok"] = not out["errors"]
     out["created"] = sorted(k for k, v in out["policies"].items()
                             if v.get("created"))

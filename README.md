@@ -308,8 +308,12 @@ behavior byte-for-byte; with one, each marketplace publishes independently —
 one failing never rolls back the others — and per-marketplace state
 (listing id, URL, status, last error) lives on the listing record.
 
-- **eBay** — unchanged: Trading API for new live listings, Inventory for
-  drafts/dry-runs, imported-listing revise/relist, Promoted Listings.
+- **eBay** — Trading API for everything that touches a listing: new live
+  listings, revise, relist and end. Drafts stay in the app and never reach
+  eBay; a dry run renders the Trading request instead of sending it. The REST
+  APIs are still used for the things that are not listings — Account
+  (business policies, programs, privileges), Taxonomy, Fulfillment (orders),
+  and Marketing (Promoted Listings).
 - **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
   `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
   then activated on a live publish. Etsy requires a category (AI Suggest

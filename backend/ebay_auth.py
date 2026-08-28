@@ -631,7 +631,16 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
         json=body,
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        # Not raise_for_status(): that reduces the refusal to a status code and
+        # drops eBay's body, which is the only thing distinguishing "not opted
+        # into business policies" (the most common cause, and the button that
+        # fixes it sits next to this one) from "name already used" or "category
+        # type not allowed". Same reason _create_policy raises this.
+        raise AccountApiError(
+            f"eBay refused to create the {svc['code']} shipping policy "
+            f"({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
     created = resp.json()
     log.info("ebay: created %s fulfillment policy %s", svc["code"],
              created.get("fulfillmentPolicyId", ""))
