@@ -1185,9 +1185,15 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # connections made before the identity scope was granted 403 on it. A
         # seller who switched accounts then carried the old account's shipping,
         # payment, return and location ids straight into the new one.
-        carried, conclusive = ebay_account.reconcile_account_settings(
+        # Attribute access, not positional unpacking. reconcile_account_settings
+        # returns a 3-field Reconciled NamedTuple; unpacking it into two names
+        # raised ValueError here on EVERY connect, which the blanket except
+        # below turned into a bare "?ebay=error". Nothing was ever saved, so no
+        # seller could connect at all.
+        reconciled = ebay_account.reconcile_account_settings(
             access, existing, policies)
-        save_kwargs.update(carried)
+        conclusive = reconciled.conclusive
+        save_kwargs.update(reconciled.changes)
         switched = bool(prev_user and new_user and prev_user != new_user)
         if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
             # A different store. Label everything already here as the previous
@@ -1220,6 +1226,9 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # suppression and they would never reach it at all.
         if conclusive:
             ebay_account.note_verified(uid)
+            # Only a conclusive pass may claim eBay has none of something —
+            # same rule the publish path applies (ebay_provider._with_current_policies).
+            ebay_account.note_absent(uid, reconciled.absent)
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
