@@ -224,26 +224,50 @@ BLOCKED_CODE = "240"
 
 def publish_block_issues(exc: Exception, creds: Optional[dict], *,
                          payments: Optional[Callable[[str], dict]] = None,
+                         privileges: Optional[Callable[[str], Optional[dict]]] = None,
                          ) -> list[dict]:
     """Issues for a failed publish, and for eBay error 240 a look at WHY.
 
-    Payments onboarding is both the most common cause of a 240 and the only
-    one the API will state plainly, so it gets one extra call — on the failure
-    path only, where a round-trip costs nothing and a blind seller costs
-    everything. A failing check is silent: a diagnosis must never replace the
-    rejection the seller actually needs to read.
+    A 240 carries no field to fix and repeats on every listing. eBay's own
+    wording — "the listing or seller may be in violation of eBay policy" — is
+    four causes in a trench coat, and the account-level ones are far more
+    common than the wording one. So on a 240 only, ask the two APIs that will
+    state a cause plainly:
+
+      * the payments program (onboarding not finished);
+      * selling privileges (registration not finished, or a selling limit).
+
+    Both run on the failure path only, where a round-trip costs nothing and a
+    blind seller costs everything. Every check here is silent on failure and
+    ADDITIVE: a diagnosis must never replace the rejection the seller actually
+    needs to read, and one lookup failing must not skip the others.
     """
     issues = ebay_errors.from_trading_error(exc)
     if str(getattr(exc, "code", "")) != BLOCKED_CODE or not creds:
         return issues
+    token = creds.get("access_token") or ""
+
+    status = ""
     try:
-        program = (payments or ebay_auth.fetch_payments_program)(creds["access_token"])
+        program = (payments or ebay_auth.fetch_payments_program)(token)
         status = str(program.get("status", "")).upper()
     except Exception as exc2:  # noqa: BLE001 - a diagnosis, never a blocker
+        # Falls through to the privileges check rather than returning: this
+        # used to `return issues` here, so an unreadable payments call meant
+        # the seller learned nothing about registration or limits either.
         log.info("ebay: payments-program check after a 240 failed: %s", exc2)
-        return issues
-    log.warning("ebay: publish blocked by error %s; payments program = %s",
-                BLOCKED_CODE, status or "unknown")
+
+    try:
+        priv = (privileges or ebay_auth.fetch_privileges)(token)
+    except Exception as exc3:  # noqa: BLE001 - fetch_privileges already
+        log.info("ebay: privileges check after a 240 failed: %s", exc3)
+        priv = None
+
+    log.warning("ebay: publish blocked by error %s; payments=%s registered=%s "
+                "limit=%s", BLOCKED_CODE, status or "unknown",
+                (priv or {}).get("registration_complete", "unknown"),
+                (priv or {}).get("selling_limit"))
+
     if status and status != "OPTED_IN":
         issues.append({
             "target": "account", "level": "error",
@@ -254,4 +278,59 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
                     "Payments (bank details and identity verification), then "
                     "publish again — the listing itself is fine."),
         })
+
+    if priv is not None and not priv.get("registration_complete"):
+        issues.append({
+            "target": "account", "level": "error",
+            "title": "eBay hasn't finished setting this account up to sell",
+            "fix": ("eBay reports this account's seller registration as "
+                    "incomplete, and it won't accept listings until that's "
+                    "done. Open eBay → My eBay → Selling; it usually wants "
+                    "identity or bank verification. The listing itself is "
+                    "fine."),
+        })
+
+    limit = (priv or {}).get("selling_limit") or {}
+    if limit and _limit_is_exhausted(limit):
+        issues.append({
+            "target": "account", "level": "error",
+            "title": "This account is at its eBay selling limit",
+            "fix": ("eBay caps what a new account may list — this one is at "
+                    + _limit_words(limit) + ". New listings are refused until "
+                    "the cap rises or current listings end. You can ask eBay "
+                    "to raise it from My eBay → Selling → Monthly limits."),
+        })
     return issues
+
+
+def _as_number(value) -> Optional[float]:
+    """eBay sends the limit amount as a STRING ("500.0"). Anything unparseable
+    is None, which every caller reads as "no usable number" rather than 0 —
+    a limit we cannot read must never be reported as exhausted."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _limit_is_exhausted(limit: dict) -> bool:
+    """True only when eBay gave a number and that number is zero.
+
+    Deliberately strict. A missing or unreadable figure is not a cap of
+    nothing, and telling a seller they are at a limit they are not at sends
+    them to argue with eBay support over a message this app invented.
+    """
+    quantity = _as_number(limit.get("quantity"))
+    amount = _as_number(limit.get("amount"))
+    return quantity == 0 or amount == 0
+
+
+def _limit_words(limit: dict) -> str:
+    parts = []
+    quantity = _as_number(limit.get("quantity"))
+    amount = _as_number(limit.get("amount"))
+    if quantity is not None:
+        parts.append(f"{int(quantity)} item" + ("" if quantity == 1 else "s"))
+    if amount is not None:
+        parts.append(f"{amount:g} {limit.get('currency') or ''}".strip())
+    return " / ".join(parts) if parts else "its cap"

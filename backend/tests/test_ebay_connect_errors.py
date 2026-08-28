@@ -97,3 +97,41 @@ def test_exchange_code_surfaces_the_reason(monkeypatch):
     with pytest.raises(ebay_auth.OAuthError) as caught:
         ebay_auth.exchange_code("a-code")
     assert caught.value.reason == "expired"
+
+
+# --- eBay must ask WHICH account ------------------------------------------
+
+def test_the_authorize_url_forces_a_login():
+    """Without prompt=login, eBay reuses whatever session the browser already
+    has and silently reconnects THAT account.
+
+    Reported from production: a seller unlinked one store, pressed Connect for
+    a second one, "was not walked through the eBay approval steps" at all, and
+    ended up reconnected to the first account — whose listings then filled the
+    app and whose account-level block failed every publish. There is no screen
+    anywhere in that sequence that names the account, so nothing contradicts
+    the seller's belief that they switched.
+
+    eBay documents `prompt=login` for exactly this. It costs a returning seller
+    one login screen.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    url = ebay_auth.authorize_url(state="s")
+    assert parse_qs(urlparse(url).query)["prompt"] == ["login"]
+
+
+def test_the_authorize_url_still_carries_the_rest():
+    """Guarding the addition: scopes, RuName, state and response_type are what
+    make the callback work at all."""
+    from urllib.parse import parse_qs, urlparse
+
+    # keep_blank_values: EBAY_RUNAME is empty in the test environment, and
+    # parse_qs drops blank values by default — which would read as "the
+    # parameter is missing" rather than "it is unset here".
+    q = parse_qs(urlparse(ebay_auth.authorize_url(state="abc")).query,
+                 keep_blank_values=True)
+    assert q["state"] == ["abc"]
+    assert q["response_type"] == ["code"]
+    assert q["redirect_uri"] == [ebay_auth.config.EBAY_RUNAME]
+    assert "sell.account" in q["scope"][0]
