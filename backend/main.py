@@ -1940,6 +1940,13 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
 MAX_UPLOAD_FILES = 40   # per single listing (eBay itself accepts up to 24 live)
 MAX_BULK_FILES = 250    # per bulk batch (many items) — the supported batch size
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
+# ...and per BATCH. The per-file cap alone left the product unbounded: 250
+# files x 60MB is 15GB of writes that a 1GB volume accepts one file at a time
+# until it fills, breaking every other seller's upload on the way. 400MB is
+# comfortably above a real batch -- the client re-encodes to 2000px before
+# upload, so 250 photos land around 250MB -- and well under the free space the
+# volume actually has.
+MAX_BULK_BATCH_BYTES = 400 * 1024 * 1024
 
 
 @app.post("/api/upload")
@@ -3119,12 +3126,21 @@ async def bulk_upload(
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
+    batch_bytes = 0
     try:
         for i, f in enumerate(files):
             data = await f.read()
             if len(data) > MAX_UPLOAD_BYTES:
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+            # Checked BEFORE the write, so the batch stops at the budget
+            # instead of discovering it as an ENOSPC that has already taken
+            # the volume down for everyone else.
+            batch_bytes += len(data)
+            if batch_bytes > MAX_BULK_BATCH_BYTES:
+                raise HTTPException(
+                    413, f"That batch is over {MAX_BULK_BATCH_BYTES // (1024 * 1024)}MB "
+                         "of photos in total. Split the pile and run a second batch.")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
             # Same reason as /api/upload — and more so here: a 250-photo
             # batch is on the order of a gigabyte of blocking writes.

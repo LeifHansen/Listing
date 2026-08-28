@@ -106,6 +106,44 @@ fly secrets set EBAY_OAUTH_TOKEN=... \
 > incurring, publicly visible eBay listings. For a sandbox deploy override it
 > with `fly secrets set EBAY_ENV=sandbox` (a secret wins over `[env]`).
 
+### Check what production is actually configured with
+
+`fly volumes create --size 3` above is the instruction, not a guarantee that it
+was followed — the volume on `listing-lfwjrg` is **1GB**, and a volume is
+easy to create small and never revisit. The reclaim daemon keeps usage down
+(`main._reclaim_loop`), so this is headroom rather than a leak, but the
+alerting floor in `health-watch.yml` is 400MB free and the volume runs near
+500MB. `fly volumes list -a <app>` reports the size; `fly volumes extend
+<id> --size 3` raises it without a redeploy.
+
+Everything else worth checking, production answers itself:
+
+```bash
+curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
+```
+
+- **`config_warnings`** is the field to read first. It names a secret that was
+  set under a name one word off from the one the code reads, and an on/off
+  flag set to a value that isn't on — the two misconfigurations that otherwise
+  look *identical* to never having configured the feature. It found the live
+  one: `STRIPE_API_SECRET_KEY` is deployed, the code reads
+  `STRIPE_SECRET_KEY`, and the paid tier has therefore been off while the Fly
+  dashboard showed a Stripe key plainly in place. `fly secrets set
+  STRIPE_SECRET_KEY=... --stage` fixes it (`--stage` so the change rides the
+  next deploy instead of restarting the machine under an in-flight batch);
+  unset the strays afterwards, since a credential nothing reads buys the
+  container no capability and hands anything that can read `environ` a live
+  key.
+- **`bg_engines`** is the list that will actually run, in order. `["local"]`
+  next to `"photoroom_configured": true` is not a contradiction — auto mode
+  never spends money on its own (see the photo-pipeline section) — but it does
+  mean every cutout is costing the ~107s an `isnet` inference takes on
+  `shared-cpu-2x`, with a paid engine sitting configured and unused. Setting
+  `PIXIAN_API_ID` + `PIXIAN_API_SECRET` moves auto mode to Pixian with **no
+  code change**, and `BG_ENGINE=photoroom` opts into the key already there.
+- **`disk_free_mb`**, **`db`**, **`objstore_*`** and **`build`** cover the rest;
+  `health-watch.yml` already alerts on them every two hours.
+
 The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
 sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
 optional: photos are served from `/data` and eBay fetches those URLs at publish

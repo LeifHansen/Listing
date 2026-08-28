@@ -14,6 +14,25 @@ from pydantic import BaseModel, Field, field_validator
 # limit worth holding in the model rather than at the API boundary.
 TITLE_MAX_CHARS = 80
 
+# eBay's own ceiling on a listing description. Nothing this app writes comes
+# near it -- the point is that the field had NO bound at all, and every write
+# path lands on the volume: `POST /api/publish` needs no login, and each new
+# session_id writes a fresh listing.json under /data/sessions. With ~500MB free
+# on the 1GB volume, a handful of requests carrying a multi-megabyte
+# description filled it, and the orphan sweep only reclaims directories
+# untouched for three hours.
+#
+# Set to what eBay actually accepts, so a real listing -- including one
+# imported from eBay with a long HTML description -- is never truncated. The
+# bound exists to make one request finite, not to second-guess the marketplace.
+DESCRIPTION_MAX_CHARS = 500_000
+# Long free-text the seller or the AI can fill in. eBay's limits are far
+# tighter than these (subtitle 55, condition description 1000); these are the
+# backstop, not the product rule.
+TEXT_FIELD_MAX_CHARS = 4_000
+# eBay tops out around 30 aspects on a listing; an import can carry more.
+MAX_ITEM_SPECIFICS = 500
+
 
 class ItemSpecific(BaseModel):
     name: str
@@ -174,6 +193,34 @@ class Listing(BaseModel):
         if not isinstance(value, str):
             return value
         return value.strip()[:TITLE_MAX_CHARS]
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _cap_description(cls, value):
+        """Bound the description, for the reason _cap_title gives above:
+        truncating beats a 422 the seller cannot act on. The cap is eBay's own,
+        so this only ever fires on something no marketplace would accept."""
+        if not isinstance(value, str):
+            return value
+        return value[:DESCRIPTION_MAX_CHARS]
+
+    @field_validator("subtitle", "condition_description", "brand",
+                     "category_suggestion", mode="before")
+    @classmethod
+    def _cap_text(cls, value):
+        """Same rule for the shorter free-text fields."""
+        if not isinstance(value, str):
+            return value
+        return value[:TEXT_FIELD_MAX_CHARS]
+
+    @field_validator("item_specifics", mode="before")
+    @classmethod
+    def _cap_specifics(cls, value):
+        """A listing carries tens of aspects, not thousands. Unbounded, this
+        list was the other half of the same unauthenticated write."""
+        if not isinstance(value, list):
+            return value
+        return value[:MAX_ITEM_SPECIFICS]
 
 
 class IdentifyResult(BaseModel):
