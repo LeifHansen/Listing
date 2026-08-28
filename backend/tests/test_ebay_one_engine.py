@@ -152,3 +152,70 @@ def test_what_survived_is_still_there():
     Listings — neither belonged to the Inventory engine."""
     for name in ("image_urls_for", "sku_for", "rest_headers"):
         assert hasattr(ebay, name), f"services.ebay lost {name}"
+
+
+# --- server-side credentials no longer publish ------------------------------
+#
+# The Inventory engine was the only thing that could publish with the
+# env-configured credentials (config.ebay_ready()). Deleting it removed that
+# capability, but three places still treated env config as "connected" — so an
+# env-only deployment showed "Publish Live", ran the blocking checklist, and
+# then silently produced a dry run. Either behaviour is defensible; claiming
+# one and doing the other is not. These pin the decision: env credentials are
+# for the OAuth app and the dry run, never for creating a listing.
+
+@pytest.fixture
+def env_configured(monkeypatch):
+    """A deployment with server-side eBay credentials and nobody connected."""
+    monkeypatch.setattr(ebay_provider.config, "ebay_ready", lambda: True)
+    monkeypatch.setattr(ebay_provider.db, "get_ebay_account", lambda uid: None)
+
+
+def test_env_credentials_produce_a_dry_run_not_a_claim_of_publishing(
+        env_configured, tmp_path, monkeypatch):
+    monkeypatch.setattr(ebay_provider.storage, "write_export",
+                        lambda sid, name, payload: tmp_path / "x.json")
+    out = _publish(_listing(), None)
+    assert out.dry_run is True and out.ok is True
+    # And it does not tell the operator that adding credentials would help —
+    # they already have them.
+    assert "add credentials" not in out.message
+
+
+def test_the_checklist_does_not_block_the_dry_run(env_configured, tmp_path, monkeypatch):
+    """The gate used to fire on config.ebay_ready(), so an env-only deployment
+    was blocked by a full live checklist before reaching the dry run — the one
+    thing it can actually do. A listing missing a price must still render its
+    payload."""
+    monkeypatch.setattr(ebay_provider.storage, "write_export",
+                        lambda sid, name, payload: tmp_path / "x.json")
+    out = _publish(_listing(price=None, category_id=""), None)
+    assert out.dry_run is True and not out.issues
+
+
+def test_the_checklist_still_judges_a_connected_seller(monkeypatch):
+    """The other half: removing config.ebay_ready() from the gate must not
+    stop it running for someone who really is connected."""
+    asked = []
+    monkeypatch.setattr(ebay_provider, "preflight_issues",
+                        lambda uid, listing, mode: asked.append(mode) or [])
+    monkeypatch.setattr(ebay_provider.listing_sync, "create_on_ebay",
+                        lambda *a, **k: {"listing_id": "110000000001"})
+    monkeypatch.setattr(ebay_provider, "_record_published", lambda *a, **k: True)
+    monkeypatch.setattr(ebay_provider.storage, "save_listing", lambda *a, **k: None)
+    _publish(_listing(), {"access_token": "tok", "ebay_username": "seller",
+                          "_uid": "u1"})
+    assert asked == ["live"]
+
+
+def test_an_env_only_deployment_is_told_it_will_dry_run(env_configured):
+    """preflight computed `connected` from env config, which suppressed the
+    one warning that is now simply true: "Publishing will run as a dry-run
+    payload until you connect eBay." Server credentials satisfied the check
+    while being unable to publish, so the seller was told the opposite of
+    what would happen."""
+    issues = ebay_provider.preflight_issues("u1", _listing(), "live")
+    warning = next((i for i in issues if i.get("target") == "generic"), None)
+    assert warning is not None, "an unconnected deployment must be told it will dry-run"
+    assert warning.get("level") == "warn", "it is a warning, not a blocker"
+    assert "dry-run" in warning.get("fix", "")

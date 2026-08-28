@@ -41,6 +41,11 @@ export function SettingsView() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
+  // Did THIS component's load() succeed? `data` cannot answer that — it is
+  // seeded from the store cache (policiesData), which the listing editor
+  // fills, so it is truthy on mount having loaded nothing here. `postal` and
+  // `selected` are only ever filled by load()'s success path.
+  const [loadedHere, setLoadedHere] = useState(false);
   const [optingIn, setOptingIn] = useState(false);
   const [creatingPolicies, setCreatingPolicies] = useState(false);
   const [postal, setPostal] = useState("");
@@ -55,6 +60,7 @@ export function SettingsView() {
       setPoliciesData(d);
       setPostal(d.ship_from_postal || "");
       setSelected(d.selected || {});
+      setLoadedHere(true);
     } catch (e) {
       toast(`Couldn't load policies: ${e.message}`, { kind: "error" });
     } finally {
@@ -96,12 +102,16 @@ export function SettingsView() {
         setPrefs(r.prefs || {});
       }
       if (ebay.connected && data) {
-        // Always sent, including empty. Omitting a blank made clearing the
-        // ZIP a silent no-op reported as "Defaults saved": the field showed
-        // empty, the stored value never changed, and it reappeared on the
-        // next load. `data` is loaded here (the enclosing check), so this
-        // cannot fire mid-load with a value the seller never saw.
-        const payload = { ...selected, ship_from_postal: postal.trim() };
+        // Sent even when empty — that is how a seller clears the ZIP, and
+        // omitting a blank made clearing a silent no-op reported as "Defaults
+        // saved". But ONLY once this component's own load() has succeeded:
+        // until then `postal` is "" because nothing filled it, not because
+        // anyone cleared it, and the backend reads a present-but-empty value
+        // as an explicit clear. `data` does not prove that — it is seeded from
+        // the store cache — so a mount with a warm cache, or a load that
+        // failed or is still in flight, would post a blank over a good ZIP.
+        const payload = { ...selected };
+        if (loadedHere) payload.ship_from_postal = postal.trim();
         await postJson("/api/ebay/policies", payload);
         setPoliciesData(null); // refresh the publish-step summary next time
         load();

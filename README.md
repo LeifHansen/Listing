@@ -178,15 +178,25 @@ Without eBay credentials the app runs in **dry-run mode**: it builds the exact
 `AddFixedPriceItem` (or `AddItem`) request the real publish would send and
 saves it to `data/exports/` so you can inspect it or push later.
 
-To publish for real, create a developer app at
-<https://developer.ebay.com/> and fill these in `.env`:
+**To publish for real, a seller connects their own eBay account** through
+Settings → Connect eBay (OAuth). That is the only way a live listing is
+created: every publish goes out on the connected seller's account, through the
+Trading API. Server-side credentials do NOT publish on their own — they used
+to, through the Sell Inventory API, and that engine is gone.
 
-- `EBAY_ENV` — `sandbox` (recommended first) or `production`
-- A **user** OAuth access token (`EBAY_OAUTH_TOKEN`) or the
-  `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_REFRESH_TOKEN` trio
-  (scope `https://api.ebay.com/oauth/api_scope/sell.inventory`)
-- Business policy IDs: `EBAY_FULFILLMENT_POLICY_ID`, `EBAY_PAYMENT_POLICY_ID`,
-  `EBAY_RETURN_POLICY_ID`, and `EBAY_MERCHANT_LOCATION_KEY`
+What the server-side settings are still for — the OAuth app itself, so the
+Connect button works:
+
+- `EBAY_ENV` — `sandbox` (recommended first) or `production`. **Anything other
+  than exactly `production` is treated as sandbox**, where a real eBay sign-in
+  cannot work; the app warns at boot if the value is neither.
+- `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_RUNAME` — from your eBay
+  developer keyset. `EBAY_RUNAME` is the **RuName** (`Your_Name-Yourname-...`),
+  not a URL; a URL there fails the token exchange with `invalid_grant`.
+
+`EBAY_OAUTH_TOKEN`, `EBAY_REFRESH_TOKEN` and the `EBAY_*_POLICY_ID` /
+`EBAY_MERCHANT_LOCATION_KEY` values remain read for the dry-run payload and
+for local testing; they no longer make anything go live.
 
 ### Automatic category IDs (lighter requirements)
 

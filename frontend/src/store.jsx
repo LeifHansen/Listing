@@ -134,7 +134,12 @@ export function AppProvider({ children }) {
 
   // Publishing is live if EITHER the user connected their eBay account or the
   // server has env-level credentials.
-  const canPublishLive = ebay.connected || health.ebay_configured;
+  // A connected seller account is the only thing that can produce a live
+  // listing. Server-side eBay credentials (health.ebay_configured) used to
+  // count too, because the Inventory engine could publish with them; it is
+  // gone, so an env-only deployment now gets the dry-run payload. Claiming
+  // "Publish Live" for it promised a listing the backend would not create.
+  const canPublishLive = ebay.connected;
 
   // ---------- auth ----------
   const [user, setUser] = useState(null);

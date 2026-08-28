@@ -346,7 +346,11 @@ def has_stored_connection(uid: Optional[str]) -> bool:
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = creds_for(uid)
-    connected = bool(creds) or config.ebay_ready()
+    # A connected SELLER, not a configured server. The env credentials are the
+    # operator's; since the Inventory engine went they cannot publish anything,
+    # so counting them as "connected" made the checklist judge an account that
+    # no publish would ever use.
+    connected = bool(creds)
     if creds:
         fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
         has_payment = bool(creds.get("payment_policy_id"))
@@ -723,7 +727,7 @@ class EbayProvider:
                               user_id=ctx.uid)
             message = ("Saved to your drafts. It is NOT on eBay — press "
                        "Publish Live when you're ready to list it."
-                       if (creds or config.ebay_ready()) else
+                       if creds else
                        "Saved to your drafts — find it under Drafts. It is "
                        "NOT on eBay: connect your eBay account and press "
                        "Publish Live when you're ready to list it.")
@@ -736,8 +740,10 @@ class EbayProvider:
                      "message": message})
         # Pre-publish checklist: catch everything eBay would reject BEFORE the
         # round-trip, with field-targeted fixes. Only gates a real (connected)
-        # live publish — dry-runs and drafts stay permissive.
-        if mode == "live" and (creds or config.ebay_ready()):
+        # live publish — dry-runs and drafts stay permissive. Env credentials
+        # no longer publish, so gating on them blocked the DRY RUN they now
+        # produce, which is the one thing an unconnected deployment can do.
+        if mode == "live" and creds:
             problems = preflight.errors_only(
                 preflight_issues(ctx.uid, listing, "live"))
             if problems:
@@ -901,9 +907,11 @@ class EbayProvider:
         # it, so the preview stays an honest picture of an unconfigured app.
         payload = {"call": call, "xml": body, "mode": "live"}
         export_path = storage.write_export(ctx.session_id, "ebay_payload", payload)
-        message = ("eBay not connected — generated the "
-                   f"{call} request instead of publishing. Connect eBay (or "
-                   "add credentials) to go live.")
+        message = ("No eBay account connected — generated the "
+                   f"{call} request instead of publishing. Connect eBay in "
+                   "Settings to go live. (Server-side eBay credentials no "
+                   "longer publish on their own; a listing is always created "
+                   "on a connected seller's account.)")
         return PublishOutcome(
             ok=True, dry_run=True, status="dry_run", message=message,
             raw={"dry_run": True, "mode": "live", "message": message,
