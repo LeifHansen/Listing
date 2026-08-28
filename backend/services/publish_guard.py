@@ -29,14 +29,23 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
+from .. import storage
+
 # One lock per listing, created on demand. Publishes of DIFFERENT listings must
 # still run concurrently (bulk publish leans on that), so this can't be a
 # single global lock.
 #
-# Entries are never evicted: a lock is ~50 bytes, one per listing the process
-# has published, and a stale one is harmless. Evicting them safely would mean
-# proving nobody is about to take the lock, which is the same race this exists
-# to prevent.
+# Entries are never evicted, which is only sound because the KEY is bounded.
+# It is `storage.safe_session_name`, not the raw id off the request: the
+# argument for never evicting ("a lock is ~50 bytes, one per listing the
+# process has published") assumed a listing-shaped id, while the raw string
+# arrives from an unauthenticated request body and can be any length. Keyed on
+# that, this dict was an unauthenticated memory leak — and keying on the
+# canonical name is also more correct, since it is the identity every other
+# session-keyed thing already uses.
+#
+# Evicting them safely would mean proving nobody is about to take the lock,
+# which is the same race this exists to prevent.
 _locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
 
@@ -49,10 +58,11 @@ def session_lock(session_id: str) -> threading.Lock:
     machine has its own. It handles the common case (one server, a seller
     pressing publish twice) cheaply, and `idempotency_key` covers the rest.
     """
+    key = storage.safe_session_name(session_id)
     with _registry_lock:
-        lock = _locks.get(session_id)
+        lock = _locks.get(key)
         if lock is None:
-            lock = _locks[session_id] = threading.Lock()
+            lock = _locks[key] = threading.Lock()
         return lock
 
 

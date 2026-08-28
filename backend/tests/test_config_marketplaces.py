@@ -80,3 +80,66 @@ def test_stripe_live_mode_distinguishes_key_types(fresh_config):
     assert fresh_config(STRIPE_SECRET_KEY="sk_live_abc").stripe_live_mode() is True
     assert fresh_config(STRIPE_SECRET_KEY="sk_test_abc").stripe_live_mode() is False
     assert fresh_config().stripe_live_mode() is None
+
+
+# --- "you set something, just not this" -------------------------------------
+# Production shipped with STRIPE_API_SECRET_KEY deployed while the code reads
+# STRIPE_SECRET_KEY, so /api/health reported the key as missing while the Fly
+# dashboard showed one plainly set. tokens_missing() was right and unhelpful;
+# these are the cases that make it say which mistake was made.
+
+def test_near_miss_secret_name_is_reported(fresh_config):
+    """The exact production misconfiguration: right key, one word off."""
+    cfg = fresh_config(STRIPE_API_SECRET_KEY="sk_live_abc")
+    assert cfg.near_miss_env("STRIPE_SECRET_KEY") == ["STRIPE_API_SECRET_KEY"]
+    assert any("STRIPE_API_SECRET_KEY" in w and "STRIPE_SECRET_KEY" in w
+               for w in cfg.config_warnings())
+
+
+def test_near_miss_is_not_adopted_as_a_value(fresh_config):
+    """Naming the mistake must not silently take money-handling config from a
+    variable whose contents this app never agreed on."""
+    cfg = fresh_config(STRIPE_API_SECRET_KEY="sk_live_abc")
+    assert cfg.STRIPE_SECRET_KEY == ""
+    assert cfg.stripe_ready() is False
+    assert "STRIPE_SECRET_KEY" in cfg.tokens_missing()
+
+
+def test_differently_named_stripe_keys_are_not_near_misses(fresh_config):
+    """STRIPE_API_KEY and STRIPE_PUBLISHABLE_KEY are different keys, not
+    misspellings of the secret one — production has both, and calling either a
+    near miss would send the operator to rename the wrong secret."""
+    cfg = fresh_config(STRIPE_API_KEY="pk_live_abc",
+                       STRIPE_PUBLISHABLE_KEY="pk_live_abc")
+    assert cfg.near_miss_env("STRIPE_SECRET_KEY") == []
+    assert cfg.config_warnings() == []
+
+
+def test_no_warning_once_the_canonical_name_is_set(fresh_config):
+    cfg = fresh_config(STRIPE_SECRET_KEY="sk_live_abc",
+                       STRIPE_API_SECRET_KEY="sk_live_abc")
+    assert cfg.near_miss_env("STRIPE_SECRET_KEY") == []
+    assert cfg.config_warnings() == []
+
+
+def test_working_alias_does_not_warn(fresh_config):
+    """DATABASE_URL is legitimately configured under a second name, so the
+    feature works and there is nothing to report."""
+    cfg = fresh_config(NEON_PRODUCTION_DATABASE_URL="postgresql://u:p@h/db")
+    assert cfg.DATABASE_URL == "postgresql://u:p@h/db"
+    assert cfg.config_warnings() == []
+
+
+def test_flag_set_to_an_unrecognized_value_says_so(fresh_config):
+    """TOKENS_ENABLED is deployed in production and still reads as off.
+    'missing' and 'set to something I don't parse' are different bugs."""
+    cfg = fresh_config(TOKENS_ENABLED="True_but_typo")
+    assert cfg.TOKENS_ENABLED is False
+    warning = [w for w in cfg.config_warnings() if "TOKENS_ENABLED" in w]
+    assert warning and "True_but_typo" in warning[0]
+
+
+def test_flag_set_properly_is_silent(fresh_config):
+    assert fresh_config(TOKENS_ENABLED="true").config_warnings() == []
+    assert fresh_config(TOKENS_ENABLED="1").config_warnings() == []
+    assert fresh_config().config_warnings() == []

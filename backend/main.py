@@ -414,6 +414,13 @@ def health() -> dict:
         "tokens_enabled": config.tokens_enabled(),
         "tokens_missing": config.tokens_missing(),
         "stripe_live_mode": config.stripe_live_mode(),
+        # Misconfigurations that look exactly like "not configured yet": a
+        # secret set under a name one word off from the one the code reads, or
+        # an on/off flag set to something that isn't on. Every `*_missing` list
+        # above reports those two cases identically to never having set them,
+        # which is how production ran with the paid tier off and a Stripe key
+        # visibly deployed. [] means nothing adjacent was found.
+        "config_warnings": config.config_warnings(),
         "db": db.db_status(),
     }
 
@@ -1966,7 +1973,7 @@ async def upload(
     # Uploading + optimizing stays free; the AI background removal toggle is
     # metered per photo. Charged before any disk work so a broke/logged-out
     # caller gets a clean 402/401 instead of a half-done upload.
-    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
@@ -1974,7 +1981,7 @@ async def upload(
         for i, f in enumerate(files):
             data = await f.read()
             if len(data) > MAX_UPLOAD_BYTES:
-                tokens.refund(spent)
+                await run_in_threadpool(tokens.refund, spent)
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
@@ -1989,8 +1996,8 @@ async def upload(
         # Disk full / write failure — same friendly answer as the bulk path,
         # not a raw 500; drop the partial session rather than leaving an orphan.
         # No cutout ever ran, so the background-removal charge goes back too.
-        tokens.refund(spent)
-        storage.purge_session(session_id)
+        await run_in_threadpool(tokens.refund, spent)
+        await run_in_threadpool(storage.purge_session, session_id)
         log.error("upload: disk write failed (%s)", exc)
         raise HTTPException(
             507, "The server is out of storage space — try again shortly.") from exc
@@ -2003,13 +2010,13 @@ async def upload(
         # bg-removal charge given back) instead of after the photo work.
         uid = _uid(request)
         try:
-            identify_spent = _charge_ai(request, "identify")
+            identify_spent = await run_in_threadpool(_charge_ai, request, "identify")
         except HTTPException:
-            tokens.refund(spent)
-            storage.purge_session(session_id)
+            await run_in_threadpool(tokens.refund, spent)
+            await run_in_threadpool(storage.purge_session, session_id)
             raise
         job_id = storage.new_session_id()
-        _register_bulk_job(job_id, {
+        await run_in_threadpool(_register_bulk_job, job_id, {
             "id": job_id, "kind": "pipeline", "phase": "optimizing",
             "done": False, "error": None, "result": None,
             # The identify charge was taken above, before any work ran, and
@@ -2037,7 +2044,7 @@ async def upload(
         images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
     optimized = storage.list_optimized(session_id)
     if not optimized:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
         raise HTTPException(
             400,
@@ -2048,7 +2055,7 @@ async def upload(
     # background — give those tokens back.
     bg_failed = sum(1 for r in opt_results if r.get("bg_error") or r.get("error"))
     if spent and bg_failed:
-        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     # Mirror the optimized images to R2, but don't make the user wait for it:
     # the photos are already on the volume and /media serves the local copy,
     # so nothing on screen or on the way to eBay needs the bucket to have them
@@ -2075,7 +2082,7 @@ async def upload_more(
     """Add more photos to an existing listing. Optimizes each new file into the
     session with non-colliding names and returns the new filenames, so the
     client can append them to the listing's image order."""
-    _assert_session_owner(session_id, request)
+    await run_in_threadpool(_assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
     existing = storage.list_optimized(session_id)
@@ -2084,7 +2091,7 @@ async def upload_more(
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
-    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -2096,7 +2103,7 @@ async def upload_more(
     for j, f in enumerate(files):
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
-            tokens.refund(spent)
+            await run_in_threadpool(tokens.refund, spent)
             raise HTTPException(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         idx = start + j
@@ -2105,7 +2112,7 @@ async def upload_more(
         try:
             await run_in_threadpool(src.write_bytes, data)
         except OSError as exc:
-            tokens.refund(spent)
+            await run_in_threadpool(tokens.refund, spent)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
@@ -2132,10 +2139,10 @@ async def upload_more(
         if res.get("bg_error"):
             bg_failed += 1
     if not new_names:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(400, "Could not process the uploaded image(s).")
     if spent and bg_failed:
-        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
@@ -2170,11 +2177,11 @@ async def edit_image(
     if not session_id or not name:
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
-    _assert_session_owner(session_id, request)
+    await run_in_threadpool(_assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
-    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
+    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
         log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
@@ -2286,10 +2293,10 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name") or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
-    _assert_session_owner(session_id, request)
+    await run_in_threadpool(_assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
+    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
@@ -2352,11 +2359,11 @@ async def image_auto_clean(
         img = _studio_load(request, session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
 
-    spent = _charge_ai(request, "image_ai")
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except Exception:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise
 
 
@@ -2383,23 +2390,23 @@ async def image_remove_bg(
         # misconfigured key can't hide behind a silently-degraded result.
         return {"ok": True, "image": _data_url(out), "engine": engine}
 
-    spent = _charge_ai(request, "image_ai")
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except images.CutoutBusy as exc:
         # 503, not 500 and not 422: nothing is wrong with the photo or the
         # server, the one inference slot was occupied. Retry-After makes that
         # machine-readable instead of leaving the client to guess.
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(503, str(exc),
                             headers={"Retry-After": "20"}) from exc
     except ValueError as exc:
         # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
         # of credits / rate limit) — the message tells the user exactly which.
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(422, str(exc)) from exc
     except Exception:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise
 
 
@@ -2426,14 +2433,14 @@ async def image_smart_crop(
                     "message": "Already nicely framed — no crop needed."}
         return {"ok": True, "applied": True, "image": _data_url(cropped)}
 
-    spent = _charge_ai(request, "image_ai")
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:
         res = await run_in_threadpool(_run)
     except Exception:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise
     if not res.get("applied"):  # nothing changed — don't charge for a no-op
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
     return res
 
 
@@ -2503,9 +2510,14 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # (aspect-aware — MULTI aspects may take several values).
     added = _merge_filled_specifics(listing, filled, aspects)
     storage.save_listing(session_id, listing)
-    prev_status = (db.get_listing(session_id) or {}).get("status", "draft")
+    # _sticky_status, not a second hand-written copy of the rule. This was the
+    # one status write that re-implemented it, and it listed only
+    # ("published", "ended") -- so autofill silently demoted a "live", "sold"
+    # or "unlisted" record to "draft", dropping it out of the Sold and Finds
+    # tabs. Autofill also runs by itself when the editor opens
+    # (IdentifyResult.specifics_autofilled), so nobody had to click anything.
     db.upsert_listing(session_id, listing.model_dump(),
-                      status=prev_status if prev_status in ("published", "ended") else "draft",
+                      status=_sticky_status(db.get_listing(session_id)),
                       user_id=_uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
@@ -3121,7 +3133,7 @@ async def bulk_upload(
     except OSError as exc:
         # Disk full / write failure — clean up the partial staging and report it
         # clearly instead of a raw 500. Old orphans are swept on restart.
-        storage.purge_session(staging_id)
+        await run_in_threadpool(storage.purge_session, staging_id)
         log.error("bulk upload: disk write failed (%s)", exc)
         raise HTTPException(
             507, "The server is low on storage right now, so the upload couldn't "
@@ -3132,7 +3144,7 @@ async def bulk_upload(
     uid = _uid(request)
     job_id = storage.new_session_id()
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
-    _register_bulk_job(job_id, {
+    await run_in_threadpool(_register_bulk_job, job_id, {
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
@@ -3349,11 +3361,11 @@ async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> d
             frames.append(data)
     if not frames:
         raise HTTPException(400, "No readable frames.")
-    spent = _charge_ai(request, "shelf_scan")
+    spent = await run_in_threadpool(_charge_ai, request, "shelf_scan")
     try:
         result = await run_in_threadpool(claude_ai.scan_shelf, frames)
     except Exception as exc:  # noqa: BLE001
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(502, f"Shelf scan failed: {exc}") from exc
     log.info("shelf scan: %d frames -> %d candidates", len(frames),
              len(result.get("items", [])))
@@ -3390,6 +3402,12 @@ LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
 def listings(request: Request, limit: int = LIST_CAP) -> dict:
     """History of the current user's saved listings (most recent first)."""
     user = auth.current_user(request)
+    # Clamped like /api/notifications does, and for both of its reasons: a
+    # caller-supplied ?limit had no ceiling (so one request could ask for every
+    # listing JSON blob the store holds) and no floor (?limit=-1 is a Postgres
+    # error that db.list_listings swallows into [], i.e. an empty store
+    # reported as a 200).
+    limit = max(1, min(limit, LIST_CAP))
     items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
 

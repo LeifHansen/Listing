@@ -53,6 +53,55 @@ def _env(*names: str) -> str:
     return ""
 
 
+# --- "you set something, just not this" ------------------------------------
+# Fly secrets are typed by hand, and a name that is NEARLY right is invisible:
+# the app reports the canonical name as missing while the operator is looking
+# at a dashboard showing a secret they are certain they set.
+#
+# Production is in exactly that state right now. STRIPE_API_SECRET_KEY and
+# STRIPE_API_KEY are both deployed; the code reads STRIPE_SECRET_KEY. So
+# /api/health has been reporting `tokens_missing: ["STRIPE_SECRET_KEY"]` --
+# accurate, and useless, because the answer looks like "add a Stripe key" when
+# the real answer is "rename the one already there". The entire paid tier is
+# off, and every surface that could have said so said the opposite.
+#
+# This deliberately does NOT alias the near-miss name into use. Adopting it
+# would take money-handling configuration from a variable whose contents this
+# app never agreed on -- a publishable key sitting in a "secret key" slot would
+# read as configured and fail at checkout. Naming what it found and leaving the
+# rename to a human is the honest half of the fix.
+_NAME_FILLER = frozenset({"API"})
+
+
+def _name_words(name: str) -> frozenset:
+    """A variable name reduced to the words that carry meaning, so that names
+    differing only by filler or word order compare equal."""
+    return frozenset(w for w in name.upper().split("_") if w and w not in _NAME_FILLER)
+
+
+def near_miss_env(name: str) -> list[str]:
+    """Env vars that ARE set and whose names differ from `name` only by filler
+    words or word order. Empty when `name` itself has a value -- there is
+    nothing to warn about once the canonical name works."""
+    if os.getenv(name, "").strip():
+        return []
+    want = _name_words(name)
+    return sorted(other for other, value in os.environ.items()
+                  if other != name and value.strip() and _name_words(other) == want)
+
+
+def _flag_set_but_false(name: str) -> str:
+    """The raw value of an on/off env var that is set to something this app
+    does not read as on. '' when it is unset (nothing to explain) or genuinely
+    on. TOKENS_ENABLED is deployed in production and still reads as off, which
+    `tokens_missing()` can only report as "TOKENS_ENABLED" -- indistinguishable
+    from never having set it."""
+    raw = os.getenv(name, "").strip()
+    if not raw or raw.lower() in ("1", "true", "yes", "on"):
+        return ""
+    return raw
+
+
 def _clean_db_url(value: str) -> str:
     """Placeholder-proof like _env, plus require a plausible URL scheme."""
     value = (value or "").strip()
@@ -506,3 +555,51 @@ def depop_oauth_ready() -> bool:
     the OAuth endpoints and redirect URI from the partner setup)."""
     return bool(DEPOP_CLIENT_ID and DEPOP_CLIENT_SECRET
                 and DEPOP_AUTH_URL and DEPOP_TOKEN_URL and DEPOP_REDIRECT_URI)
+
+
+# --- Config warnings -------------------------------------------------------
+# The credentials an operator types by hand into `fly secrets`. Each is paired
+# with the value this module actually resolved, so a name that has a working
+# alias (DATABASE_URL / NEON_PRODUCTION_DATABASE_URL) never warns -- only a
+# genuinely-unconfigured feature that has a near-miss name sitting next to it.
+def _watched_names() -> list[tuple[str, str]]:
+    return [
+        ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+        ("DATABASE_URL", DATABASE_URL),
+        ("SECRET_KEY", SECRET_KEY),
+        ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
+        ("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET),
+        ("PHOTOROOM_API_KEY", PHOTOROOM_API_KEY),
+        ("EBAY_VERIFICATION_TOKEN", EBAY_VERIFICATION_TOKEN),
+        ("R2_ACCOUNT_ID", R2_ACCOUNT_ID),
+        ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),
+        ("R2_SECRET_ACCESS_KEY", R2_SECRET_ACCESS_KEY),
+        ("ETSY_REDIRECT_URI", ETSY_REDIRECT_URI),
+    ]
+
+
+def config_warnings() -> list[str]:
+    """Misconfigurations that look identical to "not configured yet".
+
+    Everything here is a case where the operator DID act and the app still
+    reports the feature as missing, so the honest message is not "set this"
+    but "you set something adjacent". Reported by /api/health next to the
+    `*_missing` lists those cases would otherwise hide behind.
+    """
+    warnings = []
+    for name, resolved in _watched_names():
+        for other in near_miss_env(name):
+            if not resolved:
+                warnings.append(
+                    f"{other} is set but this app reads {name} — rename the "
+                    f"secret (or add {name}) or the feature stays off.")
+    stray = _flag_set_but_false("TOKENS_ENABLED")
+    if stray:
+        warnings.append(
+            f"TOKENS_ENABLED={stray!r} is not one of 1/true/yes/on, so token "
+            f"billing is OFF — which reads the same as never setting it.")
+    return warnings
+
+
+for _w in config_warnings():
+    log.warning(_w)

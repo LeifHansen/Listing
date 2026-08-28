@@ -36,6 +36,10 @@ _SCRUBBED = (
     # readiness tests pass or fail for reasons unrelated to the code.
     "TOKENS_ENABLED", "DATABASE_URL", "NEON_PRODUCTION_DATABASE_URL",
     "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+    # The near-miss names config.config_warnings() looks for. Scrubbed for the
+    # same reason as the canonical ones: inherited from a developer's shell
+    # they would make the warning fire (or not) for reasons unrelated to code.
+    "STRIPE_API_SECRET_KEY", "ANTHROPIC_KEY", "API_SECRET_KEY",
 )
 
 

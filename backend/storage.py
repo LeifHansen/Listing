@@ -121,8 +121,25 @@ def list_optimized(session_id: str) -> list[str]:
 
 
 def write_export(session_id: str, name: str, payload: dict) -> Path:
+    """Write a dry-run payload under EXPORTS_DIR.
+
+    The session id goes through safe_session_name like every other path keyed
+    by session. It is the ONE place that skipped it, and the id here arrives
+    straight from the request body: `POST /api/publish` needs no login, and an
+    unconnected app falls through to the dry run, so a session_id of
+    "../../etc/cron.d/x" wrote an attacker-controlled JSON file anywhere the
+    process could reach — as root, since the image sets no USER.
+
+    The containment check below is deliberate belt-and-braces: it costs one
+    resolve and it is what makes "this path cannot escape" true by
+    construction rather than by trusting the sanitizer above it.
+    """
     config.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = config.EXPORTS_DIR / f"{session_id}_{name}.json"
+    safe_name = "".join(c for c in name if c.isalnum() or c in "-_") or "export"
+    path = config.EXPORTS_DIR / f"{safe_session_name(session_id)}_{safe_name}.json"
+    root = config.EXPORTS_DIR.resolve()
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("export path escapes the exports directory")
     path.write_text(json.dumps(payload, indent=2))
     return path
 

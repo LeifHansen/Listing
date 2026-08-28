@@ -111,3 +111,41 @@ def test_a_genuinely_idle_orphan_is_still_swept(tmp_path, monkeypatch):
 
     assert storage.sweep_orphan_sessions(set(), max_age_seconds=3 * 3600) == ["batch002"]
     assert not abandoned.exists()
+
+
+# --- exports stay inside EXPORTS_DIR ----------------------------------------
+
+def test_write_export_cannot_escape_the_exports_dir(tmp_path, monkeypatch):
+    """`POST /api/publish` needs no login and, with no eBay account connected,
+    falls through to the dry run — which writes this file using the session id
+    straight from the request body. Without sanitising, "../../etc/cron.d/x"
+    wrote attacker-controlled JSON anywhere the process could reach, as root.
+    """
+    from backend import config, storage
+    monkeypatch.setattr(config, "EXPORTS_DIR", tmp_path / "exports")
+    outside = tmp_path / "ESCAPED_ebay_payload.json"
+
+    path = storage.write_export("../../ESCAPED", "ebay_payload", {"xml": "<x/>"})
+
+    assert not outside.exists()
+    assert path.parent == (tmp_path / "exports")
+    assert path.name == "ESCAPED_ebay_payload.json"
+    assert path.exists()
+
+
+def test_write_export_rejects_an_id_with_nothing_usable_left(tmp_path, monkeypatch):
+    """safe_session_name raises rather than inventing a name, so a pure-
+    traversal id fails loudly instead of writing to a guessable path."""
+    import pytest
+    from backend import config, storage
+    monkeypatch.setattr(config, "EXPORTS_DIR", tmp_path / "exports")
+    with pytest.raises(ValueError):
+        storage.write_export("../../", "ebay_payload", {"xml": "<x/>"})
+
+
+def test_write_export_sanitises_the_name_too(tmp_path, monkeypatch):
+    from backend import config, storage
+    monkeypatch.setattr(config, "EXPORTS_DIR", tmp_path / "exports")
+    path = storage.write_export("abc123", "../../evil", {"xml": "<x/>"})
+    assert path.parent == (tmp_path / "exports")
+    assert path.name == "abc123_evil.json"

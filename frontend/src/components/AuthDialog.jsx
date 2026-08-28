@@ -5,6 +5,7 @@ import { storeToken } from "@/lib/platform";
 import { useApp } from "@/store";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
+import { SiteLink } from "@/components/ui/SiteLink";
 import { Field, Input } from "@/components/ui/fields";
 import { BrandMark } from "@/components/BrandMark";
 
@@ -106,11 +107,11 @@ export function AuthDialog() {
             policies from the native app, which has no address bar. */}
         <p className="text-xs text-ink-secondary text-center text-balance">
           {mode === "signup" ? "By creating an account you agree to our " : "See our "}
-          <a className="underline underline-offset-2 hover:text-ink"
-             href="/terms" target="_blank" rel="noreferrer">terms</a>
+          <SiteLink path="/terms"
+            className="underline underline-offset-2 hover:text-ink">terms</SiteLink>
           {" and "}
-          <a className="underline underline-offset-2 hover:text-ink"
-             href="/privacy-policy" target="_blank" rel="noreferrer">privacy policy</a>.
+          <SiteLink path="/privacy-policy"
+            className="underline underline-offset-2 hover:text-ink">privacy policy</SiteLink>.
           {mode === "signup" && " You can delete your account any time from Settings."}
         </p>
       </div>

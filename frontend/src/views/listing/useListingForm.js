@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, postJson, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import { api, postJson, downscaleAllForUpload, batchModelTimeoutMs } from "@/lib/api";
 import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -417,20 +417,35 @@ export function useListingForm() {
     setAddingPhotos(true);
     try {
       const fd = new FormData();
-      files.forEach((f) => fd.append("files", f));
+      // Every other upload path re-encodes to 2000px first; this one did not,
+      // so "Add photos" was the one action that shipped raw 5-12MB phone
+      // photos -- over a mobile connection, into a 1GB volume, on the request
+      // that already has the least time to spare.
+      const prepped = await downscaleAllForUpload(files);
+      prepped.forEach((f) => fd.append("files", f));
       // Photos joining a listing get the same treatment its existing photos
       // got. Sending nothing here left the server on its `false` default, so
       // "Add photos" quietly produced originals-with-backgrounds alongside
       // cut-outs, with no toggle on the card and no word about it afterwards.
-      fd.append("remove_bg", lastRemoveBg() ? "true" : "false");
+      const removeBg = lastRemoveBg();
+      fd.append("remove_bg", removeBg ? "true" : "false");
+      // This endpoint still runs the cutouts INLINE (every other upload path
+      // hands them to a job), and inference is single-flight, so the deadline
+      // has to scale with the photo count or the client abandons work the
+      // server is mid-way through -- losing the photos AND the tokens.
       const res = await api(`/api/upload-more/${sessionId}`,
-        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
+        { method: "POST", body: fd,
+          timeoutMs: batchModelTimeoutMs(prepped.length, removeBg) });
       const added = res.added || [];
       if (added.length) {
         const next = [...(form.images || []), ...added];
         setForm((f) => ({ ...f, images: next }));
         setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
-        postJson(`/api/save/${sessionId}`, { ...collect(), images: next }).catch(() => {});
+        // Awaited, inside the try: a rejected save left the new photos on
+        // screen and saved nowhere, so a reload lost them with no error ever
+        // shown -- the same trap reorderImages above documents having fixed.
+        // The outer catch turns it into "Couldn't add photos: ...".
+        await postJson(`/api/save/${sessionId}`, { ...collect(), images: next });
         toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`, { kind: "success" });
         // A cutout that failed keeps the original photo, background and all.
         // That is the right fallback -- a photo is better than no photo -- but
@@ -537,8 +552,9 @@ export function useListingForm() {
         // blockedReason, not result.message: eBay's catch-all for an
         // account-level hold blames the title, and this toast is the one piece
         // of the outcome a seller cannot miss.
-        toast(blockedReason(
-          result, "That didn't go live — check the publish card for what to fix."),
+        toast(blockedReason(result, isLive
+          ? "The update didn't reach eBay — check the publish card for what to fix."
+          : "That didn't go live — check the publish card for what to fix."),
         { kind: "error" });
       }
       // Reflect the outcome on the card immediately. loadListings is the
@@ -559,7 +575,7 @@ export function useListingForm() {
       setAiBusy(null);
     }
   }), [collect, sessionId, setSession, loadListings, openListings, patchListing,
-      toast, chipTargets]);
+      toast, chipTargets, isLive]);
 
   // End (withdraw) the live listing everywhere it's live; it stays here as an
   // editable 'ended' record so it can be relisted later. eBay keeps its

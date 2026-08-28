@@ -6,7 +6,7 @@ import {
   Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -106,9 +106,14 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     setFileDrag(false);
     if (w.addingPhotos) return;
     // Only images: a stray PDF or folder would otherwise ride along to the
-    // uploader and come back as a server-side error.
+    // uploader and come back as a server-side error. Extension too, not just
+    // MIME: HEIC/HEIF routinely arrive with an EMPTY type on iOS and Windows,
+    // so a MIME-only filter silently threw away every photo an iPhone offered
+    // -- which is what IMAGE_EXT_RE exists for, and what the main uploader
+    // already checks.
     const files = Array.from(e.dataTransfer.files || [])
-      .filter((f) => (f.type || "").startsWith("image/"));
+      .filter((f) => (f.type || "").startsWith("image/")
+                     || IMAGE_EXT_RE.test(f.name || ""));
     if (files.length) w.addImages(files);
   };
 
@@ -161,7 +166,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           w.addingPhotos && "pointer-events-none opacity-70",
         )}>
           <input
-            type="file" accept="image/*" multiple className="sr-only"
+            type="file" accept="image/*,.heic,.heif,.hif" multiple className="sr-only"
             disabled={w.addingPhotos}
             onChange={(e) => { w.addImages(e.target.files); e.target.value = ""; }}
           />

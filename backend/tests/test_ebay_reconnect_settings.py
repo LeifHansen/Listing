@@ -35,13 +35,18 @@ DISCOVERED = {
 
 @pytest.fixture
 def carry():
-    """carry_over_settings with eBay's answers about the connected account
-    injected — the lookups are parameters precisely so this needs no network
-    and no app import."""
+    """reconcile_account_settings' `changes` with eBay's answers about the
+    connected account injected — the lookups are parameters precisely so this
+    needs no network and no app import.
+
+    Calls the function production calls. It used to go through a
+    carry_over_settings wrapper that returned exactly this and had no callers
+    of its own, so these assertions covered a shim rather than the real path."""
     def run(saved, policies, locations):
-        return ebay_account.carry_over_settings(
+        return ebay_account.reconcile_account_settings(
             "tok", saved, DISCOVERED,
-            policy_ids=lambda _t: policies, location_keys=lambda _t: locations)
+            policy_ids=lambda _t: policies,
+            location_keys=lambda _t: locations).changes
     return run
 
 
@@ -150,7 +155,7 @@ def test_no_policy_id_asks_nothing(lookup):
 
 # --- the ids do not stay wrong once the connect is over ----------------------
 #
-# carry_over_settings only ever ran while an account was CONNECTING, and it
+# The reconcile pass only ever ran while an account was CONNECTING, and it
 # keeps a saved id whenever eBay cannot say what exists -- right on its own
 # terms (an outage must never silently re-pick a seller's shipping), but it
 # leaves a connect made during any eBay hiccup carrying the PREVIOUS account's
@@ -159,7 +164,7 @@ def test_no_policy_id_asks_nothing(lookup):
 # "set", because set was never the same as ours.
 #
 # The publish path re-checks them now, on a timer. These pin the timer, since
-# the repair itself is carry_over_settings and is already covered above.
+# the repair itself is reconcile_account_settings, covered above.
 
 
 def test_a_fresh_account_is_checked_immediately():

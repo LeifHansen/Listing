@@ -110,19 +110,12 @@ def next_reset(now: Optional[_dt.datetime] = None) -> str:
     return f"{year:04d}-{month:02d}-01"
 
 
-def plan_spend(free_quota: int, free_used: int, purchased: int,
-               amount: int) -> Optional[tuple[int, int]]:
-    """Pure arithmetic of one debit: how much comes from the free allowance vs
-    the purchased balance. Returns (free_part, paid_part), or None when the
-    combined balance can't cover it. db.token_spend applies the same split
-    under its row lock; this is the testable core."""
-    free_remaining = max(0, free_quota - max(0, free_used))
-    if amount <= 0:
-        return (0, 0)
-    if free_remaining + purchased < amount:
-        return None
-    free_part = min(amount, free_remaining)
-    return (free_part, amount - free_part)
+# The arithmetic of one debit lives next to the ledger that applies it, as
+# db.plan_spend -- token_spend is its only caller, and it applies it under the
+# row lock. It used to be defined HERE as "the testable core" while
+# db.token_spend carried its own inline copy of the same split, so the billing
+# tests asserted against a function production never called and the two were
+# free to drift apart without a single test failing.
 
 
 def status(user_id: Optional[str]) -> dict:
@@ -193,12 +186,17 @@ def receipts(*spend_results: Optional[dict]) -> list[dict]:
 
     ONLY pass spends that are refunded all-or-nothing. A charge that some code
     path may give back in PART (today: background removal, one photo's worth
-    per failed cutout) must never be recorded here. The ledger keys a refund
-    by the spend id plus its amount, so a full refund and an earlier partial
-    one are two different entries and both go through — and the running total
-    that would have prevented that died with the process this exists to
-    recover from. Under-refunding is recoverable; paying a seller twice out of
-    the token balance is not."""
+    per failed cutout) must never be recorded here.
+
+    That restriction is now belt-and-braces rather than load-bearing:
+    db.token_refund sums what a spend has already had returned and caps every
+    refund at the remainder, so a full refund following a partial one gives
+    back only what is left. That running total lives in the ledger, which is
+    exactly what survives the killed process this function exists to recover
+    from — it used to live only in the process, which is why the rule was
+    absolute. Keeping the rule anyway: under-refunding is recoverable, paying
+    a seller twice out of the token balance is not, and the cap is one
+    invariant rather than two."""
     return [{"ok": True, "entry_id": r["entry_id"], "user_id": r.get("user_id", "")}
             for r in spend_results
             if r and r.get("ok") and r.get("entry_id")]

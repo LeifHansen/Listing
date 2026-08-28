@@ -307,7 +307,10 @@ def _with_stored_identity(ctx: PublishContext) -> PublishContext:
     stored = fresh.get("listing") or {}
     # The item id is this function's own: it is what the create-vs-revise
     # decision reads, and a stored one always wins over the payload's.
-    stored_id = stored.get("ebay_listing_id")
+    # publish_guard owns that read (and normalises it to a stripped string, so
+    # an id stored as a number can't read as "different from the payload" and
+    # trigger a pointless overwrite); this used to inline a rawer copy of it.
+    stored_id = publish_guard.stored_item_id(fresh)
     if stored_id and stored_id != ctx.listing.ebay_listing_id:
         log.info("publish: taking ebay_listing_id from the stored record "
                  "for session=%s", ctx.session_id)

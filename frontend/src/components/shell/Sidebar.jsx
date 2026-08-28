@@ -10,8 +10,8 @@ import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 
 // Sell IS the pipeline: the upload box, the drafts strip, and the listings
 // manager share one screen, so the old Drafts / Listing Manager entries are
-// gone and the drafts-waiting badge rides the Sell tab instead. `short` is
-// the label the mobile bottom bar shows.
+// gone and the drafts-waiting badge rides the Sell tab instead. The mobile
+// bottom bar shows the first word of each label.
 const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
@@ -221,7 +221,7 @@ export function BottomNav() {
             )}
           >
             <Icon size={isNew ? 22 : 19} strokeWidth={2.2} aria-hidden />
-            {!isNew && (item.short || item.label.split(" ")[0])}
+            {!isNew && item.label.split(" ")[0]}
           </button>
         );
       })}

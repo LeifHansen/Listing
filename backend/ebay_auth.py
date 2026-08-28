@@ -350,7 +350,17 @@ def list_business_policies(access_token: str) -> dict:
     for key, (path, list_field, id_field) in _POLICY_SPECS.items():
         try:
             data = _account_get(path, access_token)
-            for p in data.get(list_field, []):
+        except Exception as exc:  # noqa: BLE001 - best effort per type
+            # Said out loud. An empty dropdown and "this account has no
+            # shipping policies" look identical to the seller, and a bare
+            # `pass` here left no trace of which it was anywhere.
+            log.warning("ebay: couldn't list %s policies: %s", key, exc)
+            continue
+        for p in data.get(list_field, []):
+            # Per POLICY, not per type: one malformed entry used to abort the
+            # whole loop, so the seller silently got only the policies eBay
+            # happened to return before it -- with a 200 and no warning.
+            try:
                 entry = {
                     "id": p.get(id_field, ""),
                     "name": p.get("name", "") or p.get(id_field, ""),
@@ -361,8 +371,8 @@ def list_business_policies(access_token: str) -> dict:
                 if key == "fulfillment":
                     entry["services"] = [s["code"] for s in _policy_services(p)]
                 out[key].append(entry)
-        except Exception:  # noqa: BLE001 - best effort per type
-            pass
+            except Exception as exc:  # noqa: BLE001 - skip the one bad policy
+                log.warning("ebay: skipped an unreadable %s policy: %s", key, exc)
     return out
 
 
@@ -760,13 +770,6 @@ def ensure_return_policy(access_token: str,
         "refundMethod": "MONEY_BACK",
     }
     return {**_create_policy("return", access_token, body), "created": True}
-
-
-def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:
-    """[{code, name}] for one fulfillment policy (empty on any failure —
-    preflight treats unknown services as unconstrained)."""
-    services, _ = fulfillment_policy_lookup(access_token, policy_id)
-    return services
 
 
 def fulfillment_policy_lookup(access_token: str,

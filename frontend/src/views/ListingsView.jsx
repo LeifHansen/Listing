@@ -183,7 +183,12 @@ export function ListingsView({ search = "" }) {
   // and nothing visibly happens. The uploader is at the top of this same
   // screen — take them to it.
   const go = () => {
-    if (tab.empty.action?.go !== "new") return setView(tab.empty.action.go);
+    // Guard the whole thing, not just the read: the Inactive tab has no
+    // `action`, and `?.go !== "new"` is TRUE for undefined, which walked
+    // straight into dereferencing it.
+    const action = tab.empty.action;
+    if (!action) return;
+    if (action.go !== "new") return setView(action.go);
     startNew();
     try {
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -270,7 +275,10 @@ export function ListingsView({ search = "" }) {
           <h2 className="text-lg sm:text-xl font-bold text-ink">Listings</h2>
           <InfoTip text={tab.sub} />
         </div>
-        <div className="flex items-center gap-2">
+        {/* Wraps like its parent does. Without it the toggle plus "Ship
+            orders" plus "Sync with eBay" measured 442px against a 375px
+            viewport, so the Sell screen scrolled sideways on a phone. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Grid or list — a viewing preference, so it sits with the other
               view-level controls and is remembered across visits. */}
           <ViewToggle value={listingsLayout} onChange={setListingsLayout} />

@@ -242,6 +242,14 @@ def _get_engine():
                 # no-op there and the guard below swallows the syntax error.
                 "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
                 "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
+                # The unread badge polls every minute and filters on both of
+                # these; user_id alone left the read_at test to a scan of every
+                # notification the seller has ever received. IF NOT EXISTS is
+                # understood by Postgres and SQLite alike, so this is a no-op
+                # after the first boot rather than something the guard below
+                # has to swallow on every start.
+                "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
+                "ON notifications (user_id, read_at)",
             ):
                 try:
                     with _engine.begin() as conn:
@@ -778,10 +786,18 @@ _MARKETPLACE_FIELDS = ("refresh_token", "external_username", "external_id",
                        "settings")
 
 
-def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
-    """Create/update a user's connection to one marketplace. Never raises.
-    `settings` keys MERGE into the stored JSON (a reconnect refreshing the
-    shop id must not wipe the user's saved shipping/return defaults)."""
+def save_marketplace_account(user_id: str, marketplace: str, **fields) -> bool:
+    """Create/update a user's connection to one marketplace. Never raises;
+    returns whether the write actually landed. `settings` keys MERGE into the
+    stored JSON (a reconnect refreshing the shop id must not wipe the user's
+    saved shipping/return defaults).
+
+    The return value matters for ROTATING refresh tokens (Etsy invalidates the
+    old one the moment it issues a new one): a caller that cannot tell a
+    swallowed failure from a success will happily carry on with an access
+    token whose refresh token was never stored, and the connection dies
+    silently an hour later. db.upsert_listing reports for the same reason.
+    """
     try:
         eng = _get_engine()
         if eng is None:
@@ -801,8 +817,10 @@ def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
                         setattr(acct, key, fields[key])
             acct.updated_at = _now()
             s.commit()
+        return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: save_marketplace_account failed: {exc}")
+        return False
 
 
 def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
@@ -967,6 +985,26 @@ def token_status(user_id: str, period: str, free_quota: int) -> Optional[dict]:
         return None
 
 
+def plan_spend(free_quota: int, free_used: int, purchased: int,
+               amount: int) -> Optional[tuple[int, int]]:
+    """Pure arithmetic of one debit: how much comes from the free allowance vs
+    the purchased balance. Returns (free_part, paid_part), or None when the
+    combined balance can't cover it.
+
+    Lives here, beside token_spend, because token_spend is its only caller and
+    a debit rule with two implementations is a debit rule with none: this was a
+    copy in services/tokens.py that the billing tests exercised while the row
+    lock below ran its own inline version. Re-exported as tokens.plan_spend.
+    """
+    free_remaining = max(0, free_quota - max(0, free_used))
+    if amount <= 0:
+        return (0, 0)
+    if free_remaining + purchased < amount:
+        return None
+    free_part = min(amount, free_remaining)
+    return (free_part, amount - free_part)
+
+
 def token_spend(user_id: str, cost: int, free_quota: int, period: str,
                 feature: str = "") -> Optional[dict]:
     """Atomically debit `cost` tokens (free allowance first, then purchased).
@@ -983,13 +1021,15 @@ def token_spend(user_id: str, cost: int, free_quota: int, period: str,
             return None
         with Session(eng) as s:
             acct = _token_account(s, user_id, period)
+            # What is left of the monthly allowance, for the balances this
+            # reports back. The SPLIT itself is plan_spend's to decide.
             free_remaining = max(0, free_quota - acct.free_used)
-            if free_remaining + acct.purchased < cost:
+            plan = plan_spend(free_quota, acct.free_used, acct.purchased, cost)
+            if plan is None:
                 s.commit()  # keep the period rollover even when declining
                 return {"ok": False, "reason": "insufficient",
                         "free_remaining": free_remaining, "purchased": acct.purchased}
-            free_part = min(cost, free_remaining)
-            paid_part = cost - free_part
+            free_part, paid_part = plan
             acct.free_used += free_part
             acct.purchased -= paid_part
             acct.updated_at = _now()
@@ -1022,17 +1062,38 @@ def token_refund(user_id: str, entry_id: str, units: Optional[int] = None) -> bo
             if entry is None or entry.kind != "spend" or entry.user_id != user_id:
                 return False
             total = entry.free_part + entry.paid_part
-            amount = total if units is None else max(0, min(int(units), total))
+            # What this spend has ALREADY had given back. Both numbers below
+            # depend on it: the clamp was against the spend total, so repeated
+            # partial refunds could hand back more than was ever charged, and
+            # the ref was keyed on this call's amount alone, so two partial
+            # refunds of the SAME size against one spend collided on the unique
+            # ref -- the second was rejected by the database and swallowed.
+            # A bulk batch does exactly that: it refunds the failed cutouts
+            # mid-run and the unused remainder in its finally, and when those
+            # two are equal the seller silently lost the second refund.
+            already = int(s.execute(
+                select(func.coalesce(func.sum(TokenLedger.tokens), 0))
+                .where(TokenLedger.kind == "refund",
+                       TokenLedger.user_id == user_id,
+                       or_(TokenLedger.ref == entry_id,
+                           TokenLedger.ref.like(f"{entry_id}:%")))
+            ).scalar() or 0)
+            remaining = max(0, total - already)
+            amount = remaining if units is None else max(0, min(int(units), remaining))
             if amount == 0:
                 return False
-            paid_back = min(amount, entry.paid_part)
+            paid_back = min(amount, max(0, entry.paid_part - already))
             free_back = amount - paid_back
             acct = _token_account(s, user_id)
             acct.purchased += paid_back
             if free_back and acct.free_period == entry.period:
                 acct.free_used = max(0, acct.free_used - free_back)
             acct.updated_at = _now()
-            ref = entry_id if units is None else f"{entry_id}:{amount}"
+            # Full refunds keep the bare entry id, so refund_all stays safe to
+            # re-run on every boot. A partial is keyed by where it starts as
+            # well as its size, which makes consecutive partials distinct while
+            # an exact replay of the same one still collides and no-ops.
+            ref = entry_id if units is None else f"{entry_id}:{already}:{amount}"
             s.add(TokenLedger(id=_uuid.uuid4().hex, user_id=user_id, kind="refund",
                               feature=entry.feature, tokens=amount,
                               free_part=free_back, paid_part=paid_back,
@@ -1222,12 +1283,17 @@ def unread_notification_count(user_id: str) -> int:
         if eng is None or not user_id:
             return 0
         with Session(eng) as s:
-            rows = s.execute(
-                select(Notification.id)
+            # COUNT in the database, like count_foreign_listings above and for
+            # the same reason: this ran on every /api/notifications poll and
+            # dragged one row per unread notification across the cross-region
+            # link to compute a length. A synced store mints one of these per
+            # sale, so the cost grew with the seller's success.
+            return int(s.execute(
+                select(func.count())
+                .select_from(Notification)
                 .where(Notification.user_id == user_id,
                        Notification.read_at.is_(None))
-            ).scalars().all()
-            return len(rows)
+            ).scalar() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: unread_notification_count failed: {exc}")
         return 0

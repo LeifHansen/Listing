@@ -1,7 +1,7 @@
 """Pydantic data models shared across the app."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -191,8 +191,16 @@ class IdentifyResult(BaseModel):
     specifics_autofilled: bool = False
 
 
+# A session id off the wire. Natively 12 hex chars (storage.new_session_id);
+# imported listings carry ids like "ebay-123456789012". Bounded because these
+# arrive on routes that need no login, and an unbounded one became a permanent
+# dict key in services/publish_guard — a request body could size the process's
+# memory. 128 is far above anything the app itself mints.
+SessionId = Annotated[str, Field(max_length=128)]
+
+
 class RefineRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     listing: Listing
     prompt: str
 
@@ -204,7 +212,7 @@ class ImageOrderRequest(BaseModel):
 
 
 class PublishRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     listing: Listing
     mode: str = "draft"  # "draft" or "live"
     # Which marketplaces to publish to. Empty (every pre-multi client) means
@@ -215,4 +223,4 @@ class PublishRequest(BaseModel):
 
 
 class SessionOnlyRequest(BaseModel):
-    session_id: str
+    session_id: SessionId

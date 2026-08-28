@@ -11,6 +11,7 @@ import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
+import { SiteLink } from "@/components/ui/SiteLink";
 import { Field, Input, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -849,9 +850,9 @@ function LegalLinks() {
   const link = "text-ink-secondary hover:text-ink underline underline-offset-2";
   return (
     <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-secondary px-1">
-      <a className={link} href="/privacy-policy" target="_blank" rel="noreferrer">Privacy policy</a>
-      <a className={link} href="/terms" target="_blank" rel="noreferrer">Terms of service</a>
-      <a className={link} href="/about" target="_blank" rel="noreferrer">About</a>
+      <SiteLink path="/privacy-policy" className={link}>Privacy policy</SiteLink>
+      <SiteLink path="/terms" className={link}>Terms of service</SiteLink>
+      <SiteLink path="/about" className={link}>About</SiteLink>
       <a className={link} href="mailto:leifhansen1990@gmail.com">Support</a>
     </p>
   );
