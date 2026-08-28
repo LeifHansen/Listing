@@ -187,3 +187,103 @@ def test_ebays_own_reason_wins_when_it_gave_one():
     issue = ebay_errors.from_trading_error(exc)[0]
     assert "authenticity" in issue["fix"]
     assert "Customer Service" not in issue["fix"]
+
+
+# --- a 240 also asks about registration and selling limits ------------------
+#
+# eBay error 240 carries no field to fix, and its wording ("the listing or
+# seller may be in violation of eBay policy") is four causes in a trench coat.
+# The payments check named one of them. getPrivileges names two more, and it
+# already existed — it just was not wired into this path, so a seller whose
+# account was simply not finished being set up got the generic sentence and
+# nowhere to go.
+
+def _blocked():
+    from backend.services.ebay_trading import TradingError
+    return TradingError("eBay says no", code="240")
+
+
+CREDS = {"access_token": "tok"}
+OK_PAYMENTS = lambda _t: {"status": "OPTED_IN"}          # noqa: E731
+NO_PRIV = lambda _t: None                                 # noqa: E731
+
+
+def test_an_unfinished_registration_is_named(monkeypatch):
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=OK_PAYMENTS,
+        privileges=lambda _t: {"registration_complete": False,
+                               "selling_limit": None})
+    titles = [i["title"] for i in issues]
+    assert any("finished setting this account up to sell" in t for t in titles)
+
+
+def test_a_finished_registration_says_nothing(monkeypatch):
+    """No news is not a finding. Inventing an account problem sends the seller
+    to argue with eBay support over a message this app made up."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=OK_PAYMENTS,
+        privileges=lambda _t: {"registration_complete": True,
+                               "selling_limit": None})
+    assert not any("setting this account up" in i["title"] for i in issues)
+
+
+def test_a_zero_selling_limit_is_named(monkeypatch):
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=OK_PAYMENTS,
+        privileges=lambda _t: {"registration_complete": True,
+                               "selling_limit": {"quantity": 0, "amount": "0.0",
+                                                 "currency": "USD"}})
+    assert any("selling limit" in i["title"] for i in issues)
+
+
+def test_a_healthy_limit_is_not_reported_as_exhausted():
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=OK_PAYMENTS,
+        privileges=lambda _t: {"registration_complete": True,
+                               "selling_limit": {"quantity": 10,
+                                                 "amount": "500.0",
+                                                 "currency": "USD"}})
+    assert not any("selling limit" in i["title"] for i in issues)
+
+
+def test_an_unreadable_limit_is_never_called_exhausted():
+    """eBay sends the amount as a string and omits the block entirely for
+    uncapped accounts. A figure we cannot read is not a cap of nothing."""
+    for limit in ({"quantity": None, "amount": None},
+                  {"quantity": "many", "amount": "lots"},
+                  {}):
+        issues = ebay_account.publish_block_issues(
+            _blocked(), CREDS, payments=OK_PAYMENTS,
+            privileges=lambda _t, _l=limit: {"registration_complete": True,
+                                             "selling_limit": _l})
+        assert not any("selling limit" in i["title"] for i in issues), limit
+
+
+def test_a_failed_payments_check_no_longer_skips_the_rest(monkeypatch):
+    """It used to `return issues` when the payments lookup raised, so an eBay
+    blip on THAT call meant the seller learned nothing about registration
+    either — two independent diagnoses coupled by an early return."""
+    def _boom(_t):
+        raise RuntimeError("payments API down")
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=_boom,
+        privileges=lambda _t: {"registration_complete": False,
+                               "selling_limit": None})
+    assert any("finished setting this account up to sell" in i["title"]
+               for i in issues)
+
+
+def test_unreadable_privileges_add_nothing(monkeypatch):
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=OK_PAYMENTS, privileges=NO_PRIV)
+    assert all(i.get("target") != "account" or "eBay is blocking" in i["title"]
+               or "won't accept" in i["title"] for i in issues)
+
+
+def test_the_original_rejection_always_survives():
+    """Every diagnosis is additive. The rejection is what the seller needs."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=OK_PAYMENTS,
+        privileges=lambda _t: {"registration_complete": False,
+                               "selling_limit": None})
+    assert any(i.get("error_id") == "240" for i in issues)
