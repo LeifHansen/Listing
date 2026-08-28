@@ -684,7 +684,17 @@ export function AppProvider({ children }) {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const e = params.get("ebay");
-    if (e === "connected") toast("eBay connected! You can now publish real listings.", { kind: "success" });
+    if (e === "connected") {
+      // Name the account. "eBay connected!" is equally true of the wrong
+      // store, and eBay can hand back whichever account the browser was
+      // already signed in to — so the seller needs to see WHICH one before
+      // its listings start showing up.
+      const who = params.get("as");
+      toast(who
+        ? `Connected to eBay as @${who}. You can now publish real listings.`
+        : "eBay connected! You can now publish real listings.",
+        { kind: "success" });
+    }
     else if (e === "error") toast(EBAY_CONNECT_ERRORS[params.get("why")] || EBAY_CONNECT_ERRORS.unknown, { kind: "error" });
     // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy.
     const ok = params.get("connected");

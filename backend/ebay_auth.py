@@ -23,6 +23,21 @@ def authorize_url(state: str) -> str:
         "redirect_uri": config.EBAY_RUNAME,
         "scope": " ".join(config.EBAY_OAUTH_SCOPES),
         "state": state,
+        # Force eBay to ask WHICH account, every time.
+        #
+        # Without it eBay reuses whatever session the browser already has and
+        # silently reconnects that account. A seller who means to connect a
+        # second store gets the first one back, with no screen anywhere saying
+        # so — and then their old store's listings import, and publishes fail
+        # against an account they did not choose. That is not hypothetical:
+        # it is what this app's own disconnect dialog warns about, and it is
+        # why that dialog has to ask sellers to go sign out of eBay by hand.
+        #
+        # `prompt=login` is eBay's documented parameter for exactly this: it
+        # forces the login step even when a session exists. It costs a
+        # returning seller one login screen; it costs nobody a store bound to
+        # the wrong account.
+        "prompt": "login",
     }
     return f"{config.EBAY_AUTH_BASE}/oauth2/authorize?{urlencode(params)}"
 

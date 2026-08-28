@@ -130,3 +130,28 @@ def test_a_conclusive_pass_records_what_ebay_has_none_of(connect):
     connect(identity_works=True)
     assert set(ebay_account.absent_for("u1")) >= {"payment_policy_id",
                                                   "return_policy_id"}
+
+
+def test_the_landing_page_names_the_account_that_connected(connect, monkeypatch):
+    """"eBay connected!" is equally true of the wrong store.
+
+    A seller who has just been handed a different account than the one they
+    meant to pick has no other signal until that store's listings start
+    importing. The username is a public seller name, not a secret, so it rides
+    the redirect and the toast reads "Connected to eBay as @alice".
+    """
+    seen = {}
+    monkeypatch.setattr(main, "_finish_connect",
+                        lambda request, path: seen.setdefault("path", path))
+    connect(identity_works=True)
+    assert seen["path"] == "/?ebay=connected&as=alice"
+
+
+def test_an_unknown_account_still_lands_cleanly(connect, monkeypatch):
+    """The identity call is best-effort and 403s on older connections. No
+    name means no `as` — never the string "None" in a seller's URL bar."""
+    seen = {}
+    monkeypatch.setattr(main, "_finish_connect",
+                        lambda request, path: seen.setdefault("path", path))
+    connect(identity_works=False, stored_username="")
+    assert seen["path"] == "/?ebay=connected"

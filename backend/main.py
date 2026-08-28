@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -1229,7 +1230,15 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             # Only a conclusive pass may claim eBay has none of something —
             # same rule the publish path applies (ebay_provider._with_current_policies).
             ebay_account.note_absent(uid, reconciled.absent)
-        resp = _finish_connect(request, "/?ebay=connected")
+        # Name the account in the redirect. "eBay connected!" is true of the
+        # wrong store too, and a seller who has just been handed a different
+        # account than the one they picked has no other signal until their old
+        # store's listings start importing. The username is a public seller
+        # name, not a secret.
+        landing = "/?ebay=connected"
+        if new_user:
+            landing += "&as=" + quote(new_user, safe="")
+        resp = _finish_connect(request, landing)
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
     except ebay_auth.OAuthError as exc:
