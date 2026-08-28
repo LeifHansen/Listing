@@ -114,7 +114,6 @@ def sync_client(monkeypatch):
         raise AssertionError("a sweep ran when there was nothing to sweep")
 
     monkeypatch.setattr(main.listing_sync, "refresh_statuses", _never)
-    monkeypatch.setattr(main.ebay, "live_status", _never)
     yield TestClient(main.app)
     sync_guard.reset()
 
@@ -137,7 +136,5 @@ def test_a_sync_that_does_sweep_still_starts_the_cooldown(sync_client,
                         lambda token, uid, records, account="": (0, set()))
     monkeypatch.setattr(main.listing_sync, "refresh_statuses",
                         lambda token, uid, records, account="": swept.append(len(records)) or 0)
-    monkeypatch.setattr(main.ebay, "live_status",
-                        lambda rid, listing, creds=None: ("published", ""))
     assert sync_client.post("/api/ebay/sync-listings", json={}).status_code == 200
     assert sync_guard.sweep_due("u1") is False, "the cooldown never started"

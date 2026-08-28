@@ -52,7 +52,7 @@ class _ScopeError(Exception):
 # Same JSON+language headers every Sell API call wants; ebay.py owns the one
 # definition so a change (an added header, a marketplace id) lands everywhere
 # instead of in whichever copy someone happened to edit.
-from .ebay import _headers  # noqa: E402  (kept next to its first use)
+from .ebay import rest_headers as _headers  # noqa: E402
 
 
 def _is_scope_error(resp: httpx.Response) -> bool:

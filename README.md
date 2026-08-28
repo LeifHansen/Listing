@@ -25,7 +25,7 @@ payload when you don't have eBay credentials yet).
 | Identify | Photos sent to Claude vision; returns structured listing draft + confidence + "missing info" to verify | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
-| Publish | Fans out to every selected marketplace — eBay (Trading/Inventory), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
+| Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
 
 ## Quick start
 
@@ -175,18 +175,28 @@ explicitly if a proxy rewrites your scheme/host.
 ## eBay credentials (optional)
 
 Without eBay credentials the app runs in **dry-run mode**: it builds the exact
-`createOrReplaceInventoryItem` / `createOffer` / `publishOffer` payloads and
-saves them to `data/exports/` so you can inspect them or push later.
+`AddFixedPriceItem` (or `AddItem`) request the real publish would send and
+saves it to `data/exports/` so you can inspect it or push later.
 
-To publish for real, create a developer app at
-<https://developer.ebay.com/> and fill these in `.env`:
+**To publish for real, a seller connects their own eBay account** through
+Settings → Connect eBay (OAuth). That is the only way a live listing is
+created: every publish goes out on the connected seller's account, through the
+Trading API. Server-side credentials do NOT publish on their own — they used
+to, through the Sell Inventory API, and that engine is gone.
 
-- `EBAY_ENV` — `sandbox` (recommended first) or `production`
-- A **user** OAuth access token (`EBAY_OAUTH_TOKEN`) or the
-  `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_REFRESH_TOKEN` trio
-  (scope `https://api.ebay.com/oauth/api_scope/sell.inventory`)
-- Business policy IDs: `EBAY_FULFILLMENT_POLICY_ID`, `EBAY_PAYMENT_POLICY_ID`,
-  `EBAY_RETURN_POLICY_ID`, and `EBAY_MERCHANT_LOCATION_KEY`
+What the server-side settings are still for — the OAuth app itself, so the
+Connect button works:
+
+- `EBAY_ENV` — `sandbox` (recommended first) or `production`. **Anything other
+  than exactly `production` is treated as sandbox**, where a real eBay sign-in
+  cannot work; the app warns at boot if the value is neither.
+- `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_RUNAME` — from your eBay
+  developer keyset. `EBAY_RUNAME` is the **RuName** (`Your_Name-Yourname-...`),
+  not a URL; a URL there fails the token exchange with `invalid_grant`.
+
+`EBAY_OAUTH_TOKEN`, `EBAY_REFRESH_TOKEN` and the `EBAY_*_POLICY_ID` /
+`EBAY_MERCHANT_LOCATION_KEY` values remain read for the dry-run payload and
+for local testing; they no longer make anything go live.
 
 ### Automatic category IDs (lighter requirements)
 
@@ -298,8 +308,12 @@ behavior byte-for-byte; with one, each marketplace publishes independently —
 one failing never rolls back the others — and per-marketplace state
 (listing id, URL, status, last error) lives on the listing record.
 
-- **eBay** — unchanged: Trading API for new live listings, Inventory for
-  drafts/dry-runs, imported-listing revise/relist, Promoted Listings.
+- **eBay** — Trading API for everything that touches a listing: new live
+  listings, revise, relist and end. Drafts stay in the app and never reach
+  eBay; a dry run renders the Trading request instead of sending it. The REST
+  APIs are still used for the things that are not listings — Account
+  (business policies, programs, privileges), Taxonomy, Fulfillment (orders),
+  and Marketing (Promoted Listings).
 - **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
   `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
   then activated on a live publish. Etsy requires a category (AI Suggest
@@ -361,7 +375,8 @@ backend/
     listing_sync.py  bi-directional sync: import the store, push edits back
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
-    ebay.py          Inventory API payloads + publish/dry-run
+    ebay.py          photo URLs for eBay + the legacy ad SKU
+    ebay_trading.py  Trading API: publish, revise, end, read
 frontend/            React + Vite + Tailwind app (built to frontend/dist)
   src/
     styles/tokens.css  design tokens (colors, radii, shadows, dark mode)
@@ -466,18 +481,36 @@ machine with it.
 
 ## Bi-directional eBay sync
 
-The Sell Inventory API that publishes listings can only see listings created
-*through* it, so a seller's existing store was invisible to the app. **Sync with
-eBay** (on the Listings page, once eBay is connected) closes that gap using the
-Trading API with the same user OAuth token — no extra credentials:
+**Sync with eBay** (on the Listings page, once eBay is connected) mirrors the
+seller's existing store into the app, using the Trading API with the same user
+OAuth token — no extra credentials:
 
 - **eBay → app.** `GetMyeBaySelling` enumerates every active listing; `GetItem`
   pulls the detail (title, price, quantity, condition, category, item specifics,
   photos, package, watch/sold counts). Imported records get the stable id
   `ebay-<itemId>`, so re-syncing updates in place instead of duplicating.
-- **app → eBay.** Edits to an imported listing go back through
-  `ReviseFixedPriceItem` (or `ReviseItem` for auctions), and ending one uses
-  `EndItem`. Listings the app created keep using the Inventory API.
+- **app → eBay.** Edits go back through `ReviseFixedPriceItem` (or
+  `ReviseItem` for auctions), and ending one uses `EndItem` — for every
+  listing, whether the app created it or imported it.
+
+Publishing goes through the Trading API for a reason: a listing created with
+the Sell **Inventory** API becomes "inventory-based", and eBay then refuses to
+let the seller edit it anywhere but the tool that made it — Seller Hub answers
+"Inventory-based listing management is not currently supported by this tool."
+A Trading listing is an ordinary one the seller can edit in Seller Hub, the
+eBay app, or here.
+
+Saving a draft while connected used to leave an inventory item and an
+unpublished offer behind on the account. It no longer does. To clear what
+earlier drafts left (invisible in Seller Hub, and nothing else can remove it):
+
+```bash
+python3 scripts/purge_inventory_leftovers.py --user <user-id>          # dry run
+python3 scripts/purge_inventory_leftovers.py --user <user-id> --apply
+```
+
+It only ever considers SKUs this app minted, and never deletes an item with a
+published offer — that would end a live listing.
 
 A re-sync only refreshes the fields eBay owns — price, quantity, counters,
 photos — plus anything still blank locally, so a background sync never reverts

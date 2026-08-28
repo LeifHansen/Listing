@@ -76,6 +76,38 @@ def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, st
     return {key: dict(value or {}) for key, value in states.items()}, ebay_id
 
 
+# Listing fields only the server may write. Publish, end and sync set them;
+# every save round-trips the whole listing, so a client copy that differs is a
+# stale copy, never an edit.
+#
+# `source` is the one that bites. A listing this app has published carries
+# source="ebay", and that is what routes its next edit down the revise path.
+# A save that blanks it makes a live record look brand new, and the next
+# publish CREATES A SECOND LIVE LISTING instead of revising the one that
+# exists — the same duplicate `marketplaces` is protected from, through a
+# field nothing was protecting.
+#
+# `ebay_listing_id` is deliberately NOT here: owned_state_from fills it only
+# when the client didn't carry one, and both callers keep that.
+SERVER_OWNED_FIELDS = ("source", "view_url", "ebay_account")
+
+
+def restore_server_fields(listing, stored: dict) -> list[str]:
+    """Copy SERVER_OWNED_FIELDS from the stored record onto `listing`.
+
+    A stored value wins over whatever the client sent; a blank stored value
+    leaves the client's alone, so a first publish can still stamp these.
+    Returns the names actually changed, for the caller to log.
+    """
+    changed = []
+    for name in SERVER_OWNED_FIELDS:
+        value = stored.get(name)
+        if value and value != getattr(listing, name, None):
+            setattr(listing, name, value)
+            changed.append(name)
+    return changed
+
+
 def derive_top_status(prev_status: str, outcomes: dict[str, PublishOutcome],
                       mode: str) -> str:
     """The top-level status column after a multi-marketplace publish.

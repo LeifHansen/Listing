@@ -1,16 +1,19 @@
-"""How multi-valued item specifics reach eBay, on both publish paths.
+"""How multi-valued item specifics reach eBay.
 
 eBay's multi-select aspects — the item-specifics checkboxes (Features, Style,
 Season...) — hold several values, which reach us as several ItemSpecific rows
-under one name. The Inventory path has to send them as one aspect array; the
-Trading path as ONE NameValueList with several <Value> children, since a second
-NameValueList under the same Name is a duplicate-name error that rejects the
-whole publish.
+under one name. They have to go out as ONE NameValueList with several <Value>
+children: a second NameValueList under the same Name is a duplicate-name error
+that rejects the whole publish.
+
+There used to be two publish paths to check. The Inventory engine is gone, so
+the second half of this file now covers the same guarantees where they
+actually live on the Trading path — see the comment there.
 """
 import pytest
 
 from backend.models import ItemSpecific, Listing
-from backend.services import ebay, ebay_trading, taxonomy
+from backend.services import ebay_trading, taxonomy
 
 
 def _listing(specifics, **kw):
@@ -76,24 +79,46 @@ def test_values_are_escaped_and_brand_still_seeded():
     assert "<Name>Brand</Name><Value>Levi's</Value>" in block
 
 
-# --- Inventory (REST) path ----------------------------------------------------
+# --- the same contract, now that Trading is the only path ---------------------
+#
+# These two were written against ebay.build_inventory_item, which assembled the
+# aspect dict itself. That engine is gone. The guarantees are not: on the
+# Trading path they come from taxonomy.sanitize_specifics (canonical names,
+# one value per SINGLE-cardinality aspect, values coerced to the aspect's
+# constraints) running before _item_fields groups the rows. create_on_ebay and
+# push_edit both call it, so this pairing is what a real publish does.
 
-def _aspects_sent(listing):
-    item = ebay.build_inventory_item("sess", listing, "http://x", ["http://img"])
-    return item["product"]["aspects"]
+def _sanitized_specifics_xml(listing) -> str:
+    taxonomy.sanitize_specifics(listing)
+    return _specifics_xml(listing)
 
 
-def test_inventory_multi_aspect_keeps_every_tick(category):
-    sent = _aspects_sent(_listing([
+def test_multi_aspect_keeps_every_tick(category):
+    block = _sanitized_specifics_xml(_listing([
         ItemSpecific(name="Features", value="Pockets"),
         ItemSpecific(name="Features", value="Water Resistant"),
     ], category_id="57988"))
-    assert sent["Features"] == ["Pockets", "Water Resistant"]
+    assert block.count("<Name>Features</Name>") == 1
+    assert "<Value>Pockets</Value><Value>Water Resistant</Value>" in block
 
 
-def test_inventory_single_aspect_still_ships_one_value(category):
-    sent = _aspects_sent(_listing([
+def test_single_aspect_still_ships_one_value(category):
+    """eBay rejects the whole publish with "<Aspect> should contain only one
+    value" — so a second row under a SINGLE-cardinality name must be dropped
+    before the XML is built, not grouped into it."""
+    block = _sanitized_specifics_xml(_listing([
         ItemSpecific(name="Fit", value="Slim"),
         ItemSpecific(name="Fit", value="Regular"),
     ], category_id="57988"))
-    assert sent["Fit"] == ["Slim"]
+    assert "<Name>Fit</Name><Value>Slim</Value>" in block
+    assert "Regular" not in block
+
+
+def test_a_name_that_only_differs_in_case_is_snapped_to_ebay_s(category):
+    """eBay matches aspects by EXACT name, so a seller-typed "features" does
+    not satisfy the category's "Features" — it lands as a second, unrecognised
+    specific instead."""
+    block = _sanitized_specifics_xml(_listing([
+        ItemSpecific(name="features", value="Pockets"),
+    ], category_id="57988"))
+    assert "<Name>Features</Name>" in block

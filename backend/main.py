@@ -1128,15 +1128,21 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
     if not code or not verified:
-        return _finish_connect(request, "/?ebay=error")
+        # An unreadable state is a signature that no longer verifies (SECRET_KEY
+        # rotated), a stale link, or a tampered one. All three want the same
+        # thing from the seller: start again.
+        log.warning("ebay callback: %s", "no code" if not code
+                    else "state did not verify")
+        return _finish_connect(request, "/?ebay=error&why=expired")
     uid, nonce = verified
     # The nonce in the signed state must match the cookie set at connect time,
     # so a callback can only bind an eBay account to the browser that started
     # the flow (blocks CSRF authorization-code injection).
     cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
     if not cookie_nonce or cookie_nonce != nonce:
-        log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
-        return _finish_connect(request, "/?ebay=error")
+        log.warning("ebay callback: nonce mismatch (uid=%s) — cookie %s", uid,
+                    "missing" if not cookie_nonce else "did not match")
+        return _finish_connect(request, "/?ebay=error&why=expired")
     try:
         # NOT `tokens` — that is the billing module, imported at the top of
         # this file. Shadowing it here left the handler one added
@@ -1157,9 +1163,18 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         new_user = (ident["username"] or "").strip()
         save_kwargs = {
             "refresh_token": grant["refresh_token"],
-            "ebay_username": new_user,
-            "ebay_email": ident["email"],
         }
+        # Only write identity we actually learned. The fetch above is
+        # best-effort and 403s on connections made before the identity scope
+        # was granted, so it hands back "" far more often than it hands back a
+        # wrong name — and "" is not a name, it is "we don't know". Writing it
+        # anyway erased a username the app already had, and a blank username
+        # makes listing_sync.belongs_to scope nothing (every account's listings
+        # look like this one's) while count_foreign_listings reports every
+        # labelled record as foreign. db.save_ebay_account skips None, so None
+        # is how "leave what's there" is spelled.
+        save_kwargs["ebay_username"] = new_user or None
+        save_kwargs["ebay_email"] = ident["email"] or None
         # Keep a saved policy/location choice only when it still EXISTS on the
         # account that just connected. Business-policy ids belong to one
         # seller: eBay rejects another's outright, and a listing published with
@@ -1170,9 +1185,15 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # connections made before the identity scope was granted 403 on it. A
         # seller who switched accounts then carried the old account's shipping,
         # payment, return and location ids straight into the new one.
-        carried, conclusive = ebay_account.reconcile_account_settings(
+        # Attribute access, not positional unpacking. reconcile_account_settings
+        # returns a 3-field Reconciled NamedTuple; unpacking it into two names
+        # raised ValueError here on EVERY connect, which the blanket except
+        # below turned into a bare "?ebay=error". Nothing was ever saved, so no
+        # seller could connect at all.
+        reconciled = ebay_account.reconcile_account_settings(
             access, existing, policies)
-        save_kwargs.update(carried)
+        conclusive = reconciled.conclusive
+        save_kwargs.update(reconciled.changes)
         switched = bool(prev_user and new_user and prev_user != new_user)
         if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
             # A different store. Label everything already here as the previous
@@ -1205,11 +1226,28 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # suppression and they would never reach it at all.
         if conclusive:
             ebay_account.note_verified(uid)
+            # Only a conclusive pass may claim eBay has none of something —
+            # same rule the publish path applies (ebay_provider._with_current_policies).
+            ebay_account.note_absent(uid, reconciled.absent)
         resp = _finish_connect(request, "/?ebay=connected")
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
+    except ebay_auth.OAuthError as exc:
+        # eBay told us why. Pass the bucket to the UI so the seller is told
+        # whether to try again or that it is not theirs to fix, and keep
+        # eBay's own words in the log for whoever has to fix it.
+        log.warning("ebay: connect refused for uid=%s: %s | %s", uid, exc,
+                    exc.description)
+        return _finish_connect(request, f"/?ebay=error&why={exc.reason}")
+    except httpx.RequestError as exc:
+        log.warning("ebay: connect could not reach eBay for uid=%s: %s", uid, exc)
+        return _finish_connect(request, "/?ebay=error&why=network")
     except Exception:  # noqa: BLE001
-        return _finish_connect(request, "/?ebay=error")
+        # Anything left — a DB write, a bug. Without the traceback there is
+        # nothing to tell these apart afterwards, and a connect that won't
+        # stick is the one problem a seller cannot debug from the UI.
+        log.exception("ebay: connect callback failed for uid=%s", uid)
+        return _finish_connect(request, "/?ebay=error&why=unknown")
 
 
 @app.get("/api/ebay/status")
@@ -1346,12 +1384,84 @@ def ensure_policy(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "Unknown shipping service.")
     try:
         pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
-    except httpx.HTTPStatusError as exc:
+    except ebay_auth.AccountApiError as exc:
         raise HTTPException(
-            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
+            502, f"eBay couldn't create the policy: {exc.description}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            502, f"Couldn't reach eBay to create the policy: {exc}") from exc
     if pol.get("id") and not creds.get("fulfillment_policy_id"):
         db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
     return pol
+
+
+@app.post("/api/ebay/ensure-all-policies")
+def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dict:
+    """Give the account the three business policies a publish needs.
+
+    Being opted into the policy program is necessary and not sufficient: the
+    account still needs one shipping, one payment and one return policy before
+    eBay will accept a listing. Only the fulfillment half of that existed here
+    (ensure-policy, one shipping service at a time) — payment and return could
+    be listed and never created, so a seller with none was sent to Seller Hub
+    to hand-build two policies whose contents this app already assumes.
+
+    Each is found-or-created independently and each result says which it was,
+    so a partial success is legible rather than an all-or-nothing failure. Ids
+    are saved as the account defaults only where none is set: a seller who
+    deliberately chose a policy keeps it.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    token, opts = creds["access_token"], (payload or {})
+    svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
+           or ebay_auth.service_by_code("USPSGroundAdvantage"))
+    steps = {
+        "fulfillment": lambda: ebay_auth.ensure_service_policy(token, svc),
+        "payment": lambda: ebay_auth.ensure_payment_policy(token),
+        "return": lambda: ebay_auth.ensure_return_policy(
+            token,
+            days=int(opts.get("return_days") or ebay_auth.DEFAULT_RETURN_DAYS),
+            payer=str(opts.get("return_payer")
+                      or ebay_auth.DEFAULT_RETURN_PAYER)),
+    }
+    out: dict = {"policies": {}, "errors": {}}
+    save: dict = {}
+    for kind, run in steps.items():
+        try:
+            pol = run()
+        except (ebay_auth.AccountApiError, httpx.HTTPError) as exc:
+            # One policy eBay won't make must not cost the other two. The most
+            # common reason is the account not being opted in yet, which is a
+            # different button on the same screen.
+            detail = getattr(exc, "description", "") or str(exc)
+            log.warning("ensure-all-policies: %s failed for uid=%s: %s",
+                        kind, _uid(request), detail)
+            out["errors"][kind] = detail[:300]
+            continue
+        out["policies"][kind] = pol
+        field = f"{kind}_policy_id"
+        if pol.get("id") and not creds.get(field):
+            save[field] = pol["id"]
+    if save:
+        db.save_ebay_account(creds["_uid"], **save)
+        # Deliberately NOT note_verified() here. That starts the whole account's
+        # EBAY_POLICY_VERIFY_TTL clock, and the clock is the only thing gating
+        # _with_current_policies -- which is the only thing that ever repairs a
+        # policy id left behind by a previously connected seller. This route
+        # establishes provenance only for the slots it FILLED (`save` is
+        # populated exactly where the account had no id yet); an id that was
+        # already set is left untouched and never compared against the
+        # connected account. Starting the clock on that basis would suppress
+        # the cross-account repair for a full TTL over ids whose owner was
+        # never checked -- and it did so even when two of the three lookups had
+        # just failed. One extra verification round-trip is the cheaper side of
+        # that trade.
+    out["ok"] = not out["errors"]
+    out["created"] = sorted(k for k, v in out["policies"].items()
+                            if v.get("created"))
+    return out
 
 
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
@@ -1401,6 +1511,47 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     return out
 
 
+@app.post("/api/ebay/opt-in-policies")
+def ebay_opt_in_policies(request: Request) -> dict:
+    """Turn on eBay's business-policy program for the connected account.
+
+    Business policies are a seller PROGRAM, not a default. Until an account is
+    opted in, every policy list comes back empty and every policy id is
+    rejected — the "my dropdowns are empty and I can't publish" state, with
+    nothing on screen naming the cause. The app could read the program's
+    status but never set it, so the only fix was a Seller Hub page the seller
+    had to be told to find.
+
+    eBay documents the opt-in as taking up to 24 hours and returns no payload,
+    so a success here means "eBay has the request", never "your policies are
+    ready". The response says which, because promising the second and
+    delivering the first is worse than not offering the button.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds or not creds.get("access_token"):
+        raise HTTPException(400, "Connect eBay first.")
+    token = creds["access_token"]
+    already = ebay_auth.opted_in_programs(token)
+    if already is not None and ebay_auth.SELLING_POLICY_MANAGEMENT in already:
+        return {"ok": True, "already": True, "pending": False,
+                "message": "Business policies are already switched on for this "
+                           "eBay account."}
+    try:
+        ebay_auth.opt_in_to_program(token, ebay_auth.SELLING_POLICY_MANAGEMENT)
+    except ebay_auth.AccountApiError as exc:
+        log.warning("ebay opt-in refused for uid=%s: %s | %s", _uid(request),
+                    exc, exc.description)
+        raise HTTPException(
+            502, "eBay wouldn't switch business policies on for this account. "
+                 "You can turn them on directly in eBay: Seller Hub → Account "
+                 "→ Business policies.") from exc
+    log.info("ebay: business-policy opt-in requested for uid=%s", _uid(request))
+    return {"ok": True, "already": False, "pending": True,
+            "message": "Asked eBay to switch business policies on. eBay can "
+                       "take up to 24 hours, after which your shipping, "
+                       "payment and return policies will show up here."}
+
+
 @app.get("/api/ebay/account-overview")
 def ebay_account_overview(request: Request) -> dict:
     """A live mirror of the seller's most-updated eBay account settings —
@@ -1445,7 +1596,14 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         if k in payload
     }
     postal = str(payload.get("ship_from_postal") or "").strip()
-    if postal:
+    if "ship_from_postal" in payload and not postal:
+        # Clearing it is allowed and has to actually clear. The saved
+        # merchantLocationKey stays: publishing needs a ship-from ZIP, and with
+        # no typed one create_on_ebay reads it off the seller's eBay location
+        # via that key. Dropping both would leave the account unable to publish
+        # for having emptied a text box.
+        fields["ship_from_postal"] = ""
+    elif postal:
         creds = _ebay_creds_for(request)
         if not creds:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
@@ -2412,8 +2570,9 @@ def _restore_server_state(session_id: str, listing: Listing,
                           prev_rec: Optional[dict] = None) -> dict:
     """Replace the client's per-marketplace publish state with the stored one.
 
-    The server owns `marketplaces` and its legacy `ebay_listing_id` mirror:
-    only publish/end/sync write them. Any client round-trip can be stale — a
+    The server owns `marketplaces`, its legacy `ebay_listing_id` mirror, and
+    the identity fields in state.SERVER_OWNED_FIELDS: only publish/end/sync
+    write them. Any client round-trip can be stale — a
     second browser tab, or the editor's image-edit auto-save whose copy was
     loaded before a publish — and honoring a stale copy ERASES live listing
     ids. The damage is silent and expensive: the next publish finds no
@@ -2423,10 +2582,18 @@ def _restore_server_state(session_id: str, listing: Listing,
     Returns the record it read so callers don't have to re-query.
     """
     rec = prev_rec if prev_rec is not None else (db.get_listing(session_id) or {})
+    stored = rec.get("listing") or {}
     states, ebay_id = marketplace_state.owned_state_from(
-        rec.get("listing") or {}, listing.ebay_listing_id)
+        stored, listing.ebay_listing_id)
     listing.marketplaces = {k: MarketplaceState(**v) for k, v in states.items()}
     listing.ebay_listing_id = ebay_id
+    # `marketplaces` was protected here; `source` was not, and it decides
+    # whether the next publish revises the live listing or creates a second
+    # one. Same list the publish path restores from.
+    changed = marketplace_state.restore_server_fields(listing, stored)
+    if changed:
+        log.info("save: kept server-owned %s for session=%s",
+                 ", ".join(changed), session_id)
     return rec
 
 
@@ -3925,7 +4092,11 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
     creds = _ebay_creds_for(request)
-    if not (creds or config.ebay_ready()):
+    # Ending goes through EndItem, which needs the seller's own token. The
+    # env-configured single-tenant credentials used to serve here via
+    # withdrawOffer; they are the OPERATOR's, and with the Inventory engine
+    # gone there is nothing they could end that this app created.
+    if not creds:
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
     # Never end another eBay account's listing: the item id on this record was
@@ -3939,14 +4110,16 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
                  f"you're connected as @{connected}. Reconnect that account "
                  "to end it.")
     try:
-        # Imported listings live outside the Inventory API — end them through
-        # the Trading API instead.
-        if listing_sync.is_imported(listing):
-            if not creds:
-                raise HTTPException(400, "Connect eBay first.")
-            res = listing_sync.end(creds["access_token"], listing)
+        # One ending for every listing: EndItem. The old branch sent
+        # non-imported records to withdrawOffer, but everything this app
+        # publishes goes out through Trading and is stamped source="ebay", so
+        # that branch only ever served Inventory-API listings from an older
+        # build. A record with no item id has nothing on eBay to end.
+        if not listing.ebay_listing_id:
+            res = {"ended": False, "not_live": True,
+                   "message": "This listing isn't on eBay — nothing to end."}
         else:
-            res = ebay.withdraw(req.session_id, listing, creds=creds)
+            res = listing_sync.end(creds["access_token"], listing)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     if res.get("ended") or res.get("not_live"):
@@ -3987,7 +4160,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     creds = _ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
-        return {"checked": 0, "changed": 0, "archived": 0}
+        return {"checked": 0, "changed": 0}
     force = bool((payload or {}).get("force"))
     # Only the connected account's listings. A record left behind by a
     # previously-connected eBay account is another seller's item as far as this
@@ -3999,7 +4172,6 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
             if i.get("status") in ("published", "live")
             and listing_sync.belongs_to(i.get("listing") or {}, account)]
     changed = 0
-    archived = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
     # lists name every item that finished recently, so a listing that ended
     # (or sold) ON eBay moves off Active on this very sync — it never has to
@@ -4013,90 +4185,47 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: finished-list reconcile failed: %s", exc)
     live = [i for i in live if i["id"] not in handled]
-    # Imported listings are reconciled through the Trading API (the Inventory
-    # API can't see them at all); app-created ones keep the offer check below.
-    # EVERY imported listing must be excluded from `items` — not just the ones
-    # this run refreshes — or the offer check would call an eBay listing it
-    # can't see "ended". Each side is capped so one sync click can't fan out
-    # into hundreds of eBay calls — SAMPLED, not sliced, so on a store bigger
-    # than the cap every record still gets its turn across a few syncs instead
-    # of the same first N being re-checked forever.
-    imported_ids = {i["id"] for i in live
-                    if listing_sync.is_imported(i.get("listing") or {})}
-    imported = [i for i in live if i["id"] in imported_ids]
-    items = [i for i in live if i["id"] not in imported_ids]
+    # One sweep for every record. The old code split these in two: imported
+    # listings went through the Trading API, and "app-created" ones through an
+    # Inventory offer lookup keyed by SKU. That second path only ever served
+    # listings the Inventory engine published, and it is gone — everything this
+    # app puts live now goes out through Trading and carries an item id.
+    #
+    # Capped so one sync click can't fan out into hundreds of eBay calls —
+    # SAMPLED, not sliced, so on a store bigger than the cap every record still
+    # gets its turn across a few syncs instead of the same first N being
+    # re-checked forever.
+    #
     # Ask for the cooldown only when there is actually something to sweep.
     # sweep_due() STARTS the cooldown on the call that says yes, so asking
     # first and finding nothing to do spent the whole six hours on zero eBay
     # calls — and the next sync, the one with real work, was refused. The
     # cooldown exists to ration eBay's daily quota, so it should only ever be
     # consumed by a run that spends some of it.
-    if (imported or items) and not sync_guard.sweep_due(user["id"], force):
+    if live and not sync_guard.sweep_due(user["id"], force):
         # Cooled down: the finished-list reconcile above already ran (and is
-        # what actually moves ended/sold records), so skip the ~100-call
-        # per-item sweeps rather than spending the account's daily eBay quota
-        # on a background poll.
+        # what actually moves ended/sold records), so skip the per-item sweeps
+        # rather than spending the account's daily eBay quota on a background
+        # poll.
         log.debug("ebay sync: per-item sweeps skipped (cooldown) for user=%s",
                   user["id"])
-        imported, items = [], []
-    if len(imported) > 60:
-        imported = random.sample(imported, 60)
-    if len(items) > 40:
-        items = random.sample(items, 40)
-    if imported and creds:
+        live = []
+    if len(live) > 100:
+        live = random.sample(live, 100)
+    if live and creds:
         try:
             changed += listing_sync.refresh_statuses(
-                creds["access_token"], user["id"], imported, account=account)
+                creds["access_token"], user["id"], live, account=account)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
-            log.info("ebay sync: imported refresh failed: %s", exc)
-
-    # Each check is its own eBay round-trip; serially that pinned a request
-    # thread for up to ~40x the API latency right at app load (architect #15).
-    # Fetch in parallel, write to the DB serially below.
-    def _check(it):
-        try:
-            return it, ebay.live_status(
-                it["id"], Listing(**(it.get("listing") or {})), creds=creds)
-        except Exception as exc:  # noqa: BLE001 - one blip must not stop the sweep
-            log.info("ebay sync: status check failed for %s: %s", it["id"], exc)
-            return it, (None, "")
-
-    checked = []
-    if items:
-        with ThreadPoolExecutor(max_workers=min(6, len(items))) as pool:
-            checked = list(pool.map(_check, items))
-    # What each sale actually settled at, fetched once and only if something
-    # sold — the offer a seller accepted lives on the transaction, never on
-    # the listing's own price.
-    sales: Optional[dict] = None
-    for it, (status, lid) in checked:
-        if status == "sold":
-            data = it.get("listing") or {}
-            if sales is None:
-                sales = (listing_sync.recent_sales(creds["access_token"])
-                         if creds else {})
-            data = listing_sync.stamp_sale(
-                data, sales.get(str(data.get("ebay_listing_id") or "")),
-                mark_now=True)
-            db.upsert_listing(it["id"], data, status="sold", user_id=user["id"])
-            notifications.notify_sold(user["id"], it["id"], data,
-                                      sold_quantity=data.get("sold_quantity") or 0)
-            _purge_session_images(it["id"])  # archived — reclaim the storage
-            changed += 1
-            archived += 1
-        elif status == "ended":
-            db.upsert_listing(it["id"], it.get("listing") or {},
-                              status="ended", user_id=user["id"])
-            changed += 1
-        elif (status == "published" and lid
-              and not (it.get("listing") or {}).get("ebay_listing_id")):
-            data = {**(it.get("listing") or {}), "ebay_listing_id": lid}
-            db.upsert_listing(it["id"], data, status="published", user_id=user["id"])
+            log.info("ebay sync: status refresh failed: %s", exc)
     if changed:
-        log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
-                 changed, archived, user["id"])
-    return {"checked": len(items) + len(imported) + len(handled),
-            "changed": changed, "archived": archived}
+        log.info("ebay sync: %d listing(s) updated for user=%s",
+                 changed, user["id"])
+    # `archived` used to ride along here, counted by the per-item Inventory
+    # loop that no longer exists. refresh_statuses does the archiving now and
+    # reports only a change count, and nothing read the field — the frontend
+    # uses `changed` alone — so it is gone rather than reported as a constant 0.
+    return {"checked": len(live) + len(handled), "changed": changed}
 
 
 # Bounds one import run. A store bigger than this imports across repeated

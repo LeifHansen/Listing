@@ -32,6 +32,7 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import TITLE_MAX_CHARS, ItemSpecific, Listing
+from . import taxonomy
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -248,15 +249,13 @@ def _int(parent: Optional[ET.Element], path: str, default: int = 0) -> int:
 # --- condition mapping ------------------------------------------------------
 # Trading's numeric ConditionID <-> the Inventory API's condition enum this app
 # stores on Listing.condition.
-_CONDITION_BY_ID = {
-    "1000": "NEW", "1500": "NEW_OTHER", "1750": "NEW_WITH_DEFECTS",
-    "2000": "CERTIFIED_REFURBISHED", "2010": "CERTIFIED_REFURBISHED",
-    "2020": "SELLER_REFURBISHED", "2030": "SELLER_REFURBISHED",
-    "2500": "SELLER_REFURBISHED", "2750": "USED_EXCELLENT",
-    "3000": "USED_EXCELLENT", "4000": "USED_VERY_GOOD",
-    "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
-    "7000": "FOR_PARTS_OR_NOT_WORKING",
-}
+# id -> enum comes from taxonomy, which is the one place that direction is
+# defined. A local copy here disagreed on 2750: import read it as
+# USED_EXCELLENT while _CONDITION_TO_ID sends LIKE_NEW back as 2750, so every
+# revise of an imported "Like New" listing silently downgraded it to 3000.
+_CONDITION_BY_ID = taxonomy.CONDITION_ID_TO_ENUM
+# enum -> id is NOT the inverse: several ids share an enum (2000/2010,
+# 2020/2030/2500), so this names the one id to publish for each.
 _CONDITION_TO_ID = {
     "NEW": "1000", "NEW_OTHER": "1500", "NEW_WITH_DEFECTS": "1750",
     "CERTIFIED_REFURBISHED": "2000", "SELLER_REFURBISHED": "2500",
@@ -640,6 +639,41 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         raise TradingError(
             "eBay needs to know where this ships from. Add your ship-from ZIP "
             "in Settings → Listing settings and publish again.")
+    call, body = build_add_item(listing, image_urls, policies, postal_code,
+                                idempotency_key)
+    try:
+        root = _call(call, token, body)
+    except TradingError as exc:
+        if idempotency_key and _is_duplicate_rejection(exc):
+            # eBay has already processed this exact publish. Surfacing its raw
+            # wording ("UUID has already been used") would read as a failure to
+            # a seller whose listing is in fact live.
+            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
+                     call, idempotency_key, exc.code)
+            raise AlreadyListedError(
+                "This listing was already published to eBay.", code=exc.code,
+                item_id=_item_id_in_error(str(exc)),
+                detail=getattr(exc, "detail", "")) from exc
+        raise
+    item_id = _text(root, "ItemID")
+    if not item_id:
+        raise TradingError("eBay accepted the listing but returned no item id.")
+    log.info("trading: %s ok item=%s", call, item_id)
+    return {"published": True, "listing_id": item_id,
+            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+
+
+def build_add_item(listing: Listing, image_urls: list[str],
+                   policies: Optional[dict] = None,
+                   postal_code: str = "",
+                   idempotency_key: str = "") -> tuple[str, str]:
+    """(call name, <Item> XML) for a NEW listing.
+
+    Exactly the body create_listing sends, built without touching the network
+    or validating anything — so the dry-run preview and the real publish can
+    never describe two different requests. An empty postal_code simply omits
+    the element here; create_listing is what refuses to publish without one.
+    """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
     parts = _item_fields(listing, image_urls)
@@ -691,33 +725,21 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         parts.append(f"<UUID>{_esc(_uuid_form(idempotency_key))}</UUID>")
 
     call = "AddItem" if is_auction else "AddFixedPriceItem"
-    try:
-        root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
-    except TradingError as exc:
-        if idempotency_key and _is_duplicate_rejection(exc):
-            # eBay has already processed this exact publish. Surfacing its raw
-            # wording ("UUID has already been used") would read as a failure to
-            # a seller whose listing is in fact live.
-            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
-                     call, idempotency_key, exc.code)
-            raise AlreadyListedError(
-                "This listing was already published to eBay.", code=exc.code,
-                item_id=_item_id_in_error(str(exc)),
-                detail=getattr(exc, "detail", "")) from exc
-        raise
-    item_id = _text(root, "ItemID")
-    if not item_id:
-        raise TradingError("eBay accepted the listing but returned no item id.")
-    log.info("trading: %s ok item=%s", call, item_id)
-    return {"published": True, "listing_id": item_id,
-            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    return call, f"<Item>{''.join(parts)}</Item>"
 
 
 # eBay's error codes for "you already sent this": a reused UUID, and an
 # InventoryTrackingNumber already on an active listing. Codes are matched
 # first, with a text fallback so a code eBay adds later still lands here —
 # duplicating a listing is worse than one publish reported as already-live.
-_DUPLICATE_CODES = {"21916884", "21916885", "21919188", "21916752"}
+#
+# 21919188 is NOT one of them: it is "this listing would cause you to exceed
+# the amount you can list" — the monthly SELLING LIMIT. Treating it as a
+# duplicate submission sent the seller a warning that publishing again "could
+# create a duplicate", when nothing had been created and the real fix is to
+# ask eBay to raise the limit. (eBay's duplicate-LISTING-policy code is
+# 21919067, which is a different thing again and not an idempotency signal.)
+_DUPLICATE_CODES = {"21916884", "21916885", "21916752"}
 _DUPLICATE_TEXT = re.compile(
     r"(uuid|inventory\s*tracking\s*number).{0,60}?"
     r"(already\s+(been\s+)?(used|exists|specified)|not\s+unique|duplicate)"

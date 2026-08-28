@@ -96,6 +96,15 @@ def _load_secret_key() -> str:
 
 SECRET_KEY = _load_secret_key()
 
+# Encrypts the marketplace refresh tokens held in the database (see
+# backend/crypto.py). A Fernet key -- generate one with:
+#   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Left unset, a key is derived from SECRET_KEY, so a self-hosted or local
+# deployment is protected with no extra configuration. Set it explicitly if
+# SECRET_KEY might ever be rotated: rotating the key a token was written under
+# makes that token unreadable, and the seller has to reconnect.
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
+
 # --- Object storage (Cloudflare R2 / any S3, optional) ---------------------
 # Store optimized images in R2 so they survive restarts and are reliably
 # fetchable by eBay. Only the three credentials are required: the bucket
@@ -157,6 +166,23 @@ def _env_int(name: str, default: int) -> int:
     try:
         return max(0, int(os.getenv(name, "") or default))
     except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """A float from the environment that can't stop the app from booting.
+
+    Public because services parse their own tunables at module scope. A value
+    that isn't a number there ("10m", "600s", a stray quote) raised ValueError
+    while the module was still importing, which takes the WHOLE app down at
+    boot — not just the one feature the setting belongs to. A typo in a tuning
+    knob should cost its default and a log line.
+    """
+    raw = os.getenv(name, "")
+    try:
+        return max(0.0, float(raw or default))
+    except ValueError:
+        log.warning("%s=%r is not a number — using %s", name, raw, default)
         return default
 
 
@@ -351,6 +377,14 @@ EBAY_VERIFICATION_TOKEN = os.getenv("EBAY_VERIFICATION_TOKEN", "").strip()
 # sits behind a proxy that rewrites scheme/host.
 EBAY_DELETION_ENDPOINT = os.getenv("EBAY_DELETION_ENDPOINT", "").strip()
 
+# Anything that is not exactly "production" means sandbox. That is a quiet
+# footgun: EBAY_ENV=prod (or a typo) silently points the whole integration at
+# sandbox, where a seller's real eBay sign-in cannot work and the only symptom
+# is a connect that fails with no reason. Say so at boot.
+if EBAY_ENV not in ("sandbox", "production"):
+    log.warning("EBAY_ENV=%r is not 'sandbox' or 'production' — treating it as "
+                "SANDBOX. Real eBay accounts cannot connect against sandbox.",
+                EBAY_ENV)
 _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
@@ -385,6 +419,20 @@ EBAY_LOGISTICS_ENABLED = (os.getenv("EBAY_LOGISTICS_ENABLED", "").strip().lower(
                           in ("1", "true", "yes", "on"))
 if EBAY_LOGISTICS_ENABLED:
     EBAY_OAUTH_SCOPES.append("https://api.ebay.com/oauth/api_scope/sell.logistics")
+
+
+# Whether the pre-publish checklist BLOCKS a revise of an already-live listing,
+# or only reports what it would have blocked. A relist is always blocked on —
+# it creates a new listing, so it answers to the same contract a first publish
+# does. A revise is the risky one: these listings are live and selling, some
+# were created outside this app, and a checklist that has never run against
+# them will find things eBay accepted years ago. So it ships observing first —
+# read the "would block" lines out of the logs, confirm they are real, then set
+# EBAY_PREFLIGHT_BLOCKS_REVISE=1. Blocking a seller out of editing a live
+# listing is worse than the rejection the check is trying to save them from.
+EBAY_PREFLIGHT_BLOCKS_REVISE = (
+    os.getenv("EBAY_PREFLIGHT_BLOCKS_REVISE", "").strip().lower()
+    in ("1", "true", "yes", "on"))
 
 
 def ebay_oauth_ready() -> bool:

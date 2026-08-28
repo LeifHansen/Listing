@@ -161,7 +161,7 @@ export function PublishCard({ w }) {
       hint={w.isLive
         ? "This listing is LIVE on eBay — Update Live Listing pushes your edits straight to it; End listing takes it off eBay"
         : canPublishLive
-          ? "Save as Draft saves it here and stages it on your connected eBay account (as an unpublished offer); Publish Live makes it a live listing"
+          ? "Save as Draft keeps it here only — nothing is sent to eBay; Publish Live makes it a live listing"
           : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
       state={publishedOk || multiOk ? "complete" : "todo"}
     >

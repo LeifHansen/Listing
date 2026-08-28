@@ -41,6 +41,13 @@ export function SettingsView() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
+  // Did THIS component's load() succeed? `data` cannot answer that — it is
+  // seeded from the store cache (policiesData), which the listing editor
+  // fills, so it is truthy on mount having loaded nothing here. `postal` and
+  // `selected` are only ever filled by load()'s success path.
+  const [loadedHere, setLoadedHere] = useState(false);
+  const [optingIn, setOptingIn] = useState(false);
+  const [creatingPolicies, setCreatingPolicies] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
   const [prefs, setPrefs] = useState(null); // new-listing defaults (null = loading)
@@ -53,6 +60,7 @@ export function SettingsView() {
       setPoliciesData(d);
       setPostal(d.ship_from_postal || "");
       setSelected(d.selected || {});
+      setLoadedHere(true);
     } catch (e) {
       toast(`Couldn't load policies: ${e.message}`, { kind: "error" });
     } finally {
@@ -94,8 +102,16 @@ export function SettingsView() {
         setPrefs(r.prefs || {});
       }
       if (ebay.connected && data) {
+        // Sent even when empty — that is how a seller clears the ZIP, and
+        // omitting a blank made clearing a silent no-op reported as "Defaults
+        // saved". But ONLY once this component's own load() has succeeded:
+        // until then `postal` is "" because nothing filled it, not because
+        // anyone cleared it, and the backend reads a present-but-empty value
+        // as an explicit clear. `data` does not prove that — it is seeded from
+        // the store cache — so a mount with a warm cache, or a load that
+        // failed or is still in flight, would post a blank over a good ZIP.
         const payload = { ...selected };
-        if (postal.trim()) payload.ship_from_postal = postal.trim();
+        if (loadedHere) payload.ship_from_postal = postal.trim();
         await postJson("/api/ebay/policies", payload);
         setPoliciesData(null); // refresh the publish-step summary next time
         load();
@@ -369,10 +385,16 @@ export function SettingsView() {
               })}
 
               <AddShippingServiceRow
-                onCreated={(pol) => {
-                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
+                onCreated={async (pol) => {
+                  // Re-apply AFTER the reload, not before. load() ends with
+                  // setSelected(d.selected), and the server only stores this
+                  // policy as the default when the account had none — so for
+                  // a seller who already had one, the optimistic selection
+                  // was overwritten a moment later and the toast's "selected
+                  // it above" was simply false.
                   setPoliciesData(null);
-                  load();
+                  await load();
+                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
                 }}
               />
 
@@ -381,16 +403,76 @@ export function SettingsView() {
                   <p className="text-ink flex gap-2">
                     <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
                     <span>
-                      Missing a policy? eBay requires shipping, payment &amp; return policies to
-                      publish. Create them on eBay, then reopen this page.
+                      eBay requires shipping, payment &amp; return policies to publish. If these
+                      dropdowns are empty, business policies are usually switched off for the
+                      account — they’re an eBay seller program, not a default.
                     </span>
                   </p>
-                  <a
-                    href={data.manage_url} target="_blank" rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 mt-2 font-semibold text-blue"
-                  >
-                    Manage eBay business policies <ExternalLink size={13} aria-hidden />
-                  </a>
+                  {/* The button that used to be a sentence telling the seller to go
+                      find a page on eBay. eBay takes up to 24h and returns nothing,
+                      so this reports what was actually asked, never that policies
+                      are ready. */}
+                  <div className="flex flex-wrap items-center gap-3 mt-3">
+                    <Button
+                      size="sm" variant="soft" disabled={optingIn}
+                      onClick={async () => {
+                        setOptingIn(true);
+                        try {
+                          const r = await postJson("/api/ebay/opt-in-policies", {});
+                          toast(r.message, { kind: r.already ? "success" : "info" });
+                          if (r.already) load();
+                        } catch (e) {
+                          toast(e.message, { kind: "error" });
+                        } finally {
+                          setOptingIn(false);
+                        }
+                      }}
+                    >
+                      {optingIn ? "Asking eBay…" : "Turn on business policies"}
+                    </Button>
+                    {/* Opting in is necessary and not sufficient: the account
+                        still needs one shipping, one payment and one return
+                        policy. This makes whichever are missing. Separate
+                        button because eBay's opt-in takes up to 24h, so right
+                        after opting in this one will legitimately fail — and
+                        saying which is missing beats one button that hides
+                        which half went wrong. */}
+                    <Button
+                      size="sm" variant="soft" disabled={creatingPolicies}
+                      onClick={async () => {
+                        setCreatingPolicies(true);
+                        try {
+                          const r = await postJson("/api/ebay/ensure-all-policies", {});
+                          const made = (r.created || []).length;
+                          const failed = Object.keys(r.errors || {});
+                          if (failed.length) {
+                            toast(
+                              `Couldn't create your ${failed.join(" and ")} policy. `
+                              + `eBay said: ${r.errors[failed[0]]}`,
+                              { kind: "error" });
+                          } else {
+                            toast(made
+                              ? `Created your ${(r.created || []).join(", ")} policy — you can publish now.`
+                              : "You already had all three policies.",
+                              { kind: "success" });
+                          }
+                          load();
+                        } catch (e) {
+                          toast(e.message, { kind: "error" });
+                        } finally {
+                          setCreatingPolicies(false);
+                        }
+                      }}
+                    >
+                      {creatingPolicies ? "Creating…" : "Create my policies"}
+                    </Button>
+                    <a
+                      href={data.manage_url} target="_blank" rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 font-semibold text-blue"
+                    >
+                      Manage them on eBay <ExternalLink size={13} aria-hidden />
+                    </a>
+                  </div>
                 </div>
               )}
             </div>
@@ -804,7 +886,14 @@ function EbayAccountMirror() {
     return <p className="text-[13px] text-ink-secondary">Couldn’t load your eBay account details.</p>;
   }
 
-  const { account = {}, locations = [], programs = [], payments = {}, selected = {} } = data;
+  const {
+    account = {}, locations = [], programs = [], payments = {}, selected = {},
+    // programs_known tells "eBay said none" apart from "eBay didn't answer".
+    // Without it this panel reported an unreadable lookup as "not opted into
+    // any programs", which is the one answer that makes a seller act.
+    programs_known: programsKnown = false, privileges = null,
+  } = data;
+  const hasPolicyProgram = programs.includes("SELLING_POLICY_MANAGEMENT");
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -815,7 +904,7 @@ function EbayAccountMirror() {
           <p className="font-semibold text-ink truncate">{account.username || "Connected"}</p>
           <p className="text-[13px] text-ink-secondary truncate">
             {account.email ? `${account.email} · ` : ""}{account.marketplace}
-            {payments?.paymentsProgramStatus ? ` · Payments: ${payments.paymentsProgramStatus}` : ""}
+            {payments?.status ? ` · Payments: ${payments.status.replace(/_/g, " ").toLowerCase()}` : ""}
           </p>
         </div>
         <Button variant="ghost" size="sm" onClick={load}>
@@ -826,6 +915,39 @@ function EbayAccountMirror() {
           Seller Hub <ExternalLink aria-hidden />
         </Button>
       </div>
+
+      {/* Account health. Both of these stop a publish for a reason no listing
+          field explains — an unfinished registration, and the monthly selling
+          limit (eBay error 21919188). Seeing them here beats meeting them as a
+          rejection. Rendered only when eBay actually answered: `privileges` is
+          null when the lookup failed, and inventing "registration incomplete"
+          from that would be a scary claim we cannot stand behind. */}
+      {privileges && (!privileges.registration_complete || privileges.selling_limit) && (
+        <div className="flex flex-col gap-1.5 rounded-tile bg-warning-soft border border-warning/30 p-3 text-[13px]">
+          {!privileges.registration_complete && (
+            <p className="text-ink flex gap-2">
+              <AlertTriangle size={15} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>
+                eBay says this account’s seller registration isn’t finished.
+                Publishing will fail until it is — finish it in Seller Hub.
+              </span>
+            </p>
+          )}
+          {privileges.selling_limit && (
+            <p className="text-ink-secondary">
+              Monthly selling limit:{" "}
+              {privileges.selling_limit.quantity != null
+                ? `${privileges.selling_limit.quantity} items`
+                : "no item cap"}
+              {privileges.selling_limit.amount
+                ? ` · ${privileges.selling_limit.amount} ${privileges.selling_limit.currency || ""}`.trimEnd()
+                : ""}
+              . Publishing past it fails with “this listing would cause you to
+              exceed the amount you can list”.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-4">
         <div>
@@ -865,8 +987,18 @@ function EbayAccountMirror() {
                 <TagPill key={p} tone="neutral">{p.replace(/_/g, " ").toLowerCase()}</TagPill>
               ))}
             </div>
-          ) : (
+          ) : programsKnown ? (
             <p className="text-[13px] text-ink-secondary">Not opted into any programs.</p>
+          ) : (
+            <p className="text-[13px] text-ink-secondary">
+              Couldn’t read your programs from eBay just now.
+            </p>
+          )}
+          {programsKnown && !hasPolicyProgram && (
+            <p className="text-[13px] text-ink-secondary mt-2">
+              Business policies are off for this account, which is why the
+              shipping, payment and return dropdowns above are empty.
+            </p>
           )}
         </div>
       </div>

@@ -53,8 +53,13 @@ def test_cooldown_expires():
 
 
 def test_call_limit_error_is_explained_not_generic():
+    # No errorId: this branch is keyed on eBay's wording, and that is what the
+    # test is about. The fixture used to carry 21917053, which reads as "this
+    # is the call-limit code" — it is not, it is an expired IAF token, and
+    # `ebay_trading._failure` correctly routes it to the reconnect message.
+    # A fixture that mislabels a code is a trap for whoever reads it next.
     issues = ebay_errors.from_response(
-        '{"errors":[{"errorId":21917053,'
+        '{"errors":[{'
         '"message":"Application has exceeded the number of calls permitted."}]}')
     assert len(issues) == 1
     issue = issues[0]

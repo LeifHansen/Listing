@@ -82,6 +82,28 @@ def explain(err: dict) -> dict:
                  "what the hold is — the listing itself doesn't need editing."))
         return issue
 
+    # Codes whose wording would otherwise be captured by a text branch below.
+    # eBay's error IDs are stable; the sentences around them are not, and both
+    # of these read as something they aren't: the selling-limit message says
+    # "exceed the amount you can list", and "amount" belongs to the price
+    # branch, so a seller at their limit was told to fix a price that was fine.
+    if error_id == "21919188":
+        issue.update(target="generic",
+                     title="Your eBay selling limit is reached",
+                     fix="This listing would put you over the amount your "
+                         "account may have listed at once. Nothing is wrong "
+                         "with the listing. Ask eBay to raise the limit from "
+                         "Seller Hub → Overview → Monthly limits, or publish "
+                         "this once something else sells or ends.")
+        return issue
+    if error_id == "21919144":
+        issue.update(target="generic",
+                     title="eBay’s API rate limit was hit",
+                     fix="eBay caps how quickly listings may be added or "
+                         "revised. Nothing is wrong with this listing — wait "
+                         "a moment and publish again.")
+        return issue
+
     if has("item.country", "merchantlocation", "merchant location",
            "inventory location", "ship-from", "ship from", "location key"):
         issue.update(target="location",

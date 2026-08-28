@@ -11,6 +11,13 @@ SQLAlchemy==2.0.36
 psycopg[binary]==3.2.3
 bcrypt==4.2.1
 PyJWT==2.10.1
+
+# Encrypts the marketplace refresh tokens at rest (backend/crypto.py, imported
+# by backend/db.py -- the app cannot start without it). Declared explicitly for
+# the same reason numpy is below: pip resolves it today only as an OPTIONAL
+# extra of PyJWT/oauthlib, which nothing here requests, so a clean install had
+# every right not to have it.
+cryptography>=42.0
 boto3==1.35.99
 # Declared explicitly, not left to rembg to drag in: services/matte.py imports
 # numpy at module scope and services/images.py imports matte, so the app cannot

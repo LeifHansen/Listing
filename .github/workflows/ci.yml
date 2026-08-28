@@ -23,7 +23,7 @@ jobs:
       # stack (rembg/onnxruntime/Pillow), which these tests never touch.
       # fastapi is here because backend/auth.py imports it for Request/Response.
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
       - name: Ruff
         run: ruff check backend
       - name: Tests
@@ -146,6 +146,9 @@ jobs:
           pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
                  backend/tests/test_bulk_resume.py backend/tests/test_aspect_checkboxes.py \
                  backend/tests/test_sold_archive.py backend/tests/test_store_scale.py \
+                 backend/tests/test_ebay_reconnect_identity.py \
+                 backend/tests/test_ebay_save_path.py \
+                 backend/tests/test_ebay_optin_route.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
             echo "::error::API tests skipped in the only job that can run them"

@@ -22,7 +22,7 @@ from sqlalchemy import (DateTime, JSON, String, create_engine, delete, func,
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from . import config
+from . import config, crypto
 from .config import log
 
 _engine = None
@@ -58,7 +58,8 @@ class EbayAccount(Base):
     __tablename__ = "ebay_accounts"
 
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    refresh_token: Mapped[str] = mapped_column(String(2048), default="")
+    # Holds ciphertext (backend/crypto.py), ~1.5x the plaintext token.
+    refresh_token: Mapped[str] = mapped_column(String(4096), default="")
     ebay_username: Mapped[str] = mapped_column(String(128), default="")
     ebay_email: Mapped[str] = mapped_column(String(255), default="")
     fulfillment_policy_id: Mapped[str] = mapped_column(String(64), default="")
@@ -80,7 +81,7 @@ class MarketplaceAccount(Base):
 
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     marketplace: Mapped[str] = mapped_column(String(32), primary_key=True)
-    refresh_token: Mapped[str] = mapped_column(String(4096), default="")
+    refresh_token: Mapped[str] = mapped_column(String(8192), default="")
     external_username: Mapped[str] = mapped_column(String(128), default="")
     external_id: Mapped[str] = mapped_column(String(64), default="")
     settings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -235,6 +236,12 @@ def _get_engine():
                 "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
                 "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
                 "ALTER TABLE users ADD COLUMN prefs JSON",
+                # Encrypted tokens are roughly 1.5x their plaintext, and a
+                # silently truncated one disconnects a seller with no error.
+                # SQLite ignores VARCHAR lengths entirely, so these are a
+                # no-op there and the guard below swallows the syntax error.
+                "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
+                "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
             ):
                 try:
                     with _engine.begin() as conn:
@@ -593,7 +600,10 @@ def save_ebay_account(user_id: str, **fields) -> None:
                 s.add(acct)
             for key in _EBAY_FIELDS:
                 if key in fields and fields[key] is not None:
-                    setattr(acct, key, fields[key])
+                    value = fields[key]
+                    if key == "refresh_token":
+                        value = crypto.encrypt(value)
+                    setattr(acct, key, value)
             acct.updated_at = _now()
             s.commit()
     except Exception as exc:  # noqa: BLE001
@@ -609,7 +619,13 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
             a = s.get(EbayAccount, user_id)
             if not a:
                 return None
-            return {f: getattr(a, f) for f in _EBAY_FIELDS}
+            out = {f: getattr(a, f) for f in _EBAY_FIELDS}
+            # Rows written before backend/crypto.py existed hold plaintext and
+            # come back unchanged; they re-encrypt the next time anything
+            # saves them. Callers only ever see the plaintext, so the token
+            # cache in ebay_provider keys on the same value as before.
+            out["refresh_token"] = crypto.decrypt(out.get("refresh_token") or "")
+            return out
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_ebay_account failed: {exc}")
         return None
@@ -779,6 +795,8 @@ def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
                 if key in fields and fields[key] is not None:
                     if key == "settings":
                         acct.settings = {**(acct.settings or {}), **fields[key]}
+                    elif key == "refresh_token":
+                        acct.refresh_token = crypto.encrypt(fields[key])
                     else:
                         setattr(acct, key, fields[key])
             acct.updated_at = _now()
@@ -798,6 +816,7 @@ def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
                 return None
             out = {f: getattr(a, f) for f in _MARKETPLACE_FIELDS}
             out["settings"] = out.get("settings") or {}
+            out["refresh_token"] = crypto.decrypt(out.get("refresh_token") or "")
             return out
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_marketplace_account failed: {exc}")
