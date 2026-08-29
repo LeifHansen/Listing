@@ -20,24 +20,69 @@ from .models import Listing
 
 
 def new_session_id() -> str:
-    return uuid.uuid4().hex[:12]
+    """A fresh session id: a full uuid4 hex, not a 12-character prefix.
+
+    12 hex characters is 48 bits with no uniqueness check against the
+    database. Ids are not the security boundary — they travel in public
+    /media URLs by design, and the guard is _assert_session_owner — but a
+    birthday collision would silently merge two sellers' photos into one
+    directory, which no error would ever report.
+    """
+    return uuid.uuid4().hex
+
+
+# What a session id may contain. Leading character is alphanumeric so an id
+# can never start with "-" or "_" and be mistaken for a flag or a hidden file;
+# the rest also allows "-" and "_" because imported listings are minted as
+# "ebay-<item id>" (services/listing_sync.py) and job mirrors use "_".
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 def safe_session_name(session_id: str) -> str:
-    """The canonical name for a session id: alphanumerics only.
+    """The canonical name for a session id — which is the id itself.
 
-    This is THE naming rule for everything keyed by session — the on-disk
-    directory and the R2 object key alike. Imported listings carry ids like
-    "ebay-123", so any keyer that skips this rule ends up with split-brain
-    names (dir "ebay123" vs key ".../ebay-123/...") that no lookup ever
-    reunites. Raises ValueError when nothing usable remains."""
-    safe = "".join(c for c in session_id if c.isalnum())
-    if not safe:
+    This is THE naming rule for everything keyed by session: the on-disk
+    directory and the R2 object key alike. Split naming is how imported
+    listings' photos once became invisible to the offload sweep (dir
+    "ebay123" vs key ".../ebay-123/..."), so there is exactly one rule.
+
+    It REJECTS rather than rewrites, and that is the security property. The
+    old rule deleted every non-alphanumeric character, which made the mapping
+    lossy: "abc123" and "abc123-" were different database rows and the same
+    directory. The ownership guard asks the database and the file operation
+    asks storage, so an id with one character appended missed the row —
+    reading as "unowned, allow" — and then landed in the victim's directory.
+    Session ids are in every public /media URL, so knowing one is ordinary.
+
+    Accepting or rejecting makes the mapping injective: name(x) == name(y)
+    now implies x == y, so an alias cannot be constructed at all. Raises
+    ValueError on anything outside the accepted form.
+    """
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
         raise ValueError("invalid session id")
-    return safe
+    return session_id
+
+
+def legacy_session_name(session_id: str) -> str:
+    """The name this session's files were stored under BEFORE the rule above.
+
+    Used ONLY by the one-shot migration (scripts/migrate_session_ids.py),
+    which walks the real session ids in the database and renames each one's
+    directory and R2 prefix into the canonical name.
+
+    Deliberately NOT consulted on the request path. A read that fell back to
+    this name would reintroduce the whole bug: "3aaeb40637a1-" is a perfectly
+    valid id under the rule above, it has no directory of its own, and its
+    legacy name is "3aaeb40637a1" — so the fallback would hand the caller the
+    victim's photos again, through the front door this time. The migration is
+    safe because it is driven by ids that actually exist as rows, not by
+    whatever a request asks for.
+    """
+    return "".join(c for c in (session_id or "") if c.isalnum())
 
 
 def session_dir(session_id: str) -> Path:
+    """The one directory this session's files live in. No fallbacks."""
     return config.SESSIONS_DIR / safe_session_name(session_id)
 
 

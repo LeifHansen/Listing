@@ -8,9 +8,18 @@ import pytest
 from backend import storage
 
 
-def test_safe_session_name_strips_to_alnum():
-    assert storage.safe_session_name("ebay-168433981627") == "ebay168433981627"
+def test_safe_session_name_accepts_or_rejects_but_never_rewrites():
+    """This used to assert the opposite — that "ebay-168433981627" became
+    "ebay168433981627". Deleting characters made the mapping lossy, so two
+    different session ids (and two different database rows) shared one
+    storage directory, and the ownership guard could be walked around by
+    appending a character. See test_session_id_aliasing.py for the bypass.
+
+    The rule is now injective: an id is accepted unchanged or refused."""
+    assert storage.safe_session_name("ebay-168433981627") == "ebay-168433981627"
     assert storage.safe_session_name("3aaeb40637a1") == "3aaeb40637a1"
+    with pytest.raises(ValueError):
+        storage.safe_session_name("ebay 168433981627")
 
 
 def test_safe_session_name_rejects_empty():
@@ -120,17 +129,25 @@ def test_write_export_cannot_escape_the_exports_dir(tmp_path, monkeypatch):
     falls through to the dry run — which writes this file using the session id
     straight from the request body. Without sanitising, "../../etc/cron.d/x"
     wrote attacker-controlled JSON anywhere the process could reach, as root.
+
+    The traversal id is now REFUSED rather than sanitised into a tame name.
+    That is strictly stronger: sanitising silently accepted the request and
+    wrote a file the caller did not ask for, which is also how two different
+    session ids came to share one storage name (see
+    test_session_id_aliasing.py). Nothing is written either way, which is
+    what this test has always been about.
     """
+    import pytest
+
     from backend import config, storage
     monkeypatch.setattr(config, "EXPORTS_DIR", tmp_path / "exports")
     outside = tmp_path / "ESCAPED_ebay_payload.json"
 
-    path = storage.write_export("../../ESCAPED", "ebay_payload", {"xml": "<x/>"})
+    with pytest.raises(ValueError):
+        storage.write_export("../../ESCAPED", "ebay_payload", {"xml": "<x/>"})
 
     assert not outside.exists()
-    assert path.parent == (tmp_path / "exports")
-    assert path.name == "ESCAPED_ebay_payload.json"
-    assert path.exists()
+    assert not (tmp_path / "exports" / "ESCAPED_ebay_payload.json").exists()
 
 
 def test_write_export_rejects_an_id_with_nothing_usable_left(tmp_path, monkeypatch):
