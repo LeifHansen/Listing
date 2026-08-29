@@ -28,6 +28,14 @@ def _parse(text: str) -> list[dict]:
     return errs if isinstance(errs, list) else []
 
 
+def _clip(text: str, limit: int = 160) -> str:
+    """`text` short enough to sit in a one-line title, ending on a whole word."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+
+
 def _looks_like_weight(value: str) -> bool:
     """True for values like '3 oz', '1.5 lb', '70 lbs'."""
     parts = value.strip().lower().split()
@@ -75,7 +83,12 @@ def explain(err: dict) -> dict:
             # lets ebay_account order a real diagnosis ahead of it, and lets
             # the one-line surfaces prefer anything they have over it.
             placeholder=not explained,
-            title=("eBay won't accept this listing" if explained
+            # eBay's words go in the TITLE, not just the fix. The bulk card,
+            # the drafts strip and the publish toast all render the title and
+            # nothing else, so a reason left in `fix` is a reason the seller
+            # never sees — "eBay won't accept this listing" told them exactly
+            # as much as the placeholder it replaced.
+            title=(f"eBay’s reason: {_clip(said)}" if explained
                    else "eBay refused this listing and wouldn't say why"),
             fix=(f"eBay's reason: “{said}”" if explained else
                  "eBay sends this code without naming a cause. It is usually "
@@ -279,8 +292,14 @@ def from_trading_error(exc: Exception) -> list[dict]:
     """
     code = str(getattr(exc, "code", "") or "")
     detail = str(getattr(exc, "detail", "") or "")
+    # `said` — eBay's response-level <Message> alone — is what `explain` may
+    # quote as eBay's reason. `detail` is NOT interchangeable with it: it also
+    # carries warnings and trailing errors, so passing it here told a seller
+    # "eBay's reason: <a warning about something else>" on a rejection eBay
+    # had in fact declined to explain, and hid the real diagnosis behind it.
+    said = str(getattr(exc, "said", "") or "")
     issues = [explain({"errorId": code, "message": str(exc),
-                       "longMessage": detail})]
+                       "longMessage": said})]
     if detail and detail not in (issues[0].get("ebay_message") or ""):
         # Keep eBay's own words available to the UI even when the branch above
         # replaced them with a plainer explanation.

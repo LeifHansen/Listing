@@ -50,16 +50,24 @@ class TradingError(ValueError):
     condition (see AlreadyListedError) instead of matching on message text.
 
     `detail` is everything else eBay said about the failure: the response's
-    own <Message> element (which is where eBay puts the ACTUAL reason behind
-    its catch-all rejections — see `_failure` below) plus any errors after the
-    first. It rides along separately from `message` so callers can show the
-    seller a clean headline and still have the specifics to act on.
+    own <Message> element plus any errors after the first and any warnings.
+    It rides along separately from `message` so callers can show the seller a
+    clean headline and still have the specifics to act on.
+
+    `said` is the response's <Message> element ON ITS OWN — where eBay puts
+    the ACTUAL reason behind a catch-all rejection (see `_failure`). It is
+    kept apart from `detail` because only <Message> is authoritative about
+    WHY: `detail` also carries warnings and trailing errors, which are
+    context. A caller that reads `detail` as eBay's reason will quote a
+    warning as the cause of a rejection it had nothing to do with.
     """
 
-    def __init__(self, message: str, code: str = "", detail: str = ""):
+    def __init__(self, message: str, code: str = "", detail: str = "",
+                 said: str = ""):
         super().__init__(message)
         self.code = code
         self.detail = detail
+        self.said = said
 
 
 class AlreadyListedError(TradingError):
@@ -201,14 +209,14 @@ def _failure(call: str, root: ET.Element, errors: list[ET.Element],
     if code in ("931", "932", "16110", "21917053"):  # auth/token codes
         return TradingError(
             "eBay didn't accept the account connection — reconnect eBay "
-            "in Settings and try again.", code=code, detail=detail)
+            "in Settings and try again.", code=code, detail=detail, said=said)
     if code in _CATCH_ALL_CODES and said and len(said) <= 300:
         # eBay named the real reason — lead with it instead of the catch-all.
         # Only <Message> earns this: a trailing warning or a second error is
         # context, and promoting one of those to the headline would put words
         # in eBay's mouth about why the listing was refused.
         headline = said
-    return TradingError(headline[:300], code=code, detail=detail)
+    return TradingError(headline[:300], code=code, detail=detail, said=said)
 
 
 # --- tiny XML helpers (namespace-agnostic) ----------------------------------
