@@ -954,16 +954,39 @@ class EbayProvider:
         # ship-from ZIP from, and build_add_item omits the element rather than
         # inventing one. create_listing is what refuses a real publish without
         # it, so the preview stays an honest picture of an unconfigured app.
+        # In production this is a FAILED publish, not a successful preview.
+        #
+        # "Published" is a claim about the listing being live on eBay. Nothing
+        # was created here, so ok:true was untrue in the way that matters: the
+        # seller is told their item is listed, closes the app, and finds out
+        # later that it never was. The rendered XML and the export path made
+        # it worse rather than better — neither is something a seller can act
+        # on, and the path describes the server's own filesystem.
+        #
+        # Outside production the payload preview stays, because it is a real
+        # development tool: the only way to see what a publish would send
+        # without connecting an account.
+        message = ("Connect your eBay account in Settings to publish. "
+                   "Nothing was listed.")
+        if config.EBAY_ENV == "production":
+            return PublishOutcome(
+                ok=False, status="draft", message=message,
+                issues=[{"target": "account", "level": "error",
+                         "title": "eBay isn't connected",
+                         "fix": "Connect eBay in Settings, then publish again."}],
+                raw={"dry_run": False, "error": True, "mode": "live",
+                     "message": message})
+
         payload = {"call": call, "xml": body, "mode": "live"}
         export_path = storage.write_export(ctx.session_id, "ebay_payload", payload)
-        message = ("No eBay account connected — generated the "
-                   f"{call} request instead of publishing. Connect eBay in "
-                   "Settings to go live. (Server-side eBay credentials no "
-                   "longer publish on their own; a listing is always created "
-                   "on a connected seller's account.)")
+        dev_message = ("No eBay account connected — generated the "
+                       f"{call} request instead of publishing. Connect eBay in "
+                       "Settings to go live. (Server-side eBay credentials no "
+                       "longer publish on their own; a listing is always created "
+                       "on a connected seller's account.)")
         return PublishOutcome(
-            ok=True, dry_run=True, status="dry_run", message=message,
-            raw={"dry_run": True, "mode": "live", "message": message,
+            ok=True, dry_run=True, status="dry_run", message=dev_message,
+            raw={"dry_run": True, "mode": "live", "message": dev_message,
                  "export_path": str(export_path), "payload": payload})
 
 

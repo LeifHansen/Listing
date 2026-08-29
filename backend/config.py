@@ -460,6 +460,16 @@ EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.
 # GIT_SHA build arg. Empty for a local run or a build that didn't pass it.
 BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
 
+# Gates /api/admin/diagnostics — the deployment detail that used to be served
+# anonymously from /api/health (missing env var names, the R2 bucket, free
+# disk, Stripe mode, and raw driver exception text carrying the Neon host and
+# role or the R2 account id).
+#
+# Unset means the endpoint is CLOSED, not open. An absent secret has to fail
+# closed or a deploy that forgets to set it silently republishes everything
+# this was moved to protect.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",

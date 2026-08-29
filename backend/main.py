@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import shutil
 import threading
 import time
@@ -394,6 +395,43 @@ def _rate_limit_auth(request: Request, bucket: str) -> None:
 
 @app.get("/api/health")
 def health() -> dict:
+    """Liveness, and nothing else.
+
+    This is anonymous and unrate-limited, so what it returns is published to
+    anyone who asks. It used to answer with 26 operator-diagnostic keys: the
+    running commit, the NAMES of unset environment variables, the R2 bucket
+    and URL mode, free disk, which Stripe mode the keys were in, config
+    warnings naming near-miss secret names, and the raw exception text from
+    the database and object store -- which carries the Neon host and role on
+    an auth failure and the R2 account id in its endpoint.
+
+    What stays is liveness plus the handful of FEATURE-availability booleans
+    the UI genuinely reads (it hides the AI banner and the category lookups on
+    them). Those say what the app can do, which a seller is entitled to know;
+    they name no secret, no host, no bucket and no environment variable. The
+    rest moved to /api/admin/diagnostics, which is the same data behind a
+    token.
+    """
+    return {
+        "ok": True,
+        # The commit this image was built from. Deliberately kept public: the
+        # deploy gate, deploy.sh and the health-watch alarm all poll it to
+        # prove production is running what was shipped (a poisoned builder
+        # cache has served an older image here before), and on a public repo
+        # a commit sha is not a secret. It is the one operator-ish field whose
+        # value outweighs its exposure.
+        "build": config.BUILD_SHA or "unknown",
+        # Read by the UI: App.jsx's setup banner, useListingForm's category
+        # lookups, ShopMode. Capability, not configuration.
+        "anthropic_configured": config.anthropic_ready(),
+        "ebay_configured": config.ebay_ready(),
+        "taxonomy_configured": config.taxonomy_ready(),
+    }
+
+
+def _diagnostics() -> dict:
+    """Everything an operator needs to tell "not configured" apart from
+    "misconfigured". Served only from the admin route above."""
     return {
         "ok": True,
         # The commit actually running. A deploy can report success while the
@@ -444,6 +482,27 @@ def health() -> dict:
         "config_warnings": config.config_warnings(),
         "db": db.db_status(),
     }
+
+
+def _require_admin(request: Request) -> None:
+    """Fail CLOSED: an unset ADMIN_TOKEN denies rather than admits.
+
+    An absent secret reading as "no check required" is exactly how this
+    endpoint would end up public again on a deploy that forgot to set it --
+    which is the state it is being moved out of.
+    """
+    expected = (config.ADMIN_TOKEN or "").strip()
+    supplied = (request.headers.get("x-admin-token") or "").strip()
+    if not expected or not supplied or not secrets.compare_digest(supplied,
+                                                                 expected):
+        raise HTTPException(401, "Not authorised.")
+
+
+@app.get("/api/admin/diagnostics")
+def admin_diagnostics(request: Request) -> dict:
+    """The deployment detail /api/health used to hand out anonymously."""
+    _require_admin(request)
+    return _diagnostics()
 
 
 # Disk below this and photo work will start failing mid-upload. Reporting it
