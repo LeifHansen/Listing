@@ -57,7 +57,7 @@ Fast backend loop (skips the slow image suites):
   --ignore=backend/tests/test_bg_holes.py --ignore=backend/tests/test_dark_backdrop.py
 ```
 
-Currently **899 passed** on that subset, Ruff clean.
+Currently **922 passed** on that subset, Ruff clean. Full suite: **1100+ passed, the 2 environmental failures above**.
 
 ## Done — all 8 P0 release blockers
 
@@ -76,7 +76,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | P0-07 publish idempotency | `57eed10` | Guarded by `InventoryTrackingNumber`, which is not an eBay `ItemType` element — ignored on write, and the `GetItem` lookup built on it could never succeed. Now `SKU` + `InventoryTrackingMethod=SKU`. Also **added 488** (the real duplicate-UUID code) and **removed 21916884/21916885**, which are eBay's item-*condition* codes — a fixable condition rejection was being reported as "already published". The audit missed this one. |
 | P0-08 three-way sync | `66fcb16` | Inbound refused newer remote content; outbound sent the whole payload. A price edit overwrote a title fixed in Seller Hub. Added `remote_shadow` as the base, conflict records, and minimal revise payloads. |
 
-### Two traps already hit and fixed — do not reintroduce
+### Five traps already hit and fixed — do not reintroduce
 
 1. **The read-side legacy fallback (P0-01).** A first draft of `session_dir`
    fell back to the old stripped name when the canonical directory was
@@ -93,6 +93,16 @@ encoded wrong behaviour were corrected in place, each saying why.
    no shadow existed. Every record in the database has no shadow, so that
    would have overwritten every seller's local work on the first sync after
    deploy. An existing test caught it. With no shadow, nothing is reconciled.
+4. **Minimal revise needs every writer to declare itself (P0-08).** "Lower
+   prices" sets `listing.price` and publishes with no save in between, so
+   there is no diff to find — it went out as an EMPTY revise, telling eBay
+   nothing while reporting success. Fixed in `dc8d195`/`a8d8f0e`; any new
+   path that mutates a listing and then publishes must call `mark_dirty`.
+5. **A test that imports `backend.main` runs in exactly one CI job.** The
+   fast `checks` job omits the heavy stack, so such a file must
+   `importorskip` AND be listed in the smoke job's "API tests" step, which
+   fails on a skip. The guard alone would have left the session-alias
+   authorization tests running nowhere.
 
 ## Not done — agenda, in priority order
 
@@ -110,34 +120,22 @@ encoded wrong behaviour were corrected in place, each saying why.
       `no_match`.
 - [ ] Add `EBAY_VERIFICATION_TOKEN` checks to the deploy gate — the deletion
       endpoint's GET challenge 503s without it.
+- [ ] **Set `ADMIN_TOKEN`** in production, or `/api/admin/diagnostics` stays
+      closed (deliberately — it fails closed). Documented in `.env.example`.
+- [ ] Decide whether the Promoted Listings default flip (P1-06) is wanted.
+      It follows the audit and the remediation prompt, but reverses a
+      product choice made in response to seller complaints.
 
-### 2. P1 items verified as still present (evidence gathered, not yet fixed)
+### 2. P1 items — three closed, the rest open
 
-- [ ] **P1-06 — Promoted Listings defaults to on.**
-      `backend/marketplaces/ebay_provider.py` `auto_promote_enabled`: returns
-      `True` when the preference is absent *and* when the prefs read raises.
-      This enrolls sellers in a fee-bearing programme (10% default ad rate)
-      without consent, and treats an outage as consent. Fix: default off,
-      require explicit durable opt-in, record consent version/actor/timestamp,
-      and make a read failure block promotion rather than enable it.
-      **Note this reverses a deliberate product choice** (the docstring says
-      sellers asked for on-by-default), so flag it to the owner rather than
-      changing it silently. The outage path is indefensible either way.
-- [ ] **P1-09 — operator diagnostics leak; dry run reports success.**
-      Anonymous `GET /api/health` returns 26 diagnostic keys including the
-      build SHA, unset env-var *names*, R2 bucket name, raw R2/DB exception
-      text (which embeds the Neon host and role), free disk, and Stripe mode.
-      Separately, an unconnected user can "publish" and receive `ok: true`
-      with `dry_run`, the raw Trading XML, and a server filesystem path. Fix:
-      minimal public liveness endpoint, diagnostics behind admin auth, and a
-      production live publish that fails with "Connect eBay" instead of
-      succeeding.
-- [ ] **P1-12 — `GET /api/listings/{id}` performs writes.** For an
-      eBay-sourced listing it downloads up to 24 photos inline, writes up to
-      48 files plus a manifest, starts an R2 upload thread, and writes the DB
-      row — on a plain read. `backend/storage.py` states the rule this
-      violates. Fix: side-effect-free GET, remote photos read-only, and an
-      explicit "Prepare for editing" job.
+| P1 | Commit | What it was |
+| --- | --- | --- |
+| P1-06 promotion consent | `97122c7` | Promoted Listings (COST_PER_SALE, 10% default rate) was enabled when the preference was ABSENT and when the prefs read RAISED — so silence and a database outage both counted as agreeing to a fee. Now off unless explicitly on. **This reverses a deliberate product choice** (the old default was on because sellers reported publishes landing unpromoted); the commit message says so. The UI mirrored the old default independently and was changed with it. |
+| P1-09 public surface | `e2ca586` | Anonymous `/api/health` returned 26 operator keys including raw DB/R2 exception text (Neon host and role, R2 account id). Moved to `/api/admin/diagnostics` behind `ADMIN_TOKEN`, which **fails closed**. `build` deliberately stays public — deploy.yml, deploy.sh and health-watch.yml all poll it. Also: an unconnected production publish no longer answers `ok: true` with the Trading XML and a server path. |
+| P1-12 side-effect-free GET | `a8d8f0e` | A plain read downloaded up to 24 photos, wrote up to 48 files, started an R2 upload and wrote the DB row. Now `POST /api/listings/{id}/prepare-for-editing`, called by the frontend when the seller opens the editor. |
+
+Still open:
+
 - [ ] P1-01 whole-store sync is N+1, automatic per browser session, and
       quota-unsafe (2,500 GetItem calls against a 5,000/day allowance).
 - [ ] P1-02 jobs/locks/cooldowns are process-local and non-resumable.
