@@ -30,8 +30,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore,
-               ratelimit, storage)
+from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
+               objstore, ratelimit, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
@@ -83,6 +83,26 @@ app.add_middleware(
     allow_headers=["*"],
     max_age=86400,
 )
+
+
+@app.exception_handler(errors.StorageUnavailable)
+async def _storage_unavailable(request: Request, exc: errors.StorageUnavailable):
+    """A write that did not commit answers 503, everywhere, automatically.
+
+    Handled once here rather than at each call site so a command added later
+    cannot forget to — the failure mode this replaces was precisely a route
+    that reported success because nobody remembered to check.
+
+    503 and not 4xx: the seller did nothing wrong and retrying is the right
+    next move. A 404 would send them to reconnect an account that is fine.
+    """
+    log.warning("storage unavailable on %s %s: %s",
+                request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc) or "Storage is unavailable right now — "
+                                       "please try again in a moment."},
+    )
 
 
 class _DropDeletionAcks(logging.Filter):
@@ -1317,6 +1337,16 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
     except httpx.RequestError as exc:
         log.warning("ebay: connect could not reach eBay for uid=%s: %s", uid, exc)
         return _finish_connect(request, "/?ebay=error&why=network")
+    except db.StorageUnavailable as exc:
+        # eBay authorised, but the connection did not commit. Saying
+        # "connected" here is the worst outcome available: the grant is real,
+        # so the seller has no reason to doubt it, and every later publish
+        # fails on a screen that says they are connected. Named separately
+        # from the catch-all below so the UI can say "try again" rather than
+        # "something went wrong".
+        log.warning("ebay: connect authorised but did not persist for uid=%s: %s",
+                    uid, exc)
+        return _finish_connect(request, "/?ebay=error&why=storage")
     except Exception:  # noqa: BLE001
         # Anything left — a DB write, a bug. Without the traceback there is
         # nothing to tell these apart afterwards, and a connect that won't

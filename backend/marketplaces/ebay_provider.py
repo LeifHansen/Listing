@@ -804,7 +804,11 @@ class EbayProvider:
                     creds["access_token"], creds["ship_from_postal"])
                 if key:
                     creds["merchant_location_key"] = key
-                    db.save_ebay_account(creds["_uid"], merchant_location_key=key)
+                    # Remembering the key saves a lookup next time; the
+                    # publish below works without it, and the seller is told
+                    # nothing about it either way.
+                    db.save_ebay_account_best_effort(
+                        creds["_uid"], merchant_location_key=key)
             except Exception as exc:  # noqa: BLE001 - don't block publish on this
                 log.warning(f"ebay: location re-ensure failed: {exc}")
         # NEW live listings go out through the Trading API, not the Inventory

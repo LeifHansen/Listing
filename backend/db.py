@@ -24,6 +24,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from . import config, crypto
 from .config import log
+# Re-exported so callers can keep saying db.StorageUnavailable. It is DEFINED
+# in errors.py because reloading this module would otherwise mint a new class
+# and silently unbind main.py's exception handler — see errors.py.
+from .errors import StorageUnavailable  # noqa: F401
 
 _engine = None
 _initialized = False
@@ -596,10 +600,26 @@ _EBAY_FIELDS = (
 
 
 def save_ebay_account(user_id: str, **fields) -> None:
-    """Create/update a user's eBay connection. Never raises."""
+    """Create/update a user's eBay connection.
+
+    Raises StorageUnavailable when the write did not commit. That is the
+    point: this used to swallow every failure and return None, which a caller
+    cannot tell from a clean commit — so the OAuth callback redirected to
+    "eBay connected" and Settings answered {"ok": true} while nothing had
+    been stored. The seller then believes the work is done and stops
+    checking, and the next publish fails for a reason that makes no sense on
+    a screen that says connected.
+
+    Strict is the DEFAULT so that a call site nobody thought about gets the
+    safe behaviour. Writes that are genuinely optional — caching something
+    eBay can be asked for again — call save_ebay_account_best_effort, which
+    says so in its name.
+    """
     try:
         eng = _get_engine()
         if eng is None:
+            # No database configured at all is this app's supported
+            # single-box mode, not a failure to report.
             return
         with Session(eng) as s:
             acct = s.get(EbayAccount, user_id)
@@ -614,8 +634,25 @@ def save_ebay_account(user_id: str, **fields) -> None:
                     setattr(acct, key, value)
             acct.updated_at = _now()
             s.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - re-raised as a typed failure
         log.warning(f"db: save_ebay_account failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't save your eBay connection just now.") from exc
+
+
+def save_ebay_account_best_effort(user_id: str, **fields) -> bool:
+    """save_ebay_account for writes that may be lost without harming anyone.
+
+    Returns True when the write committed (or there is no database to write
+    to) and False when it failed. Use ONLY where the value can be recomputed
+    or re-fetched — a cached ship-from ZIP, a remembered inventory-location
+    key. Anything the seller is told about must use the strict command.
+    """
+    try:
+        save_ebay_account(user_id, **fields)
+        return True
+    except StorageUnavailable:
+        return False
 
 
 def get_ebay_account(user_id: str) -> Optional[dict]:

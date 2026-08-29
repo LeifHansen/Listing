@@ -647,10 +647,13 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
         postal = ebay_auth.ship_from_postal(
             token, c.get("merchant_location_key") or "")
         if postal and c.get("_uid"):
-            try:
-                db.save_ebay_account(c["_uid"], ship_from_postal=postal)
-            except Exception as exc:  # noqa: BLE001 - caching is optional
-                log.info("sync: couldn't save the resolved ship-from ZIP: %s", exc)
+            # Genuinely optional: eBay can be asked for the ZIP again next
+            # publish, and losing the cache costs one extra lookup. Nothing
+            # is reported to the seller either way, so this is one of the
+            # few writes allowed to fail quietly.
+            if not db.save_ebay_account_best_effort(c["_uid"],
+                                                    ship_from_postal=postal):
+                log.info("sync: couldn't cache the resolved ship-from ZIP")
     try:
         res = ebay_trading.create_listing(
             token, listing, image_urls,
