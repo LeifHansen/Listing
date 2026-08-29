@@ -67,19 +67,25 @@ def explain(err: dict) -> dict:
         said = long_message.strip()
         generic = ("cannot be listed or modified" in said.lower()
                    or "improper words" in said.lower())
+        explained = bool(said) and not generic
         issue.update(
             target="account",
-            title=("eBay won't accept this listing" if said and not generic
-                   else "eBay is blocking new listings on this account"),
-            fix=(f"eBay's reason: “{said}”" if said and not generic else
-                 "eBay returns this when the account itself can't list right "
-                 "now — most often a seller account that hasn't finished "
-                 "registration or payments setup, a listing limit or hold, or "
-                 "a verification eBay is waiting on. It is only sometimes "
-                 "about the words in the listing. Open eBay → My eBay → "
-                 "Selling and clear anything flagged there, then publish "
-                 "again. If nothing is flagged, eBay Customer Service can say "
-                 "what the hold is — the listing itself doesn't need editing."))
+            # A 240 eBay declined to explain is a PLACEHOLDER, not a finding:
+            # it says a publish stopped and nothing more. Marking it as one
+            # lets ebay_account order a real diagnosis ahead of it, and lets
+            # the one-line surfaces prefer anything they have over it.
+            placeholder=not explained,
+            title=("eBay won't accept this listing" if explained
+                   else "eBay refused this listing and wouldn't say why"),
+            fix=(f"eBay's reason: “{said}”" if explained else
+                 "eBay sends this code without naming a cause. It is usually "
+                 "the account rather than the listing — a seller account that "
+                 "hasn't finished registration or payments setup, a listing "
+                 "limit, or a verification eBay is waiting on — and only "
+                 "sometimes the words in the title or description. Open eBay "
+                 "→ My eBay → Selling and clear anything flagged there, then "
+                 "publish again. If nothing is flagged, eBay Customer Service "
+                 "can say what the hold is."))
         return issue
 
     # Codes whose wording would otherwise be captured by a text branch below.

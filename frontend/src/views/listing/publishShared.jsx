@@ -86,14 +86,31 @@ export async function publishListing(id, listing, effectiveTargets, mode = "live
 // Leading with res.message threw it away and sent the seller editing titles
 // that were never the problem. Prefer what the app worked out; fall back to
 // eBay's words only when there is nothing better to say.
+//
+// A 240 eBay declined to explain arrives flagged `placeholder` -- "the publish
+// stopped and nobody said why". It is an account-target issue like any other,
+// so it used to win this pick outright and hide the diagnosis behind it: seven
+// drafts, seven identical "eBay is blocking new listings on this account", and
+// the sentence naming the actual hold never on screen. It now goes last.
 export function blockedReason(res, fallback) {
   const issues = [
     ...(res?.issues || []),
     ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),
   ];
   const errors = issues.filter((i) => i && i.level !== "warn" && i.title);
-  const best = errors.find((i) => i.target && i.target !== "generic") || errors[0];
+  const named = errors.filter((i) => !i.placeholder);
+  const best = named.find((i) => i.target && i.target !== "generic")
+    || named[0] || errors[0];
   return best?.title || res?.message || fallback;
+}
+
+// Which field the editor should jump to and flag after a failed publish.
+// Same ordering rule as blockedReason: a placeholder names no field worth
+// jumping to, so it never wins over an issue that does.
+export function fixTargetFor(issues) {
+  const errors = (issues || []).filter((i) => i && i.level !== "warn");
+  const usable = (i) => i.target && i.target !== "generic" && i.target !== "account";
+  return (errors.find((i) => !i.placeholder && usable(i)) || {}).target || null;
 }
 
 // "Post to" toggle chips — one per connected marketplace. Render only when

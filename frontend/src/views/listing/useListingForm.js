@@ -4,7 +4,9 @@ import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
-import { publishListing, usePublishTargets, blockedReason } from "./publishShared";
+import {
+  publishListing, usePublishTargets, blockedReason, fixTargetFor,
+} from "./publishShared";
 import { ebayBlockers, weightOz } from "./blockers";
 import {
   confirmSpecificRows, specificValues, toggleSpecificValue as toggleValue,
@@ -486,8 +488,8 @@ export function useListingForm() {
           ? `Not quite ready — ${errors.length} thing${errors.length === 1 ? "" : "s"} to fix before publishing:`
           : "All checks passed — this listing is ready to publish. 🎉",
       });
-      const first = errors.find((x) => x.target && x.target !== "generic");
-      if (first) setFixTarget(first.target);
+      const first = fixTargetFor(errors);
+      if (first) setFixTarget(first);
     } catch (e) {
       toast(`Couldn't run the check: ${e.message}`, { kind: "error" });
     } finally {
@@ -526,8 +528,8 @@ export function useListingForm() {
         savedClean = mode === "draft" && !result.published && !issues.length
           && !Object.values(result.results || {}).some((res) => !res.ok);
         if (!result.published && issues.length) {
-          const first = issues.find((x) => x.target && x.target !== "generic");
-          if (first) setFixTarget(first.target);
+          const first = fixTargetFor(issues);
+          if (first) setFixTarget(first);
         }
       } else {
         // Live success swaps in the PublishedScreen; draft saves get a toast
@@ -539,8 +541,8 @@ export function useListingForm() {
           savedClean = true;
         }
         if (result.error && result.issues && result.issues.length) {
-          const first = result.issues.find((x) => x.target && x.target !== "generic");
-          if (first) setFixTarget(first.target);
+          const first = fixTargetFor(result.issues);
+          if (first) setFixTarget(first);
         }
       }
       // A live publish that did NOT go live has to say so out loud. Without

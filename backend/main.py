@@ -469,20 +469,79 @@ def _category_query(listing) -> str:
     return " ".join(p for p in parts if p).strip()
 
 
+def _category_queries(listing) -> list[str]:
+    """The queries to try, best first, for a numeric eBay category id.
+
+    One query used to be the whole attempt: brand + title + the AI's category
+    path. eBay matches that string as a whole, and a long one carrying model
+    numbers, adjectives and a path at once is exactly the kind that comes back
+    with NOTHING — which is how a draft ends up showing a perfectly good
+    category path beside an empty ID box, and blocked from publishing by a
+    field the seller never filled in by hand.
+
+    So: narrow the query rather than give up. The AI's own path is the last
+    resort and a good one — it is a category description with none of the
+    item's noise in it.
+    """
+    path = (listing.category_suggestion or "").strip()
+    leaf = path.split(">")[-1].strip()
+    seen, out = set(), []
+    for q in (_category_query(listing), (listing.title or "").strip(), path, leaf):
+        key = " ".join(q.lower().split())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(q)
+    return out
+
+
 def _resolve_category(listing: Listing) -> None:
     """Auto-resolve a numeric eBay category id for a fresh AI draft (single,
-    async, and bulk identify all need this). Best-effort — identify must never
-    fail on a taxonomy problem."""
-    if not config.taxonomy_ready() or listing.category_id:
+    async, and bulk identify all need this).
+
+    Best-effort — identify must never fail on a taxonomy problem — but never
+    silent again. This swallowed every exception with a bare `pass`, so a
+    misconfigured or unreachable Taxonomy API produced drafts with no category
+    id, no log line, and no way to tell that apart from "eBay had no match".
+    Both leave the seller stuck at the same blocked publish, and they have
+    opposite fixes.
+    """
+    if listing.category_id:
         return
-    try:
-        best = taxonomy.best_category_id(_category_query(listing))
+    if not config.taxonomy_ready():
+        log.warning("category: no id resolved — the Taxonomy API needs "
+                    "EBAY_CLIENT_ID/EBAY_CLIENT_SECRET, which aren't set")
+        return _needs_a_category(listing)
+    for query in _category_queries(listing):
+        try:
+            best = taxonomy.best_category_id(query)
+        except Exception as exc:  # noqa: BLE001 - never block identify on this
+            log.warning("category: eBay's Taxonomy API failed for %r: %s: %s",
+                        query[:120], type(exc).__name__, exc)
+            return _needs_a_category(listing)
         if best.get("category_id"):
             listing.category_id = best["category_id"]
             if best.get("path"):
                 listing.category_suggestion = best["path"]
-    except Exception:  # noqa: BLE001 - never block identify on taxonomy
-        pass
+            return
+        log.info("category: no eBay match for %r", query[:120])
+    log.warning("category: eBay matched no category for %r — the draft goes "
+                "out without an id and can't publish until one is picked",
+                (listing.title or "")[:80])
+    _needs_a_category(listing)
+
+
+def _needs_a_category(listing: Listing) -> None:
+    """Say on the draft itself that its category still needs picking.
+
+    A draft without a category id cannot publish, and until now nothing said
+    so until the seller pressed Publish and met a blocker on a field they had
+    never been asked to fill — beside a Category box that looked perfectly
+    filled in, because the AI's path was in it. missing_info is the list the
+    editor already shows as "things to check", which is exactly what this is.
+    """
+    note = "eBay category — we couldn't match one; pick it from the suggestions"
+    if not any("ebay category" in m.lower() for m in listing.missing_info):
+        listing.missing_info = [*listing.missing_info, note]
 
 
 def _tag_text_for(paths: list, aspects: list[dict]) -> str:
@@ -1525,6 +1584,90 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
         out["ok"] = out["ok"] and not any(
             preflight.errors_only(v) for v in by.values())
     return out
+
+
+@app.post("/api/ebay/diagnose-block")
+def ebay_diagnose_block(req: PublishRequest, request: Request) -> dict:
+    """Why is eBay refusing to list? Every question we can ask, answered raw.
+
+    Error 240 names no cause, so a seller whose listings all fail has nothing
+    to act on and no way to hand anyone evidence. This runs the whole
+    diagnosis on demand — no publish, nothing created:
+
+      * payments-program status and selling privileges (the account answers);
+      * a dry run of THIS draft through eBay's Verify call, which returns the
+        exact error the real publish would have hit, warnings included;
+      * the same dry run with plain wording, which is what separates "your
+        account is held" from "eBay dislikes the words in this listing".
+
+    Everything eBay said comes back verbatim under `ebay`, so the answer can
+    be read here, quoted to eBay Customer Service, or pasted into a bug report.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "eBay is not connected for this account.")
+    _assert_session_owner(req.session_id, request)
+    session_id, listing = req.session_id, req.listing
+    out: dict = {"env": config.EBAY_ENV,
+                 "ebay_username": creds.get("ebay_username") or "",
+                 "checks": {}, "ebay": {}}
+
+    try:
+        program = ebay_auth.fetch_payments_program(creds["access_token"])
+        out["checks"]["payments_program"] = program
+    except Exception as exc:  # noqa: BLE001 - report the failure, don't raise
+        out["checks"]["payments_program"] = {"error": _ebay_error_text(exc)}
+    out["checks"]["privileges"] = ebay_auth.fetch_privileges(creds["access_token"])
+    programs = ebay_auth.opted_in_programs(creds["access_token"])
+    out["checks"]["opted_in_programs"] = sorted(programs) if programs else programs
+
+    verify = listing_sync.verifier(
+        creds["access_token"],
+        ebay.image_urls_for(session_id, listing, _base_url(request)), creds)
+    if verify is None:
+        out["ebay"]["verify"] = {
+            "ran": False,
+            "why": ("No ship-from ZIP is saved, and eBay won't check a listing "
+                    "without one — set it in Settings → Listing settings."),
+        }
+        return out
+    out["ebay"]["verify"] = _verify_report(verify, listing)
+    out["ebay"]["verify_plain_wording"] = _verify_report(
+        verify, ebay_account.plain_wording(listing))
+    accepted_plain = out["ebay"]["verify_plain_wording"]["accepted"]
+    refused_real = not out["ebay"]["verify"]["accepted"]
+    out["verdict"] = (
+        "eBay accepts this listing as it stands." if not refused_real else
+        "eBay refuses this listing but accepts the same one with plain "
+        "wording — the words are the cause, not the account."
+        if accepted_plain else
+        "eBay refuses this listing AND the same listing with plain wording — "
+        "the hold is on the account, not on anything in the listing.")
+    return out
+
+
+def _ebay_error_text(exc: Exception) -> str:
+    """One line naming what eBay said, HTTP body included where there is one."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        return f"{resp.status_code}: {str(getattr(resp, 'text', ''))[:400]}"
+    return f"{type(exc).__name__}: {exc}"[:400]
+
+
+def _verify_report(verify, listing) -> dict:
+    """One dry run, reported without interpretation."""
+    try:
+        verify(listing)
+    except Exception as exc:  # noqa: BLE001 - the answer IS the exception
+        return {"ran": True, "accepted": False,
+                "title": (listing.title or "")[:80],
+                "error_code": str(getattr(exc, "code", "") or ""),
+                "message": str(exc)[:600],
+                "detail": str(getattr(exc, "detail", "") or "")[:600]}
+    return {"ran": True, "accepted": True, "title": (listing.title or "")[:80]}
 
 
 @app.post("/api/ebay/opt-in-policies")
@@ -2865,6 +3008,8 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
             "error": None, "items": [], "total_items": 0, "current": 0,
             "total_photos": record.get("total_photos") or 0,
             "resumed": True,
+            # Public: the queue's progress text says what is actually running.
+            "remove_bg": strip_bg,
             "_staging_id": staging, "_strip_bg": strip_bg,
             "_resumes": resumes + 1,
         }, uid=uid)
@@ -3164,6 +3309,9 @@ async def bulk_upload(
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
+        # Public: the queue's progress text claimed backgrounds were being
+        # removed on every batch, including the ones that never asked for it.
+        "remove_bg": strip_bg,
         # Mirrored (see jobstore.MIRROR_FIELDS) so a restart can pick this
         # batch back up instead of throwing away the photo work it finished.
         "_staging_id": staging_id, "_strip_bg": strip_bg, "_resumes": 0,

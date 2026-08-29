@@ -104,7 +104,22 @@ def test_240_is_not_reported_as_a_title_problem():
 def test_240_points_at_the_account():
     issue = ebay_errors.explain({"errorId": "240", "message": E240})
     assert issue["target"] == "account"
-    assert "account" in issue["title"].lower()
+    assert "account" in issue["fix"].lower()
+
+
+def test_an_unexplained_240_is_marked_as_a_placeholder():
+    """It reports that a publish stopped and names no cause — so it must not
+    outrank a diagnosis in the surfaces that show a single line."""
+    issue = ebay_errors.explain({"errorId": "240", "message": E240})
+    assert issue["placeholder"] is True
+
+
+def test_a_240_ebay_explained_is_not_a_placeholder():
+    issue = ebay_errors.explain(
+        {"errorId": "240", "message": E240,
+         "longMessage": "Your account is restricted from listing."})
+    assert issue.get("placeholder") is False
+    assert "restricted" in issue["fix"]
 
 
 def test_240_is_recognised_from_the_wording_alone():
@@ -274,10 +289,11 @@ def test_a_failed_payments_check_no_longer_skips_the_rest(monkeypatch):
 
 
 def test_unreadable_privileges_add_nothing(monkeypatch):
+    """Nothing was learned, so nothing may be claimed: the seller is left with
+    eBay's own unexplained rejection and no invented cause beside it."""
     issues = ebay_account.publish_block_issues(
         _blocked(), CREDS, payments=OK_PAYMENTS, privileges=NO_PRIV)
-    assert all(i.get("target") != "account" or "eBay is blocking" in i["title"]
-               or "won't accept" in i["title"] for i in issues)
+    assert [i.get("placeholder") for i in issues] == [True]
 
 
 def test_the_original_rejection_always_survives():
@@ -287,3 +303,245 @@ def test_the_original_rejection_always_survives():
         privileges=lambda _t: {"registration_complete": False,
                                "selling_limit": None})
     assert any(i.get("error_id") == "240" for i in issues)
+
+
+def test_a_named_cause_leads_the_unexplained_rejection():
+    """The bulk card, the drafts strip and the publish toast all show ONE
+    line, and they show the first issue. With eBay's cause-less 240 first,
+    every one of them said "eBay refused this listing and wouldn't say why"
+    while the sentence naming the actual hold sat underneath, unread — which
+    is precisely what a seller staring at seven identical failures reported.
+    """
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, payments=lambda _t: {"status": "NOT_OPTED_IN"},
+        privileges=NO_PRIV)
+    assert "payments setup" in issues[0]["title"]
+    assert issues[-1]["placeholder"] is True
+
+
+# --- the probe: is it the account, or is it this listing? -------------------
+#
+# The account APIs answer two of error 240's four causes. When they come up
+# empty the seller is still where they started, so eBay is asked the one
+# question that separates the rest: it re-checks the same listing with plain
+# wording, through a Verify call that creates nothing.
+
+class _Draft:
+    """The parts of a Listing this probe touches."""
+
+    def __init__(self, title="Royal Stafford Sweetpea Teacup", description="Lovely."):
+        self.title = title
+        self.description = description
+
+    def model_copy(self, update):
+        return _Draft(update.get("title", self.title),
+                      update.get("description", self.description))
+
+
+def _refusing(*, plain: bool, real: bool = True):
+    """A verify() that refuses with a 240 — `real` for the listing's own
+    wording, `plain` for the neutral rewrite."""
+    def verify(candidate):
+        blocked = plain if candidate.title == ebay_account.NEUTRAL_TITLE else real
+        if blocked:
+            raise ebay_trading.TradingError(E240, code="240")
+    return verify
+
+
+@pytest.fixture(autouse=True)
+def _clean_probe_cache():
+    ebay_account.forget_verified()
+    yield
+    ebay_account.forget_verified()
+
+
+def test_a_plain_listing_refused_too_means_the_account_is_held():
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=_refusing(plain=True),
+        payments=OK_PAYMENTS, privileges=NO_PRIV)
+    assert "refusing every listing from this account" in issues[0]["title"]
+    assert issues[0]["target"] == "account"
+
+
+def test_a_plain_listing_accepted_means_the_title_is_the_cause():
+    """eBay took the same listing with a plain title and refused it with this
+    one. That is the answer error 240 refuses to give — and it is the opposite
+    of the advice the app hands out when it assumes an account hold."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=_refusing(plain=False),
+        payments=OK_PAYMENTS, privileges=NO_PRIV)
+    assert issues[0]["target"] == "title"
+    assert "title" in issues[0]["title"]
+
+
+def test_a_listing_accepted_with_its_own_title_points_at_the_description():
+    def verify(candidate):
+        if candidate.description != ebay_account.NEUTRAL_DESCRIPTION:
+            raise ebay_trading.TradingError(E240, code="240")
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=verify,
+        payments=OK_PAYMENTS, privileges=NO_PRIV)
+    assert issues[0]["target"] == "description"
+
+
+def test_an_inconclusive_probe_claims_nothing():
+    """eBay answered with something else entirely (a validation error, an
+    outage, a throttle). A probe that did not settle the question must leave
+    the seller with the rejection alone rather than a guess."""
+    def verify(_candidate):
+        raise ebay_trading.TradingError("Category is invalid.", code="10007")
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=verify,
+        payments=OK_PAYMENTS, privileges=NO_PRIV)
+    assert [i.get("placeholder") for i in issues] == [True]
+
+
+def test_the_probe_is_skipped_once_a_cause_is_already_named():
+    """A diagnosis in hand is worth more than a dry run, and the dry run is
+    two more calls against eBay on a path that is already failing."""
+    def verify(_candidate):
+        raise AssertionError("must not be called")
+    ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=verify,
+        payments=lambda _t: {"status": "NOT_OPTED_IN"}, privileges=NO_PRIV)
+
+
+def test_no_listing_or_no_verifier_means_no_probe():
+    for kwargs in ({"listing": None, "verify": _refusing(plain=True)},
+                   {"listing": _Draft(), "verify": None}):
+        issues = ebay_account.publish_block_issues(
+            _blocked(), CREDS, payments=OK_PAYMENTS, privileges=NO_PRIV,
+            **kwargs)
+        assert [i.get("placeholder") for i in issues] == [True]
+
+
+def test_an_account_verdict_is_reused_across_a_bulk_run():
+    """Seven drafts failing together is the case that matters: the account is
+    either held or it isn't, and asking eBay seven times is six wasted round
+    trips on a path that is already failing."""
+    calls = []
+    inner = _refusing(plain=True)
+
+    def verify(candidate):
+        calls.append(candidate.title)
+        inner(candidate)
+
+    creds = dict(CREDS, _uid="u1")
+    for _ in range(7):
+        issues = ebay_account.publish_block_issues(
+            _blocked(), creds, listing=_Draft(), verify=verify,
+            payments=OK_PAYMENTS, privileges=NO_PRIV)
+        assert "refusing every listing" in issues[0]["title"]
+    assert len(calls) == 1
+
+
+def test_a_wording_verdict_is_never_reused():
+    """It is true of ONE listing. Cached, it would tell the next listing its
+    title is the problem without ever asking eBay about that title."""
+    calls = []
+
+    def verify(candidate):
+        calls.append(candidate.title)
+        if candidate.title != ebay_account.NEUTRAL_TITLE:
+            raise ebay_trading.TradingError(E240, code="240")
+
+    creds = dict(CREDS, _uid="u2")
+    for _ in range(2):
+        ebay_account.publish_block_issues(
+            _blocked(), creds, listing=_Draft(), verify=verify,
+            payments=OK_PAYMENTS, privileges=NO_PRIV)
+    assert len(calls) == 4  # two probes per publish, neither remembered
+
+
+def test_a_disconnect_forgets_the_account_verdict():
+    """The hold belonged to the account that was connected. Carried across a
+    switch, it tells a healthy account it is blocked."""
+    creds = dict(CREDS, _uid="u3")
+    ebay_account.publish_block_issues(
+        _blocked(), creds, listing=_Draft(), verify=_refusing(plain=True),
+        payments=OK_PAYMENTS, privileges=NO_PRIV)
+    ebay_account.forget_verified("u3")
+    def verify(_candidate):
+        raise AssertionError("cache should have been cleared") \
+            if False else None
+    issues = ebay_account.publish_block_issues(
+        _blocked(), creds, listing=_Draft(), verify=verify,
+        payments=OK_PAYMENTS, privileges=NO_PRIV)
+    # eBay now accepts everything, so the stale "account held" verdict is gone.
+    assert not any("refusing every listing" in i["title"] for i in issues)
+
+
+# --- the dry run itself -----------------------------------------------------
+
+def test_verify_uses_ebays_dry_run_call_and_creates_nothing(monkeypatch):
+    """VerifyAddFixedPriceItem validates exactly as the real call does and
+    lists nothing. Sending the real call name here would post the listing the
+    probe exists to avoid posting."""
+    sent = {}
+
+    def fake_post(url, headers=None, content=None, **kw):
+        sent["call"] = headers["X-EBAY-API-CALL-NAME"]
+        sent["body"] = content.decode()
+        return _Resp(_response(errors=[], ack="Success"))
+
+    monkeypatch.setattr(ebay_trading.httpx, "post", fake_post)
+    listing = _listing()
+    ebay_trading.verify_listing("tok", listing, ["https://x/1.jpg"],
+                                postal_code="97201")
+    assert sent["call"] == "VerifyAddFixedPriceItem"
+    # No idempotency key: a dry run mints nothing, so there is nothing to make
+    # repeatable — and a key here could collide with the publish it diagnoses.
+    assert "UUID" not in sent["body"]
+    assert "InventoryTrackingNumber" not in sent["body"]
+
+
+def test_a_verify_rejection_keeps_ebays_error_code(monkeypatch):
+    """The probe reads exc.code to tell a 240 from anything else."""
+    monkeypatch.setattr(
+        ebay_trading.httpx, "post",
+        lambda *a, **k: _Resp(_response(errors=[("Cannot list", E240, "240")])))
+    with pytest.raises(ebay_trading.TradingError) as exc:
+        ebay_trading.verify_listing("tok", _listing(), [], postal_code="97201")
+    assert exc.value.code == "240"
+
+
+def _listing():
+    from backend.models import Listing
+    return Listing(title="Royal Stafford Sweetpea Teacup", price=22.0,
+                   category_id="20642", description="Lovely.")
+
+
+def test_warnings_on_a_failed_call_are_kept(monkeypatch):
+    """eBay attaches warnings to a rejection, and on a catch-all code they are
+    sometimes the only place the cause is named. They were dropped here without
+    even a log line."""
+    body = (f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<AddFixedPriceItemResponse xmlns="{NS}"><Ack>Failure</Ack>'
+            f"<Errors><SeverityCode>Error</SeverityCode>"
+            f"<LongMessage>{E240}</LongMessage><ErrorCode>240</ErrorCode></Errors>"
+            f"<Errors><SeverityCode>Warning</SeverityCode>"
+            f"<LongMessage>The title contains a restricted brand name."
+            f"</LongMessage><ErrorCode>21919301</ErrorCode></Errors>"
+            f"</AddFixedPriceItemResponse>").encode()
+    monkeypatch.setattr(ebay_trading.httpx, "post", lambda *a, **k: _Resp(body))
+    with pytest.raises(ebay_trading.TradingError) as exc:
+        ebay_trading._call("AddFixedPriceItem", "tok", "<Item/>")
+    assert "restricted brand name" in exc.value.detail
+
+
+def test_a_warning_never_becomes_the_rejection_headline(monkeypatch):
+    """Kept as context, not promoted: only eBay's response-level <Message>
+    speaks for why a listing was refused."""
+    body = (f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<AddFixedPriceItemResponse xmlns="{NS}"><Ack>Failure</Ack>'
+            f"<Errors><SeverityCode>Error</SeverityCode>"
+            f"<LongMessage>{E240}</LongMessage><ErrorCode>240</ErrorCode></Errors>"
+            f"<Errors><SeverityCode>Warning</SeverityCode>"
+            f"<LongMessage>Your listing was assigned a different category."
+            f"</LongMessage><ErrorCode>21919188</ErrorCode></Errors>"
+            f"</AddFixedPriceItemResponse>").encode()
+    monkeypatch.setattr(ebay_trading.httpx, "post", lambda *a, **k: _Resp(body))
+    with pytest.raises(ebay_trading.TradingError) as exc:
+        ebay_trading._call("AddFixedPriceItem", "tok", "<Item/>")
+    assert "different category" not in str(exc.value)
+    assert "cannot be listed or modified" in str(exc.value)

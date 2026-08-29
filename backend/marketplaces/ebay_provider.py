@@ -684,7 +684,10 @@ class EbayProvider:
                             "relist" if relist else "revise", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status=prev_status, user_id=uid)
-                issues = ebay_account.publish_block_issues(exc, creds)
+                issues = ebay_account.publish_block_issues(
+                    exc, creds, listing=listing,
+                    verify=listing_sync.verifier(creds["access_token"], urls,
+                                                 creds))
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
@@ -814,7 +817,10 @@ class EbayProvider:
                 log.warning("trading publish failed: session=%s: %s", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="draft", user_id=ctx.uid)
-                issues = ebay_account.publish_block_issues(exc, creds)
+                issues = ebay_account.publish_block_issues(
+                    exc, creds, listing=listing,
+                    verify=listing_sync.verifier(creds["access_token"], urls,
+                                                 creds))
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
