@@ -41,10 +41,11 @@ from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
-                       ebay_account, ebay_orders, ebay_trading, image_import,
-                       images, jobstore, listing_merge, listing_sync, metrics,
-                       notifications, orient, preflight, pricing, promotions,
-                       recommender, sync_guard, taxonomy, tokens)
+                       ebay_account, ebay_deletion, ebay_notify, ebay_orders,
+                       ebay_trading, image_import, images, jobstore,
+                       listing_merge, listing_sync, metrics, notifications,
+                       orient, preflight, pricing, promotions, recommender,
+                       sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -1240,7 +1241,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         policies = ebay_auth.fetch_policies_and_location(access)
         # Record WHICH eBay account this is, so the user can confirm they
         # connected the right one (best-effort — never block connect on it).
-        ident = {"username": "", "email": ""}
+        ident = {"user_id": "", "username": "", "email": ""}
         try:
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
@@ -1262,6 +1263,11 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # is how "leave what's there" is spelled.
         save_kwargs["ebay_username"] = new_user or None
         save_kwargs["ebay_email"] = ident["email"] or None
+        # eBay's immutable account id, under the same "None means leave what's
+        # there" rule as the name above. This is what an account-deletion
+        # notice arrives carrying, and the only identifier that survives a
+        # seller renaming themselves.
+        save_kwargs["ebay_user_id"] = (ident.get("user_id") or "").strip() or None
         # Keep a saved policy/location choice only when it still EXISTS on the
         # account that just connected. Business-policy ids belong to one
         # seller: eBay rejects another's outright, and a listing published with
@@ -1982,6 +1988,8 @@ def sync_profile_from_ebay(request: Request) -> dict:
         ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         fields["ebay_username"] = ident["username"]
         fields["ebay_email"] = ident["email"]
+        if ident.get("user_id"):
+            fields["ebay_user_id"] = ident["user_id"]
     except Exception as exc:  # noqa: BLE001 - identity scope may be missing
         log.info("profile sync: identity fetch failed for %s: %s", uid, exc)
     # Only fill policy/location gaps — never overwrite explicit selections.
@@ -2080,24 +2088,80 @@ def ebay_account_deletion_challenge(request: Request, challenge_code: str = "") 
 
 @app.post("/api/ebay/account-deletion")
 async def ebay_account_deletion_notice(request: Request) -> Response:
-    """Acknowledge an account-deletion notification.
+    """Verify, durably accept, and act on an account-deletion notification.
 
-    We key stored eBay connections by *our* user ids, not eBay usernames, so
-    there is no per-user data to purge here, so an ack is the whole job.
-    These arrive 1-2 times a MINUTE around the clock: the old approach wrote
-    a JSON file per notice (thousands a day churning through a 1GB volume,
-    deleted unread by prune_exports two days later) and let every ack spam the
-    access log. Now they're only visible at LOG_LEVEL=DEBUG — a failing
-    endpoint still surfaces via non-2xx access-log lines and eBay's own
-    delivery alerts.
+    This used to parse the body for a log line and return 200 to anything at
+    all — no signature check, no use of the userId, and no deletion. That is
+    both a compliance failure (eBay requires an app that stores eBay data to
+    process these) and a trap: the moment such a handler starts deleting, an
+    unauthenticated public URL becomes a remote account-wipe primitive. So
+    verification and erasure land together, verification first.
+
+    The order below is the whole design:
+
+      1. Verify the signature over the RAW bytes. 412 if it does not verify —
+         eBay's documented code for a failed validation.
+      2. Record the notice durably. If that write fails, answer 503: eBay
+         resends until it gets a 2xx and stops afterwards, so acknowledging a
+         notice we did not record is a promise with nothing behind it.
+      3. Only then answer 200, and erase.
+
+    A redelivery of a notice already recorded is acknowledged immediately —
+    eBay resends as a matter of routine, and doing the work twice is neither
+    needed nor safe.
     """
+    raw = await request.body()
+    signature = request.headers.get("x-ebay-signature", "")
+
     try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001 - malformed body; ack anyway
-        payload = {}
-    notif_id = ((payload.get("notification") or {}).get("notificationId")
-                or "unknown")
-    log.debug("ebay: account-deletion notice acked (notificationId=%s)", notif_id)
+        if not ebay_notify.verify(raw, signature):
+            log.warning("ebay: rejected an unsigned/invalid account-deletion "
+                        "notice from %s", request.client.host
+                        if request.client else "?")
+            return Response(status_code=412)
+    except ebay_notify.KeyUnavailable as exc:
+        # eBay's key could not be fetched. That is not a forged notice and
+        # must not be refused as one: 503 asks eBay to send it again.
+        log.warning("ebay: cannot verify deletion notice right now: %s", exc)
+        return Response(status_code=503)
+
+    try:
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001 - signed but unparseable
+        log.warning("ebay: signed account-deletion notice was not valid JSON")
+        return Response(status_code=400)
+
+    notif_id = ebay_deletion.notification_id_of(payload)
+    subject = ebay_deletion.subject_of(payload)
+    if not notif_id or not subject:
+        # Signed by eBay but missing what identifies it. Refusing is right:
+        # acknowledging would retire a notice we cannot act on.
+        log.warning("ebay: deletion notice missing notificationId or userId")
+        return Response(status_code=400)
+
+    try:
+        seen = db.record_deletion_notice(
+            notif_id, subject, ebay_deletion.payload_digest(raw))
+    except db.StorageUnavailable as exc:
+        log.warning("ebay: could not record deletion notice %s: %s",
+                    notif_id, exc)
+        return Response(status_code=503)
+
+    if seen == "duplicate":
+        log.debug("ebay: deletion notice %s already accepted", notif_id)
+        return Response(status_code=200)
+
+    # Accepted. The erasure runs after the response so eBay is not held on a
+    # multi-listing media purge; the row above is what makes that safe to do
+    # out of band.
+    def _erase() -> None:
+        result = ebay_deletion.purge(subject, purge_media=_purge_session_images)
+        db.finish_deletion_notice(notif_id, result["state"],
+                                  result.get("error", ""))
+        log.info("ebay deletion %s: state=%s users=%d listings=%d",
+                 notif_id, result["state"], result["users"], result["listings"])
+
+    _in_background(_erase, what="eBay account-deletion purge")
     return Response(status_code=200)
 
 

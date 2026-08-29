@@ -173,9 +173,19 @@ def fetch_user_identity(access_token: str) -> dict:
 
 
 def identity_display(identity: dict) -> dict:
-    """Flatten the Identity API response to {username, email} for the UI."""
+    """Flatten the Identity API response to {user_id, username, email}.
+
+    `userId` is eBay's IMMUTABLE account id and the only safe tenancy key.
+    It used to be dropped here, leaving the mutable `username` as the sole
+    record of which eBay account a listing belongs to — so a seller who
+    renamed orphaned their own rows, and a renamed-then-reused handle could
+    match somebody else's. It is also the only identifier an account-deletion
+    notice carries, so without it such a notice cannot be resolved to the
+    data it is asking us to erase.
+    """
     acct = identity.get("individualAccount") or identity.get("businessAccount") or {}
     return {
+        "user_id": identity.get("userId") or "",
         "username": identity.get("username") or "",
         "email": acct.get("email") or "",
     }

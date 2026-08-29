@@ -64,6 +64,13 @@ class EbayAccount(Base):
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     # Holds ciphertext (backend/crypto.py), ~1.5x the plaintext token.
     refresh_token: Mapped[str] = mapped_column(String(4096), default="")
+    # eBay's IMMUTABLE account id, from the Identity API. The username above
+    # is a display name the seller can change, so it cannot be the tenancy
+    # key: a rename orphans the row, and a renamed-then-reused handle can
+    # match the WRONG user. Account-deletion notices identify the account by
+    # this id and nothing else, so without it a notice cannot be resolved to
+    # the data it is asking us to erase.
+    ebay_user_id: Mapped[str] = mapped_column(String(64), index=True, default="")
     ebay_username: Mapped[str] = mapped_column(String(128), default="")
     ebay_email: Mapped[str] = mapped_column(String(255), default="")
     fulfillment_policy_id: Mapped[str] = mapped_column(String(64), default="")
@@ -90,6 +97,42 @@ class MarketplaceAccount(Base):
     external_id: Mapped[str] = mapped_column(String(64), default="")
     settings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DeletionNotice(Base):
+    """One row per eBay account-deletion notification we have accepted.
+
+    eBay requires that an application storing eBay data process account
+    deletion/closure notices. Acknowledging one is a promise that the erasure
+    will happen, so the promise has to outlive the request: the row is written
+    inside the request, and the purge runs against it afterwards. A crash
+    between the two leaves a row in 'pending', which is recoverable — the
+    alternative, a 200 with nothing recorded, is not, because eBay stops
+    resending once acknowledged.
+
+    `notification_id` is the primary key, which is what makes redelivery
+    idempotent: eBay resends until it gets a 2xx, so the same notice arrives
+    more than once as a matter of routine, not as an error.
+    """
+
+    __tablename__ = "ebay_deletion_notices"
+
+    notification_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # eBay's immutable account id from notification.data.userId. This is the
+    # only identifier the notice carries that we can resolve; username is
+    # mutable and eiasToken is legacy.
+    ebay_user_id: Mapped[str] = mapped_column(String(64), index=True, default="")
+    # pending | done | no_match | failed
+    state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    # Deliberately NOT the payload: it is personal data about someone who has
+    # just asked to be erased. Only a digest, so a redelivery can be compared
+    # without retaining what it said.
+    payload_digest: Mapped[str] = mapped_column(String(64), default="")
+    last_error: Mapped[str] = mapped_column(String(255), default="")
+    received_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
 
 
 class ListingRecord(Base):
@@ -254,6 +297,13 @@ def _get_engine():
                 # has to swallow on every start.
                 "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
                 "ON notifications (user_id, read_at)",
+                # eBay's immutable account id. Deletion notices identify the
+                # account by this and nothing else, and it is what every
+                # ownership check should key on instead of the mutable
+                # username.
+                "ALTER TABLE ebay_accounts ADD COLUMN ebay_user_id VARCHAR(64) DEFAULT ''",
+                "CREATE INDEX IF NOT EXISTS ix_ebay_accounts_ebay_user_id "
+                "ON ebay_accounts (ebay_user_id)",
             ):
                 try:
                     with _engine.begin() as conn:
@@ -593,7 +643,7 @@ def delete_user(user_id: str) -> Optional[list[str]]:
 # --- eBay accounts ---------------------------------------------------------
 
 _EBAY_FIELDS = (
-    "refresh_token", "ebay_username", "ebay_email",
+    "refresh_token", "ebay_user_id", "ebay_username", "ebay_email",
     "fulfillment_policy_id", "payment_policy_id",
     "return_policy_id", "merchant_location_key", "ship_from_postal",
 )
@@ -674,6 +724,113 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_ebay_account failed: {exc}")
         return None
+
+
+def record_deletion_notice(notification_id: str, ebay_user_id: str,
+                           payload_digest: str) -> str:
+    """Durably accept one deletion notice. Returns "new" or "duplicate".
+
+    Raises StorageUnavailable if it could not be written. The endpoint MUST
+    let that reach eBay as a non-2xx: acknowledging a notice we did not
+    record means eBay stops resending and the erasure silently never happens.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured for deletion notices")
+        with Session(eng) as s:
+            if s.get(DeletionNotice, notification_id) is not None:
+                return "duplicate"
+            s.add(DeletionNotice(
+                notification_id=notification_id, ebay_user_id=ebay_user_id,
+                payload_digest=payload_digest, state="pending",
+                received_at=_now()))
+            try:
+                s.commit()
+            except IntegrityError:
+                # Two deliveries raced. The row exists either way, which is
+                # exactly what idempotent means here.
+                s.rollback()
+                return "duplicate"
+            return "new"
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - re-raised as a typed failure
+        log.warning(f"db: record_deletion_notice failed: {exc}")
+        raise StorageUnavailable("could not record the deletion notice") from exc
+
+
+def finish_deletion_notice(notification_id: str, state: str,
+                           last_error: str = "") -> None:
+    """Mark a notice done / no_match / failed. Best-effort by design: the
+    purge has already run, and losing the bookkeeping must not undo it."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            row = s.get(DeletionNotice, notification_id)
+            if row is None:
+                return
+            row.state = state
+            row.attempts = (row.attempts or 0) + 1
+            row.last_error = (last_error or "")[:255]
+            row.completed_at = _now() if state in ("done", "no_match") else None
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: finish_deletion_notice failed: {exc}")
+
+
+def pending_deletion_notices(limit: int = 100) -> list[dict]:
+    """Notices accepted but not yet completed — what a restart has to pick
+    back up, and what an operator alert should be counting."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(DeletionNotice)
+                .where(DeletionNotice.state.in_(("pending", "failed")))
+                .order_by(DeletionNotice.received_at)
+                .limit(limit)).scalars().all()
+            return [{"notification_id": r.notification_id,
+                     "ebay_user_id": r.ebay_user_id,
+                     "state": r.state, "attempts": r.attempts,
+                     "last_error": r.last_error} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: pending_deletion_notices failed: {exc}")
+        return []
+
+
+def find_users_by_ebay_user_id(ebay_user_id: str):
+    """Our user ids connected to this eBay account, or UNAVAILABLE.
+
+    A LIST, not one id: the same eBay account can legitimately be connected
+    by more than one of our users, and a deletion notice has to reach all of
+    them. An empty list means "connected by nobody"; UNAVAILABLE means the
+    question could not be answered.
+
+    That distinction is the whole point. An account-deletion notice must not
+    be acknowledged as handled when the lookup failed — eBay would stop
+    resending, and the erasure it asked for would never happen with nothing
+    recording that it was missed.
+    """
+    ebay_user_id = (ebay_user_id or "").strip()
+    if not ebay_user_id:
+        return []
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(EbayAccount.user_id)
+                .where(EbayAccount.ebay_user_id == ebay_user_id)).all()
+            return [r[0] for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: find_users_by_ebay_user_id failed: {exc}")
+        return UNAVAILABLE
 
 
 def _json_text(column, key: str):
