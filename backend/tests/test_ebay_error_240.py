@@ -802,3 +802,51 @@ def test_an_old_verifier_falls_back_instead_of_guessing():
         _blocked(), CREDS, listing=_FullDraft(), verify=old_style,
         payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
     assert "not over its wording" in issues[0]["title"]
+
+
+def test_a_second_error_alongside_the_240_still_counts_as_one():
+    """Dropping a field to ask about it makes eBay add a complaint about the
+    hole that leaves — take the business policies away and it wants a shipping
+    service — and eBay may put that one first. Reading only the first code
+    then says "not a 240" about a response that contains one."""
+    def verify(candidate, *, with_policies=True, with_photos=True):
+        raise ebay_trading.TradingError(
+            "You must specify a shipping service.", code="10007",
+            codes=["10007", "240"])
+
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(), verify=verify,
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    # Every variant still refused with a 240 among the codes => the account.
+    assert "refusing every listing from this account" in issues[0]["title"]
+
+
+def test_one_unanswerable_probe_does_not_abandon_the_rest():
+    """The walk used to stop at the first muddled answer, so a listing whose
+    PHOTOS were the cause reported "we couldn't check" because the policies
+    question ahead of it came back inconclusive."""
+    def verify(candidate, *, with_policies=True, with_photos=True):
+        if not with_policies:                    # unanswerable
+            raise ebay_trading.TradingError("Try later", code="21919144")
+        if not with_photos:                      # the real cause
+            return
+        raise ebay_trading.TradingError(E240, code="240")
+
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(), verify=verify,
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert issues[0]["target"] == "photos"
+
+
+def test_an_unanswered_probe_still_blocks_the_account_verdict():
+    """A gap anywhere means the account cannot be declared: "we tried
+    everything" has to be true when the app says it."""
+    def verify(candidate, *, with_policies=True, with_photos=True):
+        if not with_policies:
+            raise ebay_trading.TradingError("Try later", code="21919144")
+        raise ebay_trading.TradingError(E240, code="240")
+
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(), verify=verify,
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "not over its wording" in issues[0]["title"]

@@ -476,6 +476,7 @@ def _probe_payload(listing, verify: Callable[..., None]) -> Optional[str]:
     longer holds.
     """
     plain = plain_wording(listing)
+    unanswered = False
     for field, how in _PAYLOAD_PROBES:
         candidate = plain
         overrides = how.get("listing")
@@ -484,14 +485,21 @@ def _probe_payload(listing, verify: Callable[..., None]) -> Optional[str]:
                 candidate = plain.model_copy(update=dict(overrides))
             except Exception as exc:  # noqa: BLE001 - a diagnosis, never a blocker
                 log.info("ebay: 240 probe could not vary %s: %s", field, exc)
-                return None
+                unanswered = True
+                continue
         kwargs = {k: v for k, v in how.items() if k != "listing"}
         refused = _refused(verify, candidate, **kwargs)
         if refused is None:
-            return None
+            # One question eBay wouldn't answer. That is a gap in THIS
+            # dimension, not a reason to abandon the others: aborting the walk
+            # on the first unanswerable probe is how a seller whose photos
+            # were the problem got told the cause was unknown, because the
+            # policies question ahead of it came back muddled.
+            unanswered = True
+            continue
         if not refused:
             return field
-    return ""
+    return None if unanswered else ""
 
 
 def _reworded(listing, title: str, description: str):
@@ -516,7 +524,13 @@ def _refused(verify: Callable[..., None], candidate, **kwargs) -> Optional[bool]
         return None
     except Exception as exc:  # noqa: BLE001 - a diagnosis, never a blocker
         code = str(getattr(exc, "code", "") or "")
-        if code == BLOCKED_CODE:
+        # ANY 240 in the response, not just the first error. Dropping a field
+        # to ask about it routinely makes eBay add a SECOND complaint (take
+        # the business policies away and it wants a shipping service), and
+        # eBay is free to put that one first — at which point reading `code`
+        # alone says "not a 240" about a response that plainly contains one.
+        codes = getattr(exc, "codes", None)
+        if code == BLOCKED_CODE or (codes and BLOCKED_CODE in codes):
             return True
         log.info("ebay: 240 probe inconclusive (code=%s): %s", code or "?", exc)
         return None
