@@ -138,12 +138,23 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         root = ET.fromstring(resp.content)
     except ET.ParseError as exc:
         raise TradingError(f"eBay sent an unreadable response for {call}.") from exc
+    graded = [((_text(e, "SeverityCode") or "").lower(), e)
+              for e in _findall(root, "Errors")]
+    errors = [e for sev, e in graded if sev == "error"]
+    # Warnings used to be dropped here without even a log line, on failures
+    # AND on successes. On a rejection they are sometimes the only place the
+    # cause is named; on an acceptance they are how eBay says it changed
+    # something — above all that it REMAPPED the category (eBay retires
+    # categories and moves the listing itself when CategoryMappingAllowed is
+    # true, which every publish here sets). Silently, the app then held an id
+    # eBay had already replaced.
+    warnings = [e for sev, e in graded if sev != "error"]
     ack = (_text(root, "Ack") or "").lower()
-    if ack in ("failure", "partialfailure"):
-        errors = [e for e in _findall(root, "Errors")
-                  if (_text(e, "SeverityCode") or "").lower() == "error"]
-        if errors:
-            raise _failure(call, root, errors)
+    if ack in ("failure", "partialfailure") and errors:
+        raise _failure(call, root, errors, warnings)
+    if warnings:
+        log.info("trading: %s ok with %d warning(s): %s", call, len(warnings),
+                 " | ".join(_error_line(w) for w in warnings)[:400])
     return root
 
 
@@ -162,7 +173,8 @@ def _error_line(err: ET.Element) -> str:
 _CATCH_ALL_CODES = {"240"}
 
 
-def _failure(call: str, root: ET.Element, errors: list[ET.Element]) -> TradingError:
+def _failure(call: str, root: ET.Element, errors: list[ET.Element],
+             warnings: Optional[list[ET.Element]] = None) -> TradingError:
     """Build the TradingError for a failed call, keeping everything eBay said.
 
     Only the first error became the message before this, and the response-level
@@ -174,22 +186,28 @@ def _failure(call: str, root: ET.Element, errors: list[ET.Element]) -> TradingEr
     code = _text(first, "ErrorCode") or ""
     headline = (_text(first, "LongMessage") or _text(first, "ShortMessage")
                 or "eBay rejected the request.").strip()
-    # eBay's own detail for this rejection, plus any errors past the first.
-    extras = [_text(root, "Message").strip()]
-    extras += [_error_line(e) for e in errors[1:]]
+    # eBay's own detail for this rejection: the response-level <Message>, kept
+    # apart from everything else because it is the ONLY part authoritative
+    # enough to speak for a catch-all code (see the promotion below).
+    said = _text(root, "Message").strip()
+    extras = [said] + [_error_line(e) for e in errors[1:]]
+    extras += [_error_line(e) for e in (warnings or [])]
     detail = " ".join(x for x in extras if x)[:600]
     # Always logged in full: a rejection the app can't explain is the one thing
     # a seller can't debug from the UI, and the fly logs are where it has to be.
-    log.warning("trading: %s rejected — code=%s ack-errors=%d msg=%s detail=%s",
-                call, code or "?", len(errors), headline[:200],
-                detail[:300] or "(none)")
+    log.warning("trading: %s rejected — code=%s ack-errors=%d warnings=%d "
+                "msg=%s detail=%s", call, code or "?", len(errors),
+                len(warnings or []), headline[:200], detail[:300] or "(none)")
     if code in ("931", "932", "16110", "21917053"):  # auth/token codes
         return TradingError(
             "eBay didn't accept the account connection — reconnect eBay "
             "in Settings and try again.", code=code, detail=detail)
-    if code in _CATCH_ALL_CODES and detail:
+    if code in _CATCH_ALL_CODES and said and len(said) <= 300:
         # eBay named the real reason — lead with it instead of the catch-all.
-        headline = detail if len(detail) <= 300 else headline
+        # Only <Message> earns this: a trailing warning or a second error is
+        # context, and promoting one of those to the headline would put words
+        # in eBay's mouth about why the listing was refused.
+        headline = said
     return TradingError(headline[:300], code=code, detail=detail)
 
 
@@ -659,8 +677,19 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     if not item_id:
         raise TradingError("eBay accepted the listing but returned no item id.")
     log.info("trading: %s ok item=%s", call, item_id)
-    return {"published": True, "listing_id": item_id,
-            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    out = {"published": True, "listing_id": item_id,
+           "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    # eBay retires categories and moves the listing to the current one on its
+    # own (CategoryMappingAllowed, which this request always sets). When it
+    # says so, follow it: the id in our record is the one every later revise,
+    # aspect lookup and condition list is built from, and a stale one sends
+    # all of them to a category the listing is no longer in.
+    remapped = _text(root, "CategoryID")
+    if remapped and remapped != (listing.category_id or "").strip():
+        log.warning("trading: eBay remapped category %s -> %s (item %s)",
+                    listing.category_id or "?", remapped, item_id)
+        out["category_id"] = remapped
+    return out
 
 
 def build_add_item(listing: Listing, image_urls: list[str],
@@ -726,6 +755,33 @@ def build_add_item(listing: Listing, image_urls: list[str],
 
     call = "AddItem" if is_auction else "AddFixedPriceItem"
     return call, f"<Item>{''.join(parts)}</Item>"
+
+
+# The dry-run twin of each create call. eBay validates the item exactly as it
+# would on the real call — account holds, selling limits and listing content
+# included — and creates nothing.
+_VERIFY_CALL = {"AddItem": "VerifyAddItem",
+                "AddFixedPriceItem": "VerifyAddFixedPriceItem"}
+
+
+def verify_listing(token: str, listing: Listing, image_urls: list[str],
+                   policies: Optional[dict] = None,
+                   postal_code: str = "") -> None:
+    """Ask eBay whether it WOULD accept this listing. Nothing is listed.
+
+    Returns None when eBay says it would take it, and raises TradingError —
+    with the same ErrorCode the real call would have produced — when it would
+    not. That makes it the one way to settle what eBay's error 240 never says:
+    whether a rejection belongs to the ACCOUNT or to this listing's wording.
+    Ask twice with different wording and eBay answers by contradiction.
+
+    No idempotency key rides along: this call mints nothing, so there is
+    nothing to make repeatable, and a key here would only risk colliding with
+    the real publish it is diagnosing.
+    """
+    call, body = build_add_item(listing, image_urls, policies, postal_code,
+                                idempotency_key="")
+    _call(_VERIFY_CALL[call], token, body)
 
 
 # eBay's error codes for "you already sent this": a reused UUID, and an

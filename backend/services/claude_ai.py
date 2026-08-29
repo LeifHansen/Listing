@@ -62,7 +62,20 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
   authenticity guarantees, or specs you cannot verify; put those in missing_info.
-- Title must be <= 80 characters and front-load the most searched keywords.
+- Title must be <= 80 characters, and its ORDER matters as much as its words.
+  Lead with what identifies THIS item and nothing else, in this order:
+  1. Brand, maker, artist or pattern name ("Royal Stafford", "Pyrex", "Levi's")
+  2. The exact item name, model, pattern or number ("Sweetpea", "501", "441")
+  3. What the thing is ("teacup & saucer", "mixing bowl", "straight-leg jeans")
+  4. The specifics a buyer filters or searches on (size, colour, material,
+     quantity, year)
+  5. ONLY THEN the general descriptive words: vintage, antique, retro, rare,
+     MCM, boho, unique, beautiful.
+  Never START a title with a general word. "Vintage teacup" is a title
+  thousands of listings share and it spends eBay's most heavily weighted
+  position on nothing; "Royal Stafford Sweetpea teacup & saucer bone china
+  vintage" reaches the buyer searching for that pattern by name. Keep those
+  words — they earn their place at the end, not the front.
 - Description: the FIRST WORDS must be item-specific — brand, then model or
   product name, then what the thing is ("Pyrex Cinderella 441 mixing bowl...",
   "Levi's 501 straight-leg jeans..."). NEVER open on a generic age or hype
@@ -650,10 +663,12 @@ def refine(listing: Listing, prompt: str) -> Listing:
         "fields (title <= 80 chars, condition must be one of: "
         + ", ".join(EBAY_CONDITIONS)
         + "). Only change what the instruction asks for; keep everything else. "
-        "If you rewrite the description, its first words must stay "
-        "item-specific — brand, model, what the thing is — and must never open "
-        "on a generic adjective like Vintage, Antique, Retro or Rare, unless "
-        "the seller's instruction explicitly asks for that opening. "
+        "If you rewrite the title or the description, both must still LEAD "
+        "with what identifies this item — brand or artist, then the exact "
+        "model or pattern name, then what the thing is — and keep general "
+        "words like Vintage, Antique, Retro or Rare at the END rather than "
+        "the front, unless the seller's instruction explicitly asks for that "
+        "opening. "
         "Return ONLY the JSON, no markdown."
     )
     resp = client.messages.create(

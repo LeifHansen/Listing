@@ -27,10 +27,22 @@ import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
 
 const PHASE_MESSAGES = {
   uploading: ["Uploading your photo pile…"],
-  optimizing: ["Optimizing photos…", "Straightening & removing backgrounds…"],
+  optimizing: ["Optimizing photos…", "Straightening sideways shots…"],
   grouping: ["Sorting photos into items…", "Matching angles of the same item…"],
   identifying: ["Identifying items…", "Writing titles & prices…", "Detecting brands…"],
 };
+
+// Background removal is a per-upload choice, so the progress text has to be
+// one too: this said "removing backgrounds" over every batch, including the
+// ones that never asked for it. job.remove_bg is what the batch was actually
+// started with (absent on batches started before this shipped — which reads
+// as "off", the safe way round: it never claims work that isn't happening).
+function phaseMessages(phase, removeBg) {
+  if (phase === "optimizing" && removeBg) {
+    return ["Optimizing photos…", "Straightening & removing backgrounds…"];
+  }
+  return PHASE_MESSAGES[phase] || ["Working…"];
+}
 
 // Duplicate-suspect detection: two drafts whose titles share most of their
 // meaningful words are probably the same item split in two — surface a hint
@@ -779,7 +791,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             // job id, so this view just carries on polling. Say so, or the
             // count appearing to jump reads as a glitch.
             ...(job?.resumed ? ["Picking your batch back up where it stopped…"] : []),
-            ...(PHASE_MESSAGES[phase] || ["Working…"]).map((m) => m + progressDetail),
+            ...phaseMessages(phase, job?.remove_bg).map((m) => m + progressDetail),
           ]} />
           <BrandProgress
             className="px-1"

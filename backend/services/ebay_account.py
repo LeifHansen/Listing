@@ -10,7 +10,9 @@ handlers where nothing could test them:
 
   * When eBay refuses to list ANYTHING (error 240), is it something the seller
     can see and clear? The code says only "the listing or seller may be in
-    violation of eBay policy", which is four causes in a trench coat.
+    violation of eBay policy", which is four causes in a trench coat. Two of
+    them the account APIs will name; for the rest, `probe_block_scope` gets
+    eBay to say whether it is refusing the account or the listing's words.
 
 Deliberately importable without backend.main — same rule as sync_guard: the CI
 `checks` job installs no image/AI stack, so anything that reaches for main
@@ -20,7 +22,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from .. import config, ebay_auth, ebay_errors
 from ..config import log
@@ -171,9 +173,14 @@ def forget_verified(uid: Optional[str] = None) -> None:
         if uid is None:
             _verified.clear()
             _absent.clear()
+            _block_scope.clear()
         else:
             _verified.pop(uid, None)
             _absent.pop(uid, None)
+            # A hold belongs to the account that was connected, never to the
+            # next one: carrying the verdict across a switch would tell a
+            # healthy account it is blocked.
+            _block_scope.pop(uid, None)
 
 
 def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
@@ -216,6 +223,8 @@ BLOCKED_CODE = "240"
 
 
 def publish_block_issues(exc: Exception, creds: Optional[dict], *,
+                         listing=None,
+                         verify: Optional[Callable[[Any], None]] = None,
                          payments: Optional[Callable[[str], dict]] = None,
                          privileges: Optional[Callable[[str], Optional[dict]]] = None,
                          ) -> list[dict]:
@@ -230,15 +239,27 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
       * the payments program (onboarding not finished);
       * selling privileges (registration not finished, or a selling limit).
 
-    Both run on the failure path only, where a round-trip costs nothing and a
-    blind seller costs everything. Every check here is silent on failure and
-    ADDITIVE: a diagnosis must never replace the rejection the seller actually
-    needs to read, and one lookup failing must not skip the others.
+    When neither names a cause the seller is still where they started, so a
+    third question goes to eBay itself: `probe_block_scope` re-puts the listing
+    with plain wording as a dry run, which creates nothing and settles whether
+    a 240 belongs to the account or to this listing's words.
+
+    All of it runs on the failure path only, where a round-trip costs nothing
+    and a blind seller costs everything. Every check here is silent on failure:
+    a lookup that fails must never skip the others, and nothing invented is
+    ever reported as a finding.
+
+    A diagnosis never replaces the rejection — but it does lead it. eBay's 240
+    issue is a placeholder ("refused, cause unstated"), and the surfaces that
+    have room for one line (a bulk card, the publish toast) show the FIRST
+    issue: with the placeholder first, everything learned here was rendered
+    invisible exactly where it was needed most.
     """
     issues = ebay_errors.from_trading_error(exc)
     if str(getattr(exc, "code", "")) != BLOCKED_CODE or not creds:
         return issues
     token = creds.get("access_token") or ""
+    found: list[dict] = []
 
     status = ""
     try:
@@ -262,7 +283,7 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
                 (priv or {}).get("selling_limit"))
 
     if status and status != "OPTED_IN":
-        issues.append({
+        found.append({
             "target": "account", "level": "error",
             "title": "This eBay account hasn't finished payments setup",
             "fix": ("eBay reports the account as “" + status.replace("_", " ").lower()
@@ -273,7 +294,7 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
         })
 
     if priv is not None and not priv.get("registration_complete"):
-        issues.append({
+        found.append({
             "target": "account", "level": "error",
             "title": "eBay hasn't finished setting this account up to sell",
             "fix": ("eBay reports this account's seller registration as "
@@ -285,7 +306,7 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
 
     limit = (priv or {}).get("selling_limit") or {}
     if limit and _limit_is_exhausted(limit):
-        issues.append({
+        found.append({
             "target": "account", "level": "error",
             "title": "This account is at its eBay selling limit",
             "fix": ("eBay caps what a new account may list — this one is at "
@@ -293,7 +314,161 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
                     "the cap rises or current listings end. You can ask eBay "
                     "to raise it from My eBay → Selling → Monthly limits."),
         })
-    return issues
+
+    if not found:
+        # Nothing eBay's account APIs will state plainly. Ask eBay directly
+        # what it would accept — the last question left, and the only one that
+        # separates a held account from a listing eBay dislikes the words of.
+        scope = probe_block_scope(listing, verify,
+                                  uid=str(creds.get("_uid") or ""))
+        if scope:
+            found.append(_scope_issue(scope))
+
+    # A named cause leads; eBay's unexplained placeholder falls in behind it.
+    if found and issues and issues[0].get("placeholder"):
+        return found + issues
+    return issues + found
+
+
+# --- "is it the account, or is it this listing?" ----------------------------
+#
+# Error 240 is the one rejection where that question has no answer in the
+# response. It does have an answer at eBay: the Verify* calls validate an item
+# exactly as the real call would and create nothing, so putting the SAME
+# listing twice — once with its own words, once with plain ones — makes eBay
+# state, by contradiction, which half it is refusing.
+
+# Wording with nothing in it for a filter to catch: no brand, no claim, no
+# contact details, no markup. If eBay refuses even this, the words are not it.
+NEUTRAL_TITLE = "Item for sale"
+NEUTRAL_DESCRIPTION = "Item for sale."
+
+# How long an "this account is refusing everything" verdict is reused. Bulk
+# publishing is the case that matters: seven drafts failing together would
+# otherwise pay for the same two probes seven times over, and the answer is a
+# property of the account, not of any one listing.
+BLOCK_SCOPE_TTL = config.env_float("EBAY_BLOCK_PROBE_TTL", 300.0)
+
+_block_scope: dict[str, tuple[float, str]] = {}
+
+
+def _remembered_scope(uid: str, now: Optional[float] = None) -> str:
+    if not uid:
+        return ""
+    now = time.time() if now is None else now
+    with _verified_lock:
+        at, scope = _block_scope.get(uid, (0.0, ""))
+    return scope if scope and (now - at) < BLOCK_SCOPE_TTL else ""
+
+
+def _remember_scope(uid: str, scope: str, now: Optional[float] = None) -> None:
+    """Cache an ACCOUNT-level verdict only. "It's this listing's title" is true
+    of one listing and would be a lie about the next one."""
+    if not uid or scope != "account":
+        return
+    with _verified_lock:
+        _block_scope[uid] = (time.time() if now is None else now, scope)
+
+
+def probe_block_scope(listing, verify: Optional[Callable[[Any], None]], *,
+                      uid: str = "") -> Optional[str]:
+    """What a 240 is actually about: "account", "title", "wording", or None.
+
+    Two dry runs at most, and only after the account APIs have come up empty:
+
+      1. the listing with plain wording. Still refused -> the ACCOUNT is
+         blocked, and no amount of editing will help.
+      2. otherwise the listing with its own title and plain description.
+         Refused -> the TITLE carries it; accepted -> the description (or an
+         item specific) does.
+
+    None whenever eBay answered with anything other than a 240 (a validation
+    error the real publish never reached, an outage, a rate limit): an
+    inconclusive probe must say nothing at all rather than guess.
+    """
+    if listing is None or verify is None:
+        return None
+    remembered = _remembered_scope(uid)
+    if remembered:
+        return remembered
+    blocked = _refused(verify, plain_wording(listing))
+    if blocked is None:
+        return None
+    if blocked:
+        _remember_scope(uid, "account")
+        log.warning("ebay: 240 probe — the account refuses a plain listing too")
+        return "account"
+    # eBay would take this listing with plain wording, so the words are the
+    # cause. One more probe says whether the title alone carries it.
+    titled = _refused(verify, _reworded(listing, listing.title,
+                                        NEUTRAL_DESCRIPTION))
+    scope = "title" if titled else "wording"
+    log.warning("ebay: 240 probe — the listing's %s is what eBay refuses", scope)
+    return scope
+
+
+def plain_wording(listing):
+    """The same listing with nothing in its words for a filter to catch."""
+    return _reworded(listing, NEUTRAL_TITLE, NEUTRAL_DESCRIPTION)
+
+
+def _reworded(listing, title: str, description: str):
+    """The same listing with different words — nothing else touched, so the
+    probe differs from the real publish in exactly one dimension."""
+    return listing.model_copy(update={"title": title, "description": description})
+
+
+def _refused(verify: Callable[[Any], None], candidate) -> Optional[bool]:
+    """Did eBay refuse this listing WITH A 240? None = it said something else."""
+    try:
+        verify(candidate)
+    except Exception as exc:  # noqa: BLE001 - a diagnosis, never a blocker
+        code = str(getattr(exc, "code", "") or "")
+        if code == BLOCKED_CODE:
+            return True
+        log.info("ebay: 240 probe inconclusive (code=%s): %s", code or "?", exc)
+        return None
+    return False
+
+
+def _scope_issue(scope: str) -> dict:
+    """The finding for one probe verdict. Each says what was asked and what
+    eBay answered — a seller told "it's your account" while eBay's own words
+    blame their title deserves to know why we contradict it."""
+    if scope == "account":
+        return {
+            "target": "account", "level": "error",
+            "title": "eBay is refusing every listing from this account",
+            "fix": ("We asked eBay to check this same listing with a plain "
+                    "title and description and it refused that too, so the "
+                    "wording is not the cause and editing won't help. This is "
+                    "an account-level hold: open eBay → My eBay → Selling and "
+                    "clear anything flagged there (registration, payments or "
+                    "identity verification, a policy notice). If nothing is "
+                    "flagged, only eBay Customer Service can lift it — quote "
+                    "error 240 and ask which restriction is on the account."),
+        }
+    if scope == "title":
+        return {
+            "target": "title", "level": "error",
+            "title": "eBay is refusing this listing's title",
+            "fix": ("eBay accepted this same listing when we checked it with "
+                    "a plain title, and refused it with this one — so the "
+                    "title is what it objects to, not your account. Brand and "
+                    "trademark names, and words that read as a claim "
+                    "(“authentic”, “genuine”, “certified”, “rare”), are the "
+                    "usual cause. Reword the title and publish again."),
+        }
+    return {
+        "target": "description", "level": "error",
+        "title": "eBay is refusing this listing's wording",
+        "fix": ("eBay accepted this same listing when we checked it with a "
+                "plain title and description, so something in the words is "
+                "the cause rather than your account — and the title is not "
+                "it. Look at the description and the item specifics for "
+                "trademark or authenticity claims, contact details, links, or "
+                "anything eBay could read as a promise about condition."),
+    }
 
 
 def _as_number(value) -> Optional[float]:

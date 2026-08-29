@@ -555,6 +555,43 @@ def reconcile_recent(token: str, user_id: str, records: list[dict],
     return changed, {r["id"] for r in candidates}
 
 
+def publish_policies(listing: Listing, creds: dict) -> dict:
+    """The business-policy ids a publish of THIS listing goes out with.
+
+    A per-listing shipping choice (the editor's / bulk card's Shipping service
+    dropdown) beats the account default; payment and returns stay account-level.
+    Shared with `verifier` below so a dry run is addressed to eBay exactly as
+    the real publish was — a probe that differs anywhere is a probe answering
+    a different question.
+    """
+    return {"fulfillment_policy_id": (listing.fulfillment_policy_id
+                                      or creds.get("fulfillment_policy_id")),
+            "payment_policy_id": creds.get("payment_policy_id"),
+            "return_policy_id": creds.get("return_policy_id")}
+
+
+def verifier(token: str, image_urls: list[str],
+             creds: Optional[dict] = None) -> Optional[Callable[[Listing], None]]:
+    """A "would eBay take this?" callable, or None when we can't ask cleanly.
+
+    Hands `ebay_account.publish_block_issues` a way to re-put a listing to eBay
+    without creating anything, so a rejection that names no cause can still be
+    pinned to the account or to the listing's own words. None when there is no
+    saved ship-from ZIP: create_listing refuses without one, and a probe that
+    fails on a missing field would answer the wrong question.
+    """
+    c = creds or {}
+    postal = (c.get("ship_from_postal") or "").strip()
+    if not postal:
+        return None
+
+    def verify(candidate: Listing) -> None:
+        ebay_trading.verify_listing(token, candidate, image_urls,
+                                    policies=publish_policies(candidate, c),
+                                    postal_code=postal)
+    return verify
+
+
 def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                    creds: Optional[dict] = None,
                    idempotency_key: str = "") -> dict:
@@ -593,13 +630,7 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     try:
         res = ebay_trading.create_listing(
             token, listing, image_urls,
-            # A per-listing shipping choice (the editor's / bulk card's Shipping
-            # service dropdown) beats the account default; payment/returns stay
-            # account-level.
-            policies={"fulfillment_policy_id": (listing.fulfillment_policy_id
-                                                or c.get("fulfillment_policy_id")),
-                      "payment_policy_id": c.get("payment_policy_id"),
-                      "return_policy_id": c.get("return_policy_id")},
+            policies=publish_policies(listing, c),
             postal_code=postal, idempotency_key=idempotency_key)
     except AlreadyListedError as exc:
         # This publish already produced a listing — a retry, or a second
@@ -621,6 +652,10 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                  item_id, idempotency_key)
         res = {"published": True, "listing_id": item_id, "already_listed": True,
                "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    # eBay moved the listing to a live category (see create_listing): store
+    # what it actually filed, not what we asked for.
+    if res.get("category_id"):
+        listing.category_id = res["category_id"]
     # source="ebay" is what routes later edits down the Trading path, exactly
     # like a listing imported from the seller's store.
     listing.source = "ebay"
