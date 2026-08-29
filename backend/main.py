@@ -3946,30 +3946,60 @@ def get_listing(listing_id: str, request: Request) -> dict:
     # Enforce ownership for listings that belong to an account.
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
-    _adopt_imported_images(listing_id, rec)
+    # Deliberately no photo adoption here. This used to download every remote
+    # photo, write them to disk, upsert the row and start an R2 upload — on a
+    # read. A prefetch, a retry, a crawler, a link preview or a double-click
+    # each started that work, two opens raced over one directory, and a GET
+    # could fail or bill storage for something the seller never asked for.
+    # storage.py states the rule. Adoption is now POST prepare-for-editing.
     return rec
 
 
-def _adopt_imported_images(listing_id: str, rec: dict) -> None:
-    """First open of an imported eBay listing: copy its EPS-hosted photos into
-    app storage so they're editable exactly like uploaded ones (the app owns
-    every editable image; ebayimg URLs never reach the browser editor). Runs
-    once — after this the listing has local `images` and the grid/editor treat
-    it like any other listing. Best-effort: on failure the record is returned
-    unchanged and the UI falls back to the read-only eBay photo strip."""
+@app.post("/api/listings/{listing_id}/prepare-for-editing")
+def prepare_for_editing(listing_id: str, request: Request) -> dict:
+    """Copy an imported listing's eBay-hosted photos into app storage.
+
+    The editor works only on images the app owns — ebayimg URLs never reach
+    it — so this has to happen before an imported listing can be edited. It
+    used to happen invisibly on the first GET; now the seller asks for it,
+    which is what makes the cost (up to 24 downloads and 48 files) something
+    they chose.
+
+    Idempotent: a listing whose photos are already local is reported ready
+    without fetching anything.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    names = _adopt_imported_images(listing_id, rec)
+    return {"ok": True, "images": names,
+            "listing": (rec.get("listing") or {})}
+
+
+def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:
+    """Copy an imported eBay listing's EPS-hosted photos into app storage so
+    they're editable exactly like uploaded ones (the app owns every editable
+    image; ebayimg URLs never reach the browser editor). Returns the local
+    filenames, or [] when there was nothing to do.
+
+    Best-effort: on failure the record is left unchanged and the UI falls back
+    to the read-only eBay photo strip."""
     listing = rec.get("listing") or {}
-    if ((listing.get("source") or "") != "ebay" or listing.get("images")
-            or not listing.get("image_urls")):
-        return
+    if (listing.get("source") or "") != "ebay" or not listing.get("image_urls"):
+        return []
+    if listing.get("images"):
+        return list(listing["images"])
     if (rec.get("status") or "") == "sold":
         # Archived — its session dir is purged on sale; adopting here would
         # re-download photos for a listing that can't be edited anyway.
-        return
-    # A previous open may have imported the files but failed the DB write.
+        return []
+    # A previous run may have imported the files but failed the DB write.
     names = storage.list_optimized(listing_id) \
         or image_import.import_listing_images(listing_id, listing["image_urls"])
     if not names:
-        return
+        return []
     # Mirror to R2 like uploads do — otherwise imported listings are the one
     # kind of session the offload sweep can never free from the volume.
     _in_background(objstore.upload_optimized, listing_id,
@@ -3982,9 +4012,10 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> None:
                           user_id=rec.get("user_id"))
         storage.save_listing(listing_id, Listing(
             **{k: v for k, v in listing.items() if k in Listing.model_fields}))
-    except Exception as exc:  # noqa: BLE001 - files are on disk; next open retries the DB
+    except Exception as exc:  # noqa: BLE001 - files are on disk; a retry redoes the DB
         log.warning("image import: couldn't persist adopted photos for %s: %s",
                     listing_id, exc)
+    return names
 
 
 # Fields that describe THIS sale and THIS eBay item, and so must never ride

@@ -459,7 +459,25 @@ export function AppProvider({ children }) {
 
   const openListing = useCallback(async (id) => {
     try {
-      const rec = await api(`/api/listings/${id}`);
+      let rec = await api(`/api/listings/${id}`);
+      // An imported listing's photos live on eBay, and the editor only works
+      // on images the app owns. Copying them used to happen invisibly inside
+      // the GET above, which made a plain read download up to 24 files and
+      // write the record — so a prefetch or a double-click paid for it too.
+      // Opening the EDITOR is the moment that work is actually wanted, so it
+      // is asked for here. Idempotent server-side; a failure is not fatal,
+      // the listing still opens against eBay's own photo strip.
+      const l = rec.listing || {};
+      if (l.source === "ebay" && !(l.images || []).length
+          && (l.image_urls || []).length && rec.status !== "sold") {
+        try {
+          const prepared = await api(`/api/listings/${id}/prepare-for-editing`,
+                                     { method: "POST" });
+          if (prepared?.listing) rec = { ...rec, listing: prepared.listing };
+        } catch {
+          // Non-fatal: the editor falls back to the read-only eBay photos.
+        }
+      }
       // status rides along so the workflow knows a live listing is being
       // REVISED (Update Live Listing / End listing) rather than published.
       setSession({ sessionId: rec.id, listing: rec.listing, confidence: null, status: rec.status });
