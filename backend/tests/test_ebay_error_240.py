@@ -606,3 +606,60 @@ def test_an_unchanged_category_is_not_reported_as_a_remap(monkeypatch):
     listing.category_id = "20642"
     assert "category_id" not in ebay_trading.create_listing(
         "tok", listing, [], postal_code="97201")
+
+
+# --- the production case, end to end ----------------------------------------
+#
+# Seven drafts, an account eBay's own APIs call healthy, and a 240 carrying no
+# <Message>. This is the exact shape the live logs showed:
+#
+#   trading: AddFixedPriceItem rejected — code=240 ... detail=(none)
+#   ebay: publish blocked by error 240; payments=OPTED_IN registered=True
+#         limit={'amount': '50000', 'currency': 'USD', 'quantity': 5000}
+#
+# Every account question comes back clean, so the probe's verdict is the ONLY
+# information the seller can act on — and it has to arrive first, because the
+# card renders one line.
+
+HEALTHY_PRIV = lambda _t: {                                    # noqa: E731
+    "registration_complete": True,
+    "selling_limit": {"amount": "50000", "currency": "USD", "quantity": 5000},
+}
+
+
+def test_the_live_failure_puts_the_verdict_on_the_card():
+    """A healthy account + a cause-less 240 => the probe's verdict leads."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=_refusing(plain=True),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "refusing every listing from this account" in issues[0]["title"]
+    assert issues[-1]["placeholder"] is True
+
+
+def test_a_warning_cannot_bury_the_verdict():
+    """The regression that put a content-free headline on the card.
+
+    `detail` carries warnings, and a warning is almost always present. Reading
+    it as eBay's reason marked the rejection "explained", which (a) quoted the
+    warning as the cause and (b) cleared the placeholder flag — so the verdict
+    lost the ordering and the seller got "eBay won't accept this listing" with
+    nothing whatsoever underneath it.
+    """
+    refused = ebay_trading.TradingError(
+        E240, code="240",
+        detail="Warning: the listing was submitted with a shorter handling time.")
+    issues = ebay_account.publish_block_issues(
+        refused, CREDS, listing=_Draft(), verify=_refusing(plain=True),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "refusing every listing from this account" in issues[0]["title"]
+    assert "handling time" not in issues[0]["title"]
+    assert "handling time" not in issues[0]["fix"]
+
+
+def test_a_wording_verdict_reaches_the_card_too():
+    """The same path when eBay's objection is the words, not the account."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=_refusing(plain=False),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "title" in issues[0]["title"].lower()
+    assert issues[0]["target"] == "title"
