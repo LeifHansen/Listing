@@ -45,7 +45,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "condition": "one of: %s",
   "condition_description": "string describing visible wear/flaws",
   "category_suggestion": "human-readable eBay category path",
-  "description": "string, 2-4 short paragraphs, buyer-friendly, no false claims",
+  "description": "string, 2-4 short paragraphs, buyer-friendly, no false claims, opening on the item itself (see the description rule below)",
   "price": number or null (suggested USD price based on item & condition),
   "purchase_price": number or null (ONLY the price on a store/thrift PRICE STICKER or price tag visible in the photos — what it costs to buy this item right now. null when no price sticker is legible. Never estimate; never confuse with the resale price above),
   "quantity": integer (default 1),
@@ -63,6 +63,15 @@ Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
   authenticity guarantees, or specs you cannot verify; put those in missing_info.
 - Title must be <= 80 characters and front-load the most searched keywords.
+- Description: the FIRST WORDS must be item-specific — brand, then model or
+  product name, then what the thing is ("Pyrex Cinderella 441 mixing bowl...",
+  "Levi's 501 straight-leg jeans..."). NEVER open on a generic age or hype
+  adjective: Vintage, Antique, Retro, Rare, Unique, Beautiful, Stunning,
+  Gorgeous. Search weights the opening of a description most heavily and shows
+  it as the result snippet, so a word that could head any listing in the store
+  spends the highest-value position in the listing on nothing. Keep those words
+  — just later in the sentence ("Pyrex Cinderella 441 mixing bowl, vintage
+  1960s milk glass").
 - ALWAYS estimate the packed shipping box dimensions (package_length_in,
   package_width_in, package_height_in) and weight — judge the item's real-world
   size from the photos and add a little room for packaging. Never leave the
@@ -629,6 +638,10 @@ def refine(listing: Listing, prompt: str) -> Listing:
     # Don't let the model rewrite the image list.
     current.pop("images", None)
 
+    # The description's opening rule has to survive a refine too: a rewrite
+    # here reaches the same buyers and the same search snippet as the first
+    # draft. Conditioned on the seller not asking otherwise — an explicit
+    # "start it with Vintage" is their call to make, not ours to override.
     msg = (
         "You are editing an eBay listing draft. Here is the current draft as "
         "JSON:\n\n" + json.dumps(current, indent=2) + "\n\n"
@@ -637,6 +650,10 @@ def refine(listing: Listing, prompt: str) -> Listing:
         "fields (title <= 80 chars, condition must be one of: "
         + ", ".join(EBAY_CONDITIONS)
         + "). Only change what the instruction asks for; keep everything else. "
+        "If you rewrite the description, its first words must stay "
+        "item-specific — brand, model, what the thing is — and must never open "
+        "on a generic adjective like Vintage, Antique, Retro or Rare, unless "
+        "the seller's instruction explicitly asks for that opening. "
         "Return ONLY the JSON, no markdown."
     )
     resp = client.messages.create(

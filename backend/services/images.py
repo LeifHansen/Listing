@@ -263,13 +263,6 @@ _SHADE_FLOOR = float(os.getenv("BG_SHADE_FLOOR", "0.5") or "0.5")
 # sweep — there the "off-backdrop means item" inference doesn't hold, so the
 # border is only trimmed inward, never grown.
 _BUSY_BACKDROP_STD = float(os.getenv("BG_BUSY_BACKDROP", "34") or "34")
-# Detached crumbs smaller than this share of the biggest kept region are matte
-# noise (dust, a shadow edge, a speck of backdrop texture), not a second item.
-# Generous by design: a shoe next to its pair, or a tag beside a garment, is
-# tens of percent of the main blob and always survives.
-_SPECK_FRAC = float(os.getenv("BG_SPECK_FRAC", "0.02") or "0.02")
-
-
 def _blur_threshold(mask: Image.Image, sigma: float, cut: int) -> Image.Image:
     """Binary morphology via blur + threshold: cut < 128 dilates the mask by
     about `sigma`, cut > 128 erodes it by about the same, and both smooth the
@@ -286,26 +279,6 @@ def _close_mask(mask: Image.Image, sigma: float) -> Image.Image:
     pinholes up to ~2*sigma across while leaving the silhouette's size and its
     convex corners essentially where they were."""
     return _blur_threshold(_blur_threshold(mask, sigma, 40), sigma, 215)
-
-
-def _drop_specks(arr):
-    """Delete detached crumbs from a boolean subject mask, keeping every region
-    big enough to be a real part of the listing. No-op without scipy (it rides
-    in with rembg) or when there's only one region."""
-    import numpy as np
-
-    try:
-        from scipy import ndimage
-    except Exception:  # noqa: BLE001 - cleanup is a bonus, never a requirement
-        return arr
-    labels, count = ndimage.label(arr)
-    if count <= 1:
-        return arr
-    sizes = np.bincount(labels.ravel())
-    sizes[0] = 0
-    keep = sizes >= max(_SPECK_FRAC * sizes.max(), 0.0008 * arr.size)
-    keep[0] = False
-    return keep[labels]
 
 
 def _colour_gap(luma, chroma, reference, luma_weight: Optional[float] = None):
@@ -1968,10 +1941,15 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     from . import orient
     rotations = orient.detect_rotations([src for _i, src, _dst in todo])
     # A list, not a set: these line up positionally with optimize_batch's
-    # results below, and a set's iteration order is not the job order.
+    # results below, and a set's iteration order is not the job order. The
+    # membership test gets its own set, built once — inside the comprehension
+    # it was rebuilt per job, which on a 250-photo batch resumed after a
+    # restart is a quarter of a million comparisons to answer "which of these
+    # are already done".
     pending = [i for i, _src, _dst in todo]
+    pending_set = set(pending)
     results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
-               for i, _src in jobs if i not in set(pending)}
+               for i, _src in jobs if i not in pending_set}
     if progress and not todo and jobs:
         # Nothing left to do, so nothing below will ever tick. Report the real
         # count once rather than leaving a resumed batch's bar reading zero.

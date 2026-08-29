@@ -147,8 +147,3 @@ export function ebayBlockers(l = {}, { targets = null, aspects = null } = {}) {
 export function blockerLabels(blockers) {
   return blockers.map((b) => b.label).join(", ");
 }
-
-// "1 thing" / "3 things" — the phrase every blocker headline is built from.
-export function blockerCount(n) {
-  return `${n} thing${n === 1 ? "" : "s"}`;
-}

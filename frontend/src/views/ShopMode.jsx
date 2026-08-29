@@ -4,6 +4,7 @@ import { Camera, Video, Plus, RotateCcw, MapPin, Eye } from "lucide-react";
 import { once, mediaUrl } from "@/lib/utils";
 import {
   api, postJson, downscaleForUpload, extractFrames, UPLOAD_TIMEOUT_MS,
+  MODEL_TIMEOUT_MS,
 } from "@/lib/api";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
@@ -38,7 +39,11 @@ export function ShopMode() {
       fd.append("remove_bg", "false");
       const up = await api("/api/upload",
         { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
-      const res = await api(`/api/identify/${up.session_id}`, { method: "POST" });
+      // A synchronous vision call on a phone in a store. Without its own
+      // deadline it inherited api()'s 90s default and gave up on work the
+      // server was still doing -- the same mismatch the photo studio had.
+      const res = await api(`/api/identify/${up.session_id}`,
+        { method: "POST", timeoutMs: MODEL_TIMEOUT_MS });
 
       // Best-effort market price (never block the scan on it).
       let price = null;
@@ -76,7 +81,10 @@ export function ShopMode() {
       }
       const fd = new FormData();
       frames.forEach((b, i) => fd.append("files", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" })));
-      const res = await api("/api/shelf-scan", { method: "POST", body: fd });
+      // Uploads up to six video frames AND runs vision over them: the longest
+      // single request in the app, and it was on the 90s default too.
+      const res = await api("/api/shelf-scan",
+        { method: "POST", body: fd, timeoutMs: MODEL_TIMEOUT_MS });
       setShelf({ items: res.items || [] });
     } catch (e) {
       toast(`Shelf scan error: ${e.message}`, { kind: "error" });

@@ -12,19 +12,22 @@ the orchestrator can return it verbatim on single-eBay publishes.
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
 from fastapi import HTTPException
 
-from .. import config, db, ebay_auth, ebay_errors, storage
+from .. import config, db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from ..services import (ebay, ebay_trading, image_import, listing_sync,
-                        preflight, promotions, publish_guard, taxonomy)
+from ..services import (ebay, ebay_account, ebay_trading, image_import,
+                        listing_sync, preflight, promotions, publish_guard,
+                        taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
+from . import state as marketplace_state
 from .state import STICKY_STATUSES
 
 # Access tokens live ~2 hours; refreshing one per request added a serial
@@ -32,6 +35,30 @@ from .state import STICKY_STATUSES
 # fires several). Keyed by the refresh token itself, so a reconnect (new
 # refresh token) naturally misses the cache.
 _TOKEN_CACHE: dict[str, tuple[float, str]] = {}
+_TOKEN_CACHE_MAX = 50
+_TOKEN_CACHE_LOCK = threading.Lock()
+
+
+def _make_room() -> None:
+    """Keep _TOKEN_CACHE bounded without flushing it.
+
+    The cap used to be enforced with `.clear()`, which on a busy instance
+    threw away every connected seller's token the moment the 51st arrived —
+    so all of them paid a fresh ~300-600ms eBay round-trip on their next
+    request, together, and the instance that was busy enough to fill the
+    cache is exactly the one that could least afford it.
+
+    Expired entries go first (they were dead anyway, and that alone almost
+    always makes room). Only if the cache is still full does anything live
+    get dropped, and then it is whatever expires soonest — the seller who was
+    closest to paying for a refresh regardless.
+    """
+    now = time.time()
+    for key in [k for k, (expires, _) in _TOKEN_CACHE.items() if expires <= now]:
+        _TOKEN_CACHE.pop(key, None)
+    while len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+        soonest = min(_TOKEN_CACHE, key=lambda k: _TOKEN_CACHE[k][0])
+        _TOKEN_CACHE.pop(soonest, None)
 
 
 def access_token_for(refresh_token: str) -> str:
@@ -42,11 +69,95 @@ def access_token_for(refresh_token: str) -> str:
     # Drop the cached token 90s before eBay's expiry so an in-flight request
     # never carries one that dies mid-call.
     expires = float(fresh.get("expires_at") or (time.time() + 1800))
-    if len(_TOKEN_CACHE) > 50:
-        _TOKEN_CACHE.clear()
-    _TOKEN_CACHE[refresh_token] = (max(time.time() + 60, expires - 90),
-                                   fresh["access_token"])
+    with _TOKEN_CACHE_LOCK:
+        if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+            _make_room()
+        _TOKEN_CACHE[refresh_token] = (max(time.time() + 60, expires - 90),
+                                       fresh["access_token"])
     return fresh["access_token"]
+
+
+def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
+    """Keep the saved account-scoped ids honest, without anyone asking.
+
+    Business policy ids and merchant location keys belong to ONE eBay seller
+    account. eBay rejects another account's outright, and the rejection names
+    no field — the seller sees a generic "this listing or seller may be in
+    violation of eBay policy" on EVERY publish, with nothing on screen that
+    looks wrong, because the app's own Settings happily reports the ids as
+    "set". Set is not the same as ours.
+
+    These were only ever checked while connecting an account, and that check
+    keeps the saved value whenever eBay cannot say what exists — correct on its
+    own terms (an outage must never silently re-pick a seller's shipping) but
+    it means a connect during any eBay hiccup leaves the PREVIOUS account's ids
+    in place permanently, with no later pass to correct them.
+
+    So re-check here, on the path every publish already takes, at most once per
+    VERIFY_TTL per user. Anything that no longer exists on the connected
+    account is replaced with that account's own default and written back, so
+    the repair happens once rather than on every publish. A failed lookup still
+    changes nothing, for the same reason as before.
+    """
+    if not ebay_account.verify_due(uid):
+        return acct
+    try:
+        discovered = ebay_auth.fetch_policies_and_location(access_token)
+        # Sync from whatever the connected eBay account actually has -- an id
+        # that belongs to someone else is replaced, and an EMPTY slot is filled
+        # from this account's own default.
+        #
+        # Filling blanks here is a deliberate reversal of #188, made on the
+        # seller's instruction ("sync from whatever is set in ebay, or if unset,
+        # prompt user to set"). #188 kept blanks alone to protect the "- none -"
+        # option the Settings screen offers; the seller would rather the app
+        # track eBay by itself and be told when it cannot. So a slot that is
+        # STILL empty after this now means one thing only -- eBay has none of
+        # that kind -- which is exactly the case `absent` reports and the
+        # publish checklist turns into an instruction the seller can act on.
+        result = ebay_account.reconcile_account_settings(
+            access_token, acct, discovered, fill_blanks=True)
+        changes, conclusive = result.changes, result.conclusive
+    except Exception as exc:  # noqa: BLE001 - never block a publish on this
+        log.warning("ebay: policy verification failed for %s: %s", uid, exc)
+        return acct
+    # Only a pass eBay actually answered counts. Neither lookup raises when it
+    # fails, so "no changes" alone cannot tell a healthy account apart from an
+    # eBay outage -- and starting the clock on an outage would suppress the
+    # next TTL of repairs for the seller who most needs them.
+    if conclusive:
+        ebay_account.note_verified(uid)
+        # Only a conclusive pass may claim eBay has none of something.
+        ebay_account.note_absent(uid, result.absent)
+    if not changes:
+        return acct
+    log.warning("ebay: account-scoped settings did not belong to @%s — "
+                "repaired %s", acct.get("ebay_username") or "?",
+                ", ".join(sorted(changes)))
+    # Replacing an id that HELD a value is the tell-tale of a different eBay
+    # account (see ebay_account.settings_were_dropped) -- the same signal the
+    # connect handler acts on, so it has to do the same two things here, or the
+    # repair is half a repair.
+    if ebay_account.settings_were_dropped(changes, acct):
+        # 1. Label what is already here as the previous account's. Without it
+        #    listing_sync.belongs_to treats every unstamped record as this
+        #    account's, and syncs and revises keep operating on the PREVIOUS
+        #    seller's item ids.
+        marked = db.stamp_ebay_account(
+            uid, acct.get("ebay_username") or listing_sync.UNKNOWN_ACCOUNT)
+        # 2. Drop the old store's ZIP. This one is not housekeeping: on a live
+        #    publish, ebay_provider re-ensures the ship-from location from
+        #    ship_from_postal and writes the returned key back over
+        #    merchant_location_key. Left set, that stale ZIP would force our
+        #    location to the old store's address and undo the location half of
+        #    this repair inside the same request. Blank makes listing_sync
+        #    re-read it from the account that is actually connected.
+        changes["ship_from_postal"] = ""
+        log.info("ebay: account switch detected on publish for uid=%s; "
+                 "labelled %d existing listing(s), cleared ship-from", uid,
+                 marked)
+    db.save_ebay_account(uid, **changes)
+    return {**acct, **changes}
 
 
 def creds_for(uid: Optional[str]) -> Optional[dict]:
@@ -63,8 +174,12 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
         # and silently dry-runs a live publish; log so it's debuggable.
         log.warning(f"ebay: token refresh failed for user {uid}: {exc}")
         return None
+    acct = _with_current_policies(uid, acct, access_token)
     return {
         "access_token": access_token,
+        # Which eBay account this token is for. Everything that reads or writes
+        # a listing on eBay is scoped by it — see listing_sync.belongs_to.
+        "ebay_username": acct.get("ebay_username", "") or "",
         "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
         "payment_policy_id": acct.get("payment_policy_id", ""),
         "return_policy_id": acct.get("return_policy_id", ""),
@@ -176,9 +291,6 @@ def refresh_eps_urls(listing_id: str, token: str, item_id: str,
 # outright — the browser only ever echoes back what a previous publish told it,
 # and an echo that lost them reads as "never listed". Believing that costs a
 # duplicate live listing, so the stored record wins on every one of them.
-_IDENTITY_FIELDS = ("ebay_listing_id", "source", "view_url")
-
-
 def _with_stored_identity(ctx: PublishContext) -> PublishContext:
     """`ctx` with the eBay identity fields taken from the stored record, and
     prev_record re-read inside the publish lock.
@@ -193,21 +305,55 @@ def _with_stored_identity(ctx: PublishContext) -> PublishContext:
         # there is. The idempotency key still guards the create itself.
         return ctx
     stored = fresh.get("listing") or {}
-    for field_name in _IDENTITY_FIELDS:
-        value = stored.get(field_name)
-        if value and value != getattr(ctx.listing, field_name, None):
-            log.info("publish: taking %s from the stored record for session=%s",
-                     field_name, ctx.session_id)
-            setattr(ctx.listing, field_name, value)
+    # The item id is this function's own: it is what the create-vs-revise
+    # decision reads, and a stored one always wins over the payload's.
+    # publish_guard owns that read (and normalises it to a stripped string, so
+    # an id stored as a number can't read as "different from the payload" and
+    # trigger a pointless overwrite); this used to inline a rawer copy of it.
+    stored_id = publish_guard.stored_item_id(fresh)
+    if stored_id and stored_id != ctx.listing.ebay_listing_id:
+        log.info("publish: taking ebay_listing_id from the stored record "
+                 "for session=%s", ctx.session_id)
+        ctx.listing.ebay_listing_id = stored_id
+    changed = marketplace_state.restore_server_fields(ctx.listing, stored)
+    if changed:
+        log.info("publish: taking %s from the stored record for session=%s",
+                 ", ".join(changed), ctx.session_id)
     return PublishContext(
         session_id=ctx.session_id, listing=ctx.listing, mode=ctx.mode,
         base_url=ctx.base_url, uid=ctx.uid, prev_record=fresh)
 
 
+def has_stored_connection(uid: Optional[str]) -> bool:
+    """True when this user has connected eBay, whatever `creds_for` just said.
+
+    `creds_for` answers None for two very different situations: "this seller
+    never connected eBay" and "this seller is connected but the token refresh
+    just failed". The first is the dry-run case. The second must never fall
+    through to the env-configured operator credentials — that publishes one
+    seller's listing onto the account whose refresh token is in the
+    deployment's environment.
+
+    Deliberately a plain lookup with no refresh of its own. Asking `creds_for`
+    again would re-attempt the token exchange, and an attempt that happened to
+    succeed on the retry would answer "not broken" — reopening the fallback
+    this exists to close. Paired with a known-None `creds`, the stored token
+    IS the answer: it is there, and it did not work a moment ago.
+    """
+    if not uid:
+        return False
+    acct = db.get_ebay_account(uid)
+    return bool(acct and acct.get("refresh_token"))
+
+
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = creds_for(uid)
-    connected = bool(creds) or config.ebay_ready()
+    # A connected SELLER, not a configured server. The env credentials are the
+    # operator's; since the Inventory engine went they cannot publish anything,
+    # so counting them as "connected" made the checklist judge an account that
+    # no publish would ever use.
+    connected = bool(creds)
     if creds:
         fulfillment = listing.fulfillment_policy_id or creds.get("fulfillment_policy_id") or ""
         has_payment = bool(creds.get("payment_policy_id"))
@@ -225,9 +371,11 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         has_location = bool(config.EBAY_MERCHANT_LOCATION_KEY)
 
     # What the chosen shipping policy actually ships with (per-service weight
-    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz).
-    services = (ebay_auth.fulfillment_policy_services(creds["access_token"], fulfillment)
-                if creds and fulfillment else [])
+    # caps are the classic silent publish killer, e.g. Standard Envelope's 3 oz)
+    # — and whether the account still has that policy at all.
+    services, policy_exists = (
+        ebay_auth.fulfillment_policy_lookup(creds["access_token"], fulfillment)
+        if creds and fulfillment else ([], None))
 
     required = None
     if config.taxonomy_ready() and (listing.category_id or "").strip().isdigit():
@@ -237,11 +385,53 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         except Exception:  # noqa: BLE001 - aspects are a best-effort check
             required = None
 
-    return preflight.validate(
+    issues = preflight.validate(
         listing, mode,
         has_fulfillment=bool(fulfillment), has_payment=has_payment,
         has_return=has_return, has_location=has_location, connected=connected,
         policy_services=services, required_aspects=required)
+    # A slot still empty after the sync above means eBay has none of that kind
+    # -- there is nothing to sync from, and no dropdown in this app can fix it.
+    # Saying "choose one in Settings" here sends the seller to an empty list;
+    # the only thing that helps is telling them to create it on eBay.
+    ABSENT_COPY = {
+        "fulfillment_policy_id": ("shipping", "shipping"),
+        "payment_policy_id": ("policies", "payment"),
+        "return_policy_id": ("policies", "return"),
+    }
+    if mode == "live" and creds:
+        for field in ebay_account.absent_for(uid or ""):
+            target_kind = ABSENT_COPY.get(field)
+            if not target_kind or (creds.get(field) or "").strip():
+                continue
+            target, kind = target_kind
+            issues.append({
+                "target": target, "level": "error",
+                "title": f"Your eBay account has no {kind} policy yet",
+                "fix": (f"eBay won't accept a listing without one, and there "
+                        f"isn't a {kind} policy on the account you're connected "
+                        f"as (@{creds.get('ebay_username') or 'your account'}) "
+                        f"for us to use. Create one on eBay under Seller Hub → "
+                        f"Account → Business policies, then publish again — "
+                        f"we'll pick it up automatically."),
+            })
+
+    if mode == "live" and policy_exists is False:
+        # eBay says this account has no such policy. Almost always a policy id
+        # left over from a different eBay account — publishing with it fails
+        # inside eBay, where nothing points at the shipping card.
+        per_listing = bool((listing.fulfillment_policy_id or "").strip())
+        issues.append({
+            "target": "shipping", "level": "error",
+            "title": "That shipping policy isn't on your eBay account",
+            "fix": ("Pick a shipping policy on the Shipping card"
+                    if per_listing else
+                    "Choose a shipping policy in Settings → Listing defaults")
+            + " — the saved one doesn't exist on the eBay account you're "
+              "connected as, which is what happens to policies carried over "
+              "from another account.",
+        })
+    return issues
 
 
 def _view_url(listing: Listing, listing_id: str) -> str:
@@ -307,6 +497,10 @@ class EbayProvider:
         return creds_for(uid)
 
     def disconnect(self, uid: str) -> None:
+        # Forget the "checked recently" mark too: the next connect may be a
+        # different seller, and trusting the previous account's pass is exactly
+        # how another account's policy ids survive a switch.
+        ebay_account.forget_verified(uid)
         db.disconnect_ebay_account(uid)
 
     # --- listing lifecycle -----------------------------------------------
@@ -359,6 +553,30 @@ class EbayProvider:
         # API instead of the publish path below.
         if listing_sync.is_imported(listing):
             uid = ctx.uid
+            # This listing lives on an eBay account that is no longer the
+            # connected one. Reviving it here would revise (or relist) another
+            # seller's item under this account's policies — refuse plainly and
+            # say which account owns it.
+            # Only a NAMED other account refuses the write: an owner we could
+            # not name is not proof of a different store, and blocking on it
+            # strands every imported listing the seller has (see
+            # listing_sync.UNKNOWN_ACCOUNT).
+            owner = listing_sync.named_account_of(listing)
+            connected = ((creds or {}).get("ebay_username") or "").strip()
+            if creds and owner and connected and owner != connected:
+                message = (f"This listing belongs to your other eBay account "
+                           f"(@{owner}); you're connected as @{connected}. "
+                           "Reconnect that account to change it.")
+                db.upsert_listing(session_id, listing.model_dump(),
+                                  status=prev_rec.get("status") or "published",
+                                  user_id=uid)
+                return PublishOutcome(
+                    ok=False, message=message,
+                    issues=[{"target": "account", "level": "error",
+                             "title": "That's on a different eBay account",
+                             "fix": message}],
+                    raw={"dry_run": False, "error": True, "mode": mode,
+                         "message": message})
             # The record's REAL lifecycle stage decides what "publish" means
             # here: live → revise in place; ended/sold → relist as a NEW
             # listing (eBay refuses to revise an ended item). Status writes
@@ -377,6 +595,57 @@ class EbayProvider:
             if not creds:
                 raise HTTPException(400, "Connect eBay first.")
             relist = prev_status in ("ended", "sold")
+            # The checklist runs on this route too. It used to gate only the
+            # Inventory publish below, but every listing this app creates is
+            # stamped source="ebay" the moment it goes live, so from the second
+            # publish onward a seller took this route and got no checklist at
+            # all — the one path where an eBay rejection is guaranteed to be
+            # the seller's first sign of a problem.
+            #
+            # A relist IS a new listing (same create_on_ebay call as a first
+            # publish), so it answers to the full live contract. A revise only
+            # has to satisfy what it actually sends — see preflight.validate.
+            problems = preflight.errors_only(
+                preflight_issues(uid, listing, "live" if relist else "revise"))
+            if problems and not config.EBAY_PREFLIGHT_BLOCKS_REVISE:
+                # Observing, not blocking yet — see EBAY_PREFLIGHT_BLOCKS_REVISE.
+                #
+                # A RELIST is covered by the same flag, which it was not at
+                # first. The flag exists because these listings are live (or
+                # were), some were made outside this app, and a checklist that
+                # has never run against them will find things eBay accepted
+                # years ago. A relist is the SAME population — an imported
+                # listing that ended — so it has the same problem, and blocking
+                # it strands the seller on the Inactive tab's own promise that
+                # they can relist any time.
+                #
+                # The concrete misfire is the package weight. Imported records
+                # take it from GetItem's ShippingPackageDetails, which eBay
+                # omits for flat-rate listings, so it lands at 0 — and the app's
+                # own Trading builder proves it is optional, emitting no
+                # <ShippingPackageDetails> at all when there is none. The
+                # checklist would block "eBay needs a package weight" on a
+                # listing demonstrably live on eBay without one.
+                log.info("%s would be blocked by preflight: session=%s "
+                         "issues=%s", "relist" if relist else "revise",
+                         session_id, [p.get("title") for p in problems])
+                problems = []
+            if problems:
+                db.upsert_listing(session_id, listing.model_dump(),
+                                  status=prev_status, user_id=uid)
+                log.info("%s blocked by preflight: session=%s issues=%d",
+                         "relist" if relist else "revise", session_id,
+                         len(problems))
+                return PublishOutcome(
+                    ok=False, issues=problems,
+                    message=f"Not quite ready — {len(problems)} thing"
+                            f"{'s' if len(problems) != 1 else ''} to fix "
+                            "before eBay will accept it:",
+                    raw={"dry_run": False, "error": True, "mode": mode,
+                         "message": f"Not quite ready — {len(problems)} thing"
+                                    f"{'s' if len(problems) != 1 else ''} to "
+                                    "fix before eBay will accept it:",
+                         "issues": problems})
             # Captured before the create overwrites it: a relist mints a new
             # item id, and the OLD one is what makes this relist's idempotency
             # key distinct from the publish that first listed the item.
@@ -415,12 +684,20 @@ class EbayProvider:
                             "relist" if relist else "revise", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status=prev_status, user_id=uid)
+                issues = ebay_account.publish_block_issues(exc, creds)
                 return PublishOutcome(
-                    ok=False, message=str(exc),
-                    issues=ebay_errors.from_response(str(exc)),
+                    ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc),
-                         "issues": ebay_errors.from_response(str(exc))})
+                         "message": str(exc), "issues": issues})
+            # The record's owner. Publishing through this account's creds IS
+            # the ownership fact, so write it down — without this the record's
+            # ebay_account stayed empty forever and the account-switch
+            # bookkeeping (count_foreign_listings, release) could never see
+            # it. Fills a blank only: a stamped record's history is not this
+            # call's to rewrite.
+            if not listing.ebay_account:
+                listing.ebay_account = ((creds or {}).get("ebay_username")
+                                        or "").strip()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             if pushed_local:
@@ -456,10 +733,37 @@ class EbayProvider:
         # in our records just because a revise attempt was blocked or errored —
         # the listing is still live on eBay either way.
         was_live = already_live
+        # A draft belongs to this app, not to eBay. Saving one used to fall
+        # through to the Inventory engine with do_publish=False, which created
+        # an inventory item and an UNPUBLISHED offer on the seller's account.
+        # Nothing good came of that: inventory-based listings don't appear in
+        # Seller Hub, so the seller could neither find nor delete them, and the
+        # live publish that follows goes out through Trading and mints an
+        # entirely different item — the offer is never claimed. Every draft
+        # save on a connected account left one behind.
+        if mode == "draft":
+            db.upsert_listing(session_id, listing.model_dump(),
+                              status="published" if was_live else "draft",
+                              user_id=ctx.uid)
+            message = ("Saved to your drafts. It is NOT on eBay — press "
+                       "Publish Live when you're ready to list it."
+                       if creds else
+                       "Saved to your drafts — find it under Drafts. It is "
+                       "NOT on eBay: connect your eBay account and press "
+                       "Publish Live when you're ready to list it.")
+            log.info("draft saved locally: session=%s connected=%s",
+                     session_id, bool(creds))
+            return PublishOutcome(
+                ok=True, status="published" if was_live else "draft",
+                message=message,
+                raw={"dry_run": False, "draft": True, "mode": "draft",
+                     "message": message})
         # Pre-publish checklist: catch everything eBay would reject BEFORE the
         # round-trip, with field-targeted fixes. Only gates a real (connected)
-        # live publish — dry-runs and drafts stay permissive.
-        if mode == "live" and (creds or config.ebay_ready()):
+        # live publish — dry-runs and drafts stay permissive. Env credentials
+        # no longer publish, so gating on them blocked the DRY RUN they now
+        # produce, which is the one thing an unconnected deployment can do.
+        if mode == "live" and creds:
             problems = preflight.errors_only(
                 preflight_issues(ctx.uid, listing, "live"))
             if problems:
@@ -510,16 +814,24 @@ class EbayProvider:
                 log.warning("trading publish failed: session=%s: %s", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="draft", user_id=ctx.uid)
+                issues = ebay_account.publish_block_issues(exc, creds)
                 return PublishOutcome(
-                    ok=False, message=str(exc),
-                    issues=ebay_errors.from_response(str(exc)),
+                    ok=False, message=str(exc), issues=issues,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc),
-                         "issues": ebay_errors.from_response(str(exc))})
+                         "message": str(exc), "issues": issues})
             # Record the item id FIRST. Everything below is optional extra work
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:
             # an id that never lands is indistinguishable from "never listed".
+            # The record's owner. Publishing through this account's creds IS
+            # the ownership fact, so write it down — without this the record's
+            # ebay_account stayed empty forever and the account-switch
+            # bookkeeping (count_foreign_listings, release) could never see
+            # it. Fills a blank only: a stamped record's history is not this
+            # call's to rewrite.
+            if not listing.ebay_account:
+                listing.ebay_account = ((creds or {}).get("ebay_username")
+                                        or "").strip()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", ctx.uid)
             storage.save_listing(session_id, listing)
@@ -547,68 +859,83 @@ class EbayProvider:
                 url=_view_url(listing, listing_id),
                 message=result["message"], raw=result)
 
-        log.info("publish request: session=%s mode=%s connected=%s", session_id,
-                 mode, bool(creds))
-        result = ebay.publish(session_id, listing, mode, ctx.base_url,
-                              creds=creds, is_revise=was_live)
-        # Record the outcome: published (live), draft, or dry-run. An errored
-        # attempt never demotes a live listing, and never records "live" for a
-        # listing that isn't (the old status=req.mode did exactly that).
-        if result.get("published"):
-            status = "published"
-            log.info("publish OK: session=%s listing_id=%s revised=%s",
-                     session_id, result.get("listing_id"), result.get("revised"))
-        elif result.get("error"):
-            status = "published" if was_live else "draft"
-            log.warning("publish error: session=%s step=%s", session_id,
-                        result.get("step"))
-        elif result.get("dry_run"):
-            status = "dry_run"
-        else:
-            status = "published" if was_live else mode
-        dump = listing.model_dump()
-        # Persist the eBay item id so the app can link to (and keep tracking)
-        # the live listing across sessions.
-        if result.get("listing_id"):
-            dump["ebay_listing_id"] = str(result["listing_id"])
-        recorded = (_record_published(session_id, dump, status, ctx.uid)
-                    if result.get("published")
-                    else db.upsert_listing(session_id, dump, status=status,
-                                           user_id=ctx.uid))
-        # Promoted Listings: once the item is live, best-effort create/refresh
-        # its ad. Runs when the listing's Promote toggle is on OR the
-        # account's auto-promote default (Settings) is — at the chosen rate,
-        # else eBay's recommended rate. Never blocks or fails the publish; the
-        # status is attached for the UI to show (incl. 'reconnect to grant ad
-        # permissions').
-        if result.get("published") and (listing.promote
-                                        or auto_promote_enabled(ctx.uid)):
-            result["promote_status"] = promote(
-                session_id, listing, creds,
-                rate=listing.ad_rate_percent,
-                ebay_listing_id=result.get("listing_id"))
-            if result["promote_status"].get("promoted"):
-                # Re-record with the promote flag + actual rate so the
-                # Dashboard and recommender see it as promoted.
-                dump = listing.model_dump()
-                if result.get("listing_id"):
-                    dump["ebay_listing_id"] = str(result["listing_id"])
-                db.upsert_listing(session_id, dump, status=status,
-                                  user_id=ctx.uid)
-        if result.get("published") and not recorded:
-            result["record_warning"] = RECORD_WARNING
-        listing_id = str(result.get("listing_id") or "")
+        # A live publish with no creds used to fall through to the env-config
+        # single-tenant path, which carries the OPERATOR's refresh token and
+        # policy ids. That is the right behaviour for a deployment with no
+        # accounts at all, and completely wrong for a signed-in seller whose
+        # token refresh happened to fail a moment ago — their listing would go
+        # live on the operator's eBay account. `creds_for` returns None for
+        # both, so ask which one this is before letting it through.
+        if not creds and has_stored_connection(ctx.uid):
+            log.warning("publish refused: session=%s eBay token refresh failed "
+                        "for uid=%s", session_id, ctx.uid)
+            msg = ("We couldn't reach your eBay account just now, so nothing "
+                   "was published. Try again in a minute — if it keeps "
+                   "happening, reconnect eBay in Settings.")
+            return PublishOutcome(
+                ok=False, message=msg,
+                raw={"dry_run": False, "error": True, "mode": mode,
+                     "message": msg})
+
+        if not creds:
+            # No eBay account anywhere: render what a publish WOULD send so the
+            # payload can be inspected without one.
+            return self._dry_run(ctx)
+
+        # Connected, live, and neither a new listing (handled above) nor an
+        # imported one (returned far above). What's left is a record that
+        # claims to be live but carries no source="ebay" stamp — only an
+        # Inventory-API listing from an older build of this app can be that.
+        # eBay refuses to let the Trading API revise those and offers no way to
+        # convert one, so say what actually works instead of sending a call
+        # that comes back in eBay's words.
+        log.warning("publish: no route for session=%s (already_live=%s "
+                    "item_id=%s) — legacy inventory-managed record",
+                    session_id, already_live, bool(listing.ebay_listing_id))
+        db.upsert_listing(session_id, listing.model_dump(),
+                          status="published" if was_live else "draft",
+                          user_id=ctx.uid)
+        msg = ("This listing was published by an older version of the app, and "
+               "eBay won't let it be edited from here. End it on eBay, then "
+               "use Relist to publish it fresh.")
+        issues = [{"target": "account", "level": "error",
+                   "title": "This listing can't be edited from here",
+                   "fix": msg}]
         return PublishOutcome(
-            ok=not result.get("error"),
-            listing_id=listing_id,
-            url=_view_url(listing, listing_id) if result.get("published") else "",
-            message=str(result.get("message") or ""),
-            dry_run=bool(result.get("dry_run")),
-            status=("published" if result.get("published")
-                    else "draft" if status == "draft" and not result.get("error")
-                    else ""),
-            issues=list(result.get("issues") or []),
-            raw=result)
+            ok=False, message=msg, issues=issues,
+            raw={"dry_run": False, "error": True, "mode": mode,
+                 "message": msg, "issues": issues})
+
+    def _dry_run(self, ctx: PublishContext) -> PublishOutcome:
+        """The request a publish would make, for a deployment with no account.
+
+        Renders the Trading XML through the same builder create_listing uses.
+        The old dry run rendered an Inventory item + offer, which after the
+        Trading switch described a call this app never makes — a payload a
+        seller could act on and still be surprised by the real publish.
+        """
+        listing = ctx.listing
+        urls = ebay.image_urls_for(ctx.session_id, listing, ctx.base_url)
+        call, body = ebay_trading.build_add_item(
+            listing, urls,
+            policies={"fulfillment_policy_id": config.EBAY_FULFILLMENT_POLICY_ID,
+                      "payment_policy_id": config.EBAY_PAYMENT_POLICY_ID,
+                      "return_policy_id": config.EBAY_RETURN_POLICY_ID})
+        # No postal code: a dry run has no connected account to read a
+        # ship-from ZIP from, and build_add_item omits the element rather than
+        # inventing one. create_listing is what refuses a real publish without
+        # it, so the preview stays an honest picture of an unconfigured app.
+        payload = {"call": call, "xml": body, "mode": "live"}
+        export_path = storage.write_export(ctx.session_id, "ebay_payload", payload)
+        message = ("No eBay account connected — generated the "
+                   f"{call} request instead of publishing. Connect eBay in "
+                   "Settings to go live. (Server-side eBay credentials no "
+                   "longer publish on their own; a listing is always created "
+                   "on a connected seller's account.)")
+        return PublishOutcome(
+            ok=True, dry_run=True, status="dry_run", message=message,
+            raw={"dry_run": True, "mode": "live", "message": message,
+                 "export_path": str(export_path), "payload": payload})
 
 
 register(EbayProvider())

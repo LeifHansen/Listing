@@ -161,7 +161,7 @@ export function DuplicateListings({ onChanged }) {
     try {
       const res = await postJson("/api/ebay/end-listing", { session_id: item.listing_id });
       toast(res.status === "sold"
-        ? "Turns out this one sold on eBay — it's filed under Sold. 🎉"
+        ? "Turns out this one sold on eBay — it's archived under Inactive. 🎉"
         : "Listing ended — find it under Inactive.", { kind: "success" });
       await load();
       onChanged?.();

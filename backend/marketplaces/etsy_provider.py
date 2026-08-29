@@ -118,10 +118,20 @@ class EtsyProvider:
                         log.warning(f"etsy: token refresh failed for user {uid}: {exc}")
                         return None
                     # Etsy ROTATES the refresh token — persist it or the
-                    # connection dies when the old one expires.
-                    if fresh.get("refresh_token"):
-                        db.save_marketplace_account(
-                            uid, "etsy", refresh_token=fresh["refresh_token"])
+                    # connection dies when the old one expires. A write that
+                    # fails is therefore a FAILED REFRESH, not a detail: Etsy
+                    # has already invalidated the token still in the database,
+                    # so carrying on would serve this one request and leave the
+                    # connection permanently unrecoverable, with the next
+                    # publish quietly falling through to a dry run. Better to
+                    # fail now, loudly, while the seller is still here.
+                    if fresh.get("refresh_token") and not db.save_marketplace_account(
+                            uid, "etsy", refresh_token=fresh["refresh_token"]):
+                        log.error(
+                            "etsy: could not store the rotated refresh token for "
+                            "user %s — the connection would break silently, so "
+                            "treating this as a failed refresh.", uid)
+                        return None
                     if len(_ACCESS_CACHE) > 50:
                         _ACCESS_CACHE.clear()
                     access = fresh["access_token"]
@@ -209,6 +219,8 @@ class EtsyProvider:
         prev_listing = ctx.prev_record.get("listing") or {}
         prev_state = ((prev_listing.get("marketplaces") or {}).get("etsy") or {})
         existing_id = str(prev_state.get("listing_id") or "")
+        # Bound before the try so the failure path below can always report it.
+        listing_id = existing_id
 
         try:
             if existing_id:
@@ -249,12 +261,23 @@ class EtsyProvider:
                 else:
                     message = ("Draft created on your Etsy shop — publish it "
                                "live when you're ready.")
-        except ValueError as exc:   # EtsyError — Etsy's own reason
+        except Exception as exc:  # noqa: BLE001 - see the listing_id note below
             issues = getattr(exc, "issues", None) or [
                 {"target": "generic", "level": "error",
                  "title": "Etsy rejected the listing", "fix": str(exc)}]
             log.warning("etsy publish failed: session=%s: %s", ctx.session_id, exc)
-            return PublishOutcome(ok=False, message=str(exc), issues=issues)
+            # listing_id, even on the failure. create_draft_listing may already
+            # have MINTED a listing on the seller's shop, and only the photo
+            # upload or the activate call after it failed. Dropping the id here
+            # orphaned that listing: the retry saw no existing id, created a
+            # SECOND one, and end-listing could never reach the first ("This
+            # listing isn't on Etsy"). Every further retry added another.
+            #
+            # Catching Exception, not just ValueError: an httpx.ReadTimeout on
+            # the photo upload is the same situation and used to escape to the
+            # orchestrator's broad handler, which had no id to record either.
+            return PublishOutcome(ok=False, listing_id=str(listing_id or ""),
+                                  message=str(exc), issues=issues)
 
         url = res.get("url") or _view_url(listing_id)
         log.info("etsy publish ok: session=%s listing=%s mode=%s",

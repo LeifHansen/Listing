@@ -52,6 +52,55 @@ def is_imported(listing: Listing | dict) -> bool:
     return (source or "").lower() == "ebay"
 
 
+# Stamped on a record when the account it belonged to could not be named. A
+# connection made before the identity scope was granted 403s on the identity
+# call, so a switch away from it is visible (the saved policy ids stop
+# existing) while the account behind it never was. It is deliberately not a
+# username: no account can ever match it, which is the point for reads — a
+# sweep must not re-confirm those listings under whoever is connected now.
+#
+# It is NOT evidence that the seller is on a different account, only that we
+# cannot prove they are on the same one, so nothing that refuses a write the
+# seller explicitly asked for may act on it. `named_account_of` is the reader
+# for those callers; `account_of` keeps the raw value for scoping.
+UNKNOWN_ACCOUNT = "previous account"
+
+
+def account_of(listing: Listing | dict) -> str:
+    """The eBay account a record's item id lives on ("" = not recorded)."""
+    value = (listing.get("ebay_account") if isinstance(listing, dict)
+             else getattr(listing, "ebay_account", ""))
+    return (value or "").strip()
+
+
+def named_account_of(listing: Listing | dict) -> str:
+    """The owning account when it has a real name, "" otherwise.
+
+    Callers that block an action on "this belongs to someone else" need a name
+    they can show and compare. UNKNOWN_ACCOUNT is neither: it reads as a
+    username in a sentence ("belongs to @previous account") and it can never
+    equal the connected one, so treating it as a rival account refuses every
+    publish of an imported listing, forever, with no way back.
+    """
+    owner = account_of(listing)
+    return "" if owner == UNKNOWN_ACCOUNT else owner
+
+
+def belongs_to(listing: Listing | dict, account: str) -> bool:
+    """True when this record may be read or written on `account`'s behalf.
+
+    A record with no account recorded is legacy — it predates the field, and
+    the only account it can plausibly belong to is the one connected when it
+    was made, so it passes. A record stamped with a DIFFERENT account never
+    does: its item id belongs to another seller, and eBay's GetItem will
+    happily answer for it anyway (item detail is public), which is precisely
+    how a second connected account kept re-confirming the first account's
+    listings as live.
+    """
+    owner = account_of(listing)
+    return not owner or not account or owner == (account or "").strip()
+
+
 def _is_blank(value) -> bool:
     """True for a field the seller has never filled in.
 
@@ -256,7 +305,8 @@ def stamp_sale(data: dict, sale: Optional[dict] = None,
 
 
 def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
-                  on_progress: Optional[Callable[[str, int, int], None]] = None) -> dict:
+                  on_progress: Optional[Callable[[str, int, int], None]] = None,
+                  account: str = "") -> dict:
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently ENDED (unsold → status 'ended', the Inactive
     tab) and SOLD listings (status 'sold'), each capped at
@@ -267,6 +317,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     GetItem per listing means a real store takes minutes, and the caller runs
     this as a background job so the seller watches a count instead of a
     request that never answers.
+
+    `account` is the connected eBay username. Everything this run writes is
+    stamped with it, and records belonging to a DIFFERENT account are left
+    strictly alone — they're another seller's listings, and merging this
+    account's store into them (or matching item ids across the two) is how a
+    seller who connected a second account ended up with the first one's items.
     """
     def _tick(phase: str, done: int, total: int) -> None:
         if not on_progress:
@@ -304,9 +360,18 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # can't match, and the visible result is the duplicate pair it exists to
     # remove — so the ceiling is deliberately far above any real store rather
     # than a multiple of what eBay happened to return.
-    known = {r["id"]: r for r in db.list_listings(limit=_KNOWN_LIMIT,
-                                                  user_id=user_id)}
-    if len(known) >= _KNOWN_LIMIT:
+    all_known = db.list_listings(limit=_KNOWN_LIMIT, user_id=user_id)
+    # Only this account's records take part: matching, merging, and the stale-
+    # mirror cleanup all key off eBay item ids, and ids from another account
+    # are meaningless here (worse than meaningless — a collision would merge
+    # two different sellers' listings into one row).
+    known = {r["id"]: r for r in all_known
+             if belongs_to(r.get("listing") or {}, account)}
+    foreign = len(all_known) - len(known)
+    if foreign:
+        log.info("sync: user=%s skipping %d record(s) from another eBay "
+                 "account (connected=%s)", user_id, foreign, account or "?")
+    if len(all_known) >= _KNOWN_LIMIT:
         # Never silently: past this the dedupe is working from a partial view.
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
                     "capped, duplicates may survive this run",
@@ -350,6 +415,9 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         rid = prior["id"] if prior else mirror_id
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
+        # Whose store this item is in. Written on every sync, so a record made
+        # before the field existed is labelled the first time it's seen again.
+        data["ebay_account"] = account
         if status == "sold":
             # What it went for, not what it was listed at. mark_now only for a
             # record we watched flip — backfilling an old sale must not date it
@@ -384,10 +452,15 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
 
 
 def refresh_statuses(token: str, user_id: str, records: list[dict],
-                     sales: Optional[dict] = None) -> int:
+                     sales: Optional[dict] = None, account: str = "") -> int:
     """Re-check imported listings that are still marked live: sold/ended items
     get their status corrected, and watch/sold counters refreshed. Returns how
     many records changed. A None status (API blip) changes nothing.
+
+    `account` is the connected eBay username; records belonging to a different
+    one are skipped. GetItem answers for ANY seller's item, so without this a
+    freshly connected account went on reporting the previous account's
+    listings as live and healthy forever.
 
     `sales` is recent_sales()'s map, so a record that just sold records what it
     actually went for. Callers that already fetched it pass it in; anything
@@ -407,6 +480,8 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
             log.info("sync: status check failed for %s: %s", rec.get("id"), exc)
             return rec, None
 
+    records = [r for r in records
+               if belongs_to(r.get("listing") or {}, account)]
     probed = []
     if records:
         with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(records))) as pool:
@@ -447,8 +522,8 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
     return changed
 
 
-def reconcile_recent(token: str, user_id: str,
-                     records: list[dict]) -> tuple[int, set[str]]:
+def reconcile_recent(token: str, user_id: str, records: list[dict],
+                     account: str = "") -> tuple[int, set[str]]:
     """Correct still-marked-live records whose items eBay says recently
     finished. Returns (records changed, record ids this pass covered).
 
@@ -471,10 +546,12 @@ def reconcile_recent(token: str, user_id: str,
     sales = recent_sales(token)
     finished = set(sales) | _ids(ebay_trading.unsold_listing_ids, "ended")
     candidates = [r for r in records
-                  if _item_id_of(r.get("listing") or {}) in finished]
+                  if belongs_to(r.get("listing") or {}, account)
+                  and _item_id_of(r.get("listing") or {}) in finished]
     if not candidates:
         return 0, set()
-    changed = refresh_statuses(token, user_id, candidates, sales=sales)
+    changed = refresh_statuses(token, user_id, candidates, sales=sales,
+                               account=account)
     return changed, {r["id"] for r in candidates}
 
 
@@ -549,6 +626,9 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     listing.source = "ebay"
     listing.ebay_listing_id = res["listing_id"]
     listing.view_url = res.get("view_url", "")
+    # Which account it landed on, so a later account switch can tell this
+    # listing apart from one made on the next account.
+    listing.ebay_account = (c.get("ebay_username") or "").strip()
     return res
 
 

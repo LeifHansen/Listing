@@ -112,12 +112,12 @@ export function TokensDialog() {
         const opened = await openExternal(res.url);
         if (opened) {
           toast("Finishing your purchase in the browser — your tokens appear "
-            + "here automatically once it completes.", { duration: 6000 });
+            + "here automatically once it completes.", { ttl: 6000 });
           setTokensOpen(false);
         } else {
           toast("Couldn't open the browser. Visit the Thryft Shop website to "
             + "buy tokens — they arrive on this account either way.",
-          { kind: "warning", duration: 8000 });
+          { kind: "warning", ttl: 8000 });
         }
         setBuying(null);
         return;

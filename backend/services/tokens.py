@@ -110,19 +110,12 @@ def next_reset(now: Optional[_dt.datetime] = None) -> str:
     return f"{year:04d}-{month:02d}-01"
 
 
-def plan_spend(free_quota: int, free_used: int, purchased: int,
-               amount: int) -> Optional[tuple[int, int]]:
-    """Pure arithmetic of one debit: how much comes from the free allowance vs
-    the purchased balance. Returns (free_part, paid_part), or None when the
-    combined balance can't cover it. db.token_spend applies the same split
-    under its row lock; this is the testable core."""
-    free_remaining = max(0, free_quota - max(0, free_used))
-    if amount <= 0:
-        return (0, 0)
-    if free_remaining + purchased < amount:
-        return None
-    free_part = min(amount, free_remaining)
-    return (free_part, amount - free_part)
+# The arithmetic of one debit lives next to the ledger that applies it, as
+# db.plan_spend -- token_spend is its only caller, and it applies it under the
+# row lock. It used to be defined HERE as "the testable core" while
+# db.token_spend carried its own inline copy of the same split, so the billing
+# tests asserted against a function production never called and the two were
+# free to drift apart without a single test failing.
 
 
 def status(user_id: Optional[str]) -> dict:
@@ -193,12 +186,17 @@ def receipts(*spend_results: Optional[dict]) -> list[dict]:
 
     ONLY pass spends that are refunded all-or-nothing. A charge that some code
     path may give back in PART (today: background removal, one photo's worth
-    per failed cutout) must never be recorded here. The ledger keys a refund
-    by the spend id plus its amount, so a full refund and an earlier partial
-    one are two different entries and both go through — and the running total
-    that would have prevented that died with the process this exists to
-    recover from. Under-refunding is recoverable; paying a seller twice out of
-    the token balance is not."""
+    per failed cutout) must never be recorded here.
+
+    That restriction is now belt-and-braces rather than load-bearing:
+    db.token_refund sums what a spend has already had returned and caps every
+    refund at the remainder, so a full refund following a partial one gives
+    back only what is left. That running total lives in the ledger, which is
+    exactly what survives the killed process this function exists to recover
+    from — it used to live only in the process, which is why the rule was
+    absolute. Keeping the rule anyway: under-refunding is recoverable, paying
+    a seller twice out of the token balance is not, and the cap is one
+    invariant rather than two."""
     return [{"ok": True, "entry_id": r["entry_id"], "user_id": r.get("user_id", "")}
             for r in spend_results
             if r and r.get("ok") and r.get("entry_id")]
@@ -310,14 +308,28 @@ def verify_stripe_signature(payload: bytes, sig_header: str, secret: str,
                             tolerance: int = 300,
                             now: Optional[float] = None) -> bool:
     """Verify a Stripe-Signature header (t=...,v1=...) over the raw body.
-    Pure — unit-testable without Stripe."""
+    Pure — unit-testable without Stripe.
+
+    EVERY v1 candidate is checked, not just one. The header carries a v1 per
+    active endpoint secret, and Stripe's documented way to rotate a webhook
+    secret is to serve both for a while — during which each delivery arrives
+    signed twice. Parsing the header into a dict kept whichever came last, so
+    for the whole rotation window half the deliveries verified and half were
+    rejected as forged: token purchases silently not credited, refunds not
+    clawed back, and Stripe retrying against the same coin flip.
+    """
     if not sig_header or not secret:
         return False
-    parts = dict(
-        kv.split("=", 1) for kv in sig_header.split(",") if "=" in kv
-    )
-    ts, sig = parts.get("t"), parts.get("v1")
-    if not ts or not sig:
+    ts = ""
+    sigs: list[str] = []
+    for kv in sig_header.split(","):
+        key, _, value = kv.partition("=")
+        key, value = key.strip(), value.strip()
+        if key == "t" and not ts:
+            ts = value
+        elif key == "v1" and value:
+            sigs.append(value)
+    if not ts or not sigs:
         return False
     try:
         ts_val = int(ts)
@@ -327,7 +339,10 @@ def verify_stripe_signature(payload: bytes, sig_header: str, secret: str,
         return False
     expected = hmac.new(secret.encode(), f"{ts}.".encode() + payload,
                         hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, sig)
+    # compare_digest against each candidate rather than `expected in sigs`:
+    # the whole point of this comparison is that it does not leak, through
+    # timing, how much of a forged signature was right.
+    return any(hmac.compare_digest(expected, sig) for sig in sigs)
 
 
 # Events that mean the buyer's money went back to them. A refund is usually

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
@@ -122,7 +122,14 @@ function SoldLines({ listing: l, soldFor, knownSale, discount, className }) {
 }
 
 // The one-line "what happens if you click this" for the card's status.
-const CTA = { unlisted: "Finish & list", published: "Edit live", live: "Edit live", ended: "Relist" };
+// Sold says "View sale", never "Relist": it opens as an archive of a finished
+// sale, and selling another one is a fresh listing (the archive's own "Relist
+// as new listing"). Promising a relist here is what made a sold item look
+// publishable.
+const CTA = {
+  unlisted: "Finish & list", published: "Edit live", live: "Edit live",
+  ended: "Relist", sold: "View sale",
+};
 
 function CtaHint({ status, className }) {
   const text = CTA[status];
@@ -142,7 +149,12 @@ function CtaHint({ status, className }) {
 // `metrics` (optional) shows eBay views/watchers for a live listing.
 // In select mode (`selectable`), clicking toggles `selected` via `onSelect`
 // instead of opening — powers mass actions like delete-selected in Drafts.
-export function ListingCard({
+// memo'd, and it earns it: the app context holds the 60s notification poll, so
+// every unread-count refresh re-rendered the whole tree -- one framer-motion
+// card per listing, reconciled once a minute for a bell badge, and once every
+// 1.5s while a bulk batch polls. The props are primitives plus callbacks the
+// parents already keep stable.
+export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   stale, metrics, selectable, selected, onSelect, layout = "grid", className,
 }) {
@@ -177,8 +189,14 @@ export function ListingCard({
   // aren't blank while the metrics endpoint only covers app-created ones.
   const watchers = hasMetrics ? metrics.watchers : (fromEbay ? l.watch_count : null);
   // An image that 404s (e.g. an older photo lost from ephemeral storage) shows
-  // the placeholder instead of a blank tile.
+  // the placeholder instead of a blank tile. Reset when the src changes: thumb
+  // is versioned by updated_at, so a rotate or a re-upload is a NEW url, and
+  // without this the card stayed stuck on the placeholder for the rest of its
+  // life -- most visible during the first store sync, when /media is still
+  // being written and a miss is expected.
   const [imgFailed, setImgFailed] = useState(false);
+  const [failedFor, setFailedFor] = useState(thumb);
+  if (thumb !== failedFor) { setFailedFor(thumb); setImgFailed(false); }
   // Origin — created here vs. imported from eBay — only where the distinction
   // matters (the listing exists on eBay). Hover for exactly what each allows.
   const showOrigin = isLive || item.status === "ended" || item.status === "sold";
@@ -419,4 +437,4 @@ export function ListingCard({
       )}
     </div>
   );
-}
+});

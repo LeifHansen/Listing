@@ -1,7 +1,7 @@
 """Pydantic data models shared across the app."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -13,6 +13,25 @@ from pydantic import BaseModel, Field, field_validator
 # rejection arrives after the photos have uploaded, so this is the one
 # limit worth holding in the model rather than at the API boundary.
 TITLE_MAX_CHARS = 80
+
+# eBay's own ceiling on a listing description. Nothing this app writes comes
+# near it -- the point is that the field had NO bound at all, and every write
+# path lands on the volume: `POST /api/publish` needs no login, and each new
+# session_id writes a fresh listing.json under /data/sessions. With ~500MB free
+# on the 1GB volume, a handful of requests carrying a multi-megabyte
+# description filled it, and the orphan sweep only reclaims directories
+# untouched for three hours.
+#
+# Set to what eBay actually accepts, so a real listing -- including one
+# imported from eBay with a long HTML description -- is never truncated. The
+# bound exists to make one request finite, not to second-guess the marketplace.
+DESCRIPTION_MAX_CHARS = 500_000
+# Long free-text the seller or the AI can fill in. eBay's limits are far
+# tighter than these (subtitle 55, condition description 1000); these are the
+# backstop, not the product rule.
+TEXT_FIELD_MAX_CHARS = 4_000
+# eBay tops out around 30 aspects on a listing; an import can carry more.
+MAX_ITEM_SPECIFICS = 500
 
 
 class ItemSpecific(BaseModel):
@@ -123,6 +142,14 @@ class Listing(BaseModel):
     source: str = ""
     # eBay's SKU for an imported listing, when it has one.
     sku: str = ""
+    # WHICH eBay account `ebay_listing_id` lives on, as the eBay username.
+    # Records predate this field, so "" means "unknown, assume the connected
+    # account". Without it a seller who connects a second eBay account keeps
+    # seeing the first account's store: the records are keyed by APP user, the
+    # item ids stay on the rows, and GetItem answers for any seller's item, so
+    # every sync happily re-confirmed the old account's listings as live under
+    # the new one.
+    ebay_account: str = ""
     # ISO-8601 UTC timestamp of when the listing went live on eBay, carried
     # over on import so "most recent first" can mean what the seller expects.
     ebay_start_time: str = ""
@@ -167,6 +194,34 @@ class Listing(BaseModel):
             return value
         return value.strip()[:TITLE_MAX_CHARS]
 
+    @field_validator("description", mode="before")
+    @classmethod
+    def _cap_description(cls, value):
+        """Bound the description, for the reason _cap_title gives above:
+        truncating beats a 422 the seller cannot act on. The cap is eBay's own,
+        so this only ever fires on something no marketplace would accept."""
+        if not isinstance(value, str):
+            return value
+        return value[:DESCRIPTION_MAX_CHARS]
+
+    @field_validator("subtitle", "condition_description", "brand",
+                     "category_suggestion", mode="before")
+    @classmethod
+    def _cap_text(cls, value):
+        """Same rule for the shorter free-text fields."""
+        if not isinstance(value, str):
+            return value
+        return value[:TEXT_FIELD_MAX_CHARS]
+
+    @field_validator("item_specifics", mode="before")
+    @classmethod
+    def _cap_specifics(cls, value):
+        """A listing carries tens of aspects, not thousands. Unbounded, this
+        list was the other half of the same unauthenticated write."""
+        if not isinstance(value, list):
+            return value
+        return value[:MAX_ITEM_SPECIFICS]
+
 
 class IdentifyResult(BaseModel):
     listing: Listing
@@ -183,8 +238,16 @@ class IdentifyResult(BaseModel):
     specifics_autofilled: bool = False
 
 
+# A session id off the wire. Natively 12 hex chars (storage.new_session_id);
+# imported listings carry ids like "ebay-123456789012". Bounded because these
+# arrive on routes that need no login, and an unbounded one became a permanent
+# dict key in services/publish_guard — a request body could size the process's
+# memory. 128 is far above anything the app itself mints.
+SessionId = Annotated[str, Field(max_length=128)]
+
+
 class RefineRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     listing: Listing
     prompt: str
 
@@ -196,7 +259,7 @@ class ImageOrderRequest(BaseModel):
 
 
 class PublishRequest(BaseModel):
-    session_id: str
+    session_id: SessionId
     listing: Listing
     mode: str = "draft"  # "draft" or "live"
     # Which marketplaces to publish to. Empty (every pre-multi client) means
@@ -207,4 +270,4 @@ class PublishRequest(BaseModel):
 
 
 class SessionOnlyRequest(BaseModel):
-    session_id: str
+    session_id: SessionId

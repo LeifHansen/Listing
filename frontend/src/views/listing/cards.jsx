@@ -6,7 +6,7 @@ import {
   Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
-import { api, postJson } from "@/lib/api";
+import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -15,6 +15,9 @@ import { AIStatusInline } from "@/components/ui/AIStatus";
 import { reviewAspectCount } from "./specifics";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
+import {
+  ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
+} from "./ShippingPolicySelect";
 import { TITLE_MAX } from "./blockers";
 
 /* The eight workflow cards. Each is presentational; all state lives in
@@ -104,9 +107,14 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     setFileDrag(false);
     if (w.addingPhotos) return;
     // Only images: a stray PDF or folder would otherwise ride along to the
-    // uploader and come back as a server-side error.
+    // uploader and come back as a server-side error. Extension too, not just
+    // MIME: HEIC/HEIF routinely arrive with an EMPTY type on iOS and Windows,
+    // so a MIME-only filter silently threw away every photo an iPhone offered
+    // -- which is what IMAGE_EXT_RE exists for, and what the main uploader
+    // already checks.
     const files = Array.from(e.dataTransfer.files || [])
-      .filter((f) => (f.type || "").startsWith("image/"));
+      .filter((f) => (f.type || "").startsWith("image/")
+                     || IMAGE_EXT_RE.test(f.name || ""));
     if (files.length) w.addImages(files);
   };
 
@@ -159,7 +167,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           w.addingPhotos && "pointer-events-none opacity-70",
         )}>
           <input
-            type="file" accept="image/*" multiple className="sr-only"
+            type="file" accept="image/*,.heic,.heif,.hif" multiple className="sr-only"
             disabled={w.addingPhotos}
             onChange={(e) => { w.addImages(e.target.files); e.target.value = ""; }}
           />
@@ -791,10 +799,6 @@ export function PricingCard({ w }) {
   const currency = w.form.currency || "USD";
   const fmt = w.form.listing_format || "FIXED_PRICE";
   const isAuction = fmt === "AUCTION" || fmt === "AUCTION_BIN";
-  // Profit is measured against what the item GOT once it has sold, and
-  // against what it's asking for while it's still for sale.
-  const soldOrAsking = (w.isSold && w.form.sold_price !== "")
-    ? w.form.sold_price : w.form.price;
 
   return (
     <WorkflowCard
@@ -872,32 +876,16 @@ export function PricingCard({ w }) {
               onChange={(e) => w.set("purchase_price", e.target.value)}
             />
           </Field>
-          {/* Sold items only: what the buyer actually paid. An accepted offer
-              settles BELOW the price above, and eBay never moves the listing's
-              own price to match — so this is the only place the real number
-              can live. Filled from eBay's transaction on sync; editable here
-              for a sale eBay didn't report (one older than its ~90-day
-              window, say). */}
-          {w.isSold && (
-            <Field
-              label={`Sold for (${currency})`}
-              help="What the buyer actually paid — lower than the price above if you accepted an offer. Pulled from eBay when it reports the sale."
-            >
-              <Input
-                type="number" step="0.01" min="0" inputMode="decimal"
-                placeholder={w.form.price !== "" ? String(w.form.price) : "0.00"}
-                value={w.form.sold_price}
-                onChange={(e) => w.set("sold_price", e.target.value)}
-              />
-            </Field>
-          )}
         </div>
-        {w.form.purchase_price !== "" && Number(soldOrAsking) > 0 && (
+        {/* Only ever a FORECAST here: a sold listing opens as an archive
+            (SoldArchive), which does the same sum against what it actually
+            went for. */}
+        {w.form.purchase_price !== "" && Number(w.form.price) > 0 && (
           <p className="text-[13px] text-ink-secondary -mt-1">
-            {w.isSold ? "Profit on this sale:" : "Potential profit at this price:"}{" "}
-            <strong className={Number(soldOrAsking) - Number(w.form.purchase_price) >= 0
+            Potential profit at this price:{" "}
+            <strong className={Number(w.form.price) - Number(w.form.purchase_price) >= 0
               ? "text-success" : "text-warning"}>
-              ${(Number(soldOrAsking) - Number(w.form.purchase_price)).toFixed(2)}
+              ${(Number(w.form.price) - Number(w.form.purchase_price)).toFixed(2)}
             </strong>{" "}
             before fees & shipping.
           </p>
@@ -1025,20 +1013,19 @@ function capIssueFor(services, weightOz) {
   return null;
 }
 
-// Per-listing shipping service = an eBay fulfillment policy on the offer.
-function ShippingServicePicker({ w }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
+// The listing's shipping policy — an override of the Settings default, not a
+// separate setting. See ShippingPolicySelect for why there is only one of
+// these controls now.
+function ShippingPolicyPicker({ w }) {
+  const { connected, policies, accountDefaultId } = useFulfillmentPolicies();
+  const chosen = w.form.fulfillment_policy_id || accountDefaultId;
+  const orphaned = usePolicyIsOrphaned(w.form.fulfillment_policy_id);
 
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
+  if (!connected) return null;
 
-  if (!ebay.connected) return null;
-  const policies = policiesData?.policies?.fulfillment || [];
-  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
-
-  const chosen = w.form.fulfillment_policy_id || accountDefault;
+  // Weight caps come off the policy that will actually be used, so an
+  // override naming a policy this account doesn't have has no services to
+  // check — the orphan warning below is the thing to say instead.
   const services = policies.find((p) => p.id === chosen)?.services || [];
   const weightOz = (parseFloat(w.form.package_weight_lb) || 0) * 16
     + (parseFloat(w.form.package_weight_oz) || 0);
@@ -1049,22 +1036,24 @@ function ShippingServicePicker({ w }) {
       <Field
         label={
           <span className="inline-flex items-center gap-1.5">
-            <Truck size={14} aria-hidden /> Shipping service
+            <Truck size={14} aria-hidden /> Shipping policy
           </span>
         }
-        help="How this item ships (an eBay shipping policy). USPS Ground Advantage is the cheapest option for most packages — up to 70 lb."
+        help="The eBay shipping policy this listing goes out with — it's what decides the carrier service. Leave it on Default to follow Settings; USPS Ground Advantage is the cheapest for most packages, up to 70 lb."
       >
-        <Select
-          value={chosen}
-          onChange={(e) => w.set("fulfillment_policy_id", e.target.value)}
-        >
-          {policies.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}{p.summary ? ` · ${p.summary}` : ""}
-            </option>
-          ))}
-        </Select>
+        <ShippingPolicySelect
+          value={w.form.fulfillment_policy_id}
+          onChange={(id) => w.set("fulfillment_policy_id", id)}
+        />
       </Field>
+      {orphaned && (
+        <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
+          <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden />
+          This listing points at a shipping policy your connected eBay account
+          doesn’t have — usually one left over from a different account. Pick
+          one from the list, or choose Default.
+        </p>
+      )}
       {capIssue && (
         <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
           <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden /> {capIssue}
@@ -1116,7 +1105,7 @@ export function ShippingCard({ w }) {
             </Field>
           ))}
         </div>
-        <ShippingServicePicker w={w} />
+        <ShippingPolicyPicker w={w} />
       </div>
     </WorkflowCard>
   );

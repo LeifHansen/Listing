@@ -25,7 +25,7 @@ payload when you don't have eBay credentials yet).
 | Identify | Photos sent to Claude vision; returns structured listing draft + confidence + "missing info" to verify | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
-| Publish | Fans out to every selected marketplace — eBay (Trading/Inventory), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
+| Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
 
 ## Quick start
 
@@ -47,11 +47,47 @@ cp .env.example .env
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
 
-## Deploy to Fly.io
+## Shipping an update
+
+**Merging to `main` is the deploy.** There is no other step, and no button to
+press:
+
+```
+work on a branch  →  push  →  PR  →  CI goes green  →  merge to main
+                                                          ↓
+                             GitHub Actions builds, ships to Fly, then polls
+                             /api/health until production reports that exact
+                             commit — and fails the run if it never does.
+```
+
+> ### Do not run `fly deploy` by hand
+>
+> `fly deploy` uploads **the files on your machine**. It does not read GitHub.
+> Run it from a checkout that is behind `main` and it silently replaces the
+> released code with whatever you happen to have — skipping the tests, the
+> commit stamp, and the verification, with nothing anywhere reporting it.
+>
+> On 2026-08-27 that put a build from before Aug 24 back into production
+> minutes before a seller hit publish. The eBay failure it caused was
+> indistinguishable from the bug that had just been fixed, and the deploy that
+> had shipped the fix twelve hours earlier had verified itself and passed.
+>
+> When you genuinely cannot use CI, use **`./deploy.sh`** instead. It refuses
+> unless you are on `main`, clean, and exactly level with `origin/main`; it
+> passes the `GIT_SHA` build arg that makes the release identifiable; and it
+> runs the same verification afterwards. `./deploy.sh --check` reports what it
+> would object to and changes nothing.
+>
+> A hand deploy that skips the stamp is caught either way: `health-watch.yml`
+> compares production's build against recent `main` every two hours.
+
+## First-time Fly setup
 
 A `Dockerfile` and `fly.toml` are included. eBay requires **publicly reachable
 HTTPS image URLs**, so deploying (vs. running on localhost) is what makes real
 publishing work — the app uses its public origin for `imageUrls`.
+
+The steps below create the app. Everything after that goes through `main`.
 
 ```bash
 fly launch --no-deploy        # or: fly apps create <name> ; edit fly.toml `app`
@@ -63,12 +99,61 @@ fly secrets set ANTHROPIC_API_KEY=sk-ant-...
 fly secrets set EBAY_OAUTH_TOKEN=... \
   EBAY_FULFILLMENT_POLICY_ID=... EBAY_PAYMENT_POLICY_ID=... \
   EBAY_RETURN_POLICY_ID=... EBAY_MERCHANT_LOCATION_KEY=...
-fly deploy
+./deploy.sh                   # first release; after this, merge to main
 ```
 
 > **`fly.toml` sets `EBAY_ENV=production`** — a deploy publishes REAL, fee-
 > incurring, publicly visible eBay listings. For a sandbox deploy override it
 > with `fly secrets set EBAY_ENV=sandbox` (a secret wins over `[env]`).
+
+### Check what production is actually configured with
+
+`fly volumes create --size 3` above is the instruction, not a guarantee that it
+was followed — the volume on `listing-lfwjrg` is **1GB**, and a volume is
+easy to create small and never revisit. The reclaim daemon keeps usage down
+(`main._reclaim_loop`), so this is headroom rather than a leak, but the
+alerting floor in `health-watch.yml` is 400MB free and the volume runs near
+500MB. `fly volumes list -a <app>` reports the size; `fly volumes extend
+<id> --size 3` raises it without a redeploy.
+
+Everything else worth checking, production answers itself:
+
+```bash
+curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
+```
+
+- **`config_warnings`** is the field to read first. It names the two
+  misconfigurations that otherwise look *identical* to never having configured
+  a feature at all: a secret set under a name one word off from the one the
+  code reads, and an on/off flag set to a value that isn't on. It also flags a
+  Stripe key that is present but isn't a *secret* key — a publishable `pk_...`
+  in that slot passes every readiness check in the app and then fails at
+  checkout.
+
+  How it found the Stripe one is why the field exists. Production had
+  `STRIPE_API_SECRET_KEY` deployed while the code read `STRIPE_SECRET_KEY`, so
+  the paid tier was off with a key plainly visible on the Fly dashboard and
+  `tokens_missing` reporting — accurately, uselessly — that the key was
+  missing. **The fix went into the code, not the secret**:
+  `STRIPE_API_SECRET_KEY` is now accepted as a second name for the same
+  setting, exactly as `DATABASE_URL` accepts `NEON_PRODUCTION_DATABASE_URL`.
+  Renaming a live secret restarts the machine, and with
+  `min_machines_running = 1` that means restarting it under whatever batch is
+  in flight — not a trade worth making to satisfy a spelling.
+- **`bg_engines`** is the list that will actually run, in order. `["local"]`
+  next to `"photoroom_configured": true` is not a contradiction — auto mode
+  never spends money on its own (see the photo-pipeline section) — but it does
+  mean every cutout is costing the ~107s an `isnet` inference takes on
+  `shared-cpu-2x`, with a paid engine sitting configured and unused.
+  [Pixian.ai](https://pixian.ai) is a pay-per-image background-removal API at
+  roughly a tenth of Photoroom's price; setting `PIXIAN_API_ID` +
+  `PIXIAN_API_SECRET` moves auto mode onto it with **no code change** and
+  keeps the local model as its in-chain fallback. `BG_ENGINE=photoroom` opts
+  into the key already there instead. Either turns ~107s per photo into a
+  couple of seconds; both cost money per image, which is exactly why neither
+  switches itself on.
+- **`disk_free_mb`**, **`db`**, **`objstore_*`** and **`build`** cover the rest;
+  `health-watch.yml` already alerts on them every two hours.
 
 The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
 sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
@@ -81,6 +166,38 @@ listing's images into eBay's opaque 25001 error. Fly health-checks
 > notification eBay mandates — *Marketplace Account Deletion* — applies to
 > **Production** keysets only, and the app now ships the endpoint for it (see
 > below).
+
+### Deploy credentials — and the one that must NOT be on the app
+
+CI deploys with `FLY_API_TOKEN`, read from the **GitHub Actions secret** by
+`.github/workflows/deploy.yml` and `fly-logs.yml` (`${{ secrets.FLY_API_TOKEN }}`).
+That is the only place it belongs.
+
+> **Never `fly secrets set FLY_API_TOKEN` on the app.** Nothing in this
+> codebase reads it — `grep -rn FLY_ backend/` returns nothing — so it buys the
+> running container no capability at all, while handing anything that can read
+> the process environment full control of the Fly account: every other secret
+> here (`NEON_PRODUCTION_DATABASE_URL`, `ANTHROPIC_API_KEY`, `R2_*`,
+> `SENDGRID_API_KEY`), plus the ability to destroy or redeploy any app on it.
+> The container also has Fly's own API proxy mounted at `/.fly/api`. If it is
+> ever set, take it back off — nothing depends on it:
+>
+> ```bash
+> fly secrets list -a <app>                       # is FLY_API_TOKEN there?
+> fly secrets unset FLY_API_TOKEN -a <app> --stage # --stage: no restart now
+> ```
+>
+> `--stage` matters on this app: it runs a single machine with
+> `min_machines_running = 1`, so an unstaged `secrets set`/`unset` restarts
+> production immediately and kills any in-flight photo batch. Staged changes
+> apply on the next deploy instead.
+
+Prefer an app-scoped deploy token over a personal one, so a leak cannot reach
+anything else in the account:
+
+```bash
+fly tokens create deploy -a <app>   # only deploys this app; cannot read others
+```
 
 ### Marketplace Account Deletion endpoint (Production keysets)
 
@@ -107,18 +224,28 @@ explicitly if a proxy rewrites your scheme/host.
 ## eBay credentials (optional)
 
 Without eBay credentials the app runs in **dry-run mode**: it builds the exact
-`createOrReplaceInventoryItem` / `createOffer` / `publishOffer` payloads and
-saves them to `data/exports/` so you can inspect them or push later.
+`AddFixedPriceItem` (or `AddItem`) request the real publish would send and
+saves it to `data/exports/` so you can inspect it or push later.
 
-To publish for real, create a developer app at
-<https://developer.ebay.com/> and fill these in `.env`:
+**To publish for real, a seller connects their own eBay account** through
+Settings → Connect eBay (OAuth). That is the only way a live listing is
+created: every publish goes out on the connected seller's account, through the
+Trading API. Server-side credentials do NOT publish on their own — they used
+to, through the Sell Inventory API, and that engine is gone.
 
-- `EBAY_ENV` — `sandbox` (recommended first) or `production`
-- A **user** OAuth access token (`EBAY_OAUTH_TOKEN`) or the
-  `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_REFRESH_TOKEN` trio
-  (scope `https://api.ebay.com/oauth/api_scope/sell.inventory`)
-- Business policy IDs: `EBAY_FULFILLMENT_POLICY_ID`, `EBAY_PAYMENT_POLICY_ID`,
-  `EBAY_RETURN_POLICY_ID`, and `EBAY_MERCHANT_LOCATION_KEY`
+What the server-side settings are still for — the OAuth app itself, so the
+Connect button works:
+
+- `EBAY_ENV` — `sandbox` (recommended first) or `production`. **Anything other
+  than exactly `production` is treated as sandbox**, where a real eBay sign-in
+  cannot work; the app warns at boot if the value is neither.
+- `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_RUNAME` — from your eBay
+  developer keyset. `EBAY_RUNAME` is the **RuName** (`Your_Name-Yourname-...`),
+  not a URL; a URL there fails the token exchange with `invalid_grant`.
+
+`EBAY_OAUTH_TOKEN`, `EBAY_REFRESH_TOKEN` and the `EBAY_*_POLICY_ID` /
+`EBAY_MERCHANT_LOCATION_KEY` values remain read for the dry-run payload and
+for local testing; they no longer make anything go live.
 
 ### Automatic category IDs (lighter requirements)
 
@@ -157,6 +284,7 @@ Without them, you can still type a category ID manually in the preview.
 | `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
 | `GET`  | `/api/insights` | Ranked "what to do next" actions across the user's listings |
@@ -229,8 +357,12 @@ behavior byte-for-byte; with one, each marketplace publishes independently —
 one failing never rolls back the others — and per-marketplace state
 (listing id, URL, status, last error) lives on the listing record.
 
-- **eBay** — unchanged: Trading API for new live listings, Inventory for
-  drafts/dry-runs, imported-listing revise/relist, Promoted Listings.
+- **eBay** — Trading API for everything that touches a listing: new live
+  listings, revise, relist and end. Drafts stay in the app and never reach
+  eBay; a dry run renders the Trading request instead of sending it. The REST
+  APIs are still used for the things that are not listings — Account
+  (business policies, programs, privileges), Taxonomy, Fulfillment (orders),
+  and Marketing (Promoted Listings).
 - **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
   `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
   then activated on a live publish. Etsy requires a category (AI Suggest
@@ -292,7 +424,8 @@ backend/
     listing_sync.py  bi-directional sync: import the store, push edits back
     claude_ai.py     vision identify + prompt refine
     taxonomy.py      Taxonomy API -> numeric category IDs
-    ebay.py          Inventory API payloads + publish/dry-run
+    ebay.py          photo URLs for eBay + the legacy ad SKU
+    ebay_trading.py  Trading API: publish, revise, end, read
 frontend/            React + Vite + Tailwind app (built to frontend/dist)
   src/
     styles/tokens.css  design tokens (colors, radii, shadows, dark mode)
@@ -397,18 +530,36 @@ machine with it.
 
 ## Bi-directional eBay sync
 
-The Sell Inventory API that publishes listings can only see listings created
-*through* it, so a seller's existing store was invisible to the app. **Sync with
-eBay** (on the Listings page, once eBay is connected) closes that gap using the
-Trading API with the same user OAuth token — no extra credentials:
+**Sync with eBay** (on the Listings page, once eBay is connected) mirrors the
+seller's existing store into the app, using the Trading API with the same user
+OAuth token — no extra credentials:
 
 - **eBay → app.** `GetMyeBaySelling` enumerates every active listing; `GetItem`
   pulls the detail (title, price, quantity, condition, category, item specifics,
   photos, package, watch/sold counts). Imported records get the stable id
   `ebay-<itemId>`, so re-syncing updates in place instead of duplicating.
-- **app → eBay.** Edits to an imported listing go back through
-  `ReviseFixedPriceItem` (or `ReviseItem` for auctions), and ending one uses
-  `EndItem`. Listings the app created keep using the Inventory API.
+- **app → eBay.** Edits go back through `ReviseFixedPriceItem` (or
+  `ReviseItem` for auctions), and ending one uses `EndItem` — for every
+  listing, whether the app created it or imported it.
+
+Publishing goes through the Trading API for a reason: a listing created with
+the Sell **Inventory** API becomes "inventory-based", and eBay then refuses to
+let the seller edit it anywhere but the tool that made it — Seller Hub answers
+"Inventory-based listing management is not currently supported by this tool."
+A Trading listing is an ordinary one the seller can edit in Seller Hub, the
+eBay app, or here.
+
+Saving a draft while connected used to leave an inventory item and an
+unpublished offer behind on the account. It no longer does. To clear what
+earlier drafts left (invisible in Seller Hub, and nothing else can remove it):
+
+```bash
+python3 scripts/purge_inventory_leftovers.py --user <user-id>          # dry run
+python3 scripts/purge_inventory_leftovers.py --user <user-id> --apply
+```
+
+It only ever considers SKUs this app minted, and never deletes an item with a
+published offer — that would end a live listing.
 
 A re-sync only refreshes the fields eBay owns — price, quantity, counters,
 photos — plus anything still blank locally, so a background sync never reverts
@@ -518,16 +669,53 @@ stamps two fields on the record:
 - `sold_at` — eBay's transaction date. A record's `updated_at` can't stand in
   for it: an imported listing carries its eBay *start* time.
 
-Both survive re-syncs, and the sale price is editable in the editor's Pricing
-card for a sale eBay never reported (one older than its ~90-day window). Where
-`sold_price` is unknown, the UI falls back to the asking price and marks the
-number approximate (`≈ $30.00`) rather than claiming it as the take.
+Both survive re-syncs, and the sale price is editable under **Sale figures**
+in the sold listing's archive view for a sale eBay never reported (one older
+than its ~90-day window). Where `sold_price` is unknown, the UI falls back to
+the asking price and marks the number approximate (`≈ $30.00`) rather than
+claiming it as the take.
 
 Everything downstream reads that: the sold card shows what it went for with
-the asking price struck through and how far under it landed, the Sold tab's
-profit line measures against the real amount, and the dashboard's **Sold**
-tile totals it over a window the seller picks (24 hours / 7 days / 30 days /
-90 days, defaulting to a week and remembered across visits).
+the asking price struck through and how far under it landed, the Inactive
+tab's profit line measures against the real amount, and the dashboard's
+**Sold** tile totals it over a window the seller picks (24 hours / 7 days /
+30 days / 90 days, defaulting to a week and remembered across visits).
+
+## A sold listing is an archive, not a draft
+
+Selling ends the listing. The record left behind is the app's only memory of
+what that sale was, so it stops behaving like something still on its way to
+eBay:
+
+- It files under **Inactive** with the ended-without-selling ones — one
+  archive of everything finished — and is hidden from **Active** and **All**,
+  where a seller looks for things they can still act on.
+- Opening it gives the archive view (`views/listing/SoldArchive.jsx`), not the
+  publish workflow: what it went for, against the ask and the cost basis, how
+  it was listed, and a link to the sold listing on eBay. Before this, a
+  finished sale opened as a full editor reading *"Ready to publish"*, one tap
+  from re-listing the item that had already gone.
+- `POST /api/publish` **refuses** a record whose stored status is `sold`. The
+  UI no longer offers it, and the server no longer allows it — republishing in
+  place would overwrite the sale's history with a second listing's life, and
+  for an imported item it asks eBay to revise an item that has already ended.
+
+Two things stay possible, because an archive needs them:
+
+- **The sale's own numbers** (`sold_price`, `purchase_price`) remain editable —
+  they are what the profit totals are made of, and eBay doesn't always report
+  a sale amount. Saving them can't move the record off `sold` (`_sticky_status`).
+- **Relist as new listing** (`POST /api/listings/{id}/relist`) copies the
+  listing into a **brand-new draft**: the copy, the specifics and whatever
+  photos survive, with every field describing the finished sale (item id, SKU,
+  sale price, sale date, per-marketplace state) cleared. The sold record is
+  left untouched. Photos are *copied, not moved* — though a sale purges the
+  session's images to reclaim storage, so an app-created listing usually
+  relists with none and the response says so (`photos: 0`); an imported
+  listing's eBay-hosted `image_urls` carry over as they are.
+
+An **ended** listing is unchanged: it still relists in place from Inactive,
+because nothing about it is finished history.
 
 ## Sold notifications & shipping labels
 

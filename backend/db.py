@@ -12,20 +12,29 @@ whether the DB is actually reachable.
 from __future__ import annotations
 
 import datetime as _dt
+import threading
 import time as _time
 import uuid as _uuid
 from typing import Optional
 
-from sqlalchemy import (DateTime, JSON, String, create_engine, delete, select,
-                        text)
+from sqlalchemy import (DateTime, JSON, String, create_engine, delete, func,
+                        or_, select, text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from . import config
+from . import config, crypto
 from .config import log
 
 _engine = None
 _initialized = False
+# _get_engine() assigns _engine BEFORE create_all() has finished, so an
+# unguarded second caller saw a non-None engine, found _initialized still
+# False, and issued create_all() concurrently -- both emitting plain CREATE
+# TABLE, so the loser raises. Startup now has three daemons that reach the DB
+# within microseconds of each other (db-status, reclaim's orphan sweep) plus
+# the first request, which is exactly the race. Serialize the init; the fast
+# path below skips the lock once it is warm.
+_engine_lock = threading.Lock()
 
 
 class Base(DeclarativeBase):
@@ -49,7 +58,8 @@ class EbayAccount(Base):
     __tablename__ = "ebay_accounts"
 
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    refresh_token: Mapped[str] = mapped_column(String(2048), default="")
+    # Holds ciphertext (backend/crypto.py), ~1.5x the plaintext token.
+    refresh_token: Mapped[str] = mapped_column(String(4096), default="")
     ebay_username: Mapped[str] = mapped_column(String(128), default="")
     ebay_email: Mapped[str] = mapped_column(String(255), default="")
     fulfillment_policy_id: Mapped[str] = mapped_column(String(64), default="")
@@ -71,7 +81,7 @@ class MarketplaceAccount(Base):
 
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     marketplace: Mapped[str] = mapped_column(String(32), primary_key=True)
-    refresh_token: Mapped[str] = mapped_column(String(4096), default="")
+    refresh_token: Mapped[str] = mapped_column(String(8192), default="")
     external_username: Mapped[str] = mapped_column(String(128), default="")
     external_id: Mapped[str] = mapped_column(String(64), default="")
     settings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -176,41 +186,77 @@ def _get_engine():
     global _engine, _initialized
     if not enabled():
         return None
-    if _engine is None:
-        # Pool sized against the concurrency that can actually reach it, and
-        # set to fail fast rather than hang. Almost every route here is a sync
-        # `def`, so FastAPI runs it in anyio's 40-thread pool, and background
-        # daemons (bulk, identify, the R2 pushes, the store sync) add more on
-        # top. Against SQLAlchemy's default 5+10 that meant callers past the
-        # fifteenth queued for the default 30s checkout and then hit a timeout
-        # that db.py swallows into []/None — a half-minute hang followed by a
-        # confidently empty answer. pool_recycle matters for Neon specifically:
-        # it drops idle connections, and a stale one surfaces as a failed query
-        # on somebody's next request.
-        _engine = create_engine(
-            _normalize_url(config.DATABASE_URL),
-            pool_pre_ping=True, pool_size=10, max_overflow=20,
-            pool_timeout=5, pool_recycle=300,
-        )
-    if not _initialized:
-        Base.metadata.create_all(_engine)  # may raise if DB unreachable
-        # Lightweight migrations for DBs created before a column existed. Each
-        # ALTER is separately guarded so an already-applied one doesn't skip
-        # the rest.
-        for stmt in (
-            "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
-            "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
-            "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
-            "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
-            "ALTER TABLE users ADD COLUMN prefs JSON",
-        ):
-            try:
-                with _engine.begin() as conn:
-                    conn.execute(text(stmt))
-            except Exception:  # noqa: BLE001 - column already exists
-                pass
-        _initialized = True
+    if _engine is not None and _initialized:
+        return _engine          # warm: no lock on the common path
+    with _engine_lock:
+        if _engine is None:
+            # Pool sized against the concurrency that can actually reach it,
+            # and set to fail fast rather than hang. Almost every route here is
+            # a sync `def`, so FastAPI runs it in anyio's 40-thread pool, and
+            # background daemons (bulk, identify, the R2 pushes, the store
+            # sync) add more on top. Against SQLAlchemy's default 5+10 that
+            # meant callers past the fifteenth queued for the default 30s
+            # checkout and then hit a timeout that db.py swallows into []/None
+            # — a half-minute hang followed by a confidently empty answer.
+            # pool_recycle matters for Neon specifically: it drops idle
+            # connections, and a stale one surfaces as a failed query on
+            # somebody's next request.
+            url = _normalize_url(config.DATABASE_URL)
+            # pool_timeout bounds the wait for a pool SLOT, not the TCP
+            # connect. Without a connect timeout a new connection inherits the
+            # OS default and can hang for minutes on an unreachable host - and
+            # /api/health round-trips the DB inside Fly's 5s liveness timeout.
+            # A Neon stall therefore became a failed health check, and on a
+            # single-machine app Fly answers that by replacing the machine,
+            # killing whatever batch was running. Bound it well under 5s.
+            #
+            # This bounds the CONNECT only; a server that accepts and then
+            # stalls is handled on the other side, by keeping /api/health on
+            # the warm cache (see db_status and main._db_status_loop).
+            #
+            # libpq-only: SQLite's connect() rejects the keyword outright, and
+            # the test suite runs the billing invariants on SQLite.
+            connect_args = ({"connect_timeout": 3}
+                            if url.startswith("postgresql") else {})
+            _engine = create_engine(
+                url,
+                pool_pre_ping=True, pool_size=10, max_overflow=20,
+                pool_timeout=5, pool_recycle=300,
+                connect_args=connect_args,
+            )
+        if not _initialized:
+            Base.metadata.create_all(_engine)  # may raise if DB unreachable
+            # Lightweight migrations for DBs created before a column existed.
+            # Each ALTER is separately guarded so an already-applied one
+            # doesn't skip the rest.
+            for stmt in (
+                "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
+                "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
+                "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
+                "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN prefs JSON",
+                # Encrypted tokens are roughly 1.5x their plaintext, and a
+                # silently truncated one disconnects a seller with no error.
+                # SQLite ignores VARCHAR lengths entirely, so these are a
+                # no-op there and the guard below swallows the syntax error.
+                "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
+                "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
+                # The unread badge polls every minute and filters on both of
+                # these; user_id alone left the read_at test to a scan of every
+                # notification the seller has ever received. IF NOT EXISTS is
+                # understood by Postgres and SQLite alike, so this is a no-op
+                # after the first boot rather than something the guard below
+                # has to swallow on every start.
+                "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
+                "ON notifications (user_id, read_at)",
+            ):
+                try:
+                    with _engine.begin() as conn:
+                        conn.execute(text(stmt))
+                except Exception:  # noqa: BLE001 - column already exists
+                    pass
+            _initialized = True
     return _engine
 
 
@@ -562,7 +608,10 @@ def save_ebay_account(user_id: str, **fields) -> None:
                 s.add(acct)
             for key in _EBAY_FIELDS:
                 if key in fields and fields[key] is not None:
-                    setattr(acct, key, fields[key])
+                    value = fields[key]
+                    if key == "refresh_token":
+                        value = crypto.encrypt(value)
+                    setattr(acct, key, value)
             acct.updated_at = _now()
             s.commit()
     except Exception as exc:  # noqa: BLE001
@@ -578,11 +627,138 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
             a = s.get(EbayAccount, user_id)
             if not a:
                 return None
-            return {f: getattr(a, f) for f in _EBAY_FIELDS}
+            out = {f: getattr(a, f) for f in _EBAY_FIELDS}
+            # Rows written before backend/crypto.py existed hold plaintext and
+            # come back unchanged; they re-encrypt the next time anything
+            # saves them. Callers only ever see the plaintext, so the token
+            # cache in ebay_provider keys on the same value as before.
+            out["refresh_token"] = crypto.decrypt(out.get("refresh_token") or "")
+            return out
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_ebay_account failed: {exc}")
         return None
 
+
+def _json_text(column, key: str):
+    """`column ->> key` as a comparable string, in whichever dialect is in use.
+
+    Postgres renders this as ->> and SQLite as JSON_EXTRACT; both yield NULL
+    for an absent key, so `!= ''` drops missing and blank alike.
+
+    Only safe to compare as text for a field the Listing model types as `str`
+    — which the two callers below both do (models.Listing.ebay_account and
+    .ebay_listing_id, defaulting to ""), and every write goes through the
+    model. For a field that could hold a number or a bool, `->>` would render
+    it as "0"/"false" and a text comparison would disagree with Python's
+    truth test.
+    """
+    return column[key].as_string()
+
+
+def stamp_ebay_account(user_id: str, account: str) -> int:
+    """Label every eBay-linked record that has no owning account yet.
+
+    Called the moment a DIFFERENT eBay account connects: until then a record's
+    owner was simply "whoever was connected", which is unrecoverable once the
+    connection changes. Records already labelled are left alone, and records
+    with no eBay item id (plain local drafts) are not eBay-scoped at all.
+    Returns how many rows were labelled. Never raises.
+    """
+    account = (account or "").strip()
+    if not account:
+        return 0
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        stamped = 0
+        with Session(eng) as s:
+            # Select the rows this can actually stamp, not the whole store.
+            # These are the two conditions the loop used to re-check in Python
+            # after dragging every listing's JSON blob across the wire — a
+            # mirrored store is thousands of them, and on the common case (a
+            # reconnect where everything is already labelled) every single one
+            # was fetched only to be skipped.
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            item_col = _json_text(ListingRecord.data, "ebay_listing_id")
+            rows = s.execute(
+                select(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(or_(account_col.is_(None), account_col == ""))
+                .where(item_col != "")
+            ).scalars().all()
+            for rec in rows:
+                data = dict(rec.data or {})
+                # Still re-checked here: the SQL narrows the read, but a
+                # non-string value in either field (a number, a nested object)
+                # can satisfy the predicate without satisfying this rule.
+                if data.get("ebay_account") or not data.get("ebay_listing_id"):
+                    continue
+                data["ebay_account"] = account
+                rec.data = data  # a new dict is what marks the JSON column dirty
+                stamped += 1
+            if stamped:
+                s.commit()
+        return stamped
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: stamp_ebay_account failed: {exc}")
+        return 0
+
+
+def count_foreign_listings(user_id: str, account: str) -> int:
+    """How many of this user's eBay-linked records belong to some OTHER eBay
+    account than `account` — what the UI needs to explain why a just-connected
+    store looks like it still holds the previous one's items."""
+    account = (account or "").strip()
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        with Session(eng) as s:
+            # Counted in the database, not in Python. This runs on
+            # /api/ebay/status, which the app calls on every boot, and the
+            # Python version fetched every listing's whole JSON blob — a
+            # mirrored store is megabytes of it, over a cross-region link,
+            # to produce one integer nothing else in the response needs.
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            return int(s.execute(
+                select(func.count())
+                .select_from(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(account_col != "", account_col != account)
+            ).scalar_one() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_foreign_listings failed: {exc}")
+        return 0
+
+
+def count_unowned_ebay_listings(user_id: str) -> int:
+    """eBay-linked records with NO owner recorded at all.
+
+    These predate ownership stamping (imports began labelling in #176, and
+    app publishes only started stamping alongside this helper), so after an
+    UNDETECTED account switch they are the previous account's listings with
+    nothing marking them so — invisible to count_foreign_listings, which
+    requires a non-empty label, and skipped by the release endpoint's default
+    pass. The UI needs this number to offer the seller the explicit way out.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        with Session(eng) as s:
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            item_col = _json_text(ListingRecord.data, "ebay_listing_id")
+            return int(s.execute(
+                select(func.count())
+                .select_from(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(or_(account_col.is_(None), account_col == ""))
+                .where(item_col != "")
+            ).scalar_one() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_unowned_ebay_listings failed: {exc}")
+        return 0
 
 
 def disconnect_ebay_account(user_id: str) -> None:
@@ -610,10 +786,18 @@ _MARKETPLACE_FIELDS = ("refresh_token", "external_username", "external_id",
                        "settings")
 
 
-def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
-    """Create/update a user's connection to one marketplace. Never raises.
-    `settings` keys MERGE into the stored JSON (a reconnect refreshing the
-    shop id must not wipe the user's saved shipping/return defaults)."""
+def save_marketplace_account(user_id: str, marketplace: str, **fields) -> bool:
+    """Create/update a user's connection to one marketplace. Never raises;
+    returns whether the write actually landed. `settings` keys MERGE into the
+    stored JSON (a reconnect refreshing the shop id must not wipe the user's
+    saved shipping/return defaults).
+
+    The return value matters for ROTATING refresh tokens (Etsy invalidates the
+    old one the moment it issues a new one): a caller that cannot tell a
+    swallowed failure from a success will happily carry on with an access
+    token whose refresh token was never stored, and the connection dies
+    silently an hour later. db.upsert_listing reports for the same reason.
+    """
     try:
         eng = _get_engine()
         if eng is None:
@@ -627,12 +811,16 @@ def save_marketplace_account(user_id: str, marketplace: str, **fields) -> None:
                 if key in fields and fields[key] is not None:
                     if key == "settings":
                         acct.settings = {**(acct.settings or {}), **fields[key]}
+                    elif key == "refresh_token":
+                        acct.refresh_token = crypto.encrypt(fields[key])
                     else:
                         setattr(acct, key, fields[key])
             acct.updated_at = _now()
             s.commit()
+        return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: save_marketplace_account failed: {exc}")
+        return False
 
 
 def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
@@ -646,6 +834,7 @@ def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
                 return None
             out = {f: getattr(a, f) for f in _MARKETPLACE_FIELDS}
             out["settings"] = out.get("settings") or {}
+            out["refresh_token"] = crypto.decrypt(out.get("refresh_token") or "")
             return out
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_marketplace_account failed: {exc}")
@@ -796,6 +985,26 @@ def token_status(user_id: str, period: str, free_quota: int) -> Optional[dict]:
         return None
 
 
+def plan_spend(free_quota: int, free_used: int, purchased: int,
+               amount: int) -> Optional[tuple[int, int]]:
+    """Pure arithmetic of one debit: how much comes from the free allowance vs
+    the purchased balance. Returns (free_part, paid_part), or None when the
+    combined balance can't cover it.
+
+    Lives here, beside token_spend, because token_spend is its only caller and
+    a debit rule with two implementations is a debit rule with none: this was a
+    copy in services/tokens.py that the billing tests exercised while the row
+    lock below ran its own inline version. Re-exported as tokens.plan_spend.
+    """
+    free_remaining = max(0, free_quota - max(0, free_used))
+    if amount <= 0:
+        return (0, 0)
+    if free_remaining + purchased < amount:
+        return None
+    free_part = min(amount, free_remaining)
+    return (free_part, amount - free_part)
+
+
 def token_spend(user_id: str, cost: int, free_quota: int, period: str,
                 feature: str = "") -> Optional[dict]:
     """Atomically debit `cost` tokens (free allowance first, then purchased).
@@ -812,13 +1021,15 @@ def token_spend(user_id: str, cost: int, free_quota: int, period: str,
             return None
         with Session(eng) as s:
             acct = _token_account(s, user_id, period)
+            # What is left of the monthly allowance, for the balances this
+            # reports back. The SPLIT itself is plan_spend's to decide.
             free_remaining = max(0, free_quota - acct.free_used)
-            if free_remaining + acct.purchased < cost:
+            plan = plan_spend(free_quota, acct.free_used, acct.purchased, cost)
+            if plan is None:
                 s.commit()  # keep the period rollover even when declining
                 return {"ok": False, "reason": "insufficient",
                         "free_remaining": free_remaining, "purchased": acct.purchased}
-            free_part = min(cost, free_remaining)
-            paid_part = cost - free_part
+            free_part, paid_part = plan
             acct.free_used += free_part
             acct.purchased -= paid_part
             acct.updated_at = _now()
@@ -851,17 +1062,38 @@ def token_refund(user_id: str, entry_id: str, units: Optional[int] = None) -> bo
             if entry is None or entry.kind != "spend" or entry.user_id != user_id:
                 return False
             total = entry.free_part + entry.paid_part
-            amount = total if units is None else max(0, min(int(units), total))
+            # What this spend has ALREADY had given back. Both numbers below
+            # depend on it: the clamp was against the spend total, so repeated
+            # partial refunds could hand back more than was ever charged, and
+            # the ref was keyed on this call's amount alone, so two partial
+            # refunds of the SAME size against one spend collided on the unique
+            # ref -- the second was rejected by the database and swallowed.
+            # A bulk batch does exactly that: it refunds the failed cutouts
+            # mid-run and the unused remainder in its finally, and when those
+            # two are equal the seller silently lost the second refund.
+            already = int(s.execute(
+                select(func.coalesce(func.sum(TokenLedger.tokens), 0))
+                .where(TokenLedger.kind == "refund",
+                       TokenLedger.user_id == user_id,
+                       or_(TokenLedger.ref == entry_id,
+                           TokenLedger.ref.like(f"{entry_id}:%")))
+            ).scalar() or 0)
+            remaining = max(0, total - already)
+            amount = remaining if units is None else max(0, min(int(units), remaining))
             if amount == 0:
                 return False
-            paid_back = min(amount, entry.paid_part)
+            paid_back = min(amount, max(0, entry.paid_part - already))
             free_back = amount - paid_back
             acct = _token_account(s, user_id)
             acct.purchased += paid_back
             if free_back and acct.free_period == entry.period:
                 acct.free_used = max(0, acct.free_used - free_back)
             acct.updated_at = _now()
-            ref = entry_id if units is None else f"{entry_id}:{amount}"
+            # Full refunds keep the bare entry id, so refund_all stays safe to
+            # re-run on every boot. A partial is keyed by where it starts as
+            # well as its size, which makes consecutive partials distinct while
+            # an exact replay of the same one still collides and no-ops.
+            ref = entry_id if units is None else f"{entry_id}:{already}:{amount}"
             s.add(TokenLedger(id=_uuid.uuid4().hex, user_id=user_id, kind="refund",
                               feature=entry.feature, tokens=amount,
                               free_part=free_back, paid_part=paid_back,
@@ -1051,12 +1283,17 @@ def unread_notification_count(user_id: str) -> int:
         if eng is None or not user_id:
             return 0
         with Session(eng) as s:
-            rows = s.execute(
-                select(Notification.id)
+            # COUNT in the database, like count_foreign_listings above and for
+            # the same reason: this ran on every /api/notifications poll and
+            # dragged one row per unread notification across the cross-region
+            # link to compute a length. A synced store mints one of these per
+            # sale, so the cost grew with the seller's success.
+            return int(s.execute(
+                select(func.count())
+                .select_from(Notification)
                 .where(Notification.user_id == user_id,
                        Notification.read_at.is_(None))
-            ).scalars().all()
-            return len(rows)
+            ).scalar() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: unread_notification_count failed: {exc}")
         return 0
@@ -1094,13 +1331,20 @@ _STATUS_TTL = 30  # seconds
 _status_cache: tuple[float, dict] | None = None
 
 
-def db_status() -> dict:
+def db_status(refresh: bool = False) -> dict:
     """Health probe: is a DB configured, and can we actually reach it?
-    Cached briefly (see _STATUS_TTL)."""
+    Cached briefly (see _STATUS_TTL).
+
+    `refresh` takes a new reading regardless of the cache. It exists for the
+    background refresher in main, which keeps this cache warm so that request
+    handlers - /api/health above all - are always served from it and never
+    pay for the round trip themselves.
+    """
     global _status_cache
     if not enabled():
         return {"configured": False, "connected": False}
-    if _status_cache and _time.time() - _status_cache[0] < _STATUS_TTL:
+    if (not refresh and _status_cache
+            and _time.time() - _status_cache[0] < _STATUS_TTL):
         return _status_cache[1]
     try:
         eng = _get_engine()

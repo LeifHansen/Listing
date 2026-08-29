@@ -53,6 +53,55 @@ def _env(*names: str) -> str:
     return ""
 
 
+# --- "you set something, just not this" ------------------------------------
+# Fly secrets are typed by hand, and a name that is NEARLY right is invisible:
+# the app reports the canonical name as missing while the operator is looking
+# at a dashboard showing a secret they are certain they set.
+#
+# Production is in exactly that state right now. STRIPE_API_SECRET_KEY and
+# STRIPE_API_KEY are both deployed; the code reads STRIPE_SECRET_KEY. So
+# /api/health has been reporting `tokens_missing: ["STRIPE_SECRET_KEY"]` --
+# accurate, and useless, because the answer looks like "add a Stripe key" when
+# the real answer is "rename the one already there". The entire paid tier is
+# off, and every surface that could have said so said the opposite.
+#
+# This deliberately does NOT alias the near-miss name into use. Adopting it
+# would take money-handling configuration from a variable whose contents this
+# app never agreed on -- a publishable key sitting in a "secret key" slot would
+# read as configured and fail at checkout. Naming what it found and leaving the
+# rename to a human is the honest half of the fix.
+_NAME_FILLER = frozenset({"API"})
+
+
+def _name_words(name: str) -> frozenset:
+    """A variable name reduced to the words that carry meaning, so that names
+    differing only by filler or word order compare equal."""
+    return frozenset(w for w in name.upper().split("_") if w and w not in _NAME_FILLER)
+
+
+def near_miss_env(name: str) -> list[str]:
+    """Env vars that ARE set and whose names differ from `name` only by filler
+    words or word order. Empty when `name` itself has a value -- there is
+    nothing to warn about once the canonical name works."""
+    if os.getenv(name, "").strip():
+        return []
+    want = _name_words(name)
+    return sorted(other for other, value in os.environ.items()
+                  if other != name and value.strip() and _name_words(other) == want)
+
+
+def _flag_set_but_false(name: str) -> str:
+    """The raw value of an on/off env var that is set to something this app
+    does not read as on. '' when it is unset (nothing to explain) or genuinely
+    on. TOKENS_ENABLED is deployed in production and still reads as off, which
+    `tokens_missing()` can only report as "TOKENS_ENABLED" -- indistinguishable
+    from never having set it."""
+    raw = os.getenv(name, "").strip()
+    if not raw or raw.lower() in ("1", "true", "yes", "on"):
+        return ""
+    return raw
+
+
 def _clean_db_url(value: str) -> str:
     """Placeholder-proof like _env, plus require a plausible URL scheme."""
     value = (value or "").strip()
@@ -95,6 +144,15 @@ def _load_secret_key() -> str:
 
 
 SECRET_KEY = _load_secret_key()
+
+# Encrypts the marketplace refresh tokens held in the database (see
+# backend/crypto.py). A Fernet key -- generate one with:
+#   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Left unset, a key is derived from SECRET_KEY, so a self-hosted or local
+# deployment is protected with no extra configuration. Set it explicitly if
+# SECRET_KEY might ever be rotated: rotating the key a token was written under
+# makes that token unreadable, and the seller has to reconnect.
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
 
 # --- Object storage (Cloudflare R2 / any S3, optional) ---------------------
 # Store optimized images in R2 so they survive restarts and are reliably
@@ -160,14 +218,43 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def env_float(name: str, default: float) -> float:
+    """A float from the environment that can't stop the app from booting.
+
+    Public because services parse their own tunables at module scope. A value
+    that isn't a number there ("10m", "600s", a stray quote) raised ValueError
+    while the module was still importing, which takes the WHOLE app down at
+    boot — not just the one feature the setting belongs to. A typo in a tuning
+    knob should cost its default and a log line.
+    """
+    raw = os.getenv(name, "")
+    try:
+        return max(0.0, float(raw or default))
+    except ValueError:
+        log.warning("%s=%r is not a number — using %s", name, raw, default)
+        return default
+
+
 FREE_TOKENS_PER_MONTH = _env_int("FREE_TOKENS_PER_MONTH", 50)
 
 # Stripe (payments). Secret key sk_live_/sk_test_; the webhook signing secret
 # (whsec_...) comes from the endpoint you register for checkout.session.completed
 # at https://<your-domain>/api/tokens/webhook. Purchases also confirm client-side
 # after the Checkout redirect, so the webhook is a safety net, not a requirement.
-STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
+#
+# STRIPE_API_SECRET_KEY is accepted as a second name for the same thing, the
+# way DATABASE_URL takes NEON_PRODUCTION_DATABASE_URL and ETSY_CLIENT_ID takes
+# ETSY_KEYSTRING. That is the name the production keyset was deployed under,
+# and reading it here costs nothing, while renaming a live secret restarts the
+# machine -- which, with min_machines_running = 1, means restarting it under
+# whatever batch is in flight.
+#
+# The value is still checked rather than trusted: stripe_live_mode() reads the
+# sk_live_/sk_test_ prefix, and config_warnings() says so out loud if what
+# turns up under either name is not a secret key at all (a publishable pk_ in
+# a secret-key slot would otherwise look configured and fail at checkout).
+STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY", "STRIPE_API_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET", "STRIPE_API_WEBHOOK_SECRET")
 
 
 def stripe_ready() -> bool:
@@ -351,6 +438,14 @@ EBAY_VERIFICATION_TOKEN = os.getenv("EBAY_VERIFICATION_TOKEN", "").strip()
 # sits behind a proxy that rewrites scheme/host.
 EBAY_DELETION_ENDPOINT = os.getenv("EBAY_DELETION_ENDPOINT", "").strip()
 
+# Anything that is not exactly "production" means sandbox. That is a quiet
+# footgun: EBAY_ENV=prod (or a typo) silently points the whole integration at
+# sandbox, where a seller's real eBay sign-in cannot work and the only symptom
+# is a connect that fails with no reason. Say so at boot.
+if EBAY_ENV not in ("sandbox", "production"):
+    log.warning("EBAY_ENV=%r is not 'sandbox' or 'production' — treating it as "
+                "SANDBOX. Real eBay accounts cannot connect against sandbox.",
+                EBAY_ENV)
 _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
@@ -361,6 +456,10 @@ EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.
 # before it must reconnect once to grant it (their existing refresh token only
 # carries the scopes they originally approved). Same for sell.fulfillment
 # (reading sold orders + posting tracking numbers for the shipping workflow).
+# The commit this image was built from, stamped in by the Dockerfile's
+# GIT_SHA build arg. Empty for a local run or a build that didn't pass it.
+BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
+
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
@@ -381,6 +480,20 @@ EBAY_LOGISTICS_ENABLED = (os.getenv("EBAY_LOGISTICS_ENABLED", "").strip().lower(
                           in ("1", "true", "yes", "on"))
 if EBAY_LOGISTICS_ENABLED:
     EBAY_OAUTH_SCOPES.append("https://api.ebay.com/oauth/api_scope/sell.logistics")
+
+
+# Whether the pre-publish checklist BLOCKS a revise of an already-live listing,
+# or only reports what it would have blocked. A relist is always blocked on —
+# it creates a new listing, so it answers to the same contract a first publish
+# does. A revise is the risky one: these listings are live and selling, some
+# were created outside this app, and a checklist that has never run against
+# them will find things eBay accepted years ago. So it ships observing first —
+# read the "would block" lines out of the logs, confirm they are real, then set
+# EBAY_PREFLIGHT_BLOCKS_REVISE=1. Blocking a seller out of editing a live
+# listing is worse than the rejection the check is trying to save them from.
+EBAY_PREFLIGHT_BLOCKS_REVISE = (
+    os.getenv("EBAY_PREFLIGHT_BLOCKS_REVISE", "").strip().lower()
+    in ("1", "true", "yes", "on"))
 
 
 def ebay_oauth_ready() -> bool:
@@ -454,3 +567,62 @@ def depop_oauth_ready() -> bool:
     the OAuth endpoints and redirect URI from the partner setup)."""
     return bool(DEPOP_CLIENT_ID and DEPOP_CLIENT_SECRET
                 and DEPOP_AUTH_URL and DEPOP_TOKEN_URL and DEPOP_REDIRECT_URI)
+
+
+# --- Config warnings -------------------------------------------------------
+# The credentials an operator types by hand into `fly secrets`. Each is paired
+# with the value this module actually resolved, so a name that has a working
+# alias (DATABASE_URL / NEON_PRODUCTION_DATABASE_URL) never warns -- only a
+# genuinely-unconfigured feature that has a near-miss name sitting next to it.
+def _watched_names() -> list[tuple[str, str]]:
+    return [
+        ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+        ("DATABASE_URL", DATABASE_URL),
+        ("SECRET_KEY", SECRET_KEY),
+        ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
+        ("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET),
+        ("PHOTOROOM_API_KEY", PHOTOROOM_API_KEY),
+        ("EBAY_VERIFICATION_TOKEN", EBAY_VERIFICATION_TOKEN),
+        ("R2_ACCOUNT_ID", R2_ACCOUNT_ID),
+        ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),
+        ("R2_SECRET_ACCESS_KEY", R2_SECRET_ACCESS_KEY),
+        ("ETSY_REDIRECT_URI", ETSY_REDIRECT_URI),
+    ]
+
+
+def config_warnings() -> list[str]:
+    """Misconfigurations that look identical to "not configured yet".
+
+    Everything here is a case where the operator DID act and the app still
+    reports the feature as missing, so the honest message is not "set this"
+    but "you set something adjacent". Reported by /api/health next to the
+    `*_missing` lists those cases would otherwise hide behind.
+    """
+    warnings = []
+    for name, resolved in _watched_names():
+        for other in near_miss_env(name):
+            if not resolved:
+                warnings.append(
+                    f"{other} is set but this app reads {name} — rename the "
+                    f"secret (or add {name}) or the feature stays off.")
+    stray = _flag_set_but_false("TOKENS_ENABLED")
+    if stray:
+        warnings.append(
+            f"TOKENS_ENABLED={stray!r} is not one of 1/true/yes/on, so token "
+            f"billing is OFF — which reads the same as never setting it.")
+    # A Stripe key that is present but is not a SECRET key. Worth its own line
+    # now that the secret is read from either of two names: a publishable
+    # pk_... sitting in the slot satisfies every "is it configured?" check in
+    # the app and then fails at the one moment that matters, when a seller
+    # tries to buy tokens.
+    if STRIPE_SECRET_KEY and stripe_live_mode() is None:
+        warnings.append(
+            "The Stripe secret key doesn't start with sk_live_ or sk_test_, so "
+            "it isn't a secret key — checkout will fail even though every "
+            "readiness check passes. (A publishable pk_... key belongs in "
+            "STRIPE_PUBLISHABLE_KEY.)")
+    return warnings
+
+
+for _w in config_warnings():
+    log.warning(_w)

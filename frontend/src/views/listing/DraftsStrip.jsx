@@ -1,19 +1,19 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
-import { api, pollJob, postJson } from "@/lib/api";
+import { pollJob, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Select } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
-import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { ShippingPolicySelect } from "./ShippingPolicySelect";
+import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
 
 /* The drafts experience on the merged Sell screen: every draft one click
@@ -23,47 +23,41 @@ import { blockerLabels, ebayBlockers } from "./blockers";
 
 const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 
-// Shipping service picker right on a draft's card — the same eBay fulfillment
-// policies the editor and bulk queue offer, account default preselected.
-// Saves the moment it's changed.
+// Shipping policy right on a draft's card — the same one control the editor
+// and the bulk queue use (see ShippingPolicySelect). Saves on change.
 function DraftShipping({ item, className }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
+  const { loadListings } = useApp();
   const { toast } = useToast();
   const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
-  if (!ebay.connected) return null;
-  const policies = policiesData?.policies?.fulfillment || [];
-  if (!policies.length) return null;
-  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
   const save = async (id) => {
+    const previous = value;
     setValue(id);
     try {
       await postJson(`/api/save/${item.id}`, {
         ...(item.listing || {}), fulfillment_policy_id: id,
       });
+      // Refresh the cache, exactly as DraftCategory below does. /api/save is a
+      // full REPLACE, and publishItem re-saves this card's in-memory
+      // item.listing on the way to publishing -- so without this the policy
+      // just chosen was overwritten with the stale one at the moment it
+      // mattered, and the listing went live with the wrong shipping.
+      await loadListings({ quiet: true });
     } catch (e) {
-      toast(`Couldn't save the shipping service: ${e.message}`, { kind: "error" });
+      // Put the dropdown back. Leaving it on the new value showed a policy
+      // that was never saved, long after the toast had gone.
+      setValue(previous);
+      toast(`Couldn't save the shipping policy: ${e.message}`, { kind: "error" });
     }
   };
   return (
     <div className={cn("flex items-center gap-1.5", className || "mt-1.5")}
-      title="Shipping service for this draft">
+      title="Shipping policy for this draft">
       <Truck size={14} className="shrink-0 text-ink-faint" aria-hidden />
-      <Select
-        aria-label="Shipping service"
+      <ShippingPolicySelect
         className="h-9 text-[13px]"
-        value={value || accountDefault}
-        onChange={(e) => save(e.target.value)}
-      >
-        {policies.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}{p.summary ? ` · ${p.summary}` : ""}
-          </option>
-        ))}
-      </Select>
+        value={value}
+        onChange={save}
+      />
     </div>
   );
 }
@@ -195,7 +189,9 @@ export function DraftsStrip({ search = "" }) {
         : (res.message || "Published! It's live now."),
         { kind: partial ? "warning" : "success" });
     } else {
-      toast(res.message || "Publish blocked — open the draft to see what to fix.",
+      // blockedReason, not res.message — see publishShared: eBay's catch-all
+      // for an account-level hold blames the title.
+      toast(blockedReason(res, "Publish blocked — open the draft to see what to fix."),
         { kind: "warning" });
     }
     await loadListings({ quiet: true });
@@ -222,10 +218,22 @@ export function DraftsStrip({ search = "" }) {
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0;
+    const reasons = [];
     setBulkProgress({ done: 0, total: readyToPublish.length });
     try {
       for (const item of readyToPublish) {
-        (await publishItem(item)).published ? ok++ : failed++;
+        const out = await publishItem(item);
+        if (out.published) ok++;
+        else {
+          failed++;
+          // WHY, not just how many. publishItem hands back the response and
+          // this discarded it, so a run where every listing was refused for
+          // one account-level hold reported "5 need attention — open them to
+          // fix" and sent the seller to inspect five listings that were never
+          // the problem. That is the shape of the failures in production.
+          reasons.push(out.error
+            || blockedReason(out.res, "Publish blocked — open the draft to see what to fix."));
+        }
         setBulkProgress((p) => ({ ...p, done: ok + failed }));
       }
     } finally {
@@ -233,8 +241,13 @@ export function DraftsStrip({ search = "" }) {
     }
     await loadListings({ quiet: true });
     exitSelect();
+    const shared = reasons.length && reasons.every((r) => r === reasons[0])
+      ? reasons[0] : null;
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
-      + (failed ? ` ${failed} need attention — open them to fix.` : "")
+      + (failed
+          ? (shared ? ` All ${failed} were refused: ${shared}`
+                    : ` ${failed} need attention — open them to fix.`)
+          : "")
       + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
       { kind: failed || notReady ? "warning" : "success" });
   };

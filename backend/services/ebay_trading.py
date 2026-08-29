@@ -32,6 +32,7 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import TITLE_MAX_CHARS, ItemSpecific, Listing
+from . import taxonomy
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -47,11 +48,18 @@ class TradingError(ValueError):
     `code` is eBay's own ErrorCode when the failure came back as a rejection
     rather than a transport problem, so callers can branch on a specific
     condition (see AlreadyListedError) instead of matching on message text.
+
+    `detail` is everything else eBay said about the failure: the response's
+    own <Message> element (which is where eBay puts the ACTUAL reason behind
+    its catch-all rejections — see `_failure` below) plus any errors after the
+    first. It rides along separately from `message` so callers can show the
+    seller a clean headline and still have the specifics to act on.
     """
 
-    def __init__(self, message: str, code: str = ""):
+    def __init__(self, message: str, code: str = "", detail: str = ""):
         super().__init__(message)
         self.code = code
+        self.detail = detail
 
 
 class AlreadyListedError(TradingError):
@@ -64,8 +72,9 @@ class AlreadyListedError(TradingError):
     instead of creating a second one.
     """
 
-    def __init__(self, message: str, code: str = "", item_id: str = ""):
-        super().__init__(message, code)
+    def __init__(self, message: str, code: str = "", item_id: str = "",
+                 detail: str = ""):
+        super().__init__(message, code, detail)
         self.item_id = item_id
 
 
@@ -134,16 +143,54 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         errors = [e for e in _findall(root, "Errors")
                   if (_text(e, "SeverityCode") or "").lower() == "error"]
         if errors:
-            first = errors[0]
-            msg = (_text(first, "LongMessage") or _text(first, "ShortMessage")
-                   or "eBay rejected the request.")
-            code = _text(first, "ErrorCode") or ""
-            if code in ("931", "932", "16110", "21917053"):  # auth/token codes
-                raise TradingError(
-                    "eBay didn't accept the account connection — reconnect eBay "
-                    "in Settings and try again.", code=code)
-            raise TradingError(msg.strip()[:300], code=code)
+            raise _failure(call, root, errors)
     return root
+
+
+def _error_line(err: ET.Element) -> str:
+    """One <Errors> entry as a single readable line, code included."""
+    text = (_text(err, "LongMessage") or _text(err, "ShortMessage") or "").strip()
+    code = _text(err, "ErrorCode")
+    return f"{text} (eBay error {code})" if code and text else text or f"eBay error {code}"
+
+
+# eBay's catch-all rejections: the LongMessage lists every reason the code can
+# mean and names none of them, so on its own it sends the seller looking at
+# fields that were never the problem. eBay puts the real one in the response's
+# <Message> element (Trading's AddItemResponse.Message, "returned when the
+# item is not listed"), which this client used to drop on the floor.
+_CATCH_ALL_CODES = {"240"}
+
+
+def _failure(call: str, root: ET.Element, errors: list[ET.Element]) -> TradingError:
+    """Build the TradingError for a failed call, keeping everything eBay said.
+
+    Only the first error became the message before this, and the response-level
+    <Message> was never read at all — which is exactly the detail eBay attaches
+    to error 240 ("The item cannot be listed or modified..."). A seller then saw
+    a sentence listing four possible causes and no way to tell which was theirs.
+    """
+    first = errors[0]
+    code = _text(first, "ErrorCode") or ""
+    headline = (_text(first, "LongMessage") or _text(first, "ShortMessage")
+                or "eBay rejected the request.").strip()
+    # eBay's own detail for this rejection, plus any errors past the first.
+    extras = [_text(root, "Message").strip()]
+    extras += [_error_line(e) for e in errors[1:]]
+    detail = " ".join(x for x in extras if x)[:600]
+    # Always logged in full: a rejection the app can't explain is the one thing
+    # a seller can't debug from the UI, and the fly logs are where it has to be.
+    log.warning("trading: %s rejected — code=%s ack-errors=%d msg=%s detail=%s",
+                call, code or "?", len(errors), headline[:200],
+                detail[:300] or "(none)")
+    if code in ("931", "932", "16110", "21917053"):  # auth/token codes
+        return TradingError(
+            "eBay didn't accept the account connection — reconnect eBay "
+            "in Settings and try again.", code=code, detail=detail)
+    if code in _CATCH_ALL_CODES and detail:
+        # eBay named the real reason — lead with it instead of the catch-all.
+        headline = detail if len(detail) <= 300 else headline
+    return TradingError(headline[:300], code=code, detail=detail)
 
 
 # --- tiny XML helpers (namespace-agnostic) ----------------------------------
@@ -202,15 +249,13 @@ def _int(parent: Optional[ET.Element], path: str, default: int = 0) -> int:
 # --- condition mapping ------------------------------------------------------
 # Trading's numeric ConditionID <-> the Inventory API's condition enum this app
 # stores on Listing.condition.
-_CONDITION_BY_ID = {
-    "1000": "NEW", "1500": "NEW_OTHER", "1750": "NEW_WITH_DEFECTS",
-    "2000": "CERTIFIED_REFURBISHED", "2010": "CERTIFIED_REFURBISHED",
-    "2020": "SELLER_REFURBISHED", "2030": "SELLER_REFURBISHED",
-    "2500": "SELLER_REFURBISHED", "2750": "USED_EXCELLENT",
-    "3000": "USED_EXCELLENT", "4000": "USED_VERY_GOOD",
-    "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
-    "7000": "FOR_PARTS_OR_NOT_WORKING",
-}
+# id -> enum comes from taxonomy, which is the one place that direction is
+# defined. A local copy here disagreed on 2750: import read it as
+# USED_EXCELLENT while _CONDITION_TO_ID sends LIKE_NEW back as 2750, so every
+# revise of an imported "Like New" listing silently downgraded it to 3000.
+_CONDITION_BY_ID = taxonomy.CONDITION_ID_TO_ENUM
+# enum -> id is NOT the inverse: several ids share an enum (2000/2010,
+# 2020/2030/2500), so this names the one id to publish for each.
 _CONDITION_TO_ID = {
     "NEW": "1000", "NEW_OTHER": "1500", "NEW_WITH_DEFECTS": "1750",
     "CERTIFIED_REFURBISHED": "2000", "SELLER_REFURBISHED": "2500",
@@ -594,6 +639,41 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         raise TradingError(
             "eBay needs to know where this ships from. Add your ship-from ZIP "
             "in Settings → Listing settings and publish again.")
+    call, body = build_add_item(listing, image_urls, policies, postal_code,
+                                idempotency_key)
+    try:
+        root = _call(call, token, body)
+    except TradingError as exc:
+        if idempotency_key and _is_duplicate_rejection(exc):
+            # eBay has already processed this exact publish. Surfacing its raw
+            # wording ("UUID has already been used") would read as a failure to
+            # a seller whose listing is in fact live.
+            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
+                     call, idempotency_key, exc.code)
+            raise AlreadyListedError(
+                "This listing was already published to eBay.", code=exc.code,
+                item_id=_item_id_in_error(str(exc)),
+                detail=getattr(exc, "detail", "")) from exc
+        raise
+    item_id = _text(root, "ItemID")
+    if not item_id:
+        raise TradingError("eBay accepted the listing but returned no item id.")
+    log.info("trading: %s ok item=%s", call, item_id)
+    return {"published": True, "listing_id": item_id,
+            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+
+
+def build_add_item(listing: Listing, image_urls: list[str],
+                   policies: Optional[dict] = None,
+                   postal_code: str = "",
+                   idempotency_key: str = "") -> tuple[str, str]:
+    """(call name, <Item> XML) for a NEW listing.
+
+    Exactly the body create_listing sends, built without touching the network
+    or validating anything — so the dry-run preview and the real publish can
+    never describe two different requests. An empty postal_code simply omits
+    the element here; create_listing is what refuses to publish without one.
+    """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
     parts = _item_fields(listing, image_urls)
@@ -645,32 +725,21 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         parts.append(f"<UUID>{_esc(_uuid_form(idempotency_key))}</UUID>")
 
     call = "AddItem" if is_auction else "AddFixedPriceItem"
-    try:
-        root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
-    except TradingError as exc:
-        if idempotency_key and _is_duplicate_rejection(exc):
-            # eBay has already processed this exact publish. Surfacing its raw
-            # wording ("UUID has already been used") would read as a failure to
-            # a seller whose listing is in fact live.
-            log.info("trading: %s refused as already-listed (key=%s, code=%s)",
-                     call, idempotency_key, exc.code)
-            raise AlreadyListedError(
-                "This listing was already published to eBay.", code=exc.code,
-                item_id=_item_id_in_error(str(exc))) from exc
-        raise
-    item_id = _text(root, "ItemID")
-    if not item_id:
-        raise TradingError("eBay accepted the listing but returned no item id.")
-    log.info("trading: %s ok item=%s", call, item_id)
-    return {"published": True, "listing_id": item_id,
-            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    return call, f"<Item>{''.join(parts)}</Item>"
 
 
 # eBay's error codes for "you already sent this": a reused UUID, and an
 # InventoryTrackingNumber already on an active listing. Codes are matched
 # first, with a text fallback so a code eBay adds later still lands here —
 # duplicating a listing is worse than one publish reported as already-live.
-_DUPLICATE_CODES = {"21916884", "21916885", "21919188", "21916752"}
+#
+# 21919188 is NOT one of them: it is "this listing would cause you to exceed
+# the amount you can list" — the monthly SELLING LIMIT. Treating it as a
+# duplicate submission sent the seller a warning that publishing again "could
+# create a duplicate", when nothing had been created and the real fix is to
+# ask eBay to raise the limit. (eBay's duplicate-LISTING-policy code is
+# 21919067, which is a different thing again and not an idempotency signal.)
+_DUPLICATE_CODES = {"21916884", "21916885", "21916752"}
 _DUPLICATE_TEXT = re.compile(
     r"(uuid|inventory\s*tracking\s*number).{0,60}?"
     r"(already\s+(been\s+)?(used|exists|specified)|not\s+unique|duplicate)"

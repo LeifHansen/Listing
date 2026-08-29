@@ -17,7 +17,8 @@ import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
 import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
-import { MarketTargetChips, publishListing, usePublishTargets } from "./publishShared";
+import { ShippingPolicySelect } from "./ShippingPolicySelect";
+import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
 import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
@@ -70,35 +71,6 @@ const LISTING_FORMATS = [
 // eBay's own recommendation replaces this at publish time; it's just the
 // starting number in the box.
 const DEFAULT_AD_RATE = 10;
-
-// Per-card shipping service = an eBay fulfillment (shipping) policy, same as
-// the full editor's picker. Defaults to the account's policy; a change here
-// rides on the draft and is honored at publish. Hidden until eBay is
-// connected / policies load.
-function ShippingServiceSelect({ value, onChange }) {
-  const { ebay, policiesData, setPoliciesData } = useApp();
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
-  if (!ebay.connected) return null;
-  const policies = policiesData?.policies?.fulfillment || [];
-  if (!policies.length) return null;
-  const accountDefault = policiesData?.selected?.fulfillment_policy_id || "";
-  return (
-    <Select
-      aria-label="Shipping service"
-      value={value || accountDefault}
-      onChange={(e) => onChange(e.target.value)}
-    >
-      {policies.map((p) => (
-        <option key={p.id} value={p.id}>
-          {p.name}{p.summary ? ` · ${p.summary}` : ""}
-        </option>
-      ))}
-    </Select>
-  );
-}
 
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
@@ -278,7 +250,7 @@ function BulkItemCard({
             onPick={(patch) => onChange({ ...l, ...patch })}
           />
 
-          <ShippingServiceSelect
+          <ShippingPolicySelect
             value={l.fulfillment_policy_id}
             onChange={(id) => onChange({ ...l, fulfillment_policy_id: id })}
           />
@@ -363,6 +335,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const [items, setItems] = useState([]);
   const [checked, setChecked] = useState({});
   const [publishing, setPublishing] = useState({});
+  // { done, total } while a whole-batch publish is running; null otherwise.
+  // Drives both the progress label and the disabled state that stops a second
+  // concurrent pass. Same shape as DraftsStrip's.
+  const [bulkProgress, setBulkProgress] = useState(null);
   const [deleting, setDeleting] = useState({});
   // The merge review dialog. `key` bumps on every open so the dialog remounts
   // with fresh state (which draft merges in, which is master, which entries
@@ -405,13 +381,29 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           // re-edits an item once it's identified, so for items we already have
           // we keep the local listing (which may hold edits like a changed
           // condition/price) and only pick up new items from the poll.
+          //
+          // The publish outcome is local too, and keeping only `listing` threw
+          // it away. Cards are live while the batch still runs, so a seller can
+          // publish one and have this poll overwrite status/listing_id/error
+          // 1.5s later with the server's still-"draft" row: a failure lost its
+          // reason and read as an un-published draft, and a SUCCESS did too --
+          // inviting a second, duplicate, fee-incurring live listing.
           setItems((cur) => {
             const mine = new Map(cur.map((it) => [it.session_id, it]));
             return j.items
               .filter((srv) => !removed.current.has(srv.session_id))
               .map((srv) => {
                 const local = mine.get(srv.session_id);
-                return local ? { ...srv, listing: local.listing ?? srv.listing } : srv;
+                if (!local) return srv;
+                const merged = { ...srv, listing: local.listing ?? srv.listing };
+                // Once this client has published an item, its own record of
+                // that is newer than anything the batch job knows.
+                if (local.status === "published" || local.listing_id || local.error) {
+                  merged.status = local.status ?? merged.status;
+                  merged.listing_id = local.listing_id ?? merged.listing_id;
+                  merged.error = local.error ?? merged.error;
+                }
+                return merged;
               });
           });
           // Nothing is ticked for you. Selection means "I picked these" — so
@@ -514,7 +506,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     updateItem(it.session_id, next);
     try {
       await postJson("/api/delete-image", { session_id: it.session_id, name });
-      postJson(`/api/save/${it.session_id}`, next).catch(() => {});
+      // Awaited. The file is really gone by this point, so a save that fails
+      // silently leaves the draft pointing at a deleted photo -- and the
+      // publish then hands eBay an image URL that 404s, which is the opaque
+      // 25001 the README describes chasing.
+      await postJson(`/api/save/${it.session_id}`, next);
     } catch (e) {
       updateItem(it.session_id, l);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
@@ -548,14 +544,18 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             error: res.published
               ? (res.multi && Object.values(res.results || {}).some((r) => !r.ok)
                   ? `${summary} — open the full editor to fix the rest.` : null)
-              : (res.message || "Publish blocked — open the full editor to fix."),
+              // blockedReason, not res.message — see publishShared: eBay's
+              // catch-all for an account-level hold blames the title.
+              : blockedReason(res, "Publish blocked — open the full editor to fix."),
           }
         : x));
-      return !!res.published;
+      return { published: !!res.published,
+               reason: res.published ? null
+                 : blockedReason(res, "Publish blocked — open the full editor to fix.") };
     } catch (e) {
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
         ? { ...x, error: e.message } : x));
-      return false;
+      return { published: false, reason: e.message };
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
@@ -571,7 +571,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       message: `"${name}" goes straight to your store.`,
       confirmLabel: "Publish live",
     }))) return;
-    if (await publishOne(it)) loadListings({ quiet: true });
+    if ((await publishOne(it)).published) loadListings({ quiet: true });
   }, [confirm, publishOne, loadListings]);
 
   // Delete a draft straight from the queue — the counterpart to Merge for
@@ -693,12 +693,36 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0;
-    for (const it of targets) {
-      (await publishOne(it)) ? ok++ : failed++;
+    const reasons = [];
+    // Guarded like the drafts strip's equivalent: this is a loop of real,
+    // fee-incurring eBay calls that runs for minutes on a full batch, and the
+    // button had no disabled state, no loading state and no once() wrapper --
+    // so a second click started a CONCURRENT pass over the drafts the first
+    // one had not reached yet, and published them twice.
+    setBulkProgress({ done: 0, total: targets.length });
+    try {
+      for (const it of targets) {
+        const res = await publishOne(it);
+        if (res.published) ok++;
+        else { failed++; if (res.reason) reasons.push(res.reason); }
+        setBulkProgress((p) => ({ ...p, done: ok + failed }));
+      }
+    } finally {
+      setBulkProgress(null);
     }
     loadListings({ quiet: true });
+    // Say WHY, not just how many. A count on its own is unactionable, and the
+    // failures here are usually all the same account-level hold -- five
+    // rejections reading "5 need attention" sent the seller to inspect five
+    // listings that were never the problem.
+    const shared = reasons.length && reasons.every((r) => r === reasons[0])
+      ? reasons[0] : null;
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
-      + (failed ? ` ${failed} need attention — see the queue.` : ""),
+      + (failed
+          ? (shared
+              ? ` ${failed} refused: ${shared}`
+              : ` ${failed} need attention — see the queue.`)
+          : ""),
       { kind: failed ? "warning" : "success" });
   };
 
@@ -862,11 +886,15 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       {drafts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2.5">
           <Button variant="primary" onClick={publishAll}
+            disabled={!!bulkProgress} loading={!!bulkProgress}
             title="Publish every draft in this batch — no ticking required.">
-            <Rocket aria-hidden /> Publish all ({drafts.length})
+            <Rocket aria-hidden />
+            {bulkProgress
+              ? `Publishing ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
+              : `Publish all (${drafts.length})`}
           </Button>
           <Button variant="secondary" onClick={publishSelected}
-            disabled={!selectedDrafts}
+            disabled={!selectedDrafts || !!bulkProgress}
             title={selectedDrafts
               ? `Publish the ${selectedDrafts} ticked draft${selectedDrafts === 1 ? "" : "s"}.`
               : "Tick the drafts you want to publish."}>

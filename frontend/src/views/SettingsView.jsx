@@ -11,14 +11,23 @@ import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
+import { SiteLink } from "@/components/ui/SiteLink";
 import { Field, Input, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
+// eBay's three business policies. "Shipping policy" is the one that also
+// names the carrier service, so it is the ONLY place the app says "shipping
+// policy" — the per-listing control (ShippingPolicySelect) overrides this
+// exact field and uses the same word. It used to be called a "shipping
+// service" there, which read as a second, separate setting.
 const POLICY_KINDS = [
-  { key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy" },
+  {
+    key: "fulfillment", field: "fulfillment_policy_id", label: "Shipping policy",
+    help: "Applied to every new listing. It's what sets the carrier service — a listing can override it on its own Shipping card.",
+  },
   { key: "payment", field: "payment_policy_id", label: "Payment policy" },
   { key: "return", field: "return_policy_id", label: "Return policy" },
 ];
@@ -33,6 +42,13 @@ export function SettingsView() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
+  // Did THIS component's load() succeed? `data` cannot answer that — it is
+  // seeded from the store cache (policiesData), which the listing editor
+  // fills, so it is truthy on mount having loaded nothing here. `postal` and
+  // `selected` are only ever filled by load()'s success path.
+  const [loadedHere, setLoadedHere] = useState(false);
+  const [optingIn, setOptingIn] = useState(false);
+  const [creatingPolicies, setCreatingPolicies] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
   const [prefs, setPrefs] = useState(null); // new-listing defaults (null = loading)
@@ -45,6 +61,7 @@ export function SettingsView() {
       setPoliciesData(d);
       setPostal(d.ship_from_postal || "");
       setSelected(d.selected || {});
+      setLoadedHere(true);
     } catch (e) {
       toast(`Couldn't load policies: ${e.message}`, { kind: "error" });
     } finally {
@@ -86,8 +103,16 @@ export function SettingsView() {
         setPrefs(r.prefs || {});
       }
       if (ebay.connected && data) {
+        // Sent even when empty — that is how a seller clears the ZIP, and
+        // omitting a blank made clearing a silent no-op reported as "Defaults
+        // saved". But ONLY once this component's own load() has succeeded:
+        // until then `postal` is "" because nothing filled it, not because
+        // anyone cleared it, and the backend reads a present-but-empty value
+        // as an explicit clear. `data` does not prove that — it is seeded from
+        // the store cache — so a mount with a warm cache, or a load that
+        // failed or is still in flight, would post a blank over a good ZIP.
         const payload = { ...selected };
-        if (postal.trim()) payload.ship_from_postal = postal.trim();
+        if (loadedHere) payload.ship_from_postal = postal.trim();
         await postJson("/api/ebay/policies", payload);
         setPoliciesData(null); // refresh the publish-step summary next time
         load();
@@ -186,6 +211,7 @@ export function SettingsView() {
                   <strong> Disconnect and reconnect</strong> to confirm which account it is.</>
               )}
             </p>
+            <ForeignListingsNotice />
             <div className="flex flex-wrap gap-2.5">
               <Button variant="secondary" onClick={checkPayout} loading={checking}>
                 <Wallet aria-hidden /> Check payout setup
@@ -337,12 +363,12 @@ export function SettingsView() {
                 )}
               </Field>
 
-              {POLICY_KINDS.map(({ key, field, label }) => {
+              {POLICY_KINDS.map(({ key, field, label, help }) => {
                 const opts = data.policies[key] || [];
                 return (
                   <Field
                     key={key} label={label}
-                    help={opts.length ? undefined : `No ${label.toLowerCase()} on eBay yet.`}
+                    help={opts.length ? help : `No ${label.toLowerCase()} on eBay yet.`}
                   >
                     <Select
                       value={selected[field] || ""}
@@ -360,10 +386,16 @@ export function SettingsView() {
               })}
 
               <AddShippingServiceRow
-                onCreated={(pol) => {
-                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
+                onCreated={async (pol) => {
+                  // Re-apply AFTER the reload, not before. load() ends with
+                  // setSelected(d.selected), and the server only stores this
+                  // policy as the default when the account had none — so for
+                  // a seller who already had one, the optimistic selection
+                  // was overwritten a moment later and the toast's "selected
+                  // it above" was simply false.
                   setPoliciesData(null);
-                  load();
+                  await load();
+                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
                 }}
               />
 
@@ -372,16 +404,76 @@ export function SettingsView() {
                   <p className="text-ink flex gap-2">
                     <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
                     <span>
-                      Missing a policy? eBay requires shipping, payment &amp; return policies to
-                      publish. Create them on eBay, then reopen this page.
+                      eBay requires shipping, payment &amp; return policies to publish. If these
+                      dropdowns are empty, business policies are usually switched off for the
+                      account — they’re an eBay seller program, not a default.
                     </span>
                   </p>
-                  <a
-                    href={data.manage_url} target="_blank" rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 mt-2 font-semibold text-blue"
-                  >
-                    Manage eBay business policies <ExternalLink size={13} aria-hidden />
-                  </a>
+                  {/* The button that used to be a sentence telling the seller to go
+                      find a page on eBay. eBay takes up to 24h and returns nothing,
+                      so this reports what was actually asked, never that policies
+                      are ready. */}
+                  <div className="flex flex-wrap items-center gap-3 mt-3">
+                    <Button
+                      size="sm" variant="soft" disabled={optingIn}
+                      onClick={async () => {
+                        setOptingIn(true);
+                        try {
+                          const r = await postJson("/api/ebay/opt-in-policies", {});
+                          toast(r.message, { kind: r.already ? "success" : "info" });
+                          if (r.already) load();
+                        } catch (e) {
+                          toast(e.message, { kind: "error" });
+                        } finally {
+                          setOptingIn(false);
+                        }
+                      }}
+                    >
+                      {optingIn ? "Asking eBay…" : "Turn on business policies"}
+                    </Button>
+                    {/* Opting in is necessary and not sufficient: the account
+                        still needs one shipping, one payment and one return
+                        policy. This makes whichever are missing. Separate
+                        button because eBay's opt-in takes up to 24h, so right
+                        after opting in this one will legitimately fail — and
+                        saying which is missing beats one button that hides
+                        which half went wrong. */}
+                    <Button
+                      size="sm" variant="soft" disabled={creatingPolicies}
+                      onClick={async () => {
+                        setCreatingPolicies(true);
+                        try {
+                          const r = await postJson("/api/ebay/ensure-all-policies", {});
+                          const made = (r.created || []).length;
+                          const failed = Object.keys(r.errors || {});
+                          if (failed.length) {
+                            toast(
+                              `Couldn't create your ${failed.join(" and ")} policy. `
+                              + `eBay said: ${r.errors[failed[0]]}`,
+                              { kind: "error" });
+                          } else {
+                            toast(made
+                              ? `Created your ${(r.created || []).join(", ")} policy — you can publish now.`
+                              : "You already had all three policies.",
+                              { kind: "success" });
+                          }
+                          load();
+                        } catch (e) {
+                          toast(e.message, { kind: "error" });
+                        } finally {
+                          setCreatingPolicies(false);
+                        }
+                      }}
+                    >
+                      {creatingPolicies ? "Creating…" : "Create my policies"}
+                    </Button>
+                    <a
+                      href={data.manage_url} target="_blank" rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 font-semibold text-blue"
+                    >
+                      Manage them on eBay <ExternalLink size={13} aria-hidden />
+                    </a>
+                  </div>
                 </div>
               )}
             </div>
@@ -758,9 +850,9 @@ function LegalLinks() {
   const link = "text-ink-secondary hover:text-ink underline underline-offset-2";
   return (
     <p className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-secondary px-1">
-      <a className={link} href="/privacy-policy" target="_blank" rel="noreferrer">Privacy policy</a>
-      <a className={link} href="/terms" target="_blank" rel="noreferrer">Terms of service</a>
-      <a className={link} href="/about" target="_blank" rel="noreferrer">About</a>
+      <SiteLink path="/privacy-policy" className={link}>Privacy policy</SiteLink>
+      <SiteLink path="/terms" className={link}>Terms of service</SiteLink>
+      <SiteLink path="/about" className={link}>About</SiteLink>
       <a className={link} href="mailto:leifhansen1990@gmail.com">Support</a>
     </p>
   );
@@ -795,7 +887,14 @@ function EbayAccountMirror() {
     return <p className="text-[13px] text-ink-secondary">Couldn’t load your eBay account details.</p>;
   }
 
-  const { account = {}, locations = [], programs = [], payments = {}, selected = {} } = data;
+  const {
+    account = {}, locations = [], programs = [], payments = {}, selected = {},
+    // programs_known tells "eBay said none" apart from "eBay didn't answer".
+    // Without it this panel reported an unreadable lookup as "not opted into
+    // any programs", which is the one answer that makes a seller act.
+    programs_known: programsKnown = false, privileges = null,
+  } = data;
+  const hasPolicyProgram = programs.includes("SELLING_POLICY_MANAGEMENT");
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -806,7 +905,7 @@ function EbayAccountMirror() {
           <p className="font-semibold text-ink truncate">{account.username || "Connected"}</p>
           <p className="text-[13px] text-ink-secondary truncate">
             {account.email ? `${account.email} · ` : ""}{account.marketplace}
-            {payments?.paymentsProgramStatus ? ` · Payments: ${payments.paymentsProgramStatus}` : ""}
+            {payments?.status ? ` · Payments: ${payments.status.replace(/_/g, " ").toLowerCase()}` : ""}
           </p>
         </div>
         <Button variant="ghost" size="sm" onClick={load}>
@@ -817,6 +916,39 @@ function EbayAccountMirror() {
           Seller Hub <ExternalLink aria-hidden />
         </Button>
       </div>
+
+      {/* Account health. Both of these stop a publish for a reason no listing
+          field explains — an unfinished registration, and the monthly selling
+          limit (eBay error 21919188). Seeing them here beats meeting them as a
+          rejection. Rendered only when eBay actually answered: `privileges` is
+          null when the lookup failed, and inventing "registration incomplete"
+          from that would be a scary claim we cannot stand behind. */}
+      {privileges && (!privileges.registration_complete || privileges.selling_limit) && (
+        <div className="flex flex-col gap-1.5 rounded-tile bg-warning-soft border border-warning/30 p-3 text-[13px]">
+          {!privileges.registration_complete && (
+            <p className="text-ink flex gap-2">
+              <AlertTriangle size={15} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>
+                eBay says this account’s seller registration isn’t finished.
+                Publishing will fail until it is — finish it in Seller Hub.
+              </span>
+            </p>
+          )}
+          {privileges.selling_limit && (
+            <p className="text-ink-secondary">
+              Monthly selling limit:{" "}
+              {privileges.selling_limit.quantity != null
+                ? `${privileges.selling_limit.quantity} items`
+                : "no item cap"}
+              {privileges.selling_limit.amount
+                ? ` · ${privileges.selling_limit.amount} ${privileges.selling_limit.currency || ""}`.trimEnd()
+                : ""}
+              . Publishing past it fails with “this listing would cause you to
+              exceed the amount you can list”.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-4">
         <div>
@@ -856,8 +988,18 @@ function EbayAccountMirror() {
                 <TagPill key={p} tone="neutral">{p.replace(/_/g, " ").toLowerCase()}</TagPill>
               ))}
             </div>
-          ) : (
+          ) : programsKnown ? (
             <p className="text-[13px] text-ink-secondary">Not opted into any programs.</p>
+          ) : (
+            <p className="text-[13px] text-ink-secondary">
+              Couldn’t read your programs from eBay just now.
+            </p>
+          )}
+          {programsKnown && !hasPolicyProgram && (
+            <p className="text-[13px] text-ink-secondary mt-2">
+              Business policies are off for this account, which is why the
+              shipping, payment and return dropdowns above are empty.
+            </p>
           )}
         </div>
       </div>
@@ -974,8 +1116,85 @@ function NewListingDefaultsFields({ prefs, set }) {
   );
 }
 
-// One-tap "create an eBay shipping policy for any service" — the dropdown of
-// all eBay options; picking one creates (or reuses) a policy on the account.
+/* Listings left over from a previously-connected eBay account.
+ *
+ * Connecting a second eBay account doesn't move the first account's listings
+ * anywhere — records belong to the APP user, not the eBay one — so they stay
+ * in the app looking exactly like listings of the account now connected. They
+ * are excluded from every eBay call (see services/listing_sync.belongs_to),
+ * but "excluded" is invisible; without this notice they simply read as "the
+ * new account somehow has my old items". */
+function ForeignListingsNotice() {
+  const { ebay, loadEbayStatus, loadListings } = useApp();
+  const { toast, confirm } = useToast();
+  const [working, setWorking] = useState(false);
+  const foreign = ebay.foreign_listings || 0;
+  // eBay-linked records from before the app tracked which account listed
+  // them. After a switch these are the OLD account's items wearing no label —
+  // but a seller who never switched has the same shape for their own older
+  // imports, so nothing but the seller can say whose they are. That's why
+  // their unlink rides the same button but only when they exist, and the
+  // request says so explicitly (include_unowned).
+  const unowned = ebay.unowned_listings || 0;
+  const count = foreign + unowned;
+  if (!count) return null;
+
+  const release = async () => {
+    const ok = await confirm({
+      title: `Unlink ${count} listing${count === 1 ? "" : "s"} from your old eBay account?`,
+      message: "They stay here with their photos and details, as drafts you can "
+        + "publish to the account you're connected to now. Nothing is deleted, "
+        + "and nothing changes on eBay."
+        + (unowned
+          ? ` ${unowned} of them ${unowned === 1 ? "was" : "were"} linked before `
+            + "the app tracked accounts — only unlink if those items aren't "
+            + "on the account you're connected to now."
+          : ""),
+      confirmLabel: "Unlink them",
+    });
+    if (!ok) return;
+    setWorking(true);
+    try {
+      const res = await postJson("/api/ebay/release-foreign-listings",
+        unowned ? { include_unowned: true } : {});
+      toast(`Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`,
+        { kind: "success" });
+      await Promise.all([loadEbayStatus(), loadListings()]);
+    } catch (e) {
+      toast(`Couldn't unlink them: ${e.message}`, { kind: "error" });
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 flex gap-3">
+      <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
+      <div className="text-sm min-w-0">
+        <p className="font-bold text-ink">
+          {count} listing{count === 1 ? "" : "s"} here {count === 1 ? "is" : "are"} linked
+          to an eBay account that isn&apos;t the one connected
+        </p>
+        <p className="text-ink-secondary mt-0.5">
+          They were listed on an account you connected earlier. Thryft Shop
+          leaves them alone — it won’t sync, edit, or end them while
+          {ebay.username ? <strong className="text-ink"> {ebay.username} </strong> : " this account "}
+          is connected. Reconnect that account to manage them again, or unlink
+          them here to keep the drafts and drop the old eBay link.
+        </p>
+        <Button variant="secondary" className="mt-2.5" onClick={release} loading={working}>
+          <Unlink aria-hidden /> Unlink from the old account
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// The shortcut that CREATES a shipping policy, for sellers who don't have one
+// covering the service they want. Deliberately worded as an action on the
+// dropdown above ("Need another one?") rather than as a setting: it writes to
+// the same eBay object the Shipping policy field selects, and presenting it as
+// a peer made the two look like separate things that had to agree.
 function AddShippingServiceRow({ onCreated }) {
   const { toast } = useToast();
   const [services, setServices] = useState([]);
@@ -1010,15 +1229,15 @@ function AddShippingServiceRow({ onCreated }) {
     <Field
       label={
         <span className="inline-flex items-center gap-1.5">
-          <Truck size={14} aria-hidden /> Add a shipping service
+          <Truck size={14} aria-hidden /> Need another shipping policy?
         </span>
       }
-      help="All the eBay options in one dropdown — picking one creates (or reuses) a shipping policy on your eBay account, ready to select as your default above."
+      help="Pick a carrier service and we'll create the matching shipping policy on your eBay account (or reuse one you already have) and select it above."
     >
       <div className="flex gap-2">
         <div className="flex-1 min-w-0">
           <Select value={code} onChange={(e) => setCode(e.target.value)}>
-            <option value="">Choose an eBay shipping service…</option>
+            <option value="">Choose a carrier service…</option>
             {services.map((s) => (
               <option key={s.code} value={s.code}>
                 {s.label}{s.note ? ` — ${s.note}` : ""}

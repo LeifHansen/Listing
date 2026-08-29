@@ -12,6 +12,7 @@ location / policies / generic).
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 
@@ -46,7 +47,62 @@ def explain(err: dict) -> dict:
     def has(*words: str) -> bool:
         return any(w in hay for w in words)
 
+    def has_word(*words: str) -> bool:
+        """Whole-word match. Short identifiers need it: plain `in` made "ean"
+        fire on "means" and "clean", filing unrelated rejections under
+        "eBay wants a UPC/EAN"."""
+        return any(re.search(rf"\b{re.escape(w)}\b", hay) for w in words)
+
     issue = {"error_id": error_id, "ebay_message": message or long_message}
+
+    # eBay error 240 first: its wording mentions the title, the description and
+    # eBay policy all at once, so every branch below would claim it and send
+    # the seller to fix a field that is fine. It is an ACCOUNT-level block far
+    # more often than a wording problem — eBay's own guidance is that the real
+    # reason arrives in the response's <Message>, which ebay_trading now keeps.
+    if error_id == "240" or has("cannot be listed or modified", "improper words"):
+        # When eBay attached a real reason (the response's <Message>, carried
+        # here as longMessage), that IS the answer — lead with eBay's own
+        # words. Only fall back to explaining the code when it said nothing.
+        said = long_message.strip()
+        generic = ("cannot be listed or modified" in said.lower()
+                   or "improper words" in said.lower())
+        issue.update(
+            target="account",
+            title=("eBay won't accept this listing" if said and not generic
+                   else "eBay is blocking new listings on this account"),
+            fix=(f"eBay's reason: “{said}”" if said and not generic else
+                 "eBay returns this when the account itself can't list right "
+                 "now — most often a seller account that hasn't finished "
+                 "registration or payments setup, a listing limit or hold, or "
+                 "a verification eBay is waiting on. It is only sometimes "
+                 "about the words in the listing. Open eBay → My eBay → "
+                 "Selling and clear anything flagged there, then publish "
+                 "again. If nothing is flagged, eBay Customer Service can say "
+                 "what the hold is — the listing itself doesn't need editing."))
+        return issue
+
+    # Codes whose wording would otherwise be captured by a text branch below.
+    # eBay's error IDs are stable; the sentences around them are not, and both
+    # of these read as something they aren't: the selling-limit message says
+    # "exceed the amount you can list", and "amount" belongs to the price
+    # branch, so a seller at their limit was told to fix a price that was fine.
+    if error_id == "21919188":
+        issue.update(target="generic",
+                     title="Your eBay selling limit is reached",
+                     fix="This listing would put you over the amount your "
+                         "account may have listed at once. Nothing is wrong "
+                         "with the listing. Ask eBay to raise the limit from "
+                         "Seller Hub → Overview → Monthly limits, or publish "
+                         "this once something else sells or ends.")
+        return issue
+    if error_id == "21919144":
+        issue.update(target="generic",
+                     title="eBay’s API rate limit was hit",
+                     fix="eBay caps how quickly listings may be added or "
+                         "revised. Nothing is wrong with this listing — wait "
+                         "a moment and publish again.")
+        return issue
 
     if has("item.country", "merchantlocation", "merchant location",
            "inventory location", "ship-from", "ship from", "location key"):
@@ -107,7 +163,8 @@ def explain(err: dict) -> dict:
                      fix=("Set a Brand (use “Unbranded” if there isn’t one) and add an "
                           "item specific “MPN” — “Does Not Apply” works for items "
                           "without a part number."))
-    elif has("upc", "ean", "isbn", "gtin", "product identifier", "does not apply"):
+    elif (has("product identifier", "does not apply")
+          or has_word("upc", "ean", "isbn", "gtin")):
         issue.update(target="specifics",
                      title="eBay wants a product identifier (UPC/EAN)",
                      fix="Add an item specific “UPC” set to “Does not apply” for vintage/handmade items.")
@@ -203,6 +260,25 @@ def from_response(text: str) -> list[dict]:
     if not issues:
         issues.append({"target": "generic", "title": "eBay rejected the listing",
                        "fix": "See the details below.", "error_id": "", "ebay_message": ""})
+    return issues
+
+
+def from_trading_error(exc: Exception) -> list[dict]:
+    """Issues for a Trading API failure, using everything the error carries.
+
+    `from_response` only ever sees the headline string. A TradingError also
+    knows eBay's ErrorCode and the response-level <Message> that explains a
+    catch-all rejection, and both change what the seller should be told — so
+    they're fed to `explain` directly rather than being thrown away.
+    """
+    code = str(getattr(exc, "code", "") or "")
+    detail = str(getattr(exc, "detail", "") or "")
+    issues = [explain({"errorId": code, "message": str(exc),
+                       "longMessage": detail})]
+    if detail and detail not in (issues[0].get("ebay_message") or ""):
+        # Keep eBay's own words available to the UI even when the branch above
+        # replaced them with a plainer explanation.
+        issues[0]["ebay_detail"] = detail
     return issues
 
 

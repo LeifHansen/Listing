@@ -108,14 +108,21 @@ def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
     metrics_by_id = metrics_by_id or {}
     rates_by_id = rates_by_id or {}
     promoted_ids = promoted_ids or set()
+    # Keep the strongest action per listing as they are generated, rather than
+    # collecting every rec across the whole store and sorting the lot to throw
+    # most of it away. A mirrored store is thousands of listings and each one
+    # yields several recs, so the discarded list was the large one.
+    #
+    # Ties keep the FIRST rec seen for a listing, which is what sorting the
+    # flat list did too (sorted() is stable and recommend_for emits in its own
+    # deliberate order — the metrics-driven advice before the age heuristics).
     best: dict[str, dict] = {}
-    ranked_all: list[dict] = []
     for it in items:
-        ranked_all.extend(recommend_for(
-            it, metrics=metrics_by_id.get(it.get("id")),
-            rate=rates_by_id.get(it.get("id")),
-            promoted=it.get("id") in promoted_ids))
-    for r in sorted(ranked_all, key=lambda x: -x["priority"]):
-        if r["listing_id"] not in best:
-            best[r["listing_id"]] = r
+        for r in recommend_for(
+                it, metrics=metrics_by_id.get(it.get("id")),
+                rate=rates_by_id.get(it.get("id")),
+                promoted=it.get("id") in promoted_ids):
+            held = best.get(r["listing_id"])
+            if held is None or r["priority"] > held["priority"]:
+                best[r["listing_id"]] = r
     return sorted(best.values(), key=lambda x: -x["priority"])[:limit]

@@ -23,8 +23,85 @@ def authorize_url(state: str) -> str:
         "redirect_uri": config.EBAY_RUNAME,
         "scope": " ".join(config.EBAY_OAUTH_SCOPES),
         "state": state,
+        # Force eBay to ask WHICH account, every time.
+        #
+        # Without it eBay reuses whatever session the browser already has and
+        # silently reconnects that account. A seller who means to connect a
+        # second store gets the first one back, with no screen anywhere saying
+        # so — and then their old store's listings import, and publishes fail
+        # against an account they did not choose. That is not hypothetical:
+        # it is what this app's own disconnect dialog warns about, and it is
+        # why that dialog has to ask sellers to go sign out of eBay by hand.
+        #
+        # `prompt=login` is eBay's documented parameter for exactly this: it
+        # forces the login step even when a session exists. It costs a
+        # returning seller one login screen; it costs nobody a store bound to
+        # the wrong account.
+        "prompt": "login",
     }
     return f"{config.EBAY_AUTH_BASE}/oauth2/authorize?{urlencode(params)}"
+
+
+class AccountApiError(RuntimeError):
+    """A Sell Account API write eBay refused, carrying eBay's own words.
+
+    Separate from OAuthError because these fail for entirely different reasons
+    — not eligible for a program, a policy name already taken, a category type
+    the account can't use — and the caller's job is to relay eBay's sentence
+    rather than map it to an auth bucket.
+    """
+
+    def __init__(self, message: str, *, description: str = "", status: int = 0):
+        super().__init__(message)
+        self.description = description
+        self.status = status
+
+
+class OAuthError(RuntimeError):
+    """A token request eBay refused, carrying the reason eBay gave.
+
+    `raise_for_status()` alone reduces every refusal to a status code, and the
+    body it discards is the only thing that says WHICH of the half-dozen
+    causes it was. Connecting is the one flow a seller cannot debug from the
+    UI — a bare "connection failed" leaves nobody, seller or operator, with
+    anywhere to start.
+    """
+
+    def __init__(self, message: str, *, code: str = "", description: str = "",
+                 status: int = 0):
+        super().__init__(message)
+        self.code = code
+        self.description = description
+        self.status = status
+
+    @property
+    def reason(self) -> str:
+        """A short bucket for the UI: what the seller can actually do.
+
+        `invalid_client` is the app's own credentials, and `invalid_grant` on
+        this flow is nearly always a redirect_uri (RuName) that doesn't match
+        the keyset — neither is the seller's to fix, and both look identical
+        when the app is pointed at sandbox while they signed in to production
+        eBay, so they share one bucket.
+        """
+        if self.code in ("invalid_client", "unauthorized_client"):
+            return "config"
+        if self.code == "invalid_grant":
+            return "expired"
+        return "unknown"
+
+
+def _oauth_error(resp: httpx.Response) -> OAuthError:
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    code = str(body.get("error") or "")
+    description = str(body.get("error_description") or "")[:300]
+    return OAuthError(
+        f"eBay refused the token request ({resp.status_code}"
+        + (f", {code}" if code else "") + ")",
+        code=code, description=description, status=resp.status_code)
 
 
 def _token_request(data: dict) -> dict:
@@ -35,7 +112,15 @@ def _token_request(data: dict) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        err = _oauth_error(resp)
+        # eBay's own words, at WARNING, against the environment in use: the
+        # single most common cause of a connect that will not stick is an app
+        # pointed at sandbox while the seller signs in to production (or the
+        # reverse), and that is invisible from the status code alone.
+        log.warning("ebay oauth: %s [env=%s] %s", err, config.EBAY_ENV,
+                    err.description)
+        raise err
     return resp.json()
 
 
@@ -124,6 +209,87 @@ def fetch_payments_program(access_token: str) -> dict:
     return resp.json()
 
 
+# Business policies are a seller PROGRAM on eBay, not a default. Until an
+# account is opted in, every policy list comes back empty and every policy id
+# is rejected — which is exactly the "the dropdowns are empty and I can't
+# publish" state, with nothing on screen naming the cause.
+SELLING_POLICY_MANAGEMENT = "SELLING_POLICY_MANAGEMENT"
+
+
+def opted_in_programs(access_token: str) -> Optional[set[str]]:
+    """The programs this account is opted into, or None when eBay didn't say.
+
+    None is deliberately not an empty set. "We couldn't ask" and "opted into
+    nothing" lead to opposite advice — the second tells a seller to opt in, the
+    first tells them nothing is known — and collapsing them is the mistake this
+    integration has made in four other places.
+    """
+    try:
+        data = _account_get("/sell/account/v1/program/get_opted_in_programs",
+                            access_token)
+    except Exception as exc:  # noqa: BLE001 - unknown, not "none"
+        log.info("ebay: couldn't read opted-in programs: %s", exc)
+        return None
+    return {p.get("programType") for p in (data.get("programs") or [])
+            if p.get("programType")}
+
+
+def opt_in_to_program(access_token: str,
+                      program: str = SELLING_POLICY_MANAGEMENT) -> None:
+    """Opt the connected account into an eBay seller program.
+
+    eBay documents this as taking up to 24 hours to take effect, and it
+    returns no payload, so a 2xx means "accepted", never "in force". Callers
+    must not tell the seller their policies are ready — only that eBay has the
+    request. Raises on refusal so the caller can say what eBay said.
+    """
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}/sell/account/v1/program/opt_in",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json={"programType": program},
+        timeout=30,
+    )
+    if not resp.is_success:
+        raise AccountApiError(
+            f"eBay refused the opt-in ({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
+    log.info("ebay: opted in to %s", program)
+
+
+def fetch_privileges(access_token: str) -> Optional[dict]:
+    """{registration_complete, selling_limit} for the connected seller, or
+    None when eBay didn't answer.
+
+    Both halves are things that stop a publish for a reason no listing field
+    explains: an unfinished registration, and the monthly selling limit —
+    error 21919188, which this app spent a release reporting as a duplicate
+    submission. Knowing them BEFORE a publish is the difference between a
+    checklist item and a rejection.
+
+    `sellingLimit` is absent for accounts eBay does not cap, which is why it
+    is None rather than zero: a missing cap is not a cap of nothing.
+    """
+    try:
+        data = _account_get("/sell/account/v1/privilege", access_token)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        log.info("ebay: couldn't read selling privileges: %s", exc)
+        return None
+    limit = data.get("sellingLimit") or {}
+    amount = limit.get("amount") or {}
+    return {
+        "registration_complete": bool(data.get("sellerRegistrationCompleted")),
+        "selling_limit": {
+            "amount": amount.get("value"),
+            "currency": amount.get("currency"),
+            "quantity": limit.get("quantity"),
+        } if limit else None,
+    }
+
+
 def ensure_inventory_location(access_token: str, postal_code: str,
                               country: str = "US") -> str:
     """Ensure our own ship-from location holds exactly the seller's ZIP+country
@@ -184,7 +350,17 @@ def list_business_policies(access_token: str) -> dict:
     for key, (path, list_field, id_field) in _POLICY_SPECS.items():
         try:
             data = _account_get(path, access_token)
-            for p in data.get(list_field, []):
+        except Exception as exc:  # noqa: BLE001 - best effort per type
+            # Said out loud. An empty dropdown and "this account has no
+            # shipping policies" look identical to the seller, and a bare
+            # `pass` here left no trace of which it was anywhere.
+            log.warning("ebay: couldn't list %s policies: %s", key, exc)
+            continue
+        for p in data.get(list_field, []):
+            # Per POLICY, not per type: one malformed entry used to abort the
+            # whole loop, so the seller silently got only the policies eBay
+            # happened to return before it -- with a 200 and no warning.
+            try:
                 entry = {
                     "id": p.get(id_field, ""),
                     "name": p.get("name", "") or p.get(id_field, ""),
@@ -195,9 +371,50 @@ def list_business_policies(access_token: str) -> dict:
                 if key == "fulfillment":
                     entry["services"] = [s["code"] for s in _policy_services(p)]
                 out[key].append(entry)
-        except Exception:  # noqa: BLE001 - best effort per type
-            pass
+            except Exception as exc:  # noqa: BLE001 - skip the one bad policy
+                log.warning("ebay: skipped an unreadable %s policy: %s", key, exc)
     return out
+
+
+def policy_ids_on_account(access_token: str) -> dict[str, set[str]]:
+    """{kind: {policy ids that actually exist on the connected account}}.
+
+    A saved policy id is only usable on the account that owns it: eBay rejects
+    another seller's profile id outright. This is what lets a reconnect keep
+    the seller's choices when they still exist and quietly re-pick a default
+    when they don't, instead of guessing from the account name — which is
+    unreadable on connections made before the identity scope was granted.
+    A kind that couldn't be fetched is absent (not empty), so a transient API
+    failure never reads as "none of your policies exist".
+    """
+    out: dict[str, set[str]] = {}
+    for kind, (path, list_field, id_field) in _POLICY_SPECS.items():
+        try:
+            data = _account_get(path, access_token)
+        except Exception:  # noqa: BLE001 - unknown, not empty
+            continue
+        out[kind] = {p.get(id_field, "") for p in data.get(list_field, [])
+                     if p.get(id_field)}
+    return out
+
+
+def location_keys_on_account(access_token: str) -> Optional[set[str]]:
+    """Every merchantLocationKey on the connected account, or None if the
+    lookup failed (unknown — callers must not treat that as "none")."""
+    try:
+        resp = httpx.get(
+            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
+            headers={"Authorization": f"Bearer {access_token}",
+                     "Accept": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return None
+        return {loc.get("merchantLocationKey", "")
+                for loc in (resp.json().get("locations") or [])
+                if loc.get("merchantLocationKey")}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _policy_summary(kind: str, p: dict) -> str:
@@ -296,7 +513,8 @@ def account_overview(access_token: str) -> dict:
     Every section is fetched independently, so one failing leaves the rest
     intact (e.g. a seller with no business policies still gets locations)."""
     out: dict = {"policies": {"fulfillment": [], "payment": [], "return": []},
-                 "locations": [], "programs": [], "payments": {}}
+                 "locations": [], "programs": [], "payments": {},
+                 "programs_known": False, "privileges": None}
     try:
         out["policies"] = list_business_policies(access_token)
     except Exception:  # noqa: BLE001
@@ -311,12 +529,13 @@ def account_overview(access_token: str) -> dict:
             out["locations"] = resp.json().get("locations", []) or []
     except Exception:  # noqa: BLE001
         pass
-    try:
-        data = _account_get("/sell/account/v1/program/get_opted_in_programs", access_token)
-        out["programs"] = [p.get("programType") for p in (data.get("programs") or [])
-                           if p.get("programType")]
-    except Exception:  # noqa: BLE001
-        pass
+    programs = opted_in_programs(access_token)
+    # `programs_known` is the whole point of the tri-state: an empty list here
+    # used to mean both "opted into nothing" and "eBay didn't answer", and the
+    # UI can only offer "turn on business policies" honestly for the first.
+    out["programs_known"] = programs is not None
+    out["programs"] = sorted(programs or ())
+    out["privileges"] = fetch_privileges(access_token)
     try:
         out["payments"] = fetch_payments_program(access_token)
     except Exception:  # noqa: BLE001
@@ -437,7 +656,16 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
         json=body,
         timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.is_success:
+        # Not raise_for_status(): that reduces the refusal to a status code and
+        # drops eBay's body, which is the only thing distinguishing "not opted
+        # into business policies" (the most common cause, and the button that
+        # fixes it sits next to this one) from "name already used" or "category
+        # type not allowed". Same reason _create_policy raises this.
+        raise AccountApiError(
+            f"eBay refused to create the {svc['code']} shipping policy "
+            f"({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
     created = resp.json()
     log.info("ebay: created %s fulfillment policy %s", svc["code"],
              created.get("fulfillmentPolicyId", ""))
@@ -445,17 +673,133 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
             "name": created.get("name", name), "created": True}
 
 
-def fulfillment_policy_services(access_token: str, policy_id: str) -> list[dict]:
-    """[{code, name}] for one fulfillment policy (empty on any failure —
-    preflight treats unknown services as unconstrained)."""
+# Defaults for the policies the app creates. They are arguments rather than
+# constants so the Settings screen can own them next; these are the values a
+# small seller wants on day one, not opinions worth hard-coding forever.
+DEFAULT_RETURN_DAYS = 30
+DEFAULT_RETURN_PAYER = "BUYER"
+PAYMENT_POLICY_NAME = "Immediate payment (Thryft Shop)"
+RETURN_POLICY_NAME = "30-day returns (Thryft Shop)"
+
+
+def _create_policy(kind: str, access_token: str, body: dict) -> dict:
+    """POST one business policy, returning {id, name}. Raises AccountApiError
+    with eBay's own words, which for policy writes is the whole story — "name
+    already used", "not opted in", "category type not allowed" all arrive as
+    the same 400 otherwise."""
+    path, _list_field, id_field = _POLICY_SPECS[kind]
+    resp = httpx.post(
+        f"{config.EBAY_API_BASE}{path}",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=30,
+    )
+    if not resp.is_success:
+        raise AccountApiError(
+            f"eBay refused to create the {kind} policy ({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
+    created = resp.json()
+    log.info("ebay: created %s policy %s", kind, created.get(id_field, ""))
+    return {"id": created.get(id_field, ""),
+            "name": created.get("name", body.get("name", ""))}
+
+
+def _first_existing_policy(kind: str, access_token: str) -> Optional[dict]:
+    """The account's first policy of this kind, or None.
+
+    None covers both "none exist" and "couldn't ask" on purpose here: the only
+    caller creates one either way, and creating a second policy is recoverable
+    while publishing with none is not.
+    """
+    path, list_field, id_field = _POLICY_SPECS[kind]
+    try:
+        items = _account_get(path, access_token).get(list_field) or []
+    except Exception as exc:  # noqa: BLE001
+        log.info("ebay: couldn't list %s policies: %s", kind, exc)
+        return None
+    if not items:
+        return None
+    return {"id": items[0].get(id_field, ""), "name": items[0].get("name", "")}
+
+
+def ensure_payment_policy(access_token: str,
+                          immediate_pay: bool = True) -> dict:
+    """Find — or create — a payment policy. Returns {id, name, created}.
+
+    On a managed-payments account eBay handles the money, so the policy is
+    little more than a name and the immediate-pay setting; sending
+    paymentMethods here is what gets these rejected. Immediate pay is on by
+    default because an unpaid fixed-price sale is the small seller's most
+    common headache.
+    """
+    existing = _first_existing_policy("payment", access_token)
+    if existing and existing["id"]:
+        return {**existing, "created": False}
+    body = {
+        "name": PAYMENT_POLICY_NAME,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "immediatePay": immediate_pay,
+    }
+    return {**_create_policy("payment", access_token, body), "created": True}
+
+
+def ensure_return_policy(access_token: str,
+                         days: int = DEFAULT_RETURN_DAYS,
+                         payer: str = DEFAULT_RETURN_PAYER) -> dict:
+    """Find — or create — a return policy. Returns {id, name, created}.
+
+    `returnPeriod` is required whenever returns are accepted, and refundMethod
+    is deprecated to MONEY_BACK (any other value is rejected), so it is sent
+    as the only legal value rather than left out and defaulted server-side.
+    """
+    existing = _first_existing_policy("return", access_token)
+    if existing and existing["id"]:
+        return {**existing, "created": False}
+    body = {
+        "name": RETURN_POLICY_NAME,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "returnsAccepted": True,
+        "returnPeriod": {"value": int(days), "unit": "DAY"},
+        "returnShippingCostPayer": payer,
+        "refundMethod": "MONEY_BACK",
+    }
+    return {**_create_policy("return", access_token, body), "created": True}
+
+
+def fulfillment_policy_lookup(access_token: str,
+                              policy_id: str) -> tuple[list[dict], Optional[bool]]:
+    """([{code, name}], exists) for one fulfillment policy.
+
+    `exists` is False only when eBay positively says this account has no such
+    policy (404), True when it returned one, and None when the answer is
+    unknown (network trouble, an unexpected status). The three are kept apart
+    because "this policy isn't on your account" is a real, fixable publish
+    blocker — it's what a policy id left over from a different eBay account
+    looks like — while "we couldn't ask" must never be reported as one.
+    """
     if not policy_id:
-        return []
+        return [], None
     try:
         p = _account_get(f"/sell/account/v1/fulfillment_policy/{policy_id}",
                          access_token)
-        return _policy_services(p)
+        return _policy_services(p), True
+    except httpx.HTTPStatusError as exc:
+        # 404 is eBay saying the policy is not on this account. 400 is eBay
+        # rejecting the REQUEST — a malformed id, a marketplace it won't answer
+        # for — which says nothing about what the account has, and reading it
+        # as absence blocks every live publish behind a shipping-policy error
+        # the seller cannot act on.
+        if exc.response.status_code == 404:
+            return [], False
+        return [], None
     except Exception:  # noqa: BLE001
-        return []
+        return [], None
 
 
 _SERVICE_FRIENDLY = [

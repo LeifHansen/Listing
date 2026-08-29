@@ -2,9 +2,12 @@ import { useState } from "react";
 import { Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// The Thryft Shop logo (uploaded to frontend/public/). One asset, used
-// app-wide: sidebar, login dialog, loading states, favicon.
-export const BRAND_LOGO = "/thryft-shop-logo-final.png";
+// The Thryft Shop logo, at the size it is actually drawn. Every in-app use is
+// between 32px and 80px CSS, so 160 covers 2x -- and the source art is a
+// 1254x1254 PNG weighing 574KB, which is more than any JS chunk in the bundle
+// and was being downloaded to fill an 8-pixel-tall sidebar slot. The original
+// stays in public/ as the master; nothing on a hot path points at it.
+export const BRAND_LOGO = "/logo-160.webp";
 
 // The logo (transparent background) for small spots. No card/box behind it, so
 // it blends on cream (light) and navy (dark). Falls back to the Zap glyph if

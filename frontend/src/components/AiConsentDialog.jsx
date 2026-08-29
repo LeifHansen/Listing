@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
-import { apiUrl, isNative, openExternal } from "@/lib/platform";
+import { SiteLink } from "@/components/ui/SiteLink";
 
 /* One-time consent before the first photo is analyzed by AI.
  *
@@ -37,12 +37,8 @@ export function AiConsentDialog() {
           Claude AI) for analysis. They're used only to create your listing —
           never for ads, and never shared beyond the marketplaces you choose
           to publish to. Details are in our{" "}
-          <a href={apiUrl("/privacy-policy")} target="_blank" rel="noreferrer"
-            onClick={(e) => {
-              // Native shell: open in the system browser, not the webview.
-              if (isNative()) { e.preventDefault(); openExternal(apiUrl("/privacy-policy")); }
-            }}
-            className="text-blue underline">privacy policy</a>.
+          <SiteLink path="/privacy-policy"
+            className="text-blue underline">privacy policy</SiteLink>.
         </p>
         <div className="flex items-center justify-end gap-2">
           <Button variant="ghost" onClick={() => answer(false)}>Not now</Button>

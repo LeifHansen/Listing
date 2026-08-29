@@ -59,6 +59,29 @@ const DEFAULT_TIMEOUT_MS = 90000;
 // Uploads move real bytes: a bulk batch over a phone connection takes
 // minutes and is not stuck.
 export const UPLOAD_TIMEOUT_MS = 300000;
+// Calls that wait on the background-removal model. The default above is a
+// NETWORK deadline and far too short for these: one isnet inference has been
+// measured at 104s on the production machine (shared CPU, one inference thread
+// by design so the app can keep answering health checks), and the request also
+// queues for the single-flight inference lock before that. At 90s the studio's
+// "Remove background" gave up while its own answer was still being computed —
+// the seller saw a failure, the server finished into a closed socket, and the
+// photo they then saved was the untouched original. ONNX cannot be interrupted
+// mid-run, so the client has to outlast it.
+export const MODEL_TIMEOUT_MS = 240000;
+
+// A deadline for a request that runs the cutout model over SEVERAL photos in
+// one go. Inference is single-flight on the server, so N photos cost roughly N
+// inferences end to end — a flat UPLOAD_TIMEOUT_MS meant "Add photos" with
+// background removal on gave up part-way through work the server was still
+// doing, every time, for anything past two photos. The cap keeps a genuinely
+// stuck request from hanging the UI forever.
+const BATCH_MODEL_CAP_MS = 900000;   // 15 min
+export function batchModelTimeoutMs(count, removeBg) {
+  if (!removeBg) return UPLOAD_TIMEOUT_MS;
+  return Math.min(BATCH_MODEL_CAP_MS,
+                  UPLOAD_TIMEOUT_MS + Math.max(0, count) * MODEL_TIMEOUT_MS);
+}
 
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.
@@ -82,6 +105,13 @@ export async function api(path, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const abort = timeoutMs > 0 ? new AbortController() : null;
   const timer = abort ? setTimeout(() => abort.abort(), timeoutMs) : null;
+  // A caller's own signal used to be overwritten by ours and silently stopped
+  // working. Forward it instead, so `signal` means what it says wherever it is
+  // passed -- the trap that made studioCall's 240s deadline a no-op.
+  if (abort && opts.signal) {
+    if (opts.signal.aborted) abort.abort();
+    else opts.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  }
   let res;
   try {
     res = await fetch(apiUrl(path), abort ? { ...opts, signal: abort.signal } : opts);

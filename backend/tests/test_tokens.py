@@ -5,6 +5,14 @@ The pure helpers (plan_spend, periods, Stripe signature check) test directly;
 the balance invariants run against the real db.token_* transaction code on a
 throwaway SQLite file — the same SQLAlchemy paths production uses on Postgres,
 minus the row locking (which SQLite ignores).
+
+db.plan_spend is the function db.token_spend itself calls, which is the only
+reason testing it directly means anything. It was previously a second copy in
+services/tokens.py, exercised here while token_spend ran its own inline split —
+every assertion below passed against code production never reached.
+test_the_ledger_applies_the_split_plan_spend_predicts guards that, against the
+real transaction rather than by identity (module reloads in this suite make an
+`is` check a test of import order).
 """
 from __future__ import annotations
 
@@ -23,25 +31,25 @@ from backend.services import tokens
 # --- pure arithmetic --------------------------------------------------------
 
 def test_plan_spend_prefers_free_allowance():
-    assert tokens.plan_spend(50, 0, 100, 5) == (5, 0)
+    assert db.plan_spend(50, 0, 100, 5) == (5, 0)
 
 
 def test_plan_spend_splits_across_free_and_purchased():
     # 2 free left, needs 5 -> 2 free + 3 purchased
-    assert tokens.plan_spend(50, 48, 10, 5) == (2, 3)
+    assert db.plan_spend(50, 48, 10, 5) == (2, 3)
 
 
 def test_plan_spend_uses_purchased_when_free_exhausted():
-    assert tokens.plan_spend(50, 50, 10, 5) == (0, 5)
+    assert db.plan_spend(50, 50, 10, 5) == (0, 5)
 
 
 def test_plan_spend_declines_when_broke():
-    assert tokens.plan_spend(50, 50, 4, 5) is None
-    assert tokens.plan_spend(0, 0, 0, 1) is None
+    assert db.plan_spend(50, 50, 4, 5) is None
+    assert db.plan_spend(0, 0, 0, 1) is None
 
 
 def test_plan_spend_zero_cost_is_free():
-    assert tokens.plan_spend(0, 0, 0, 0) == (0, 0)
+    assert db.plan_spend(0, 0, 0, 0) == (0, 0)
 
 
 def test_period_and_reset_roll_the_calendar():
@@ -92,6 +100,58 @@ def test_stripe_signature_roundtrip():
     assert not tokens.verify_stripe_signature(payload, stale, secret)
     assert not tokens.verify_stripe_signature(payload, "", secret)
     assert not tokens.verify_stripe_signature(payload, "t=abc,v1=zz", secret)
+
+
+def _sign_multi(payload: bytes, secrets: list[str], ts: int) -> str:
+    """The header Stripe sends while a webhook secret is being rotated: one
+    v1 per active endpoint secret, over the same timestamp and body."""
+    macs = [hmac.new(sec.encode(), f"{ts}.".encode() + payload,
+                     hashlib.sha256).hexdigest() for sec in secrets]
+    return ",".join([f"t={ts}"] + [f"v1={m}" for m in macs])
+
+
+def test_a_rotating_secret_verifies_whichever_v1_is_ours():
+    """Rotating a webhook secret means both are live for a while, and every
+    delivery in that window arrives signed twice.
+
+    Parsing the header into a dict kept only the LAST v1, so verification
+    became a coin flip decided by which order Stripe listed them: half the
+    deliveries were rejected as forged. Rejected deliveries are not cosmetic
+    here — that is a paid token pack never credited, or a refund never
+    clawed back, with Stripe retrying against the same coin flip.
+    """
+    payload = b'{"type":"checkout.session.completed"}'
+    ours, theirs = "whsec_ours", "whsec_the_new_one"
+    now = int(time.time())
+    # Ours first, then ours last: both orders must verify.
+    assert tokens.verify_stripe_signature(
+        payload, _sign_multi(payload, [ours, theirs], now), ours)
+    assert tokens.verify_stripe_signature(
+        payload, _sign_multi(payload, [theirs, ours], now), ours)
+
+
+def test_multiple_signatures_do_not_weaken_the_check():
+    """Accepting any of several candidates must not become accepting
+    anything: a header full of signatures, none of them ours, is still a
+    forgery — and the timestamp still has to be fresh."""
+    payload = b'{"type":"checkout.session.completed"}'
+    now = int(time.time())
+    header = _sign_multi(payload, ["whsec_a", "whsec_b", "whsec_c"], now)
+    assert not tokens.verify_stripe_signature(payload, header, "whsec_ours")
+    # Right secret, wrong body.
+    good = _sign_multi(payload, ["whsec_a", "whsec_ours"], now)
+    assert not tokens.verify_stripe_signature(b'{"type":"other"}', good, "whsec_ours")
+    # Right secret, replayed from an hour ago.
+    stale = _sign_multi(payload, ["whsec_a", "whsec_ours"], now - 3600)
+    assert not tokens.verify_stripe_signature(payload, stale, "whsec_ours")
+
+
+def test_a_header_with_no_usable_signature_is_rejected():
+    payload = b"{}"
+    now = int(time.time())
+    assert not tokens.verify_stripe_signature(payload, f"t={now}", "whsec_ours")
+    assert not tokens.verify_stripe_signature(payload, f"t={now},v1=", "whsec_ours")
+    assert not tokens.verify_stripe_signature(payload, "v1=abc", "whsec_ours")
 
 
 # --- balance invariants against the real DB code (SQLite) -------------------
@@ -326,3 +386,65 @@ def test_reversal_leaves_the_free_allowance_alone(tokens_db):
     snap = tokens_db.token_status(uid, period, 20)
     assert snap["purchased"] == 0
     assert snap["free_used"] == 10 and snap["free_remaining"] == 10
+
+
+# --- partial refunds: two of the same size must both land -------------------
+
+def test_the_ledger_applies_the_split_plan_spend_predicts(tokens_db):
+    """Not a tautology: token_spend used to carry its own inline copy of this
+    arithmetic, so every plan_spend assertion above could pass while the
+    ledger did something else. Checked against the real transaction rather
+    than by `is`, which in this suite only tests module-reload order."""
+    uid, period, quota = "split", "2026-08", 6
+    assert tokens_db.token_credit(uid, 20, ref="pack_split")["ok"]
+    for cost in (5, 3, 4):
+        snap = tokens_db.token_status(uid, period, quota)
+        predicted = tokens_db.plan_spend(
+            quota, snap["free_used"], snap["purchased"], cost)
+        res = tokens_db.token_spend(uid, cost, free_quota=quota, period=period)
+        assert res["ok"], res
+        assert (res["free_part"], res["paid_part"]) == predicted
+
+
+def test_two_equal_partial_refunds_both_credit(tokens_db):
+    """A bulk batch refunds the failed cutouts mid-run and the unused
+    remainder in its finally. When those are equal — a 4-photo batch where 2
+    cutouts fail and the run then aborts — both were keyed `<entry>:2`, the
+    second hit the unique ref, and db swallowed it. The seller was silently
+    short."""
+    uid, period = "partial", "2026-08"
+    assert tokens_db.token_credit(uid, 10, ref="pack_1")["ok"]
+    spend = tokens_db.token_spend(uid, 4, free_quota=0, period=period, feature="image_ai")
+    assert spend["ok"] and spend["paid_part"] == 4
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 6
+
+    assert tokens_db.token_refund(uid, spend["entry_id"], units=2) is True
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 8
+    assert tokens_db.token_refund(uid, spend["entry_id"], units=2) is True
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 10
+
+
+def test_partial_refunds_never_exceed_the_spend(tokens_db):
+    """The clamp was against the spend total, not what was left of it, so
+    without the ref collision that used to hide it, repeated partials would
+    hand back more than was ever charged."""
+    uid, period = "overrefund", "2026-08"
+    assert tokens_db.token_credit(uid, 10, ref="pack_2")["ok"]
+    spend = tokens_db.token_spend(uid, 4, free_quota=0, period=period, feature="image_ai")
+    assert spend["ok"]
+    for _ in range(3):
+        tokens_db.token_refund(uid, spend["entry_id"], units=3)
+    # 4 charged, at most 4 back — never 10 + 9.
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 10
+
+
+def test_a_full_refund_is_still_replay_safe(tokens_db):
+    """refund_all re-runs on every boot, so the full path must stay keyed on
+    the bare entry id and no-op the second time."""
+    uid, period = "replay", "2026-08"
+    assert tokens_db.token_credit(uid, 10, ref="pack_3")["ok"]
+    spend = tokens_db.token_spend(uid, 4, free_quota=0, period=period, feature="identify")
+    assert tokens_db.token_refund(uid, spend["entry_id"]) is True
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 10
+    assert tokens_db.token_refund(uid, spend["entry_id"]) is False
+    assert tokens_db.token_status(uid, period, 0)["purchased"] == 10

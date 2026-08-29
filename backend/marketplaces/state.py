@@ -48,6 +48,12 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
         entry["error"] = ""
     else:
         entry["error"] = outcome.message or "Publish failed."
+        # A failed attempt still must not rewrite lifecycle state — but if the
+        # marketplace MINTED a listing before failing, that listing exists and
+        # nothing else will ever record it. Fills a blank only: an id already
+        # on the record is not this failure's to change.
+        if outcome.listing_id and not entry.get("listing_id"):
+            entry["listing_id"] = str(outcome.listing_id)
     if key == "ebay":
         if entry.get("listing_id"):
             data["ebay_listing_id"] = entry["listing_id"]
@@ -74,6 +80,38 @@ def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, st
     states = stored.get("marketplaces") or {}
     ebay_id = str(incoming_ebay_id or stored.get("ebay_listing_id") or "")
     return {key: dict(value or {}) for key, value in states.items()}, ebay_id
+
+
+# Listing fields only the server may write. Publish, end and sync set them;
+# every save round-trips the whole listing, so a client copy that differs is a
+# stale copy, never an edit.
+#
+# `source` is the one that bites. A listing this app has published carries
+# source="ebay", and that is what routes its next edit down the revise path.
+# A save that blanks it makes a live record look brand new, and the next
+# publish CREATES A SECOND LIVE LISTING instead of revising the one that
+# exists — the same duplicate `marketplaces` is protected from, through a
+# field nothing was protecting.
+#
+# `ebay_listing_id` is deliberately NOT here: owned_state_from fills it only
+# when the client didn't carry one, and both callers keep that.
+SERVER_OWNED_FIELDS = ("source", "view_url", "ebay_account")
+
+
+def restore_server_fields(listing, stored: dict) -> list[str]:
+    """Copy SERVER_OWNED_FIELDS from the stored record onto `listing`.
+
+    A stored value wins over whatever the client sent; a blank stored value
+    leaves the client's alone, so a first publish can still stamp these.
+    Returns the names actually changed, for the caller to log.
+    """
+    changed = []
+    for name in SERVER_OWNED_FIELDS:
+        value = stored.get(name)
+        if value and value != getattr(listing, name, None):
+            setattr(listing, name, value)
+            changed.append(name)
+    return changed
 
 
 def derive_top_status(prev_status: str, outcomes: dict[str, PublishOutcome],

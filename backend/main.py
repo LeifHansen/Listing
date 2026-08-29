@@ -17,8 +17,10 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -38,15 +40,36 @@ from .marketplaces.state import STICKY_STATUSES
 from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_orders,
-                       ebay_trading, image_import, images, jobstore,
+from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
+                       ebay_orders, ebay_trading, image_import, images, jobstore,
                        listing_merge, listing_sync, metrics, notifications,
                        orient, preflight, pricing, promotions, recommender,
                        sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
-app = FastAPI(title="eBay Listing Generator")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Everything that has to happen before the first request is served.
+
+    Replaces the two startup hooks this used to register with Starlette's
+    deprecated event API, which warned on every boot and every test run. Both
+    bodies moved here verbatim, in their original registration order — and
+    that order matters: warming the model and probing the bucket are
+    fire-and-forget threads, while the job mirrors must be adopted before a
+    client can poll for one.
+
+    The names below are defined further down the module. That resolves fine —
+    this body runs at startup, not at import — and keeps each hook's own
+    documentation next to the machinery it starts.
+    """
+    _warm_models()
+    _adopt_job_mirrors()
+    yield
+
+
+app = FastAPI(title="eBay Listing Generator", lifespan=_lifespan)
 
 # The iOS/Android shell bundles the web build (guideline 4.2 forbids a bare
 # remote-webview app), so its pages live on capacitor://localhost and call
@@ -101,6 +124,14 @@ async def _cache_headers(request: Request, call_next):
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
     elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
         response.headers["Cache-Control"] = "no-cache"
+    elif path.startswith("/api/"):
+        # API responses had NO cache directive at all, leaving heuristic
+        # caching to browsers and any intermediary. These answers are
+        # per-account state -- which eBay account is connected, what the
+        # listings are -- and a stale copy of one is how a seller ends up
+        # debugging an account switch against yesterday's answer. no-store,
+        # not no-cache: there is nothing here worth revalidating.
+        response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 
@@ -149,6 +180,13 @@ _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # 250 MB is roughly one full bulk batch of headroom, which is the amount that
 # actually predicts an ENOSPC.
 _LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
+# How long the housekeeping daemon waits between passes. A volume with room to
+# spare only needs the slow pass; one that is low - or that will not answer how
+# much is left - has to be revisited soon, because the next bulk batch is what
+# fills it. The loop used to sleep three hours either way, so a volume that
+# filled mid-batch stayed broken until the next pass happened to come round.
+_RECLAIM_INTERVAL = 3 * 3600
+_RECLAIM_INTERVAL_LOW = 15 * 60
 
 
 def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
@@ -230,26 +268,85 @@ def reclaim_space(aggressive: bool = False) -> int:
     return freed
 
 
+def _reclaim_plan(free: int) -> tuple[bool, int]:
+    """Decide (aggressive, seconds until the next pass) from a free-space reading.
+
+    `free` is storage.disk_free_bytes(), which reports 0 both for a genuinely
+    full volume and for a stat it could not take (it swallows the error and
+    returns 0). Those are the two states aggressive reclaim exists for, so 0
+    has to count as low. Reading it as "no reason to hurry" is what
+    `bool(free) and free < limit` did: the guard was meant to say "if we know
+    the free space", but its effect was to switch the emergency off at exactly
+    the moment it needed to fire.
+
+    A stat that fails on a healthy volume therefore reclaims early rather than
+    late. That trade is deliberate: short TTLs cost a round trip to R2 for an
+    edit, while being wrong the other way is ENOSPC, which fails every upload.
+    """
+    low = free < _LOW_DISK_BYTES
+    return low, (_RECLAIM_INTERVAL_LOW if low else _RECLAIM_INTERVAL)
+
+
 def _reclaim_loop() -> None:
     """Housekeeping daemon: reclaim space every few hours, and sooner when the
     volume is running low. Without this the volume only ever got swept at
     startup, so a busy day of bulk batches could fill it mid-flight."""
     while True:
+        delay = _RECLAIM_INTERVAL_LOW
         try:
             free = storage.disk_free_bytes()
-            reclaim_space(aggressive=bool(free) and free < _LOW_DISK_BYTES)
+            aggressive, delay = _reclaim_plan(free)
+            freed = reclaim_space(aggressive=aggressive)
+            # The one state this daemon cannot fix by itself: the volume is
+            # low and there is nothing left to free. Nothing else reports it
+            # - reclaim_space only logs when it actually frees something - and
+            # with no metrics stack anywhere, this log line is the alert.
+            if aggressive and not freed:
+                log.warning(
+                    "reclaim: volume low (%d MB free) and nothing left to "
+                    "reclaim - the volume needs more room", round(free / 1e6))
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
-        time.sleep(3 * 3600)
+        time.sleep(delay)
 
 
-@app.on_event("startup")
+# Well under db._STATUS_TTL (30s), so the cache /api/health reads stays inside
+# its window and the probe never has to go and fetch it. The gap is the slack:
+# at 10s a refresh has 20s to complete before the cache goes stale and a
+# request handler would have to take the round trip itself.
+_DB_STATUS_REFRESH = 10
+
+
+def _db_status_loop() -> None:
+    """Keep db_status()'s cache warm, off the request path.
+
+    /api/health reports db state, and db_status() only caches for 30s while
+    Fly's liveness check runs every 15s - so roughly every other check was
+    making a live round trip to Neon inside a 5s timeout. Fly answers a missed
+    check by replacing the machine, and with one machine that kills whatever
+    batch is running, which is the restart loop fly.toml says was designed
+    out. Refreshing on this thread means a slow probe costs a daemon nobody is
+    waiting on, and the request handler is always served from cache.
+    """
+    if not db.enabled():
+        return   # nothing to refresh; don't wake 8,640 times a day to no-op
+    while True:
+        try:
+            db.db_status(refresh=True)
+        except Exception as exc:  # noqa: BLE001 - housekeeping never dies
+            log.warning("db status refresh: %s", exc)
+        time.sleep(_DB_STATUS_REFRESH)
+
+
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
     background-removal model, resolve the R2 bucket check so /api/health tells
-    the truth from the first request, and keep the volume from filling up."""
+    the truth from the first request, keep the db-status cache warm so the
+    liveness probe never blocks on Postgres, and keep the volume from filling
+    up."""
     threading.Thread(target=images.warm, daemon=True).start()
     threading.Thread(target=objstore.probe, daemon=True).start()
+    threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
 
 
@@ -278,6 +375,11 @@ def _rate_limit_auth(request: Request, bucket: str) -> None:
 def health() -> dict:
     return {
         "ok": True,
+        # The commit actually running. A deploy can report success while the
+        # image serving traffic is older (a poisoned builder cache has done
+        # this here before), and without this the only way to tell was to
+        # diff response shapes against git history and guess.
+        "build": config.BUILD_SHA or "unknown",
         "anthropic_configured": config.anthropic_ready(),
         "ebay_configured": config.ebay_ready(),
         "ebay_missing": config.ebay_status()["missing"],
@@ -312,6 +414,13 @@ def health() -> dict:
         "tokens_enabled": config.tokens_enabled(),
         "tokens_missing": config.tokens_missing(),
         "stripe_live_mode": config.stripe_live_mode(),
+        # Misconfigurations that look exactly like "not configured yet": a
+        # secret set under a name one word off from the one the code reads, or
+        # an on/off flag set to something that isn't on. Every `*_missing` list
+        # above reports those two cases identically to never having set them,
+        # which is how production ran with the paid tier off and a Stripe key
+        # visibly deployed. [] means nothing adjacent was found.
+        "config_warnings": config.config_warnings(),
         "db": db.db_status(),
     }
 
@@ -840,8 +949,16 @@ async def tokens_webhook(request: Request) -> dict:
     the raw body; a DB outage returns 503 so Stripe retries the delivery."""
     payload = await request.body()
     try:
-        return tokens.handle_webhook(payload,
-                                     request.headers.get("Stripe-Signature", ""))
+        # handle_webhook verifies the signature and then writes the credit
+        # through db.token_credit - a synchronous SELECT ... FOR UPDATE +
+        # INSERT + COMMIT against Neon. Called directly it blocks the event
+        # loop for the whole round trip, stalling every other request on this
+        # single-machine app, the liveness check included. Stripe delivers
+        # these unattended and retries on 5xx, so nobody is watching when it
+        # happens.
+        return await run_in_threadpool(
+            tokens.handle_webhook, payload,
+            request.headers.get("Stripe-Signature", ""))
     except PermissionError as exc:
         raise HTTPException(400, "Invalid signature") from exc
     except Exception as exc:  # noqa: BLE001
@@ -863,7 +980,11 @@ def account_summary(request: Request) -> dict:
     if not user:
         raise HTTPException(401, "Log in first.")
     counted = db.db_status().get("connected", False)
-    rows = db.list_listings(limit=1000, user_id=user["id"]) if counted else []
+    # LIST_CAP, not a number of its own: every other read of the store uses it,
+    # and a lower cap here would quietly under-report the very seller this
+    # dialog exists to warn — someone with more listings than the cap is told
+    # they are about to delete fewer than they have, live ones included.
+    rows = db.list_listings(limit=LIST_CAP, user_id=user["id"]) if counted else []
     live = sum(1 for r in rows
                if (r.get("status") or "") in ("published", "live"))
     return {
@@ -1015,18 +1136,28 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
 def ebay_callback(request: Request, code: str = "", state: str = ""):
     verified = auth.verify_state(state)
     if not code or not verified:
-        return _finish_connect(request, "/?ebay=error")
+        # An unreadable state is a signature that no longer verifies (SECRET_KEY
+        # rotated), a stale link, or a tampered one. All three want the same
+        # thing from the seller: start again.
+        log.warning("ebay callback: %s", "no code" if not code
+                    else "state did not verify")
+        return _finish_connect(request, "/?ebay=error&why=expired")
     uid, nonce = verified
     # The nonce in the signed state must match the cookie set at connect time,
     # so a callback can only bind an eBay account to the browser that started
     # the flow (blocks CSRF authorization-code injection).
     cookie_nonce = request.cookies.get(EBAY_NONCE_COOKIE, "")
     if not cookie_nonce or cookie_nonce != nonce:
-        log.warning("ebay callback: nonce mismatch (uid=%s)", uid)
-        return _finish_connect(request, "/?ebay=error")
+        log.warning("ebay callback: nonce mismatch (uid=%s) — cookie %s", uid,
+                    "missing" if not cookie_nonce else "did not match")
+        return _finish_connect(request, "/?ebay=error&why=expired")
     try:
-        tokens = ebay_auth.exchange_code(code)
-        access = tokens["access_token"]
+        # NOT `tokens` — that is the billing module, imported at the top of
+        # this file. Shadowing it here left the handler one added
+        # tokens.spend() call away from an AttributeError on a dict, inside a
+        # try whose except turns anything at all into a bare "/?ebay=error".
+        grant = ebay_auth.exchange_code(code)
+        access = grant["access_token"]
         policies = ebay_auth.fetch_policies_and_location(access)
         # Record WHICH eBay account this is, so the user can confirm they
         # connected the right one (best-effort — never block connect on it).
@@ -1035,32 +1166,104 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
             log.warning(f"ebay: identity fetch failed on connect: {exc}")
-        # Preserve the user's saved policy/location choices when reconnecting the
-        # SAME account (or when identity is unreadable — don't risk clobbering
-        # good settings). Only a switch to a DIFFERENT account takes the
-        # auto-discovered defaults fresh, since the old account's policy ids
-        # can't be reused. This is why a reconnect used to silently revert
-        # shipping to eBay Standard Envelope.
         existing = db.get_ebay_account(uid) or {}
-        new_user = ident["username"]
-        keep_saved = (not new_user) or existing.get("ebay_username") == new_user
+        prev_user = (existing.get("ebay_username") or "").strip()
+        new_user = (ident["username"] or "").strip()
         save_kwargs = {
-            "refresh_token": tokens["refresh_token"],
-            "ebay_username": ident["username"],
-            "ebay_email": ident["email"],
+            "refresh_token": grant["refresh_token"],
         }
-        if keep_saved:
-            for k, v in policies.items():
-                if v and not existing.get(k):
-                    save_kwargs[k] = v  # fill only the gaps
-        else:
-            save_kwargs.update(policies)
+        # Only write identity we actually learned. The fetch above is
+        # best-effort and 403s on connections made before the identity scope
+        # was granted, so it hands back "" far more often than it hands back a
+        # wrong name — and "" is not a name, it is "we don't know". Writing it
+        # anyway erased a username the app already had, and a blank username
+        # makes listing_sync.belongs_to scope nothing (every account's listings
+        # look like this one's) while count_foreign_listings reports every
+        # labelled record as foreign. db.save_ebay_account skips None, so None
+        # is how "leave what's there" is spelled.
+        save_kwargs["ebay_username"] = new_user or None
+        save_kwargs["ebay_email"] = ident["email"] or None
+        # Keep a saved policy/location choice only when it still EXISTS on the
+        # account that just connected. Business-policy ids belong to one
+        # seller: eBay rejects another's outright, and a listing published with
+        # one fails for a reason the seller can't see in any field.
+        #
+        # This used to be decided from the account NAME, keeping everything
+        # whenever the name was unreadable — which is the common case, since
+        # connections made before the identity scope was granted 403 on it. A
+        # seller who switched accounts then carried the old account's shipping,
+        # payment, return and location ids straight into the new one.
+        # Attribute access, not positional unpacking. reconcile_account_settings
+        # returns a 3-field Reconciled NamedTuple; unpacking it into two names
+        # raised ValueError here on EVERY connect, which the blanket except
+        # below turned into a bare "?ebay=error". Nothing was ever saved, so no
+        # seller could connect at all.
+        reconciled = ebay_account.reconcile_account_settings(
+            access, existing, policies)
+        conclusive = reconciled.conclusive
+        save_kwargs.update(reconciled.changes)
+        switched = bool(prev_user and new_user and prev_user != new_user)
+        if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
+            # A different store. Label everything already here as the previous
+            # account's, so syncs and publishes stop treating those listings as
+            # this account's (see services/listing_sync.belongs_to).
+            #
+            # Dropped settings alone say the store changed, not who it was: a
+            # policy the seller deleted looks the same, and the previous name
+            # is often unreadable. UNKNOWN_ACCOUNT records that honestly rather
+            # than inventing a username the sweeps would compare against.
+            marked = db.stamp_ebay_account(
+                uid, prev_user or listing_sync.UNKNOWN_ACCOUNT)
+            log.info("ebay connect: account switch for uid=%s (%s -> %s); "
+                     "labelled %d existing listing(s)", uid,
+                     prev_user or "?", new_user or "?", marked)
+            # The old ZIP belonged to the old store; create_on_ebay re-reads it
+            # from eBay when it's blank.
+            save_kwargs.setdefault("ship_from_postal", "")
         db.save_ebay_account(uid, **save_kwargs)
-        resp = _finish_connect(request, "/?ebay=connected")
+        # This connect just reconciled the account-scoped ids against the
+        # account that authorised, so the publish path need not redo it at
+        # once -- but ONLY if eBay actually answered for every one of them.
+        #
+        # Neither lookup raises when it fails, so a connect made during an eBay
+        # outage keeps the previous account's ids and looks, from here, exactly
+        # like a connect where everything already matched. Marking that
+        # verified would suppress the publish-path repair for the whole TTL in
+        # precisely the case the repair exists for -- and because a seller's
+        # instinct is to disconnect and reconnect, every retry would re-arm the
+        # suppression and they would never reach it at all.
+        if conclusive:
+            ebay_account.note_verified(uid)
+            # Only a conclusive pass may claim eBay has none of something —
+            # same rule the publish path applies (ebay_provider._with_current_policies).
+            ebay_account.note_absent(uid, reconciled.absent)
+        # Name the account in the redirect. "eBay connected!" is true of the
+        # wrong store too, and a seller who has just been handed a different
+        # account than the one they picked has no other signal until their old
+        # store's listings start importing. The username is a public seller
+        # name, not a secret.
+        landing = "/?ebay=connected"
+        if new_user:
+            landing += "&as=" + quote(new_user, safe="")
+        resp = _finish_connect(request, landing)
         resp.delete_cookie(EBAY_NONCE_COOKIE)
         return resp
+    except ebay_auth.OAuthError as exc:
+        # eBay told us why. Pass the bucket to the UI so the seller is told
+        # whether to try again or that it is not theirs to fix, and keep
+        # eBay's own words in the log for whoever has to fix it.
+        log.warning("ebay: connect refused for uid=%s: %s | %s", uid, exc,
+                    exc.description)
+        return _finish_connect(request, f"/?ebay=error&why={exc.reason}")
+    except httpx.RequestError as exc:
+        log.warning("ebay: connect could not reach eBay for uid=%s: %s", uid, exc)
+        return _finish_connect(request, "/?ebay=error&why=network")
     except Exception:  # noqa: BLE001
-        return _finish_connect(request, "/?ebay=error")
+        # Anything left — a DB write, a bug. Without the traceback there is
+        # nothing to tell these apart afterwards, and a connect that won't
+        # stick is the one problem a seller cannot debug from the UI.
+        log.exception("ebay: connect callback failed for uid=%s", uid)
+        return _finish_connect(request, "/?ebay=error&why=unknown")
 
 
 @app.get("/api/ebay/status")
@@ -1093,7 +1296,66 @@ def ebay_status(request: Request) -> dict:
             "return": bool(acct and acct.get("return_policy_id")),
             "location": bool(acct and acct.get("merchant_location_key")),
         } if connected else {},
+        # Listings still here from an eBay account that ISN'T the connected
+        # one. They're excluded from every eBay call, but they're visible, so
+        # the UI has to be able to explain them rather than let them read as
+        # "the new account somehow has my old items".
+        "foreign_listings": (db.count_foreign_listings(
+            uid, acct.get("ebay_username") or "") if connected and uid else 0),
+        # eBay-linked records with no owner recorded — they predate ownership
+        # stamping, so after an undetected switch they are the old account's
+        # items wearing no label. Reported separately because only the seller
+        # can say whose they are (see release_foreign_listings).
+        "unowned_listings": (db.count_unowned_ebay_listings(uid)
+                             if connected and uid else 0),
     }
+
+
+@app.post("/api/ebay/release-foreign-listings")
+def release_foreign_listings(request: Request,
+                             payload: Optional[dict] = None) -> dict:
+    """Unlink every listing belonging to a previously-connected eBay account.
+
+    The records stay — they're the seller's own work, photos and all — but the
+    eBay item id, source and live status come off, so they become ordinary
+    local drafts of the current account instead of ghosts of the old store.
+    Nothing is deleted, and nothing is touched on eBay.
+
+    `include_unowned` additionally unlinks eBay-linked records with NO owner
+    recorded. Those predate ownership stamping, so after an undetected switch
+    the app cannot tell them from the connected account's own imports — which
+    is why they never release by default, and why releasing them is the
+    seller's explicit call: only they know whether the store behind those
+    items is still the one connected. Publishes stamp the owner now, so this
+    legacy pool only ever shrinks.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    include_unowned = bool((payload or {}).get("include_unowned"))
+    acct = db.get_ebay_account(uid) or {}
+    connected = (acct.get("ebay_username") or "").strip()
+    released = unowned = 0
+    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+        data = rec.get("listing") or {}
+        if not ebay_account.releasable(data, connected, include_unowned):
+            continue
+        legacy = not listing_sync.account_of(data)
+
+        def _unlink(d: dict) -> dict:
+            d.update(ebay_account="", ebay_listing_id="", source="",
+                     view_url="", sku="", image_urls=d.get("image_urls") or [])
+            d.pop("marketplaces", None)
+            return d
+
+        if db.mutate_listing_data(rec["id"], _unlink, status="draft",
+                                  user_id=uid) is not None:
+            released += 1
+            if legacy:
+                unowned += 1
+    log.info("release-foreign-listings: uid=%s released=%d (unowned=%d, "
+             "connected=%s)", uid, released, unowned, connected or "?")
+    return {"released": released, "released_unowned": unowned}
 
 
 @app.get("/api/ebay/policies")
@@ -1138,12 +1400,84 @@ def ensure_policy(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "Unknown shipping service.")
     try:
         pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
-    except httpx.HTTPStatusError as exc:
+    except ebay_auth.AccountApiError as exc:
         raise HTTPException(
-            502, f"eBay couldn't create the policy: {exc.response.text[:300]}") from exc
+            502, f"eBay couldn't create the policy: {exc.description}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            502, f"Couldn't reach eBay to create the policy: {exc}") from exc
     if pol.get("id") and not creds.get("fulfillment_policy_id"):
         db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
     return pol
+
+
+@app.post("/api/ebay/ensure-all-policies")
+def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dict:
+    """Give the account the three business policies a publish needs.
+
+    Being opted into the policy program is necessary and not sufficient: the
+    account still needs one shipping, one payment and one return policy before
+    eBay will accept a listing. Only the fulfillment half of that existed here
+    (ensure-policy, one shipping service at a time) — payment and return could
+    be listed and never created, so a seller with none was sent to Seller Hub
+    to hand-build two policies whose contents this app already assumes.
+
+    Each is found-or-created independently and each result says which it was,
+    so a partial success is legible rather than an all-or-nothing failure. Ids
+    are saved as the account defaults only where none is set: a seller who
+    deliberately chose a policy keeps it.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    token, opts = creds["access_token"], (payload or {})
+    svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
+           or ebay_auth.service_by_code("USPSGroundAdvantage"))
+    steps = {
+        "fulfillment": lambda: ebay_auth.ensure_service_policy(token, svc),
+        "payment": lambda: ebay_auth.ensure_payment_policy(token),
+        "return": lambda: ebay_auth.ensure_return_policy(
+            token,
+            days=int(opts.get("return_days") or ebay_auth.DEFAULT_RETURN_DAYS),
+            payer=str(opts.get("return_payer")
+                      or ebay_auth.DEFAULT_RETURN_PAYER)),
+    }
+    out: dict = {"policies": {}, "errors": {}}
+    save: dict = {}
+    for kind, run in steps.items():
+        try:
+            pol = run()
+        except (ebay_auth.AccountApiError, httpx.HTTPError) as exc:
+            # One policy eBay won't make must not cost the other two. The most
+            # common reason is the account not being opted in yet, which is a
+            # different button on the same screen.
+            detail = getattr(exc, "description", "") or str(exc)
+            log.warning("ensure-all-policies: %s failed for uid=%s: %s",
+                        kind, _uid(request), detail)
+            out["errors"][kind] = detail[:300]
+            continue
+        out["policies"][kind] = pol
+        field = f"{kind}_policy_id"
+        if pol.get("id") and not creds.get(field):
+            save[field] = pol["id"]
+    if save:
+        db.save_ebay_account(creds["_uid"], **save)
+        # Deliberately NOT note_verified() here. That starts the whole account's
+        # EBAY_POLICY_VERIFY_TTL clock, and the clock is the only thing gating
+        # _with_current_policies -- which is the only thing that ever repairs a
+        # policy id left behind by a previously connected seller. This route
+        # establishes provenance only for the slots it FILLED (`save` is
+        # populated exactly where the account had no id yet); an id that was
+        # already set is left untouched and never compared against the
+        # connected account. Starting the clock on that basis would suppress
+        # the cross-account repair for a full TTL over ids whose owner was
+        # never checked -- and it did so even when two of the three lookups had
+        # just failed. One extra verification round-trip is the cheaper side of
+        # that trade.
+    out["ok"] = not out["errors"]
+    out["created"] = sorted(k for k, v in out["policies"].items()
+                            if v.get("created"))
+    return out
 
 
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
@@ -1193,6 +1527,47 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     return out
 
 
+@app.post("/api/ebay/opt-in-policies")
+def ebay_opt_in_policies(request: Request) -> dict:
+    """Turn on eBay's business-policy program for the connected account.
+
+    Business policies are a seller PROGRAM, not a default. Until an account is
+    opted in, every policy list comes back empty and every policy id is
+    rejected — the "my dropdowns are empty and I can't publish" state, with
+    nothing on screen naming the cause. The app could read the program's
+    status but never set it, so the only fix was a Seller Hub page the seller
+    had to be told to find.
+
+    eBay documents the opt-in as taking up to 24 hours and returns no payload,
+    so a success here means "eBay has the request", never "your policies are
+    ready". The response says which, because promising the second and
+    delivering the first is worse than not offering the button.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds or not creds.get("access_token"):
+        raise HTTPException(400, "Connect eBay first.")
+    token = creds["access_token"]
+    already = ebay_auth.opted_in_programs(token)
+    if already is not None and ebay_auth.SELLING_POLICY_MANAGEMENT in already:
+        return {"ok": True, "already": True, "pending": False,
+                "message": "Business policies are already switched on for this "
+                           "eBay account."}
+    try:
+        ebay_auth.opt_in_to_program(token, ebay_auth.SELLING_POLICY_MANAGEMENT)
+    except ebay_auth.AccountApiError as exc:
+        log.warning("ebay opt-in refused for uid=%s: %s | %s", _uid(request),
+                    exc, exc.description)
+        raise HTTPException(
+            502, "eBay wouldn't switch business policies on for this account. "
+                 "You can turn them on directly in eBay: Seller Hub → Account "
+                 "→ Business policies.") from exc
+    log.info("ebay: business-policy opt-in requested for uid=%s", _uid(request))
+    return {"ok": True, "already": False, "pending": True,
+            "message": "Asked eBay to switch business policies on. eBay can "
+                       "take up to 24 hours, after which your shipping, "
+                       "payment and return policies will show up here."}
+
+
 @app.get("/api/ebay/account-overview")
 def ebay_account_overview(request: Request) -> dict:
     """A live mirror of the seller's most-updated eBay account settings —
@@ -1237,7 +1612,14 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         if k in payload
     }
     postal = str(payload.get("ship_from_postal") or "").strip()
-    if postal:
+    if "ship_from_postal" in payload and not postal:
+        # Clearing it is allowed and has to actually clear. The saved
+        # merchantLocationKey stays: publishing needs a ship-from ZIP, and with
+        # no typed one create_on_ebay reads it off the seller's eBay location
+        # via that key. Dropping both would leave the account unable to publish
+        # for having emptied a text box.
+        fields["ship_from_postal"] = ""
+    elif postal:
         creds = _ebay_creds_for(request)
         if not creds:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
@@ -1459,6 +1841,7 @@ def ebay_disconnect(request: Request) -> dict:
         raise HTTPException(401, "Log in first.")
     # Keep saved policy/location prefs so reconnecting the same account restores
     # them; a different account overwrites them on connect (see the callback).
+    ebay_account.forget_verified(uid)
     db.disconnect_ebay_account(uid)
     return {"ok": True}
 
@@ -1557,6 +1940,13 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
 MAX_UPLOAD_FILES = 40   # per single listing (eBay itself accepts up to 24 live)
 MAX_BULK_FILES = 250    # per bulk batch (many items) — the supported batch size
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
+# ...and per BATCH. The per-file cap alone left the product unbounded: 250
+# files x 60MB is 15GB of writes that a 1GB volume accepts one file at a time
+# until it fills, breaking every other seller's upload on the way. 400MB is
+# comfortably above a real batch -- the client re-encodes to 2000px before
+# upload, so 250 photos land around 250MB -- and well under the free space the
+# volume actually has.
+MAX_BULK_BATCH_BYTES = 400 * 1024 * 1024
 
 
 @app.post("/api/upload")
@@ -1590,7 +1980,7 @@ async def upload(
     # Uploading + optimizing stays free; the AI background removal toggle is
     # metered per photo. Charged before any disk work so a broke/logged-out
     # caller gets a clean 402/401 instead of a half-done upload.
-    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
@@ -1598,7 +1988,7 @@ async def upload(
         for i, f in enumerate(files):
             data = await f.read()
             if len(data) > MAX_UPLOAD_BYTES:
-                tokens.refund(spent)
+                await run_in_threadpool(tokens.refund, spent)
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
@@ -1613,8 +2003,8 @@ async def upload(
         # Disk full / write failure — same friendly answer as the bulk path,
         # not a raw 500; drop the partial session rather than leaving an orphan.
         # No cutout ever ran, so the background-removal charge goes back too.
-        tokens.refund(spent)
-        storage.purge_session(session_id)
+        await run_in_threadpool(tokens.refund, spent)
+        await run_in_threadpool(storage.purge_session, session_id)
         log.error("upload: disk write failed (%s)", exc)
         raise HTTPException(
             507, "The server is out of storage space — try again shortly.") from exc
@@ -1627,13 +2017,13 @@ async def upload(
         # bg-removal charge given back) instead of after the photo work.
         uid = _uid(request)
         try:
-            identify_spent = _charge_ai(request, "identify")
+            identify_spent = await run_in_threadpool(_charge_ai, request, "identify")
         except HTTPException:
-            tokens.refund(spent)
-            storage.purge_session(session_id)
+            await run_in_threadpool(tokens.refund, spent)
+            await run_in_threadpool(storage.purge_session, session_id)
             raise
         job_id = storage.new_session_id()
-        _register_bulk_job(job_id, {
+        await run_in_threadpool(_register_bulk_job, job_id, {
             "id": job_id, "kind": "pipeline", "phase": "optimizing",
             "done": False, "error": None, "result": None,
             # The identify charge was taken above, before any work ran, and
@@ -1661,7 +2051,7 @@ async def upload(
         images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
     optimized = storage.list_optimized(session_id)
     if not optimized:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
         raise HTTPException(
             400,
@@ -1672,7 +2062,7 @@ async def upload(
     # background — give those tokens back.
     bg_failed = sum(1 for r in opt_results if r.get("bg_error") or r.get("error"))
     if spent and bg_failed:
-        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     # Mirror the optimized images to R2, but don't make the user wait for it:
     # the photos are already on the volume and /media serves the local copy,
     # so nothing on screen or on the way to eBay needs the bucket to have them
@@ -1699,7 +2089,7 @@ async def upload_more(
     """Add more photos to an existing listing. Optimizes each new file into the
     session with non-colliding names and returns the new filenames, so the
     client can append them to the listing's image order."""
-    _assert_session_owner(session_id, request)
+    await run_in_threadpool(_assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
     existing = storage.list_optimized(session_id)
@@ -1708,7 +2098,7 @@ async def upload_more(
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
-    spent = _charge_ai(request, "image_ai", units=len(files)) if strip_bg else None
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -1720,7 +2110,7 @@ async def upload_more(
     for j, f in enumerate(files):
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
-            tokens.refund(spent)
+            await run_in_threadpool(tokens.refund, spent)
             raise HTTPException(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         idx = start + j
@@ -1729,7 +2119,7 @@ async def upload_more(
         try:
             await run_in_threadpool(src.write_bytes, data)
         except OSError as exc:
-            tokens.refund(spent)
+            await run_in_threadpool(tokens.refund, spent)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
@@ -1756,14 +2146,23 @@ async def upload_more(
         if res.get("bg_error"):
             bg_failed += 1
     if not new_names:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(400, "Could not process the uploaded image(s).")
     if spent and bg_failed:
-        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
-    return {"added": new_names, "optimized": storage.list_optimized(session_id)}
+    # optimize_results carries each photo's bg_error, exactly as /api/upload
+    # returns it. It was computed here already -- the token refund above counts
+    # it -- and then dropped on the floor, so a photo that kept its background
+    # reached the seller with nothing said about it. The refund is not the
+    # message; it is invisible.
+    return {"added": new_names, "optimized": storage.list_optimized(session_id),
+            "optimize_results": [
+                {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
+                for (idx, _src), res in zip(staged, results)
+                if not res.get("error") and res.get("bg_error")]}
 
 
 @app.post("/api/edit-image")
@@ -1785,11 +2184,11 @@ async def edit_image(
     if not session_id or not name:
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
-    _assert_session_owner(session_id, request)
+    await run_in_threadpool(_assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
-    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
+    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
         log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
@@ -1901,10 +2300,10 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name") or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
-    _assert_session_owner(session_id, request)
+    await run_in_threadpool(_assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
+    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
@@ -1967,11 +2366,11 @@ async def image_auto_clean(
         img = _studio_load(request, session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
 
-    spent = _charge_ai(request, "image_ai")
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except Exception:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise
 
 
@@ -1998,23 +2397,23 @@ async def image_remove_bg(
         # misconfigured key can't hide behind a silently-degraded result.
         return {"ok": True, "image": _data_url(out), "engine": engine}
 
-    spent = _charge_ai(request, "image_ai")
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except images.CutoutBusy as exc:
         # 503, not 500 and not 422: nothing is wrong with the photo or the
         # server, the one inference slot was occupied. Retry-After makes that
         # machine-readable instead of leaving the client to guess.
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(503, str(exc),
                             headers={"Retry-After": "20"}) from exc
     except ValueError as exc:
         # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
         # of credits / rate limit) — the message tells the user exactly which.
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(422, str(exc)) from exc
     except Exception:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise
 
 
@@ -2041,14 +2440,14 @@ async def image_smart_crop(
                     "message": "Already nicely framed — no crop needed."}
         return {"ok": True, "applied": True, "image": _data_url(cropped)}
 
-    spent = _charge_ai(request, "image_ai")
+    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:
         res = await run_in_threadpool(_run)
     except Exception:
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise
     if not res.get("applied"):  # nothing changed — don't charge for a no-op
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
     return res
 
 
@@ -2118,9 +2517,14 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # (aspect-aware — MULTI aspects may take several values).
     added = _merge_filled_specifics(listing, filled, aspects)
     storage.save_listing(session_id, listing)
-    prev_status = (db.get_listing(session_id) or {}).get("status", "draft")
+    # _sticky_status, not a second hand-written copy of the rule. This was the
+    # one status write that re-implemented it, and it listed only
+    # ("published", "ended") -- so autofill silently demoted a "live", "sold"
+    # or "unlisted" record to "draft", dropping it out of the Sold and Finds
+    # tabs. Autofill also runs by itself when the editor opens
+    # (IdentifyResult.specifics_autofilled), so nobody had to click anything.
     db.upsert_listing(session_id, listing.model_dump(),
-                      status=prev_status if prev_status in ("published", "ended") else "draft",
+                      status=_sticky_status(db.get_listing(session_id)),
                       user_id=_uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
@@ -2194,8 +2598,9 @@ def _restore_server_state(session_id: str, listing: Listing,
                           prev_rec: Optional[dict] = None) -> dict:
     """Replace the client's per-marketplace publish state with the stored one.
 
-    The server owns `marketplaces` and its legacy `ebay_listing_id` mirror:
-    only publish/end/sync write them. Any client round-trip can be stale — a
+    The server owns `marketplaces`, its legacy `ebay_listing_id` mirror, and
+    the identity fields in state.SERVER_OWNED_FIELDS: only publish/end/sync
+    write them. Any client round-trip can be stale — a
     second browser tab, or the editor's image-edit auto-save whose copy was
     loaded before a publish — and honoring a stale copy ERASES live listing
     ids. The damage is silent and expensive: the next publish finds no
@@ -2205,10 +2610,18 @@ def _restore_server_state(session_id: str, listing: Listing,
     Returns the record it read so callers don't have to re-query.
     """
     rec = prev_rec if prev_rec is not None else (db.get_listing(session_id) or {})
+    stored = rec.get("listing") or {}
     states, ebay_id = marketplace_state.owned_state_from(
-        rec.get("listing") or {}, listing.ebay_listing_id)
+        stored, listing.ebay_listing_id)
     listing.marketplaces = {k: MarketplaceState(**v) for k, v in states.items()}
     listing.ebay_listing_id = ebay_id
+    # `marketplaces` was protected here; `source` was not, and it decides
+    # whether the next publish revises the live listing or creates a second
+    # one. Same list the publish path restores from.
+    changed = marketplace_state.restore_server_fields(listing, stored)
+    if changed:
+        log.info("save: kept server-owned %s for session=%s",
+                 ", ".join(changed), session_id)
     return rec
 
 
@@ -2465,7 +2878,6 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
     return resumed
 
 
-@app.on_event("startup")
 def _adopt_job_mirrors() -> None:
     """Re-adopt mirrored jobs before the first request is served, so a client
     that polls straight through a restart is told its batch was interrupted
@@ -2714,12 +3126,21 @@ async def bulk_upload(
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
+    batch_bytes = 0
     try:
         for i, f in enumerate(files):
             data = await f.read()
             if len(data) > MAX_UPLOAD_BYTES:
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+            # Checked BEFORE the write, so the batch stops at the budget
+            # instead of discovering it as an ENOSPC that has already taken
+            # the volume down for everyone else.
+            batch_bytes += len(data)
+            if batch_bytes > MAX_BULK_BATCH_BYTES:
+                raise HTTPException(
+                    413, f"That batch is over {MAX_BULK_BATCH_BYTES // (1024 * 1024)}MB "
+                         "of photos in total. Split the pile and run a second batch.")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
             # Same reason as /api/upload — and more so here: a 250-photo
             # batch is on the order of a gigabyte of blocking writes.
@@ -2728,7 +3149,7 @@ async def bulk_upload(
     except OSError as exc:
         # Disk full / write failure — clean up the partial staging and report it
         # clearly instead of a raw 500. Old orphans are swept on restart.
-        storage.purge_session(staging_id)
+        await run_in_threadpool(storage.purge_session, staging_id)
         log.error("bulk upload: disk write failed (%s)", exc)
         raise HTTPException(
             507, "The server is low on storage right now, so the upload couldn't "
@@ -2739,7 +3160,7 @@ async def bulk_upload(
     uid = _uid(request)
     job_id = storage.new_session_id()
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
-    _register_bulk_job(job_id, {
+    await run_in_threadpool(_register_bulk_job, job_id, {
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
         "total_photos": len(files),
@@ -2956,11 +3377,11 @@ async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> d
             frames.append(data)
     if not frames:
         raise HTTPException(400, "No readable frames.")
-    spent = _charge_ai(request, "shelf_scan")
+    spent = await run_in_threadpool(_charge_ai, request, "shelf_scan")
     try:
         result = await run_in_threadpool(claude_ai.scan_shelf, frames)
     except Exception as exc:  # noqa: BLE001
-        tokens.refund(spent)
+        await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(502, f"Shelf scan failed: {exc}") from exc
     log.info("shelf scan: %d frames -> %d candidates", len(frames),
              len(result.get("items", [])))
@@ -2997,6 +3418,12 @@ LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
 def listings(request: Request, limit: int = LIST_CAP) -> dict:
     """History of the current user's saved listings (most recent first)."""
     user = auth.current_user(request)
+    # Clamped like /api/notifications does, and for both of its reasons: a
+    # caller-supplied ?limit had no ceiling (so one request could ask for every
+    # listing JSON blob the store holds) and no floor (?limit=-1 is a Postgres
+    # error that db.list_listings swallows into [], i.e. an empty store
+    # reported as a 200).
+    limit = max(1, min(limit, LIST_CAP))
     items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
 
@@ -3311,6 +3738,76 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> None:
                     listing_id, exc)
 
 
+# Fields that describe THIS sale and THIS eBay item, and so must never ride
+# along into the fresh draft a relist creates: carrying any of them over
+# would make the copy look like the sold listing it came from — and let a
+# publish try to revise an eBay item that is already finished.
+_SALE_ONLY_FIELDS = {
+    "ebay_listing_id": "", "sku": "", "source": "", "ebay_start_time": "",
+    "view_url": "", "watch_count": 0, "sold_quantity": 0,
+    "sold_price": None, "sold_at": "",
+}
+
+
+@app.post("/api/listings/{listing_id}/relist")
+def relist_listing(listing_id: str, request: Request) -> dict:
+    """Copy a settled (sold / ended) listing into a BRAND-NEW draft.
+
+    A sold listing is an archive record: what one finished sale was. The app
+    no longer lets it be edited back onto eBay (/api/publish refuses it), so
+    selling another of the same item is a NEW listing — which is what this
+    makes. The draft carries the copy, the specifics and whatever photos
+    survive; every field belonging to the finished sale (item id, sale price,
+    sale date, per-marketplace state) is cleared. The sold record itself is
+    left exactly as it was.
+
+    Photos: a sale purges the session's images to reclaim storage, so a
+    relist of an app-created listing usually starts with none — `photos: 0`
+    says so, and the editor opens on the upload card. Listings imported from
+    eBay keep their eBay-hosted `image_urls`, which the copy carries as-is.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    uid = _uid(request)
+    if rec.get("user_id") and rec["user_id"] != uid:
+        raise HTTPException(404, "Listing not found")
+
+    data = dict(rec.get("listing") or {})
+    data.update(_SALE_ONLY_FIELDS)
+    data["marketplaces"] = {}
+    listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
+
+    new_id = storage.new_session_id()
+    # Photos are COPIED, never moved: the sold record keeps whatever it still
+    # has, and a copy that fails leaves the seller a draft to re-upload into
+    # rather than no draft at all.
+    src_dir = storage.optimized_dir(listing_id)
+    names = [n for n in (listing.images or storage.list_optimized(listing_id))
+             if (src_dir / n).is_file()]
+    copied: list[str] = []
+    if names:
+        dst_dir = storage.optimized_dir(new_id)
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            try:
+                shutil.copyfile(src_dir / name, dst_dir / name)
+            except OSError as exc:
+                raise HTTPException(
+                    507, "The server is out of storage space — try again shortly.") from exc
+            copied.append(name)
+        objstore.upload_optimized(new_id, dst_dir, copied)
+    listing.images = copied
+
+    storage.save_listing(new_id, listing)
+    db.upsert_listing(new_id, listing.model_dump(), status="draft", user_id=uid)
+    log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
+             listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
+    return {"ok": True, "id": new_id, "from": listing_id,
+            "photos": len(copied) + len(listing.image_urls or []),
+            "listing": listing.model_dump()}
+
+
 @app.delete("/api/listings/{listing_id}")
 def delete_listing(listing_id: str, request: Request) -> dict:
     """Remove a saved listing/draft and clean up its files. A missing (or
@@ -3493,6 +3990,16 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     _assert_session_owner(req.session_id, request)
     uid = _uid(request)
     prev_rec = db.get_listing(req.session_id) or {}
+    # A sold listing is an archive record, not a draft: it says what one
+    # finished sale was, and republishing it in place would overwrite that
+    # history with a second listing's life (and, for an imported item, ask
+    # eBay to revise an item that has already ended). Selling another of the
+    # same thing is a NEW listing — POST /api/listings/{id}/relist makes one
+    # from this record's copy and photos, leaving the sale intact.
+    if (prev_rec.get("status") or "") == "sold":
+        raise HTTPException(
+            409, "This listing has sold — it's archived under Inactive. "
+                 "Use Relist as new listing to sell another one.")
 
     # The server owns per-marketplace state: whatever map the client sent is
     # replaced with the stored record's before anything reads it (or gets
@@ -3628,18 +4135,34 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
     creds = _ebay_creds_for(request)
-    if not (creds or config.ebay_ready()):
+    # Ending goes through EndItem, which needs the seller's own token. The
+    # env-configured single-tenant credentials used to serve here via
+    # withdrawOffer; they are the OPERATOR's, and with the Inventory engine
+    # gone there is nothing they could end that this app created.
+    if not creds:
         raise HTTPException(400, "Connect eBay first.")
     listing = Listing(**(rec.get("listing") or {}))
+    # Never end another eBay account's listing: the item id on this record was
+    # minted by a store that isn't connected any more, and EndItem would either
+    # fail confusingly or (worse) act on the wrong seller's item.
+    owner = listing_sync.account_of(listing)
+    connected = (creds or {}).get("ebay_username", "")
+    if creds and owner and connected and owner != connected:
+        raise HTTPException(
+            400, f"This listing is on your other eBay account (@{owner}) — "
+                 f"you're connected as @{connected}. Reconnect that account "
+                 "to end it.")
     try:
-        # Imported listings live outside the Inventory API — end them through
-        # the Trading API instead.
-        if listing_sync.is_imported(listing):
-            if not creds:
-                raise HTTPException(400, "Connect eBay first.")
-            res = listing_sync.end(creds["access_token"], listing)
+        # One ending for every listing: EndItem. The old branch sent
+        # non-imported records to withdrawOffer, but everything this app
+        # publishes goes out through Trading and is stamped source="ebay", so
+        # that branch only ever served Inventory-API listings from an older
+        # build. A record with no item id has nothing on eBay to end.
+        if not listing.ebay_listing_id:
+            res = {"ended": False, "not_live": True,
+                   "message": "This listing isn't on eBay — nothing to end."}
         else:
-            res = ebay.withdraw(req.session_id, listing, creds=creds)
+            res = listing_sync.end(creds["access_token"], listing)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
     if res.get("ended") or res.get("not_live"):
@@ -3680,12 +4203,18 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     creds = _ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
-        return {"checked": 0, "changed": 0, "archived": 0}
+        return {"checked": 0, "changed": 0}
     force = bool((payload or {}).get("force"))
+    # Only the connected account's listings. A record left behind by a
+    # previously-connected eBay account is another seller's item as far as this
+    # token is concerned — and since eBay answers item lookups for anyone, a
+    # sweep over it doesn't fail, it just keeps reporting the old store as
+    # live and healthy under the new account.
+    account = (creds or {}).get("ebay_username", "")
     live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-            if i.get("status") in ("published", "live")]
+            if i.get("status") in ("published", "live")
+            and listing_sync.belongs_to(i.get("listing") or {}, account)]
     changed = 0
-    archived = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
     # lists name every item that finished recently, so a listing that ended
     # (or sold) ON eBay moves off Active on this very sync — it never has to
@@ -3694,89 +4223,52 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     if live and creds:
         try:
             got, handled = listing_sync.reconcile_recent(
-                creds["access_token"], user["id"], live)
+                creds["access_token"], user["id"], live, account=account)
             changed += got
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
             log.info("ebay sync: finished-list reconcile failed: %s", exc)
     live = [i for i in live if i["id"] not in handled]
-    # Imported listings are reconciled through the Trading API (the Inventory
-    # API can't see them at all); app-created ones keep the offer check below.
-    # EVERY imported listing must be excluded from `items` — not just the ones
-    # this run refreshes — or the offer check would call an eBay listing it
-    # can't see "ended". Each side is capped so one sync click can't fan out
-    # into hundreds of eBay calls — SAMPLED, not sliced, so on a store bigger
-    # than the cap every record still gets its turn across a few syncs instead
-    # of the same first N being re-checked forever.
-    imported_ids = {i["id"] for i in live
-                    if listing_sync.is_imported(i.get("listing") or {})}
-    imported = [i for i in live if i["id"] in imported_ids]
-    items = [i for i in live if i["id"] not in imported_ids]
-    if not sync_guard.sweep_due(user["id"], force):
+    # One sweep for every record. The old code split these in two: imported
+    # listings went through the Trading API, and "app-created" ones through an
+    # Inventory offer lookup keyed by SKU. That second path only ever served
+    # listings the Inventory engine published, and it is gone — everything this
+    # app puts live now goes out through Trading and carries an item id.
+    #
+    # Capped so one sync click can't fan out into hundreds of eBay calls —
+    # SAMPLED, not sliced, so on a store bigger than the cap every record still
+    # gets its turn across a few syncs instead of the same first N being
+    # re-checked forever.
+    #
+    # Ask for the cooldown only when there is actually something to sweep.
+    # sweep_due() STARTS the cooldown on the call that says yes, so asking
+    # first and finding nothing to do spent the whole six hours on zero eBay
+    # calls — and the next sync, the one with real work, was refused. The
+    # cooldown exists to ration eBay's daily quota, so it should only ever be
+    # consumed by a run that spends some of it.
+    if live and not sync_guard.sweep_due(user["id"], force):
         # Cooled down: the finished-list reconcile above already ran (and is
-        # what actually moves ended/sold records), so skip the ~100-call
-        # per-item sweeps rather than spending the account's daily eBay quota
-        # on a background poll.
+        # what actually moves ended/sold records), so skip the per-item sweeps
+        # rather than spending the account's daily eBay quota on a background
+        # poll.
         log.debug("ebay sync: per-item sweeps skipped (cooldown) for user=%s",
                   user["id"])
-        imported, items = [], []
-    if len(imported) > 60:
-        imported = random.sample(imported, 60)
-    if len(items) > 40:
-        items = random.sample(items, 40)
-    if imported and creds:
+        live = []
+    if len(live) > 100:
+        live = random.sample(live, 100)
+    if live and creds:
         try:
             changed += listing_sync.refresh_statuses(
-                creds["access_token"], user["id"], imported)
+                creds["access_token"], user["id"], live, account=account)
         except Exception as exc:  # noqa: BLE001 - sync is best-effort
-            log.info("ebay sync: imported refresh failed: %s", exc)
-
-    # Each check is its own eBay round-trip; serially that pinned a request
-    # thread for up to ~40x the API latency right at app load (architect #15).
-    # Fetch in parallel, write to the DB serially below.
-    def _check(it):
-        try:
-            return it, ebay.live_status(
-                it["id"], Listing(**(it.get("listing") or {})), creds=creds)
-        except Exception as exc:  # noqa: BLE001 - one blip must not stop the sweep
-            log.info("ebay sync: status check failed for %s: %s", it["id"], exc)
-            return it, (None, "")
-
-    checked = []
-    if items:
-        with ThreadPoolExecutor(max_workers=min(6, len(items))) as pool:
-            checked = list(pool.map(_check, items))
-    # What each sale actually settled at, fetched once and only if something
-    # sold — the offer a seller accepted lives on the transaction, never on
-    # the listing's own price.
-    sales: Optional[dict] = None
-    for it, (status, lid) in checked:
-        if status == "sold":
-            data = it.get("listing") or {}
-            if sales is None:
-                sales = (listing_sync.recent_sales(creds["access_token"])
-                         if creds else {})
-            data = listing_sync.stamp_sale(
-                data, sales.get(str(data.get("ebay_listing_id") or "")),
-                mark_now=True)
-            db.upsert_listing(it["id"], data, status="sold", user_id=user["id"])
-            notifications.notify_sold(user["id"], it["id"], data,
-                                      sold_quantity=data.get("sold_quantity") or 0)
-            _purge_session_images(it["id"])  # archived — reclaim the storage
-            changed += 1
-            archived += 1
-        elif status == "ended":
-            db.upsert_listing(it["id"], it.get("listing") or {},
-                              status="ended", user_id=user["id"])
-            changed += 1
-        elif (status == "published" and lid
-              and not (it.get("listing") or {}).get("ebay_listing_id")):
-            data = {**(it.get("listing") or {}), "ebay_listing_id": lid}
-            db.upsert_listing(it["id"], data, status="published", user_id=user["id"])
+            log.info("ebay sync: status refresh failed: %s", exc)
     if changed:
-        log.info("ebay sync: %d listing(s) updated (%d archived as sold) for user=%s",
-                 changed, archived, user["id"])
-    return {"checked": len(items) + len(imported) + len(handled),
-            "changed": changed, "archived": archived}
+        log.info("ebay sync: %d listing(s) updated for user=%s",
+                 changed, user["id"])
+    # `archived` used to ride along here, counted by the per-item Inventory
+    # loop that no longer exists. refresh_statuses does the archiving now and
+    # reports only a change count, and nothing read the field — the frontend
+    # uses `changed` alone — so it is gone rather than reported as a constant 0.
+    return {"checked": len(live) + len(handled), "changed": changed}
 
 
 # Bounds one import run. A store bigger than this imports across repeated
@@ -3790,7 +4282,7 @@ _IMPORT_JOBS: dict[str, str] = {}
 _IMPORT_LOCK = threading.Lock()
 
 
-def _run_import_job(job_id: str, token: str, uid: str) -> None:
+def _run_import_job(job_id: str, token: str, uid: str, account: str = "") -> None:
     """Background worker for the store mirror. One GetItem per listing means a
     real store takes minutes — far longer than a browser (or the proxy in
     front of us) will hold a request open, which is why this is a job the
@@ -3809,7 +4301,8 @@ def _run_import_job(job_id: str, token: str, uid: str) -> None:
         jobstore.update(job_id, phase=phase, current=done, total_items=total)
     try:
         result = listing_sync.import_active(
-            token, uid, limit=IMPORT_LIMIT, on_progress=_progress)
+            token, uid, limit=IMPORT_LIMIT, on_progress=_progress,
+            account=account)
         jobstore.update(job_id, done=True, phase="done", error=None, **result)
     except ebay_trading.TradingError as exc:
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
@@ -3861,7 +4354,8 @@ def import_listings(request: Request) -> dict:
         "error": None, "current": 0, "total_items": 0,
     }, uid=uid)
     threading.Thread(
-        target=_run_import_job, args=(job_id, creds["access_token"], uid),
+        target=_run_import_job,
+        args=(job_id, creds["access_token"], uid, creds.get("ebay_username", "")),
         daemon=True,
     ).start()
     log.info("import-listings %s: started for user=%s", job_id, uid)

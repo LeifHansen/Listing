@@ -31,7 +31,8 @@ MAX_ATTEMPTS = 10           # per client, per window, per bucket
 # far below what it takes to wedge the machine.
 STUDIO_MAX_CALLS = 120
 # Cap the number of tracked keys so a spray across many IPs can't grow the
-# dict without bound; cold entries are swept when the cap is reached.
+# dict without bound; cold entries are swept when the cap is reached, and if
+# none are cold the coldest are dropped anyway (see check).
 _MAX_KEYS = 2048
 
 _hits: dict[str, list[float]] = {}
@@ -56,10 +57,37 @@ def check(key: str, now: float | None = None,
         hits.append(now)
         _hits[key] = hits
         if len(_hits) > _MAX_KEYS:
-            for k in [k for k, v in _hits.items()
-                      if not v or now - v[-1] > WINDOW_SECONDS]:
-                _hits.pop(k, None)
+            _evict(now, key)
         return len(hits) <= limit
+
+
+def _evict(now: float, keep: str) -> None:
+    """Bring the tracked-key count back under the cap. Caller holds the lock.
+
+    Expired keys go first — they are free, and in normal traffic they are all
+    there is to drop. But a burst that touches thousands of distinct keys
+    inside ONE window leaves nothing expired to collect, which is exactly the
+    spray _MAX_KEYS exists to survive: the sweep found no candidates, the dict
+    kept growing, and the cap was a comment rather than a bound. So when the
+    cheap pass isn't enough, fall back to dropping the coldest keys until the
+    dict fits.
+
+    Dropping a key forgives its attempts so far, which is why the coldest go
+    first: a key idle since early in the window is the one least likely to be
+    mid-flood, and a live attacker's own key is the last thing evicted (never
+    `keep`, the caller's, which was just touched). Under a spray big enough to
+    reach here the attacker is paying for the eviction of their own earlier
+    keys, one bcrypt hash at a time.
+    """
+    for k in [k for k, v in _hits.items()
+              if k != keep and (not v or now - v[-1] > WINDOW_SECONDS)]:
+        _hits.pop(k, None)
+    if len(_hits) <= _MAX_KEYS:
+        return
+    coldest = sorted((v[-1] if v else 0.0, k) for k, v in _hits.items()
+                     if k != keep)
+    for _last, k in coldest[:len(_hits) - _MAX_KEYS]:
+        _hits.pop(k, None)
 
 
 def reset() -> None:

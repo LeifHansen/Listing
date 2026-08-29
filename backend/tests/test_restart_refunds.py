@@ -110,10 +110,14 @@ def test_the_same_full_refund_twice_does_not_pay_twice(dbmod, monkeypatch):
         "a second boot paid the seller a second time")
 
 
-def test_a_partial_refund_does_not_block_a_later_full_one(dbmod, monkeypatch):
-    """The hazard that decides WHICH charges may be recorded. A partial refund
-    is a different ledger entry from a full one, so both go through — which is
-    why tokens.receipts must never be handed a partially refundable charge."""
+def test_a_full_refund_after_a_partial_one_returns_only_the_remainder(
+        dbmod, monkeypatch):
+    """A partial refund followed by a full one must return the charge exactly
+    once. This used to hand back MORE than was charged — the two were separate
+    ledger entries and nothing summed them — and the note here recorded that as
+    the reason tokens.receipts refuses partially-refundable charges. The cap
+    now lives in db.token_refund, computed from the ledger, so it survives the
+    killed process that motivated the rule."""
     _billing(dbmod, monkeypatch)
 
     spent = tokens.spend("u1", "identify")
@@ -123,6 +127,4 @@ def test_a_partial_refund_does_not_block_a_later_full_one(dbmod, monkeypatch):
     tokens.refund(spent, units=1)          # one unit back, in process
     tokens.refund(spent)                   # ...then a full refund on top
 
-    assert _balance(dbmod) - after_spend > charged, (
-        "if the ledger ever starts collapsing these, the restriction in "
-        "tokens.receipts can be relaxed — until then it is load-bearing")
+    assert _balance(dbmod) - after_spend == charged

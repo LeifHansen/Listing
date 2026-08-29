@@ -639,7 +639,7 @@ export function Dashboard() {
           value={formatMoney(sales.total) || "$0.00"}
           sub={soldSub(sales, soldEnded)}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
-          onClick={() => openListings(soldEnded.some((i) => i.status === "sold") ? "sold" : "inactive")} />
+          onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
           value={todays.length}
           sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}
