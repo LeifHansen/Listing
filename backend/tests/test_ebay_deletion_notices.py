@@ -22,6 +22,15 @@ from __future__ import annotations
 import json
 
 import pytest
+
+# Importing backend.main pulls the whole app in. The `checks` job installs
+# neither of these, so it skips this file; the smoke job's "API tests" step is
+# where it runs, and that step fails on a skip so this can never quietly stop
+# running.
+pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
+
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
