@@ -50,7 +50,7 @@ def reconcile_account_settings(
         access: str, existing: dict, discovered: dict, *,
         policy_ids: Optional[Callable[[str], dict]] = None,
         location_keys: Optional[Callable[[str], Optional[set]]] = None,
-        fill_blanks: bool = True) -> tuple[dict, bool]:
+        fill_blanks: bool = True) -> "Reconciled":
     """(what to store for this account, did eBay actually answer).
 
     A saved choice survives only if it still EXISTS on this account; otherwise
@@ -111,13 +111,6 @@ def reconcile_account_settings(
             # long-standing connect-time behaviour.
             out[field] = discovered[field]
     return Reconciled(out, conclusive, absent)
-
-
-def carry_over_settings(access: str, existing: dict, discovered: dict,
-                        **kwargs) -> dict:
-    """reconcile_account_settings' changes alone, for callers that don't need
-    to know whether eBay answered."""
-    return reconcile_account_settings(access, existing, discovered, **kwargs)[0]
 
 
 # How long a verified set of account-scoped ids is trusted before the next

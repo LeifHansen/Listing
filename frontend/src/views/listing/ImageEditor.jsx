@@ -58,15 +58,16 @@ async function studioCall(path, sessionId, name, blob, timeoutMs) {
   fd.append("session_id", sessionId);
   fd.append("name", name);
   if (blob) fd.append("file", new File([blob], name, { type: blob.type }));
-  const opts = { method: "POST", body: fd };
-  if (timeoutMs) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    opts.signal = ctrl.signal;
-    try { return await api(path, opts); }
-    finally { clearTimeout(timer); }
-  }
-  return api(path, opts);
+  // timeoutMs goes in the opts bag, which is the only channel api() reads.
+  // Rolling our own AbortController here looked equivalent and was not: api()
+  // computed its own deadline from opts.timeoutMs (absent -> the 90s default)
+  // and then replaced our signal with its own. So MODEL_TIMEOUT_MS was
+  // imported, passed down, and dropped -- "Remove background" kept giving up
+  // at 90 seconds on an inference that takes ~107 in production, told the
+  // seller it had taken "longer than 90s", and left them to save the
+  // untouched original while the server finished into a closed socket.
+  return api(path, { method: "POST", body: fd,
+                     ...(timeoutMs ? { timeoutMs } : {}) });
 }
 
 function loadImage(src) {
@@ -79,6 +80,13 @@ function loadImage(src) {
 }
 
 export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }) {
+  // Which photo is open RIGHT NOW. This dialog is one long-lived instance
+  // whose `name` prop changes (NewListing renders it unkeyed), so an in-flight
+  // request holds the name it started on while the canvas has already moved
+  // to another photo. Background removal takes ~107s in production, which is
+  // ample time to close the studio and open a different photo.
+  const nameRef = useRef(name);
+  useEffect(() => { nameRef.current = name; }, [name]);
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
   const painting = useRef(false);
@@ -271,8 +279,13 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     setAiBusy("Removing the background…");
     try {
       const blob = await canvasBlob(canvas);
+      const startedOn = name;
       const res = await studioCall("/api/image/remove-bg", sessionId, name, blob,
                                    MODEL_TIMEOUT_MS);
+      // Committing this now would paint one photo's cutout onto another's
+      // canvas -- and Save would then write those pixels into the other
+      // photo's file. Staying quiet is right: the seller moved on.
+      if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
       toast(
         `Background removed${res.engine === "adobe" ? " with Adobe Photoshop" : res.engine === "photoroom" ? " with Photoroom" : res.engine === "pixian" ? " with Pixian" : " (on-server model)"} — review and Save to keep it.`,
@@ -580,7 +593,11 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
             title="Discard every edit and reload the saved photo">
             <RotateCcw aria-hidden /> Revert
           </Button>
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          {/* Disabled with the rest of the toolbar while AI work is in flight.
+              Leaving it live let the seller close the studio mid-inference and
+              open another photo, which is how a result landed on the wrong
+              one. */}
+          <Button variant="secondary" onClick={onClose} disabled={!!aiBusy}>Cancel</Button>
           <Button variant="primary" onClick={save} loading={saving} disabled={!!aiBusy}>
             Save
           </Button>

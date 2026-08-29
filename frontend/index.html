@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Thryft Shop — AI eBay listings</title>
   <meta name="description" content="Snap it. AI writes it. List it on eBay." />
-  <link rel="icon" type="image/png" href="/thryft-shop-logo-final.png" />
-  <link rel="apple-touch-icon" href="/thryft-shop-logo-final.png" />
+  <!-- Sized for the slot each one fills. These used to be the 574KB master
+       art: a 1254px PNG for a 32px favicon, and again for the boot splash,
+       which is fetched BEFORE React mounts -- so the branded splash sat blank
+       for as long as it took, on the cellular connection this ships to. -->
+  <link rel="icon" type="image/png" sizes="48x48" href="/logo-48.png" />
+  <link rel="apple-touch-icon" href="/logo-180.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <!-- Fredoka (600-700) sets headings, stats & short labels; Nunito Sans
@@ -26,7 +30,7 @@
   <div id="root">
     <!-- Branded boot splash — replaced the moment React mounts. -->
     <div id="boot-splash" style="min-height:100dvh;display:grid;place-items:center">
-      <img src="/thryft-shop-logo-final.png" alt="Thryft Shop"
+      <img src="/logo-512.webp" alt="Thryft Shop" width="512" height="512"
         style="width:200px;max-width:60vw;border-radius:28px;animation:ts-boot 1.6s ease-in-out infinite" />
     </div>
     <style>

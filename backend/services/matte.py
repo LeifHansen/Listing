@@ -103,10 +103,6 @@ STATUSES = (APPLIED, NEEDS_REVIEW, KEPT_ORIGINAL, FAILED)
 # wording can change freely, these cannot.
 ERR_SUBJECT_ERASED = "subject_erased"
 ERR_DARK_SUBJECT = "dark_subject_removed"
-ERR_ENGINE_UNAVAILABLE = "engine_unavailable"
-ERR_ENGINE_FAILED = "engine_failed"
-ERR_TIMEOUT = "timeout"
-ERR_TOO_LARGE = "image_too_large"
 
 
 @dataclass

@@ -66,11 +66,6 @@ def test_size_explicit_beats_item_specific():
     assert mapping_depop.size_for(lst2) == "32x30"
 
 
-def test_photo_cap():
-    lst = _listing(images=[f"{i}.jpg" for i in range(8)])
-    assert len(mapping_depop.select_photos(lst)) == mapping_depop.MAX_PHOTOS
-
-
 def test_preflight_clean_listing_passes():
     assert _errors(mapping_depop.preflight(_listing())) == set()
 

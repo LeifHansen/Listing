@@ -26,15 +26,26 @@ const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 // Shipping policy right on a draft's card — the same one control the editor
 // and the bulk queue use (see ShippingPolicySelect). Saves on change.
 function DraftShipping({ item, className }) {
+  const { loadListings } = useApp();
   const { toast } = useToast();
   const [value, setValue] = useState(item.listing?.fulfillment_policy_id || "");
   const save = async (id) => {
+    const previous = value;
     setValue(id);
     try {
       await postJson(`/api/save/${item.id}`, {
         ...(item.listing || {}), fulfillment_policy_id: id,
       });
+      // Refresh the cache, exactly as DraftCategory below does. /api/save is a
+      // full REPLACE, and publishItem re-saves this card's in-memory
+      // item.listing on the way to publishing -- so without this the policy
+      // just chosen was overwritten with the stale one at the moment it
+      // mattered, and the listing went live with the wrong shipping.
+      await loadListings({ quiet: true });
     } catch (e) {
+      // Put the dropdown back. Leaving it on the new value showed a policy
+      // that was never saved, long after the toast had gone.
+      setValue(previous);
       toast(`Couldn't save the shipping policy: ${e.message}`, { kind: "error" });
     }
   };
@@ -207,10 +218,22 @@ export function DraftsStrip({ search = "" }) {
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0;
+    const reasons = [];
     setBulkProgress({ done: 0, total: readyToPublish.length });
     try {
       for (const item of readyToPublish) {
-        (await publishItem(item)).published ? ok++ : failed++;
+        const out = await publishItem(item);
+        if (out.published) ok++;
+        else {
+          failed++;
+          // WHY, not just how many. publishItem hands back the response and
+          // this discarded it, so a run where every listing was refused for
+          // one account-level hold reported "5 need attention — open them to
+          // fix" and sent the seller to inspect five listings that were never
+          // the problem. That is the shape of the failures in production.
+          reasons.push(out.error
+            || blockedReason(out.res, "Publish blocked — open the draft to see what to fix."));
+        }
         setBulkProgress((p) => ({ ...p, done: ok + failed }));
       }
     } finally {
@@ -218,8 +241,13 @@ export function DraftsStrip({ search = "" }) {
     }
     await loadListings({ quiet: true });
     exitSelect();
+    const shared = reasons.length && reasons.every((r) => r === reasons[0])
+      ? reasons[0] : null;
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
-      + (failed ? ` ${failed} need attention — open them to fix.` : "")
+      + (failed
+          ? (shared ? ` All ${failed} were refused: ${shared}`
+                    : ` ${failed} need attention — open them to fix.`)
+          : "")
       + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
       { kind: failed || notReady ? "warning" : "success" });
   };

@@ -394,7 +394,14 @@ export function PublishBar({ w }) {
             )}
           </span>
         </span>
-        <span className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto">
+        {/* flex-wrap, and shrink-0 only from sm up. Every child is a Button,
+            and Button's base class is whitespace-nowrap, so with nowrap +
+            shrink-0 this row could not give way anywhere: at 375px the five
+            buttons measured 582px inside a 311px card, which put "Save Draft"
+            54px past the right edge and "Publish Live" entirely off-screen.
+            The app's primary action was unreachable on every phone size Apple
+            sells, and the page scrolled sideways instead of saying so. */}
+        <span className="flex flex-wrap items-center justify-end gap-2.5 w-full sm:w-auto sm:shrink-0">
           {w.isLive ? (
             <>
               {w.ebayListingId && (

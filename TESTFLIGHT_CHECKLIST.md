@@ -22,9 +22,13 @@ the whole build; there is nothing to hand-configure.
 Run in Terminal, one block at a time:
 
 ```bash
-# The default branch — whatever production deploys from. If you're testing a
-# feature branch, check that out instead.
-cd ~/Listing && git checkout claude/ebay-listing-generator-se7lao && git pull
+# main IS what production deploys from, so it is what testers should be
+# testing. Building from a stale feature branch is the same mistake as a hand
+# `fly deploy` from a behind checkout (see README) — except no health check
+# ever catches it, because the build that ships to TestFlight is whatever was
+# on the Mac. If you're deliberately testing a feature branch, check that out
+# instead, and say so in the TestFlight "What to Test" notes.
+cd ~/Listing && git checkout main && git pull
 cd frontend
 npm install
 ./scripts/ios-prepare.sh

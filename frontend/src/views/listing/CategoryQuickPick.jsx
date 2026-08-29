@@ -91,7 +91,7 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
       )}
       {sugg?.items && !sugg.items.length && (
         <p className="text-[13px] text-ink-secondary px-1 py-1">
-          No matches — edit the title in Preview &amp; Edit and try again.
+          No matches — edit the title in Review &amp; List and try again.
         </p>
       )}
       {sugg?.items?.map((c) => (

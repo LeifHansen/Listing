@@ -48,6 +48,12 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
         entry["error"] = ""
     else:
         entry["error"] = outcome.message or "Publish failed."
+        # A failed attempt still must not rewrite lifecycle state — but if the
+        # marketplace MINTED a listing before failing, that listing exists and
+        # nothing else will ever record it. Fills a blank only: an id already
+        # on the record is not this failure's to change.
+        if outcome.listing_id and not entry.get("listing_id"):
+            entry["listing_id"] = str(outcome.listing_id)
     if key == "ebay":
         if entry.get("listing_id"):
             data["ebay_listing_id"] = entry["listing_id"]

@@ -106,6 +106,55 @@ fly secrets set EBAY_OAUTH_TOKEN=... \
 > incurring, publicly visible eBay listings. For a sandbox deploy override it
 > with `fly secrets set EBAY_ENV=sandbox` (a secret wins over `[env]`).
 
+### Check what production is actually configured with
+
+`fly volumes create --size 3` above is the instruction, not a guarantee that it
+was followed — the volume on `listing-lfwjrg` is **1GB**, and a volume is
+easy to create small and never revisit. The reclaim daemon keeps usage down
+(`main._reclaim_loop`), so this is headroom rather than a leak, but the
+alerting floor in `health-watch.yml` is 400MB free and the volume runs near
+500MB. `fly volumes list -a <app>` reports the size; `fly volumes extend
+<id> --size 3` raises it without a redeploy.
+
+Everything else worth checking, production answers itself:
+
+```bash
+curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
+```
+
+- **`config_warnings`** is the field to read first. It names the two
+  misconfigurations that otherwise look *identical* to never having configured
+  a feature at all: a secret set under a name one word off from the one the
+  code reads, and an on/off flag set to a value that isn't on. It also flags a
+  Stripe key that is present but isn't a *secret* key — a publishable `pk_...`
+  in that slot passes every readiness check in the app and then fails at
+  checkout.
+
+  How it found the Stripe one is why the field exists. Production had
+  `STRIPE_API_SECRET_KEY` deployed while the code read `STRIPE_SECRET_KEY`, so
+  the paid tier was off with a key plainly visible on the Fly dashboard and
+  `tokens_missing` reporting — accurately, uselessly — that the key was
+  missing. **The fix went into the code, not the secret**:
+  `STRIPE_API_SECRET_KEY` is now accepted as a second name for the same
+  setting, exactly as `DATABASE_URL` accepts `NEON_PRODUCTION_DATABASE_URL`.
+  Renaming a live secret restarts the machine, and with
+  `min_machines_running = 1` that means restarting it under whatever batch is
+  in flight — not a trade worth making to satisfy a spelling.
+- **`bg_engines`** is the list that will actually run, in order. `["local"]`
+  next to `"photoroom_configured": true` is not a contradiction — auto mode
+  never spends money on its own (see the photo-pipeline section) — but it does
+  mean every cutout is costing the ~107s an `isnet` inference takes on
+  `shared-cpu-2x`, with a paid engine sitting configured and unused.
+  [Pixian.ai](https://pixian.ai) is a pay-per-image background-removal API at
+  roughly a tenth of Photoroom's price; setting `PIXIAN_API_ID` +
+  `PIXIAN_API_SECRET` moves auto mode onto it with **no code change** and
+  keeps the local model as its in-chain fallback. `BG_ENGINE=photoroom` opts
+  into the key already there instead. Either turns ~107s per photo into a
+  couple of seconds; both cost money per image, which is exactly why neither
+  switches itself on.
+- **`disk_free_mb`**, **`db`**, **`objstore_*`** and **`build`** cover the rest;
+  `health-watch.yml` already alerts on them every two hours.
+
 The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
 sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
 optional: photos are served from `/data` and eBay fetches those URLs at publish

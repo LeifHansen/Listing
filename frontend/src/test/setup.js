@@ -48,7 +48,3 @@ Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     return this.__ctx;
   },
 });
-
-export function callsOn(canvas) {
-  return canvas.getContext("2d").calls;
-}

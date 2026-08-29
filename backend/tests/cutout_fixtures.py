@@ -304,12 +304,6 @@ def spill(result: Image.Image, truth: Image.Image) -> float:
     return float((_bits(result) & outside).sum()) / float(outside.sum())
 
 
-def iou(result: Image.Image, truth: Image.Image) -> float:
-    a, t = _bits(result), _bits(truth)
-    union = (a | t).sum()
-    return float((a & t).sum()) / float(union) if union else 1.0
-
-
 def worst_hole(result: Image.Image, truth: Image.Image) -> float:
     """Largest solid chunk of the product that went missing, as a fraction of
     the product. Catches the failure an average cannot: a cutout can retain

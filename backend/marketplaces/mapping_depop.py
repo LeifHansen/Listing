@@ -56,11 +56,6 @@ def size_for(listing: Listing) -> str:
     return ""
 
 
-def select_photos(listing: Listing) -> list[str]:
-    """Depop takes at most MAX_PHOTOS — keep the seller's ordering."""
-    return (listing.images or [])[:MAX_PHOTOS]
-
-
 def build_product_payload(listing: Listing) -> dict:
     payload = {
         "title": truncate_title(listing.title),
