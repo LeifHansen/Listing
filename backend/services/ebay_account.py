@@ -42,10 +42,17 @@ class Reconciled(NamedTuple):
     conclusive -- eBay answered for every account-scoped field
     absent     -- fields eBay positively has NONE of. Nothing can be synced into
                   these; only the seller can create them, on eBay.
+    valid      -- {kind: {policy ids this account actually has}}, straight from
+                  the lookup this pass already paid for. The account-scoped
+                  fields above are not the only place a policy id is stored:
+                  a DRAFT carries its own shipping choice, and that one is
+                  reconciled nowhere. Handing the set back lets the publish
+                  path check it without buying the lookup a second time.
     """
     changes: dict
     conclusive: bool
     absent: list
+    valid: dict = {}
 
 
 def reconcile_account_settings(
@@ -112,7 +119,7 @@ def reconcile_account_settings(
             # to remove. When known is None we have no opinion, which is the
             # long-standing connect-time behaviour.
             out[field] = discovered[field]
-    return Reconciled(out, conclusive, absent)
+    return Reconciled(out, conclusive, absent, valid_policies)
 
 
 # How long a verified set of account-scoped ids is trusted before the next
@@ -145,6 +152,61 @@ def note_verified(uid: str, now: Optional[float] = None) -> None:
         _verified[uid] = now
 
 
+# The policy ids each account actually has, from the last verify pass. This
+# exists because ACCOUNT_SCOPED is not the whole story: a DRAFT stores its own
+# `fulfillment_policy_id` (the editor's and the bulk card's Shipping dropdown),
+# and the repair pass has never looked at it. A draft created while another
+# eBay account was connected therefore carries that account's policy id for
+# ever, and publishes it on every attempt — every listing failing identically,
+# on an account whose own API checks all come back clean.
+_valid_policies: dict[str, tuple[float, dict]] = {}
+
+
+def remember_valid_policies(uid: str, valid: dict,
+                            now: Optional[float] = None) -> None:
+    """Keep what the verify pass already learned, for the publish path."""
+    if not uid or not valid:
+        return
+    with _verified_lock:
+        _valid_policies[uid] = (time.time() if now is None else now, valid)
+
+
+def known_policy_ids(uid: str, kind: str,
+                     now: Optional[float] = None) -> Optional[set]:
+    """The ids of `kind` this account has, or None for "we don't know".
+
+    None is the important half: an unread or expired answer must leave a saved
+    id alone. Replacing a policy the seller chose because we could not reach
+    eBay is the same class of bug as keeping a foreign one.
+    """
+    if not uid:
+        return None
+    now = time.time() if now is None else now
+    with _verified_lock:
+        at, valid = _valid_policies.get(uid, (0.0, {}))
+    if not valid or (now - at) >= VERIFY_TTL:
+        return None
+    known = valid.get(kind)
+    return known if known else None
+
+
+def usable_policy_id(uid: str, kind: str, wanted: str, fallback: str) -> str:
+    """`wanted` if this account really has it, else `fallback`.
+
+    Only ever downgrades to the account default, and only on a definite
+    answer: an id we cannot check is passed through untouched.
+    """
+    wanted = (wanted or "").strip()
+    if not wanted:
+        return fallback
+    known = known_policy_ids(uid, kind)
+    if known is None or wanted in known:
+        return wanted
+    log.warning("ebay: draft carried a %s policy id this account does not "
+                "have (%s) — falling back to the account default", kind, wanted)
+    return fallback
+
+
 # Which account-scoped settings eBay says this seller has NONE of, from the
 # last conclusive pass. Cached beside the verify clock and for the same reason:
 # it is the answer to "why is this slot still empty after a sync", and the
@@ -174,6 +236,7 @@ def forget_verified(uid: Optional[str] = None) -> None:
             _verified.clear()
             _absent.clear()
             _block_scope.clear()
+            _valid_policies.clear()
         else:
             _verified.pop(uid, None)
             _absent.pop(uid, None)
@@ -181,6 +244,12 @@ def forget_verified(uid: Optional[str] = None) -> None:
             # next one: carrying the verdict across a switch would tell a
             # healthy account it is blocked.
             _block_scope.pop(uid, None)
+            # Policy ids belong to the account that was connected even more
+            # literally: kept across a switch, they would vet the NEW
+            # account's drafts against the OLD account's policies — rewriting
+            # a valid choice to a foreign default, which is the exact bug the
+            # check exists to prevent, inverted.
+            _valid_policies.pop(uid, None)
 
 
 def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:

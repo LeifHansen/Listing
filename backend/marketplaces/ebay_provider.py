@@ -118,6 +118,11 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
         result = ebay_account.reconcile_account_settings(
             access_token, acct, discovered, fill_blanks=True)
         changes, conclusive = result.changes, result.conclusive
+        # This pass already asked eBay which policies the account has. Keep
+        # the answer: it is the only thing that can vet the shipping policy id
+        # stored on a DRAFT, which is account-scoped like the others but lives
+        # outside `acct` and so was never reconciled with them.
+        ebay_account.remember_valid_policies(uid, result.valid)
     except Exception as exc:  # noqa: BLE001 - never block a publish on this
         log.warning("ebay: policy verification failed for %s: %s", uid, exc)
         return acct

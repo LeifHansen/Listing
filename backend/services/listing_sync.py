@@ -27,7 +27,7 @@ from typing import Callable, Optional
 from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from . import ebay_trading, notifications, taxonomy
+from . import ebay_account, ebay_trading, notifications, taxonomy
 from .ebay_trading import AlreadyListedError, TradingError
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
@@ -564,8 +564,20 @@ def publish_policies(listing: Listing, creds: dict) -> dict:
     the real publish was — a probe that differs anywhere is a probe answering
     a different question.
     """
-    return {"fulfillment_policy_id": (listing.fulfillment_policy_id
-                                      or creds.get("fulfillment_policy_id")),
+    # The draft's own shipping choice is the ONE policy id the account repair
+    # never sees: it lives on the listing, not on the account, so a draft made
+    # while another eBay account was connected keeps that account's id for
+    # ever and re-sends it on every publish. eBay rejects another seller's
+    # profile id outright, which looks — from every screen in this app — like
+    # the account being blocked rather than one stale field on one draft.
+    # So it is checked here, against what the last verify pass saw, and falls
+    # back to the account default when this account provably has no such
+    # policy. An id we could not check is passed through untouched.
+    chosen = ebay_account.usable_policy_id(
+        str(creds.get("_uid") or ""), "fulfillment",
+        listing.fulfillment_policy_id or "",
+        creds.get("fulfillment_policy_id") or "")
+    return {"fulfillment_policy_id": chosen or creds.get("fulfillment_policy_id"),
             "payment_policy_id": creds.get("payment_policy_id"),
             "return_policy_id": creds.get("return_policy_id")}
 
