@@ -652,6 +652,10 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                  item_id, idempotency_key)
         res = {"published": True, "listing_id": item_id, "already_listed": True,
                "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    # eBay moved the listing to a live category (see create_listing): store
+    # what it actually filed, not what we asked for.
+    if res.get("category_id"):
+        listing.category_id = res["category_id"]
     # source="ebay" is what routes later edits down the Trading path, exactly
     # like a listing imported from the seller's store.
     listing.source = "ebay"

@@ -545,3 +545,35 @@ def test_a_warning_never_becomes_the_rejection_headline(monkeypatch):
         ebay_trading._call("AddFixedPriceItem", "tok", "<Item/>")
     assert "different category" not in str(exc.value)
     assert "cannot be listed or modified" in str(exc.value)
+
+
+def test_a_remapped_category_is_followed(monkeypatch):
+    """eBay retires categories and moves the listing itself. The id in our
+    record drives every later revise, aspect lookup and condition list, so a
+    remap we ignore points all of them at a category the listing left."""
+    body = (f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<AddFixedPriceItemResponse xmlns="{NS}"><Ack>Warning</Ack>'
+            f"<ItemID>110512345678</ItemID><CategoryID>20642</CategoryID>"
+            f"<Errors><SeverityCode>Warning</SeverityCode>"
+            f"<LongMessage>The category was mapped to a new one."
+            f"</LongMessage><ErrorCode>21916620</ErrorCode></Errors>"
+            f"</AddFixedPriceItemResponse>").encode()
+    monkeypatch.setattr(ebay_trading.httpx, "post", lambda *a, **k: _Resp(body))
+    listing = _listing()
+    listing.category_id = "13961"  # what we asked for
+    res = ebay_trading.create_listing("tok", listing, ["https://x/1.jpg"],
+                                      postal_code="97201")
+    assert res["listing_id"] == "110512345678"
+    assert res["category_id"] == "20642"
+
+
+def test_an_unchanged_category_is_not_reported_as_a_remap(monkeypatch):
+    body = (f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<AddFixedPriceItemResponse xmlns="{NS}"><Ack>Success</Ack>'
+            f"<ItemID>110512345678</ItemID><CategoryID>20642</CategoryID>"
+            f"</AddFixedPriceItemResponse>").encode()
+    monkeypatch.setattr(ebay_trading.httpx, "post", lambda *a, **k: _Resp(body))
+    listing = _listing()
+    listing.category_id = "20642"
+    assert "category_id" not in ebay_trading.create_listing(
+        "tok", listing, [], postal_code="97201")

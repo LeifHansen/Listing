@@ -138,17 +138,23 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         root = ET.fromstring(resp.content)
     except ET.ParseError as exc:
         raise TradingError(f"eBay sent an unreadable response for {call}.") from exc
+    graded = [((_text(e, "SeverityCode") or "").lower(), e)
+              for e in _findall(root, "Errors")]
+    errors = [e for sev, e in graded if sev == "error"]
+    # Warnings used to be dropped here without even a log line, on failures
+    # AND on successes. On a rejection they are sometimes the only place the
+    # cause is named; on an acceptance they are how eBay says it changed
+    # something — above all that it REMAPPED the category (eBay retires
+    # categories and moves the listing itself when CategoryMappingAllowed is
+    # true, which every publish here sets). Silently, the app then held an id
+    # eBay had already replaced.
+    warnings = [e for sev, e in graded if sev != "error"]
     ack = (_text(root, "Ack") or "").lower()
-    if ack in ("failure", "partialfailure"):
-        graded = [((_text(e, "SeverityCode") or "").lower(), e)
-                  for e in _findall(root, "Errors")]
-        errors = [e for sev, e in graded if sev == "error"]
-        # Warnings on a FAILED call used to be dropped here without even a log
-        # line. On eBay's catch-all rejections they are sometimes the only
-        # place the real cause is named, and they cost nothing to keep.
-        warnings = [e for sev, e in graded if sev != "error"]
-        if errors:
-            raise _failure(call, root, errors, warnings)
+    if ack in ("failure", "partialfailure") and errors:
+        raise _failure(call, root, errors, warnings)
+    if warnings:
+        log.info("trading: %s ok with %d warning(s): %s", call, len(warnings),
+                 " | ".join(_error_line(w) for w in warnings)[:400])
     return root
 
 
@@ -671,8 +677,19 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     if not item_id:
         raise TradingError("eBay accepted the listing but returned no item id.")
     log.info("trading: %s ok item=%s", call, item_id)
-    return {"published": True, "listing_id": item_id,
-            "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    out = {"published": True, "listing_id": item_id,
+           "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    # eBay retires categories and moves the listing to the current one on its
+    # own (CategoryMappingAllowed, which this request always sets). When it
+    # says so, follow it: the id in our record is the one every later revise,
+    # aspect lookup and condition list is built from, and a stale one sends
+    # all of them to a category the listing is no longer in.
+    remapped = _text(root, "CategoryID")
+    if remapped and remapped != (listing.category_id or "").strip():
+        log.warning("trading: eBay remapped category %s -> %s (item %s)",
+                    listing.category_id or "?", remapped, item_id)
+        out["category_id"] = remapped
+    return out
 
 
 def build_add_item(listing: Listing, image_urls: list[str],

@@ -1,10 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks,
   RefreshCw, ExternalLink, Ban, Trash2,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -132,6 +132,54 @@ function MultiResultPanel({ r, onFix }) {
   );
 }
 
+/* "Ask eBay why" — for the one rejection eBay refuses to explain.
+ *
+ * Error 240 means either "this account is held" or "eBay dislikes the words
+ * in this listing", and says which about as often as never. The server can
+ * settle it by re-putting the listing through eBay's own dry-run call twice,
+ * once with plain wording — but only on the failure path, and only when the
+ * account APIs came up empty. This is the same diagnosis on demand, with
+ * eBay's answers shown verbatim so they can be quoted to eBay support. */
+function AskEbayWhy({ w }) {
+  const [state, setState] = useState(null); // null | {loading} | {data} | {error}
+  const ask = async () => {
+    setState({ loading: true });
+    try {
+      setState({ data: await postJson("/api/ebay/diagnose-block", {
+        session_id: w.sessionId, listing: w.collect(), mode: "live" }) });
+    } catch (e) {
+      setState({ error: e.message });
+    }
+  };
+  const d = state?.data;
+  return (
+    <div className="mt-3">
+      <Button variant="soft" size="sm" onClick={ask} disabled={state?.loading}>
+        <ListChecks aria-hidden />
+        {state?.loading ? "Asking eBay…" : "Ask eBay why"}
+      </Button>
+      {state?.error && (
+        <p className="mt-2 text-sm text-ink-secondary">
+          Couldn't ask eBay: {state.error}
+        </p>
+      )}
+      {d && (
+        <div className="mt-3 text-sm text-ink">
+          <p className="font-semibold">{d.verdict || "eBay gave no verdict."}</p>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs font-semibold text-ink-secondary">
+              Everything eBay said (for eBay Customer Service)
+            </summary>
+            <pre className="mt-2 text-xs bg-bg-sunken rounded-[10px] p-3 overflow-x-auto max-h-72 whitespace-pre-wrap">
+              {JSON.stringify(d, null, 2)}
+            </pre>
+          </details>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Publish — the last card: what will apply, the two big buttons, and a
 // friendly "what to fix" panel when eBay pushes back.
 export function PublishCard({ w }) {
@@ -230,6 +278,9 @@ export function PublishCard({ w }) {
                 : [{ target: "generic", title: r.message || "eBay rejected the listing", fix: typeof r.detail === "string" ? r.detail : "" }]}
               onFix={onFix}
             />
+            {(r.issues || []).some((i) => i.target === "account") && (
+              <AskEbayWhy w={w} />
+            )}
             {r.detail && (
               <details className="mt-3">
                 <summary className="cursor-pointer text-xs font-semibold text-ink-secondary">
