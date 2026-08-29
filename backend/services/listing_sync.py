@@ -27,7 +27,8 @@ from typing import Callable, Optional
 from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from . import ebay_account, ebay_trading, notifications, taxonomy
+from . import (ebay_account, ebay_trading, notifications, sync_merge,
+               taxonomy)
 from .ebay_trading import AlreadyListedError, TradingError
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
@@ -201,6 +202,39 @@ def _is_blank(value) -> bool:
     if isinstance(value, (int, float)):
         return value == 0
     return len(value) == 0 if hasattr(value, "__len__") else False
+
+
+def _reconcile(prior: Optional[dict], merged: dict, fresh: dict) -> dict:
+    """Three-way reconcile `merged` against eBay, and re-baseline the shadow.
+
+    `_merge` above is the legacy field-precedence pass and stays as the
+    starting point; this decides the content fields it deliberately leaves
+    alone, using the shadow of what eBay last said.
+
+    Best-effort: a record that cannot be reconciled keeps exactly what
+    `_merge` produced, which is the behaviour that shipped before. Losing a
+    remote edit is bad; failing an entire store import over one odd record is
+    worse.
+    """
+    shadow = (prior or {}).get("remote_shadow") or None
+    try:
+        local = Listing(**{k: v for k, v in merged.items()
+                           if k in Listing.model_fields})
+        result = sync_merge.three_way(local, shadow, fresh)
+    except Exception as exc:  # noqa: BLE001 - never fail a whole import
+        log.info("sync: could not reconcile %s: %s",
+                 fresh.get("ebay_listing_id") or "?", exc)
+        return merged
+    out = result.listing.model_dump()
+    # The new base: what eBay is telling us right now. Written whether or not
+    # anything changed, so the next sync compares against the latest agreement.
+    out["remote_shadow"] = sync_merge.shadow_from(fresh)
+    out["conflicts"] = result.conflicts
+    if result.conflicts:
+        log.info("sync: %s has %d field(s) changed on both sides: %s",
+                 fresh.get("ebay_listing_id") or "?", len(result.conflicts),
+                 ", ".join(sorted(result.conflicts)))
+    return out
 
 
 def _merge(existing: Optional[dict], fresh: dict, *, own_source: bool = False) -> dict:
@@ -502,6 +536,11 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         rid = prior["id"] if prior else mirror_id
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
+        # Reconcile against what eBay last said, so a change made in Seller
+        # Hub actually arrives instead of being kept out by a non-blank local
+        # copy — and so a field BOTH sides changed becomes a visible conflict
+        # rather than one of them silently winning.
+        data = _reconcile(prior.get("listing") if prior else None, data, fresh)
         # Whose store this item is in. Written on every sync, so a record made
         # before the field existed is labelled the first time it's seen again.
         data["ebay_account"] = account

@@ -197,6 +197,18 @@ class Listing(BaseModel):
     # on a revise as the new AVAILABLE stock, so re-sending an import-time
     # total puts already-sold units back on sale.
     #
+    # What eBay last told us this listing said — the BASE for reconciling it.
+    #
+    # Without it there are only two versions (ours and eBay's), and two
+    # versions cannot tell "the seller edited this here" from "we are holding
+    # an old copy of it": both look like a difference. That is why the old
+    # sync kept every content field local unless blank, and why a revise then
+    # pushed a stale title back over a newer one. See services/sync_merge.py.
+    remote_shadow: dict = Field(default_factory=dict)
+    # Fields the seller and eBay have BOTH changed since the shadow, held as
+    # {"field": {"local": ..., "remote": ...}}. Neither value may be chosen
+    # silently, and a conflicted field is never included in a revise.
+    conflicts: dict = Field(default_factory=dict)
     # Names are Listing field names ("title", "price", "quantity", ...).
     #
     # A sorted list rather than a set because every listing round-trips

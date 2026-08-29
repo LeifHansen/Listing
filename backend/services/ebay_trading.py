@@ -600,23 +600,41 @@ def item_id_for_sku(token: str, sku: str) -> str:
     return _text(item, "ItemID") if item is not None else ""
 
 
-def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> list[str]:
-    """The <Item> children shared by create and revise: the listing's content."""
+def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
+                 only: Optional[set[str]] = None) -> list[str]:
+    """The <Item> children shared by create and revise: the listing's content.
+
+    `only` restricts the output to the named Listing fields, and is how a
+    revise stays minimal. A create passes None and sends everything, because
+    it has no remote state to overwrite.
+
+    Every field this omits on a revise is a field eBay keeps as it is. Every
+    field it INCLUDES is one eBay overwrites — with a value this app may have
+    read weeks ago. That is the difference between "update the price" and
+    "replace the listing with my copy of it".
+    """
+    def wanted(name: str) -> bool:
+        return only is None or name in only
+
     parts: list[str] = []
-    if listing.title:
+    if listing.title and wanted("title"):
         parts.append(f"<Title>{_esc(listing.title[:TITLE_MAX_CHARS])}</Title>")
-    if listing.description:
+    if listing.description and wanted("description"):
         parts.append(f"<Description>{_cdata(listing.description)}</Description>")
-    if listing.category_id:
+    if listing.category_id and wanted("category_id"):
         parts.append("<PrimaryCategory><CategoryID>"
                      f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
     cond_id = _CONDITION_TO_ID.get((listing.condition or "").upper())
-    if cond_id:
+    if cond_id and wanted("condition"):
         parts.append(f"<ConditionID>{cond_id}</ConditionID>")
-    if listing.condition_description:
+    if listing.condition_description and wanted("condition_description"):
         parts.append("<ConditionDescription>"
                      f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
-    specifics = [s for s in listing.item_specifics if s.name.strip() and s.value.strip()]
+    if not wanted("item_specifics") and not wanted("brand"):
+        specifics = []
+    else:
+        specifics = [s for s in listing.item_specifics
+                     if s.name.strip() and s.value.strip()]
     # CRITICAL: identify, the maker double-check, and the editor's Brand field
     # all write the brand to listing.brand — not to a specifics row. The old
     # Inventory path seeded the Brand aspect from it (services/ebay.py); this
@@ -646,7 +664,10 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> li
             + "</NameValueList>"
             for name, values in list(grouped.items())[:60])
         parts.append(f"<ItemSpecifics>{rows}</ItemSpecifics>")
-    if image_urls:
+    # PictureDetails REPLACES the listing's whole photo set, so sending it on
+    # an unrelated edit silently discards anything the seller added on eBay
+    # since the last sync.
+    if image_urls and (wanted("image_urls") or wanted("images")):
         urls = "".join(f"<PictureURL>{_esc(u)}</PictureURL>" for u in image_urls[:24])
         parts.append(f"<PictureDetails>{urls}</PictureDetails>")
     return parts
@@ -914,10 +935,18 @@ def build_revise_item(listing: Listing, item_id: str,
     """
     if not item_id:
         raise TradingError("This listing has no eBay item id to update.")
+    # Only what the seller actually changed. Everything else this app holds is
+    # a snapshot of eBay taken at the last sync, and sending a snapshot is not
+    # a no-op — it overwrites whatever eBay has now, which may be newer
+    # (Seller Hub, the eBay app, a category remap eBay applied itself). A
+    # seller who fixed a title on eBay and later changed only the price here
+    # had the stale title pushed back over their newer one, and was told the
+    # update succeeded.
+    dirty = set(listing.dirty_fields)
     parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
-    parts.extend(_item_fields(listing, image_urls))
+    parts.extend(_item_fields(listing, image_urls, only=dirty))
     is_auction = (listing.listing_format or "").upper().startswith("AUCTION")
-    if listing.price is not None and listing.price > 0:
+    if "price" in dirty and listing.price is not None and listing.price > 0:
         # On an auction the editable price is Buy It Now; the start price can't
         # be revised once bids exist, so it's left alone.
         tag = "BuyItNowPrice" if is_auction else "StartPrice"
@@ -935,7 +964,7 @@ def build_revise_item(listing: Listing, item_id: str,
     # takes a listing out of stock was the one that never reached eBay.
     if listing.is_dirty("quantity") and listing.quantity is not None:
         parts.append(f"<Quantity>{max(0, int(listing.quantity))}</Quantity>")
-    if listing.fulfillment_policy_id:
+    if "fulfillment_policy_id" in dirty and listing.fulfillment_policy_id:
         # The seller picked a shipping service for THIS listing — send the
         # matching business-policy profile so the revise actually changes it.
         parts.append("<SellerProfiles><SellerShippingProfile><ShippingProfileID>"

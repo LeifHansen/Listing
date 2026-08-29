@@ -126,3 +126,31 @@ def test_server_owned_state_is_never_a_seller_edit():
     for name in ("ebay_listing_id", "source", "marketplaces", "watch_count",
                  "sold_quantity", "view_url", "ebay_account"):
         assert name not in dirty_fields.TRACKED, name
+
+
+def test_marks_survive_the_save_then_publish_round_trip():
+    """The end-to-end risk created by making revise minimal.
+
+    A seller edits in the app, saves, then publishes. The save stores the new
+    value, so by publish time the incoming listing and the stored one AGREE —
+    a diff at that moment finds nothing changed. If the marks did not carry
+    across, the revise would send an empty payload and the seller's edit would
+    silently never reach eBay, with a success message on screen.
+
+    Accumulating against the stored record's own marks is what prevents that.
+    """
+    stored = _stored()
+
+    # Save: the seller changes the title.
+    saved = dirty_fields.accumulate(
+        Listing(**{**stored, "title": "Green lamp"}), stored)
+    assert saved.is_dirty("title")
+
+    # Publish: the client sends the same listing back, now identical to what
+    # was stored a moment ago.
+    after_save = saved.model_dump()
+    at_publish = dirty_fields.accumulate(Listing(**after_save), after_save)
+
+    assert dirty_fields.changed_fields(Listing(**after_save), after_save) == []
+    assert at_publish.is_dirty("title"), \
+        "the edit was lost between save and publish; the revise would be empty"
