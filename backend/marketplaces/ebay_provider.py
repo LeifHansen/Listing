@@ -182,8 +182,11 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
     acct = _with_current_policies(uid, acct, access_token)
     return {
         "access_token": access_token,
-        # Which eBay account this token is for. Everything that reads or writes
-        # a listing on eBay is scoped by it — see listing_sync.belongs_to.
+        # Which eBay account this token is for. Everything that reads or
+        # writes a listing on eBay is scoped by it — see listing_sync.owns.
+        # The immutable id is what actually decides; the username is kept for
+        # display and for records too old to carry an id.
+        "ebay_user_id": acct.get("ebay_user_id", "") or "",
         "ebay_username": acct.get("ebay_username", "") or "",
         "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
         "payment_policy_id": acct.get("payment_policy_id", ""),
@@ -706,6 +709,9 @@ class EbayProvider:
             if not listing.ebay_account:
                 listing.ebay_account = ((creds or {}).get("ebay_username")
                                         or "").strip()
+            if not listing.ebay_account_id:
+                listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
+                                           or "").strip()
             # eBay took the edit, so the record and the listing agree again
             # and there is nothing left pending. Cleared here — on acceptance
             # — and not when the request was built: a revise that failed
@@ -852,6 +858,9 @@ class EbayProvider:
             if not listing.ebay_account:
                 listing.ebay_account = ((creds or {}).get("ebay_username")
                                         or "").strip()
+            if not listing.ebay_account_id:
+                listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
+                                           or "").strip()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", ctx.uid)
             storage.save_listing(session_id, listing)

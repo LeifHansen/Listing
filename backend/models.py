@@ -150,6 +150,12 @@ class Listing(BaseModel):
     # every sync happily re-confirmed the old account's listings as live under
     # the new one.
     ebay_account: str = ""
+    # eBay's IMMUTABLE account id for the same account. `ebay_account` above
+    # is a display name the seller can change, so it cannot decide ownership:
+    # a rename orphans the record, and a released-then-reused handle can make
+    # it match a different seller. This is what listing_sync.owns prefers.
+    # "" on records written before the field existed.
+    ebay_account_id: str = ""
     # ISO-8601 UTC timestamp of when the listing went live on eBay, carried
     # over on import so "most recent first" can mean what the seller expects.
     ebay_start_time: str = ""

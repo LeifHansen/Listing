@@ -86,19 +86,105 @@ def named_account_of(listing: Listing | dict) -> str:
     return "" if owner == UNKNOWN_ACCOUNT else owner
 
 
-def belongs_to(listing: Listing | dict, account: str) -> bool:
-    """True when this record may be read or written on `account`'s behalf.
+def account_id_of(listing: Listing | dict) -> str:
+    """The IMMUTABLE eBay account id a record is stamped with ("" = none).
 
-    A record with no account recorded is legacy — it predates the field, and
-    the only account it can plausibly belong to is the one connected when it
-    was made, so it passes. A record stamped with a DIFFERENT account never
-    does: its item id belongs to another seller, and eBay's GetItem will
-    happily answer for it anyway (item detail is public), which is precisely
-    how a second connected account kept re-confirming the first account's
-    listings as live.
+    Records written before this field existed have only `ebay_account`, the
+    seller's mutable username. See `owns` for how the two are combined.
     """
-    owner = account_of(listing)
-    return not owner or not account or owner == (account or "").strip()
+    value = (listing.get("ebay_account_id") if isinstance(listing, dict)
+             else getattr(listing, "ebay_account_id", ""))
+    return (value or "").strip()
+
+
+def _identity(account) -> tuple[str, str]:
+    """(immutable id, username) from whatever the caller holds.
+
+    Accepts a creds bundle, an account row, or a bare username string — the
+    call sites hold different things and none of them should have to care.
+    """
+    if isinstance(account, dict):
+        return ((account.get("ebay_user_id") or "").strip(),
+                (account.get("ebay_username") or "").strip())
+    return "", (account or "").strip()
+
+
+def owns(listing: Listing | dict, account) -> bool:
+    """True when this record may be READ on `account`'s behalf.
+
+    Ownership is decided on eBay's immutable userId whenever both sides carry
+    one, with no username fallback: a username agreeing does not rescue an id
+    that disagrees, because handles get renamed and re-registered.
+
+    A record stamped with an immutable id is never matched by a caller who
+    has none. That closes the fail-open that mattered most — a connected
+    account whose identity could not be read (the identity scope 403s on
+    older connections) used to match EVERY record, and since GetItem answers
+    for any seller's item, a status sweep then re-confirmed another account's
+    listings as live under this one.
+
+    Records that predate immutable ids fall back to the username, which is
+    all they have. Refusing those outright would strand sellers who did
+    nothing wrong, so they stay readable — but see `may_write`.
+    """
+    owner_id = account_id_of(listing)
+    caller_id, caller_name = _identity(account)
+    if owner_id:
+        return bool(caller_id) and owner_id == caller_id
+    owner_name = account_of(listing)
+    if owner_name == UNKNOWN_ACCOUNT:
+        # "We could not name the account" must never match whoever is
+        # connected now — that is the sentinel's entire purpose.
+        return False
+    return not owner_name or not caller_name or owner_name == caller_name
+
+
+def may_write(listing: Listing | dict, account) -> bool:
+    """True when this record may be WRITTEN on `account`'s behalf.
+
+    Stricter than `owns`, because the failures are not symmetric: showing a
+    seller a listing that turns out not to be theirs is a confusing screen,
+    while REVISING one is an edit to a stranger's live listing that no later
+    correction undoes.
+
+    So a write needs the caller to be identified, and needs the record to
+    agree — by immutable id where there is one, by a named username where the
+    record is too old to have anything better.
+    """
+    caller_id, caller_name = _identity(account)
+    if not caller_id and not caller_name:
+        # Nothing to prove ownership against.
+        return False
+    owner_id = account_id_of(listing)
+    if owner_id:
+        return bool(caller_id) and owner_id == caller_id
+    owner_name = account_of(listing)
+    if owner_name == UNKNOWN_ACCOUNT:
+        return False
+    if not owner_name:
+        # A legacy record with no owner recorded. The connected account is
+        # the only one it can plausibly belong to, and refusing would make
+        # every pre-existing listing permanently uneditable.
+        return True
+    return bool(caller_name) and owner_name == caller_name
+
+
+def belongs_to(listing: Listing | dict, account: str) -> bool:
+    """Deprecated alias for `owns`, kept for callers that hold only a name.
+
+    This used to be the ownership rule itself, and it decided on the seller's
+    eBay USERNAME — a display name they can change. Worse, it returned True
+    when EITHER side was blank, so a connected account whose identity could
+    not be read (the identity scope 403s on older connections) matched every
+    record in the database. Since eBay's GetItem answers for any seller's
+    item, a status sweep then re-confirmed another account's listings as live
+    under this one.
+
+    It delegates now so there is exactly ONE ownership rule. Prefer `owns`
+    for reads and `may_write` for writes, passing the creds bundle so the
+    immutable account id is available.
+    """
+    return owns(listing, account)
 
 
 def _is_blank(value) -> bool:
@@ -366,11 +452,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # are meaningless here (worse than meaningless — a collision would merge
     # two different sellers' listings into one row).
     known = {r["id"]: r for r in all_known
-             if belongs_to(r.get("listing") or {}, account)}
+             if owns(r.get("listing") or {}, account)}
     foreign = len(all_known) - len(known)
     if foreign:
         log.info("sync: user=%s skipping %d record(s) from another eBay "
-                 "account (connected=%s)", user_id, foreign, account or "?")
+                 "account (connected=%s)", user_id, foreign,
+                 _identity(account)[1] or _identity(account)[0] or "?")
     if len(all_known) >= _KNOWN_LIMIT:
         # Never silently: past this the dedupe is working from a partial view.
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
@@ -481,7 +568,7 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
             return rec, None
 
     records = [r for r in records
-               if belongs_to(r.get("listing") or {}, account)]
+               if owns(r.get("listing") or {}, account)]
     probed = []
     if records:
         with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(records))) as pool:
@@ -546,7 +633,7 @@ def reconcile_recent(token: str, user_id: str, records: list[dict],
     sales = recent_sales(token)
     finished = set(sales) | _ids(ebay_trading.unsold_listing_ids, "ended")
     candidates = [r for r in records
-                  if belongs_to(r.get("listing") or {}, account)
+                  if owns(r.get("listing") or {}, account)
                   and _item_id_of(r.get("listing") or {}) in finished]
     if not candidates:
         return 0, set()

@@ -4453,10 +4453,13 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # token is concerned — and since eBay answers item lookups for anyone, a
     # sweep over it doesn't fail, it just keeps reporting the old store as
     # live and healthy under the new account.
-    account = (creds or {}).get("ebay_username", "")
+    # The whole creds bundle, not just the username: ownership is decided on
+    # eBay's immutable account id where the record carries one, and falls back
+    # to the name only for records too old to have it (listing_sync.owns).
+    account = creds or {}
     live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
             if i.get("status") in ("published", "live")
-            and listing_sync.belongs_to(i.get("listing") or {}, account)]
+            and listing_sync.owns(i.get("listing") or {}, account)]
     changed = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
     # lists name every item that finished recently, so a listing that ended
