@@ -369,8 +369,16 @@ class _Draft:
 
 def _refusing(*, plain: bool, real: bool = True):
     """A verify() that refuses with a 240 — `real` for the listing's own
-    wording, `plain` for the neutral rewrite."""
-    def verify(candidate):
+    wording, `plain` for the neutral rewrite.
+
+    It accepts the verifier's real keyword arguments and ignores them, so a
+    `plain=True` double models an account that refuses everything: the plain
+    rewrite AND every payload variant the probe goes on to try. Without them
+    it would model a verifier too old to answer those questions, which is a
+    different verdict entirely.
+    """
+    def verify(candidate, *, with_policies: bool = True,
+               with_photos: bool = True):
         blocked = plain if candidate.title == ebay_account.NEUTRAL_TITLE else real
         if blocked:
             raise ebay_trading.TradingError(E240, code="240")
@@ -451,9 +459,9 @@ def test_an_account_verdict_is_reused_across_a_bulk_run():
     calls = []
     inner = _refusing(plain=True)
 
-    def verify(candidate):
+    def verify(candidate, **kwargs):
         calls.append(candidate.title)
-        inner(candidate)
+        inner(candidate, **kwargs)
 
     creds = dict(CREDS, _uid="u1")
     for _ in range(7):
@@ -461,7 +469,9 @@ def test_an_account_verdict_is_reused_across_a_bulk_run():
             _blocked(), creds, listing=_Draft(), verify=verify,
             payments=OK_PAYMENTS, privileges=NO_PRIV)
         assert "refusing every listing" in issues[0]["title"]
-    assert len(calls) == 1
+    # The first draft pays for the walk: the plain rewrite plus one probe per
+    # payload dimension. The other six reuse its verdict and ask nothing.
+    assert len(calls) == 1 + len(ebay_account._PAYLOAD_PROBES)
 
 
 def test_a_wording_verdict_is_never_reused():
@@ -606,3 +616,189 @@ def test_an_unchanged_category_is_not_reported_as_a_remap(monkeypatch):
     listing.category_id = "20642"
     assert "category_id" not in ebay_trading.create_listing(
         "tok", listing, [], postal_code="97201")
+
+
+# --- the production case, end to end ----------------------------------------
+#
+# Seven drafts, an account eBay's own APIs call healthy, and a 240 carrying no
+# <Message>. This is the exact shape the live logs showed:
+#
+#   trading: AddFixedPriceItem rejected — code=240 ... detail=(none)
+#   ebay: publish blocked by error 240; payments=OPTED_IN registered=True
+#         limit={'amount': '50000', 'currency': 'USD', 'quantity': 5000}
+#
+# Every account question comes back clean, so the probe's verdict is the ONLY
+# information the seller can act on — and it has to arrive first, because the
+# card renders one line.
+
+HEALTHY_PRIV = lambda _t: {                                    # noqa: E731
+    "registration_complete": True,
+    "selling_limit": {"amount": "50000", "currency": "USD", "quantity": 5000},
+}
+
+
+def test_the_live_failure_puts_the_verdict_on_the_card():
+    """A healthy account + a cause-less 240 => the probe's verdict leads."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=_refusing(plain=True),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "refusing every listing from this account" in issues[0]["title"]
+    assert issues[-1]["placeholder"] is True
+
+
+def test_a_warning_cannot_bury_the_verdict():
+    """The regression that put a content-free headline on the card.
+
+    `detail` carries warnings, and a warning is almost always present. Reading
+    it as eBay's reason marked the rejection "explained", which (a) quoted the
+    warning as the cause and (b) cleared the placeholder flag — so the verdict
+    lost the ordering and the seller got "eBay won't accept this listing" with
+    nothing whatsoever underneath it.
+    """
+    refused = ebay_trading.TradingError(
+        E240, code="240",
+        detail="Warning: the listing was submitted with a shorter handling time.")
+    issues = ebay_account.publish_block_issues(
+        refused, CREDS, listing=_Draft(), verify=_refusing(plain=True),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "refusing every listing from this account" in issues[0]["title"]
+    assert "handling time" not in issues[0]["title"]
+    assert "handling time" not in issues[0]["fix"]
+
+
+def test_a_wording_verdict_reaches_the_card_too():
+    """The same path when eBay's objection is the words, not the account."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_Draft(), verify=_refusing(plain=False),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "title" in issues[0]["title"].lower()
+    assert issues[0]["target"] == "title"
+
+
+# --- the payload probes -----------------------------------------------------
+#
+# "Not the words" was being reported as "the account", and a publish carries
+# plenty that is neither: the business policy ids (which come from the ACCOUNT,
+# not the draft, and so break every listing at once), the photo URLs, the item
+# specifics, the condition note. Telling a seller their account is held when
+# eBay would take the listing with one field changed sends them to argue with
+# Customer Service over something they could have fixed in a minute.
+
+class _FullDraft:
+    """A draft with the fields the payload probes vary."""
+
+    def __init__(self, title="Royal Stafford Sweetpea Teacup",
+                 description="Lovely.", item_specifics=("Type", "Teacup"),
+                 condition_description="Light crazing."):
+        self.title = title
+        self.description = description
+        self.item_specifics = list(item_specifics)
+        self.condition_description = condition_description
+
+    def model_copy(self, update):
+        return _FullDraft(
+            update.get("title", self.title),
+            update.get("description", self.description),
+            update.get("item_specifics", self.item_specifics),
+            update.get("condition_description", self.condition_description))
+
+
+def _refusing_unless(*, ok_without=None, inconclusive_at=None):
+    """A verifier that refuses everything with a 240 except the one variant
+    named by `ok_without` — the shape of eBay accepting a listing the moment
+    a single field is dropped."""
+    def verify(candidate, *, with_policies=True, with_photos=True):
+        state = {
+            "policies": not with_policies,
+            "photos": not with_photos,
+            "specifics": not candidate.item_specifics,
+            "condition": not candidate.condition_description,
+        }
+        for field, dropped in state.items():
+            if dropped and field == inconclusive_at:
+                raise ebay_trading.TradingError("Rate limited", code="21919144")
+            if dropped and field == ok_without:
+                return
+        raise ebay_trading.TradingError(E240, code="240")
+    return verify
+
+
+def test_a_bad_business_policy_is_not_called_an_account_hold():
+    """The regression this whole path exists to prevent: policy ids come from
+    the account, so a stale one fails every listing identically — which reads
+    exactly like a hold until you drop them and eBay says yes."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(),
+        verify=_refusing_unless(ok_without="policies"),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert issues[0]["target"] == "policies"
+    assert "business policies" in issues[0]["title"]
+    assert "account" not in issues[0]["title"].lower()
+
+
+def test_the_photos_can_be_the_cause():
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(),
+        verify=_refusing_unless(ok_without="photos"),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert issues[0]["target"] == "photos"
+
+
+def test_an_item_specific_can_be_the_cause():
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(),
+        verify=_refusing_unless(ok_without="specifics"),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert issues[0]["target"] == "specifics"
+
+
+def test_the_account_verdict_now_means_everything_was_tried():
+    """Only when dropping each part changes nothing is the account fair."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(),
+        verify=_refusing_unless(ok_without=None),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "refusing every listing from this account" in issues[0]["title"]
+    assert "no business policies" in issues[0]["fix"]
+
+
+def test_an_unfinished_walk_does_not_claim_the_account():
+    """eBay answering something else partway through leaves the rest unknown,
+    and the verdict has to say so instead of upgrading to a hold."""
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(),
+        verify=_refusing_unless(ok_without=None, inconclusive_at="policies"),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "not over its wording" in issues[0]["title"]
+    assert "refusing every listing" not in issues[0]["title"]
+
+
+def test_a_policy_verdict_is_reused_across_a_bulk_run():
+    """The ids are the account's, so seven drafts share one answer."""
+    calls = []
+
+    def counting(candidate, *, with_policies=True, with_photos=True):
+        calls.append(with_policies)
+        if not with_policies:
+            return
+        raise ebay_trading.TradingError(E240, code="240")
+
+    for _ in range(3):
+        issues = ebay_account.publish_block_issues(
+            _blocked(), {**CREDS, "_uid": "u1"}, listing=_FullDraft(),
+            verify=counting, payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+        assert issues[0]["target"] == "policies"
+    assert calls, "the first draft must actually ask eBay"
+    assert len(calls) <= 3, "the answer must not be re-bought per draft"
+
+
+def test_an_old_verifier_falls_back_instead_of_guessing():
+    """A verifier that predates the payload probes can't answer them; that is
+    unknown, not a hold."""
+    def old_style(candidate):
+        raise ebay_trading.TradingError(E240, code="240")
+
+    issues = ebay_account.publish_block_issues(
+        _blocked(), CREDS, listing=_FullDraft(), verify=old_style,
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
+    assert "not over its wording" in issues[0]["title"]

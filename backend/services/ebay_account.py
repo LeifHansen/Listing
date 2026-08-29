@@ -361,10 +361,17 @@ def _remembered_scope(uid: str, now: Optional[float] = None) -> str:
     return scope if scope and (now - at) < BLOCK_SCOPE_TTL else ""
 
 
+# Verdicts that are a property of the ACCOUNT rather than of one draft, and
+# so are safe to reuse across a bulk run. "policies" belongs here because the
+# ids come from the account, not the listing: every draft in the run is
+# carrying the same three, and re-probing per draft would buy nothing.
+_ACCOUNT_WIDE_SCOPES = frozenset({"account", "policies"})
+
+
 def _remember_scope(uid: str, scope: str, now: Optional[float] = None) -> None:
-    """Cache an ACCOUNT-level verdict only. "It's this listing's title" is true
+    """Cache an account-wide verdict only. "It's this listing's title" is true
     of one listing and would be a lie about the next one."""
-    if not uid or scope != "account":
+    if not uid or scope not in _ACCOUNT_WIDE_SCOPES:
         return
     with _verified_lock:
         _block_scope[uid] = (time.time() if now is None else now, scope)
@@ -395,8 +402,29 @@ def probe_block_scope(listing, verify: Optional[Callable[[Any], None]], *,
     if blocked is None:
         return None
     if blocked:
+        # "Not the words" is NOT the same as "the account". The probe has only
+        # varied the wording so far, and a publish carries plenty that isn't
+        # words: the business policy ids, the photo URLs, the item specifics,
+        # the condition. Any one of those can draw a 240, and calling that an
+        # account hold sends the seller to argue with eBay Customer Service
+        # about a listing eBay would take the moment one field changed. So
+        # keep asking, one field at a time, before blaming the account.
+        field = _probe_payload(listing, verify)
+        if field:
+            _remember_scope(uid, field)
+            log.warning("ebay: 240 probe — eBay refuses the listing's %s", field)
+            return field
+        if field is None:
+            # The walk stopped early: eBay started answering with something
+            # other than a 240, so the rest of the payload went unasked. Say
+            # only what was actually established — the wording is not it —
+            # rather than the full "we tried everything" verdict.
+            log.warning("ebay: 240 probe — wording ruled out; the rest of the "
+                        "payload could not be checked")
+            return "account_words"
         _remember_scope(uid, "account")
-        log.warning("ebay: 240 probe — the account refuses a plain listing too")
+        log.warning("ebay: 240 probe — the account refuses a plain listing "
+                    "with no policies, photos, specifics or condition either")
         return "account"
     # eBay would take this listing with plain wording, so the words are the
     # cause. One more probe says whether the title alone carries it.
@@ -412,16 +440,80 @@ def plain_wording(listing):
     return _reworded(listing, NEUTRAL_TITLE, NEUTRAL_DESCRIPTION)
 
 
+# What a publish carries besides its words, in the order worth suspecting.
+# Each entry drops exactly ONE thing from an already-plain listing: eBay
+# accepting the result names that thing as the cause, because it is the only
+# difference between the two requests.
+#
+# Policies lead because they are the part of the payload that does not come
+# from the draft at all — they are ids stored against the account, and an id
+# that belongs to a disconnected account, or to a policy since deleted on
+# eBay, is attached to every listing alike. That is exactly the shape of
+# "every publish fails identically while the listings themselves are fine".
+_PAYLOAD_PROBES: tuple[tuple[str, dict], ...] = (
+    ("policies", {"with_policies": False}),
+    ("photos", {"with_photos": False}),
+    ("specifics", {"listing": {"item_specifics": []}}),
+    ("condition", {"listing": {"condition_description": ""}}),
+)
+
+
+def _probe_payload(listing, verify: Callable[..., None]) -> Optional[str]:
+    """The first non-word part of the publish eBay stops refusing without.
+
+    Three answers, and they must stay distinct — conflating the last two is
+    how an app ends up telling a seller their account is held when all it
+    established was that the title was innocent:
+
+      "policies" / "photos" / ...  eBay accepted the listing without it
+      ""                           it refused every variant: the account
+      None                         the walk could not finish, so the rest of
+                                   the payload is simply unknown
+
+    An inconclusive answer (eBay replying with something other than a 240,
+    or a verifier too old to vary the field) ends the walk rather than moving
+    on: once eBay is saying something else, the comparison this rests on no
+    longer holds.
+    """
+    plain = plain_wording(listing)
+    for field, how in _PAYLOAD_PROBES:
+        candidate = plain
+        overrides = how.get("listing")
+        if overrides:
+            try:
+                candidate = plain.model_copy(update=dict(overrides))
+            except Exception as exc:  # noqa: BLE001 - a diagnosis, never a blocker
+                log.info("ebay: 240 probe could not vary %s: %s", field, exc)
+                return None
+        kwargs = {k: v for k, v in how.items() if k != "listing"}
+        refused = _refused(verify, candidate, **kwargs)
+        if refused is None:
+            return None
+        if not refused:
+            return field
+    return ""
+
+
 def _reworded(listing, title: str, description: str):
     """The same listing with different words — nothing else touched, so the
     probe differs from the real publish in exactly one dimension."""
     return listing.model_copy(update={"title": title, "description": description})
 
 
-def _refused(verify: Callable[[Any], None], candidate) -> Optional[bool]:
-    """Did eBay refuse this listing WITH A 240? None = it said something else."""
+def _refused(verify: Callable[..., None], candidate, **kwargs) -> Optional[bool]:
+    """Did eBay refuse this listing WITH A 240? None = it said something else.
+
+    `kwargs` reach the verifier, which is what attaches the business policies
+    and the photo URLs — the two parts of a publish that are not fields on the
+    draft and so cannot be varied by editing it.
+    """
     try:
-        verify(candidate)
+        verify(candidate, **kwargs) if kwargs else verify(candidate)
+    except TypeError as exc:
+        # A verifier that predates the payload probes. Skip the question
+        # rather than read its refusal to answer as eBay's verdict.
+        log.info("ebay: 240 probe skipped (%s)", exc)
+        return None
     except Exception as exc:  # noqa: BLE001 - a diagnosis, never a blocker
         code = str(getattr(exc, "code", "") or "")
         if code == BLOCKED_CODE:
@@ -435,14 +527,75 @@ def _scope_issue(scope: str) -> dict:
     """The finding for one probe verdict. Each says what was asked and what
     eBay answered — a seller told "it's your account" while eBay's own words
     blame their title deserves to know why we contradict it."""
+    if scope == "policies":
+        return {
+            "target": "policies", "level": "error",
+            "title": "eBay is refusing this listing's business policies",
+            "fix": ("eBay took this same listing the moment we sent it "
+                    "WITHOUT the shipping / payment / return policies, and "
+                    "refused it with them — so the policy ids this app is "
+                    "attaching are the cause, not your account and not the "
+                    "listing. That usually means a policy was deleted or "
+                    "renamed on eBay, or the saved ids belong to an eBay "
+                    "account that was connected before this one. Open "
+                    "Settings → Listing settings, re-pick each of the three "
+                    "policies, and publish again."),
+        }
+    if scope == "photos":
+        return {
+            "target": "photos", "level": "error",
+            "title": "eBay is refusing this listing's photos",
+            "fix": ("eBay took this same listing with the photos removed and "
+                    "refused it with them. Either it could not fetch them or "
+                    "it objects to one of them. Re-upload the photos (or drop "
+                    "the last one you added) and publish again."),
+        }
+    if scope == "specifics":
+        return {
+            "target": "specifics", "level": "error",
+            "title": "eBay is refusing this listing's item specifics",
+            "fix": ("eBay took this same listing with the item specifics "
+                    "removed and refused it with them, so one of those "
+                    "name/value rows is the cause. Open Item specifics and "
+                    "clear anything unusual — a value carrying a brand or "
+                    "trademark name, a claim, a URL, or a row eBay doesn't "
+                    "recognise for this category."),
+        }
+    if scope == "condition":
+        return {
+            "target": "condition", "level": "error",
+            "title": "eBay is refusing this listing's condition note",
+            "fix": ("eBay took this same listing with the condition "
+                    "description removed and refused it with it. Reword the "
+                    "condition note — claims about authenticity or grading, "
+                    "and anything that reads as a guarantee, are the usual "
+                    "cause."),
+        }
+    if scope == "account_words":
+        return {
+            "target": "account", "level": "error",
+            "title": "eBay is refusing this listing, and not over its wording",
+            "fix": ("eBay refused this same listing with a plain title and "
+                    "description, so rewording it won't help. We couldn't get "
+                    "a clear answer on the rest — eBay stopped returning this "
+                    "error partway through the check — so the cause is either "
+                    "a hold on the account or something the listing carries "
+                    "besides its words (the business policies, the photos, "
+                    "the item specifics). Press “Ask eBay why” to run the "
+                    "check again; if it keeps landing here, eBay Customer "
+                    "Service can say whether a restriction is on the account "
+                    "— quote error 240."),
+        }
     if scope == "account":
         return {
             "target": "account", "level": "error",
             "title": "eBay is refusing every listing from this account",
             "fix": ("We asked eBay to check this same listing with a plain "
-                    "title and description and it refused that too, so the "
-                    "wording is not the cause and editing won't help. This is "
-                    "an account-level hold: open eBay → My eBay → Selling and "
+                    "title and description, then again with no business "
+                    "policies, no photos, no item specifics and no condition "
+                    "note — and it refused every one of them. Nothing in the "
+                    "listing is the cause, so editing won't help. This is an "
+                    "account-level hold: open eBay → My eBay → Selling and "
                     "clear anything flagged there (registration, payments or "
                     "identity verification, a policy notice). If nothing is "
                     "flagged, only eBay Customer Service can lift it — quote "
