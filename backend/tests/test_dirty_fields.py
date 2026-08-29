@@ -154,3 +154,23 @@ def test_marks_survive_the_save_then_publish_round_trip():
     assert dirty_fields.changed_fields(Listing(**after_save), after_save) == []
     assert at_publish.is_dirty("title"), \
         "the edit was lost between save and publish; the revise would be empty"
+
+
+def test_a_programmatic_edit_must_mark_itself_dirty():
+    """Minimal revise payloads create a second failure mode, and this is it.
+
+    Not every edit comes from the editor. "Lower prices" sets listing.price
+    directly and publishes, with no save in between — so there is no diff for
+    dirty_fields to find, and an unmarked change goes out as an EMPTY revise:
+    eBay is told nothing, the record says the new price, and the seller is
+    shown a success. Silently doing nothing is the worst of the three
+    outcomes, because nothing anywhere reports it.
+
+    Any code path that mutates a listing and then publishes has to say so.
+    """
+    listing = Listing(**_stored())
+    listing.price = 19.99
+    assert not listing.is_dirty("price"), "precondition: assignment is silent"
+
+    listing.mark_dirty("price")
+    assert listing.is_dirty("price")

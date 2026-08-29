@@ -3906,6 +3906,12 @@ def lower_prices(payload: dict, request: Request) -> dict:
         listing = Listing(**data)
         was = listing.price
         listing.price = new_price
+        # This edit never passes through a save, so there is no diff for
+        # dirty_fields to find — and a revise only carries fields marked as
+        # changed. Unmarked, this would send eBay an empty revise: the record
+        # would show the new price, the seller would be told it worked, and
+        # the listing would still be at the old one.
+        listing.mark_dirty("price")
         # Through the provider, so each listing takes whichever revise path it
         # belongs to (Trading for store listings, the Inventory API for the
         # older app-published ones) and the record's status is written by the
