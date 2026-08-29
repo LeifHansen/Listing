@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
-  PackageOpen, Truck, Plus, TrendingUp, Megaphone, Store, BadgeCheck,
+  PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck,
   Trash2, Clock,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
@@ -384,20 +384,6 @@ export function SettingsView() {
                   </Field>
                 );
               })}
-
-              <AddShippingServiceRow
-                onCreated={async (pol) => {
-                  // Re-apply AFTER the reload, not before. load() ends with
-                  // setSelected(d.selected), and the server only stores this
-                  // policy as the default when the account had none — so for
-                  // a seller who already had one, the optimistic selection
-                  // was overwritten a moment later and the toast's "selected
-                  // it above" was simply false.
-                  setPoliciesData(null);
-                  await load();
-                  setSelected((s) => ({ ...s, fulfillment_policy_id: pol.id }));
-                }}
-              />
 
               {POLICY_KINDS.some(({ key }) => !(data.policies[key] || []).length) && (
                 <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm">
@@ -1187,69 +1173,6 @@ function ForeignListingsNotice() {
         </Button>
       </div>
     </div>
-  );
-}
-
-// The shortcut that CREATES a shipping policy, for sellers who don't have one
-// covering the service they want. Deliberately worded as an action on the
-// dropdown above ("Need another one?") rather than as a setting: it writes to
-// the same eBay object the Shipping policy field selects, and presenting it as
-// a peer made the two look like separate things that had to agree.
-function AddShippingServiceRow({ onCreated }) {
-  const { toast } = useToast();
-  const [services, setServices] = useState([]);
-  const [code, setCode] = useState("");
-  const [creating, setCreating] = useState(false);
-
-  useEffect(() => {
-    api("/api/ebay/shipping-services")
-      .then((r) => setServices(r.services || []))
-      .catch(() => {});
-  }, []);
-
-  const create = async () => {
-    if (!code) return;
-    setCreating(true);
-    try {
-      const pol = await postJson("/api/ebay/ensure-policy", { service_code: code });
-      toast(pol.created
-        ? `Created "${pol.name}" on your eBay account and selected it above.`
-        : `Your "${pol.name}" policy already ships this — selected it above.`,
-        { kind: "success" });
-      onCreated(pol);
-      setCode("");
-    } catch (e) {
-      toast(`Couldn't add that service: ${e.message}`, { kind: "error" });
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  return (
-    <Field
-      label={
-        <span className="inline-flex items-center gap-1.5">
-          <Truck size={14} aria-hidden /> Need another shipping policy?
-        </span>
-      }
-      help="Pick a carrier service and we'll create the matching shipping policy on your eBay account (or reuse one you already have) and select it above."
-    >
-      <div className="flex gap-2">
-        <div className="flex-1 min-w-0">
-          <Select value={code} onChange={(e) => setCode(e.target.value)}>
-            <option value="">Choose a carrier service…</option>
-            {services.map((s) => (
-              <option key={s.code} value={s.code}>
-                {s.label}{s.note ? ` — ${s.note}` : ""}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <Button variant="secondary" onClick={create} loading={creating} disabled={!code}>
-          <Plus aria-hidden /> Add
-        </Button>
-      </div>
-    </Field>
   );
 }
 
