@@ -293,7 +293,7 @@ export function SettingsView() {
           <SectionHeader
             icon={Megaphone}
             title="Promoted Listings"
-            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate (pay only when it sells through the ad)."
+            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate. Promoted Listings costs a percentage of the sale price when an item sells through the ad, so this stays off until you turn it on."
           />
           {prefs === null ? (
             <div className="ai-shimmer h-12 rounded-tile" aria-hidden />
@@ -301,10 +301,10 @@ export function SettingsView() {
             <div className="max-w-lg">
               <Field label="Auto-promote new listings">
                 <Select
-                  value={String(prefs.auto_promote ?? 1)}
+                  value={String(prefs.auto_promote ?? 0)}
                   onChange={(e) => setPref("auto_promote", Number(e.target.value))}
                 >
-                  <option value="1">On — promote at eBay’s recommended rate</option>
+                  <option value="1">On — promote every new listing at eBay’s recommended rate</option>
                   <option value="0">Off — only when I toggle Promote on a listing</option>
                 </Select>
               </Field>

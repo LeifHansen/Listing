@@ -199,16 +199,38 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
 
 def auto_promote_enabled(uid: Optional[str]) -> bool:
     """Account default: promote every newly published listing at eBay's
-    recommended ad rate. ON unless explicitly turned off in Settings — sellers
-    reported publishes landing unpromoted and only discovering it later from
-    the Dashboard nags. Anonymous/env-token publishes stay explicit-only."""
+    recommended ad rate. OFF unless the seller explicitly turned it on.
+
+    Promoted Listings Standard is COST_PER_SALE — eBay takes a percentage of
+    the sale price (10% by default here) when an item sells through the
+    promotion. So this is a spending decision, and two things that used to
+    return True are not decisions at all:
+
+      - an ABSENT preference, i.e. every seller who has never opened Settings
+        and saved that field. Silence is not agreement to a fee.
+      - an UNREADABLE preference. db.get_prefs answers {} on a database
+        failure, so an outage enrolled sellers as surely as a choice did, and
+        nothing recorded that it had.
+
+    The second is indefensible whatever the right default is: "we could not
+    find out" is never a yes. The first reverses a deliberate product choice
+    — the previous default was ON because sellers reported publishes landing
+    unpromoted — and it is reversed on purpose: an unpromoted listing is a
+    missed opportunity the seller can fix, while an unasked-for ad fee is
+    money taken from someone who never agreed.
+
+    Per-listing Promote is untouched: ticking it IS explicit consent for that
+    listing. Anonymous/env-token publishes stay explicit-only.
+    """
     if not uid:
         return False
     try:
         value = db.get_prefs(uid).get("auto_promote")
-    except Exception:  # noqa: BLE001 - prefs are optional
-        return True
-    return True if value is None else bool(value)
+    except Exception as exc:  # noqa: BLE001 - an outage is not consent
+        log.warning("promote: couldn't read the auto-promote preference for "
+                    "%s, treating as off: %s", uid, exc)
+        return False
+    return bool(value)
 
 
 def promote(record_id: str, listing: Listing, creds: Optional[dict],
