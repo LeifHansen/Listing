@@ -7,6 +7,7 @@ import {
 import { cn, formatMoney, mediaUrl } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
+import { reviewAspectCount } from "@/views/listing/specifics";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
 function MetricsRow({ views, watchers, className }) {
@@ -162,8 +163,7 @@ export const ListingCard = memo(function ListingCard({
   // Drafts with AI-inferred specifics awaiting a glance get a ⚠ count chip —
   // review those fields and the draft is publish-ready.
   const reviewCount = (item.status === "draft" || item.status === "dry_run")
-    ? (l.item_specifics || []).filter(
-      (s) => (s.value || "").trim() && s.confidence === "medium").length
+    ? reviewAspectCount(l.item_specifics)
     : 0;
   const isLive = item.status === "published" || item.status === "live";
   const hasMetrics = isLive && metrics

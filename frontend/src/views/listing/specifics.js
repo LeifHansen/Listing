@@ -36,6 +36,22 @@ export function toggleSpecificValue(specifics, name, value, on) {
   return next;
 }
 
+/* How many specifics still want a glance from the seller.
+
+   Counts ASPECTS, not rows. A multi-select aspect holds one row per ticked
+   value but shows ONE review flag for the whole group, and one ✓ clears the
+   group (confirmSpecificRows below) — so four AI-ticked values are one thing
+   to look at, not four. Counting rows made the editor's banner claim "4 AI
+   guesses to check" where a single flag was on screen, and made one click
+   drop the count by four. */
+export function reviewAspectCount(specifics) {
+  const names = new Set();
+  for (const s of specifics || []) {
+    if ((s.value || "").trim() && s.confidence === "medium") names.add(key(s.name));
+  }
+  return names.size;
+}
+
 // Clear the AI review flag on EVERY row for an aspect, not just the first: a
 // multi-select aspect shows one flag for the whole group, so one ✓ clears it.
 export function confirmSpecificRows(specifics, name) {
