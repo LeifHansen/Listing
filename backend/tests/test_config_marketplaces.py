@@ -88,21 +88,48 @@ def test_stripe_live_mode_distinguishes_key_types(fresh_config):
 # dashboard showed one plainly set. tokens_missing() was right and unhelpful;
 # these are the cases that make it say which mistake was made.
 
-def test_near_miss_secret_name_is_reported(fresh_config):
-    """The exact production misconfiguration: right key, one word off."""
+def test_stripe_secret_reads_the_api_prefixed_name_too(fresh_config):
+    """STRIPE_API_SECRET_KEY is the name the production keyset is deployed
+    under. Accepted as a second name for the same setting, like DATABASE_URL
+    takes NEON_PRODUCTION_DATABASE_URL — renaming a live secret restarts the
+    machine, and with min_machines_running = 1 that means restarting it under
+    whatever batch is in flight."""
     cfg = fresh_config(STRIPE_API_SECRET_KEY="sk_live_abc")
-    assert cfg.near_miss_env("STRIPE_SECRET_KEY") == ["STRIPE_API_SECRET_KEY"]
-    assert any("STRIPE_API_SECRET_KEY" in w and "STRIPE_SECRET_KEY" in w
+    assert cfg.STRIPE_SECRET_KEY == "sk_live_abc"
+    assert cfg.stripe_ready() is True
+    assert "STRIPE_SECRET_KEY" not in cfg.tokens_missing()
+
+
+def test_the_canonical_name_still_wins(fresh_config):
+    cfg = fresh_config(STRIPE_SECRET_KEY="sk_live_canonical",
+                       STRIPE_API_SECRET_KEY="sk_live_other")
+    assert cfg.STRIPE_SECRET_KEY == "sk_live_canonical"
+
+
+def test_a_resolved_alias_is_not_reported_as_a_near_miss(fresh_config):
+    """Nothing to warn about once the setting works under either name."""
+    cfg = fresh_config(STRIPE_API_SECRET_KEY="sk_live_abc")
+    assert cfg.config_warnings() == []
+
+
+def test_a_key_that_is_not_a_secret_key_is_called_out(fresh_config):
+    """Reading the secret from either name makes this worth its own check: a
+    publishable pk_ in the slot satisfies every readiness check in the app and
+    then fails at the one moment that matters."""
+    cfg = fresh_config(STRIPE_API_SECRET_KEY="pk_live_wrong")
+    assert cfg.stripe_ready() is True          # present...
+    assert cfg.stripe_live_mode() is None      # ...but not a secret key
+    assert any("isn't a secret key" in w for w in cfg.config_warnings())
+
+
+def test_near_miss_is_still_reported_for_a_name_with_no_alias(fresh_config):
+    """The detector still earns its keep on the settings that have only one
+    accepted spelling."""
+    cfg = fresh_config(ANTHROPIC_KEY="sk-ant-abc")
+    assert cfg.near_miss_env("ANTHROPIC_API_KEY") == ["ANTHROPIC_KEY"]
+    assert cfg.ANTHROPIC_API_KEY == ""
+    assert any("ANTHROPIC_KEY" in w and "ANTHROPIC_API_KEY" in w
                for w in cfg.config_warnings())
-
-
-def test_near_miss_is_not_adopted_as_a_value(fresh_config):
-    """Naming the mistake must not silently take money-handling config from a
-    variable whose contents this app never agreed on."""
-    cfg = fresh_config(STRIPE_API_SECRET_KEY="sk_live_abc")
-    assert cfg.STRIPE_SECRET_KEY == ""
-    assert cfg.stripe_ready() is False
-    assert "STRIPE_SECRET_KEY" in cfg.tokens_missing()
 
 
 def test_differently_named_stripe_keys_are_not_near_misses(fresh_config):
@@ -119,6 +146,19 @@ def test_no_warning_once_the_canonical_name_is_set(fresh_config):
     cfg = fresh_config(STRIPE_SECRET_KEY="sk_live_abc",
                        STRIPE_API_SECRET_KEY="sk_live_abc")
     assert cfg.near_miss_env("STRIPE_SECRET_KEY") == []
+    assert cfg.config_warnings() == []
+
+
+def test_tokens_missing_is_empty_under_productions_own_secret_names(fresh_config):
+    """End to end, with exactly what `fly secrets list` shows on the app:
+    nothing left standing between this config and taking money."""
+    cfg = fresh_config(STRIPE_API_SECRET_KEY="sk_live_abc",
+                       STRIPE_WEBHOOK_SECRET="whsec_abc",
+                       TOKENS_ENABLED="1",
+                       DATABASE_URL="postgresql://u:p@h/db")
+    assert cfg.tokens_missing() == []
+    assert cfg.tokens_enabled() is True
+    assert cfg.stripe_live_mode() is True
     assert cfg.config_warnings() == []
 
 

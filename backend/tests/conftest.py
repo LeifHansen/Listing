@@ -39,7 +39,8 @@ _SCRUBBED = (
     # The near-miss names config.config_warnings() looks for. Scrubbed for the
     # same reason as the canonical ones: inherited from a developer's shell
     # they would make the warning fire (or not) for reasons unrelated to code.
-    "STRIPE_API_SECRET_KEY", "ANTHROPIC_KEY", "API_SECRET_KEY",
+    "STRIPE_API_SECRET_KEY", "STRIPE_API_WEBHOOK_SECRET",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "API_SECRET_KEY",
 )
 
 

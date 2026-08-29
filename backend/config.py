@@ -241,8 +241,20 @@ FREE_TOKENS_PER_MONTH = _env_int("FREE_TOKENS_PER_MONTH", 50)
 # (whsec_...) comes from the endpoint you register for checkout.session.completed
 # at https://<your-domain>/api/tokens/webhook. Purchases also confirm client-side
 # after the Checkout redirect, so the webhook is a safety net, not a requirement.
-STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
+#
+# STRIPE_API_SECRET_KEY is accepted as a second name for the same thing, the
+# way DATABASE_URL takes NEON_PRODUCTION_DATABASE_URL and ETSY_CLIENT_ID takes
+# ETSY_KEYSTRING. That is the name the production keyset was deployed under,
+# and reading it here costs nothing, while renaming a live secret restarts the
+# machine -- which, with min_machines_running = 1, means restarting it under
+# whatever batch is in flight.
+#
+# The value is still checked rather than trusted: stripe_live_mode() reads the
+# sk_live_/sk_test_ prefix, and config_warnings() says so out loud if what
+# turns up under either name is not a secret key at all (a publishable pk_ in
+# a secret-key slot would otherwise look configured and fail at checkout).
+STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY", "STRIPE_API_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET", "STRIPE_API_WEBHOOK_SECRET")
 
 
 def stripe_ready() -> bool:
@@ -598,6 +610,17 @@ def config_warnings() -> list[str]:
         warnings.append(
             f"TOKENS_ENABLED={stray!r} is not one of 1/true/yes/on, so token "
             f"billing is OFF — which reads the same as never setting it.")
+    # A Stripe key that is present but is not a SECRET key. Worth its own line
+    # now that the secret is read from either of two names: a publishable
+    # pk_... sitting in the slot satisfies every "is it configured?" check in
+    # the app and then fails at the one moment that matters, when a seller
+    # tries to buy tokens.
+    if STRIPE_SECRET_KEY and stripe_live_mode() is None:
+        warnings.append(
+            "The Stripe secret key doesn't start with sk_live_ or sk_test_, so "
+            "it isn't a secret key — checkout will fail even though every "
+            "readiness check passes. (A publishable pk_... key belongs in "
+            "STRIPE_PUBLISHABLE_KEY.)")
     return warnings
 
 
