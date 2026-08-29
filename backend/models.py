@@ -178,6 +178,72 @@ class Listing(BaseModel):
     # Marketplace-specific listing fields, edited in their own cards.
     etsy: EtsyFields = Field(default_factory=EtsyFields)
     depop: DepopFields = Field(default_factory=DepopFields)
+    # Which fields the SELLER actually changed since this record last agreed
+    # with the marketplace. Empty means "nothing known to be edited".
+    #
+    # A revise used to send every field it could build, on the theory that
+    # sending a value equal to the stored one is a no-op. It isn't: the stored
+    # value is a snapshot, and eBay's copy may have moved on (Seller Hub, the
+    # eBay app, a category remap). Re-sending the snapshot then overwrites the
+    # newer value with an older one, and the seller's work vanishes with a
+    # success message. Quantity is the sharpest case — see
+    # tests/test_ebay_quantity_contract.py — because eBay reads the Quantity
+    # on a revise as the new AVAILABLE stock, so re-sending an import-time
+    # total puts already-sold units back on sale.
+    #
+    # Names are Listing field names ("title", "price", "quantity", ...).
+    #
+    # A sorted list rather than a set because every listing round-trips
+    # through model_dump() into a JSON column and into API responses, and
+    # json.dumps has no set. Sorted so a record's serialization is stable and
+    # two equal drafts don't diff.
+    dirty_fields: list[str] = Field(default_factory=list)
+
+    def mark_dirty(self, *names: str) -> "Listing":
+        """Record that the seller edited these fields. Chainable."""
+        self.dirty_fields = sorted(set(self.dirty_fields) | {n for n in names if n})
+        return self
+
+    def clear_dirty(self, *names: str) -> "Listing":
+        """Forget edits that have now been accepted by the marketplace. With
+        no names, forgets all of them (the record and eBay agree again)."""
+        if names:
+            self.dirty_fields = sorted(set(self.dirty_fields) - set(names))
+        else:
+            self.dirty_fields = []
+        return self
+
+    def is_dirty(self, name: str) -> bool:
+        """True when `name` is a field the seller explicitly changed.
+
+        Records that predate dirty-tracking carry an empty set. That is
+        deliberately read as "nothing to send" rather than "send everything":
+        the whole point is that an unproven field must not overwrite a
+        marketplace value that may be newer.
+        """
+        return name in self.dirty_fields
+
+    @field_validator("dirty_fields", mode="before")
+    @classmethod
+    def _coerce_dirty(cls, value):
+        """Accept anything JSON or a caller might hand over — None from an
+        older record, a set from calling code — and normalize to the sorted,
+        de-duplicated list this field stores."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return sorted({str(v) for v in value if v})
+        return value
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _floor_quantity_at_zero(cls, value):
+        """Zero is a real inventory state (eBay's out-of-stock control), so it
+        must survive; negative is not, and eBay has been seen reporting sold
+        greater than quantity on variation and out-of-stock listings."""
+        if isinstance(value, (int, float)) and value < 0:
+            return 0
+        return value
 
     @field_validator("title", mode="before")
     @classmethod

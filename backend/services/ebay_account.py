@@ -285,6 +285,33 @@ def releasable(data: dict, connected: str,
                 or (data.get("marketplaces") or {}).get("ebay"))
 
 
+# The top-level fields that mirror eBay's entry in `marketplaces`. Cleared
+# alongside it, because `source` is what routes a later edit down the Trading
+# path and `ebay_listing_id` is what it would aim at.
+_EBAY_PROJECTION = ("ebay_account", "ebay_listing_id", "source", "view_url",
+                    "sku")
+
+
+def unlink_ebay(data: dict) -> dict:
+    """Strip this record's eBay identity, leaving every other marketplace
+    exactly as it was. Mutates and returns `data`.
+
+    The eBay entry is removed from `marketplaces` by key. Dropping the whole
+    map — which is what this used to do — also deleted the seller's Etsy and
+    Depop ids, URLs and statuses. Nothing changes on those marketplaces, so
+    the listings stay live and the app simply forgets them; the record still
+    looks intact, and the loss only surfaces later as a duplicate publish or
+    an update that goes nowhere.
+    """
+    data.update({name: "" for name in _EBAY_PROJECTION})
+    data["image_urls"] = data.get("image_urls") or []
+    markets = data.get("marketplaces")
+    if isinstance(markets, dict):
+        # By key, so a marketplace added after this was written survives too.
+        data["marketplaces"] = {k: v for k, v in markets.items() if k != "ebay"}
+    return data
+
+
 # eBay's "this account can't list right now" code. It carries no field to fix
 # and repeats on every listing, so the only useful follow-up is to ask what
 # the hold actually is.

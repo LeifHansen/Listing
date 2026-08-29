@@ -317,6 +317,11 @@ def _listing_format(listing_type: str, has_bin: bool) -> str:
     return "FIXED_PRICE"
 
 
+def _quantity_sold(selling: Optional[ET.Element]) -> int:
+    """Units already sold on this listing (0 when eBay didn't say)."""
+    return _int(selling, "QuantitySold") if selling is not None else 0
+
+
 def _item_to_listing(item: ET.Element) -> dict:
     """Map one Trading API <Item> to this app's Listing shape (as a dict)."""
     selling = _find(item, "SellingStatus")
@@ -361,7 +366,23 @@ def _item_to_listing(item: ET.Element) -> dict:
         "description": _text(item, "Description"),
         "price": round(price, 2) if price is not None else None,
         "currency": _text(item, "Currency") or config.EBAY_CURRENCY,
-        "quantity": max(1, _int(item, "Quantity", 1)),
+        # What is still BUYABLE, which is not what eBay puts in Item.Quantity.
+        #
+        # GetItem reports Item.Quantity as the quantity the listing was
+        # created with and SellingStatus.QuantitySold as how many of those
+        # have gone; the remainder is the difference. Importing Item.Quantity
+        # directly overstates stock by exactly the number already sold — and
+        # because ReviseFixedPriceItem reads the Quantity it is sent as the
+        # new available stock, the next edit would put the sold units back on
+        # sale. max(1, ...) compounded it by making a sold-out listing import
+        # as "1 available", so the one listing with nothing left to sell was
+        # the one offering a unit that does not exist.
+        #
+        # Zero is a real state here (eBay's out-of-stock control), so the
+        # floor is 0, not 1. Clamped because eBay does report sold greater
+        # than quantity on some variation/out-of-stock listings.
+        # https://developer.ebay.com/devzone/xml/docs/reference/ebay/getitem.html
+        "quantity": max(0, _int(item, "Quantity", 0) - _quantity_sold(selling)),
         "listing_format": fmt,
         "auction_start_price": round(auction_start, 2) if auction_start else None,
         "package_weight_lb": float(weight_major or 0),
@@ -376,7 +397,7 @@ def _item_to_listing(item: ET.Element) -> dict:
         "sku": _text(item, "SKU"),
         "source": "ebay",
         "watch_count": _int(item, "WatchCount"),
-        "sold_quantity": (_int(selling, "QuantitySold") if selling is not None else 0),
+        "sold_quantity": _quantity_sold(selling),
         "view_url": _text(item, "ListingDetails/ViewItemURL"),
         # When the listing actually went live on eBay. The only true recency
         # signal an imported listing has — without it every listing looks as
@@ -851,13 +872,14 @@ def _revise_call_name(listing: Listing) -> str:
             else "ReviseFixedPriceItem")
 
 
-def revise_listing(token: str, item_id: str, listing: Listing,
-                   image_urls: Optional[list[str]] = None) -> dict:
-    """Push an edit back to a listing this app didn't create.
+def build_revise_item(listing: Listing, item_id: str,
+                      image_urls: Optional[list[str]] = None) -> tuple[str, str]:
+    """(call name, request body) for revising one listing.
 
-    Sends only the fields this app actually edits, so nothing set elsewhere on
-    the listing gets clobbered by omission. Returns {"ok": True, "listing_id"}
-    or raises TradingError with eBay's own reason."""
+    Split out of revise_listing so the payload can be asserted on without a
+    network call — what this request does NOT contain is now a correctness
+    rule, not a detail (see tests/test_ebay_quantity_contract.py).
+    """
     if not item_id:
         raise TradingError("This listing has no eBay item id to update.")
     parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
@@ -868,17 +890,37 @@ def revise_listing(token: str, item_id: str, listing: Listing,
         # be revised once bids exist, so it's left alone.
         tag = "BuyItNowPrice" if is_auction else "StartPrice"
         parts.append(f"<{tag}>{listing.price:.2f}</{tag}>")
-    if listing.quantity and listing.quantity > 0:
-        parts.append(f"<Quantity>{int(listing.quantity)}</Quantity>")
+    # Quantity ONLY when the seller actually changed stock.
+    #
+    # eBay reads the Quantity on a revise as the new AVAILABLE quantity, not
+    # as a restatement of the original listing size. The value this app holds
+    # is a snapshot from the last import, so re-sending it on an unrelated
+    # edit (a title fix, a price change) tells eBay to make that many units
+    # available again — including the ones that already sold. A seller who
+    # renamed an item found stock they no longer had back on sale.
+    #
+    # `> 0` was the second half: it dropped zero, so the single edit that
+    # takes a listing out of stock was the one that never reached eBay.
+    if listing.is_dirty("quantity") and listing.quantity is not None:
+        parts.append(f"<Quantity>{max(0, int(listing.quantity))}</Quantity>")
     if listing.fulfillment_policy_id:
         # The seller picked a shipping service for THIS listing — send the
         # matching business-policy profile so the revise actually changes it.
         parts.append("<SellerProfiles><SellerShippingProfile><ShippingProfileID>"
                      f"{_esc(listing.fulfillment_policy_id)}</ShippingProfileID>"
                      "</SellerShippingProfile></SellerProfiles>")
+    return _revise_call_name(listing), f"<Item>{''.join(parts)}</Item>"
 
-    call = _revise_call_name(listing)
-    root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
+
+def revise_listing(token: str, item_id: str, listing: Listing,
+                   image_urls: Optional[list[str]] = None) -> dict:
+    """Push an edit back to a listing this app didn't create.
+
+    Sends only the fields this app actually edits, so nothing set elsewhere on
+    the listing gets clobbered by omission. Returns {"ok": True, "listing_id"}
+    or raises TradingError with eBay's own reason."""
+    call, body = build_revise_item(listing, item_id, image_urls)
+    root = _call(call, token, body)
     returned = _text(root, "ItemID") or item_id
     log.info("trading: %s ok item=%s", call, returned)
     return {"ok": True, "listing_id": returned}

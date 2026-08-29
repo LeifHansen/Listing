@@ -706,6 +706,11 @@ class EbayProvider:
             if not listing.ebay_account:
                 listing.ebay_account = ((creds or {}).get("ebay_username")
                                         or "").strip()
+            # eBay took the edit, so the record and the listing agree again
+            # and there is nothing left pending. Cleared here — on acceptance
+            # — and not when the request was built: a revise that failed
+            # leaves its edits marked, so the retry still carries them.
+            listing.clear_dirty()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             if pushed_local:

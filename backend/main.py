@@ -40,11 +40,11 @@ from .marketplaces.state import STICKY_STATUSES
 from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
-                       ebay_orders, ebay_trading, image_import, images, jobstore,
-                       listing_merge, listing_sync, metrics, notifications,
-                       orient, preflight, pricing, promotions, recommender,
-                       sync_guard, taxonomy, tokens)
+from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
+                       ebay_account, ebay_orders, ebay_trading, image_import,
+                       images, jobstore, listing_merge, listing_sync, metrics,
+                       notifications, orient, preflight, pricing, promotions,
+                       recommender, sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -1401,14 +1401,8 @@ def release_foreign_listings(request: Request,
             continue
         legacy = not listing_sync.account_of(data)
 
-        def _unlink(d: dict) -> dict:
-            d.update(ebay_account="", ebay_listing_id="", source="",
-                     view_url="", sku="", image_urls=d.get("image_urls") or [])
-            d.pop("marketplaces", None)
-            return d
-
-        if db.mutate_listing_data(rec["id"], _unlink, status="draft",
-                                  user_id=uid) is not None:
+        if db.mutate_listing_data(rec["id"], ebay_account.unlink_ebay,
+                                  status="draft", user_id=uid) is not None:
             released += 1
             if legacy:
                 unowned += 1
@@ -2765,6 +2759,13 @@ def _restore_server_state(session_id: str, listing: Listing,
     if changed:
         log.info("save: kept server-owned %s for session=%s",
                  ", ".join(changed), session_id)
+    # Record what the SELLER changed, by diffing against the copy just read.
+    # A revise sends only these: every other field this app holds is a
+    # snapshot of eBay taken at the last sync, and re-sending a snapshot
+    # overwrites whatever eBay has now — which may be newer. Done here rather
+    # than at each call site because this runs on every save path, and a save
+    # that skipped it would leave the seller's edit unsent.
+    dirty_fields.accumulate(listing, stored)
     return rec
 
 
