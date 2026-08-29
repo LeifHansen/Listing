@@ -198,10 +198,39 @@ def test_ebays_own_reason_wins_when_it_gave_one():
     as the generic account explanation."""
     exc = ebay_trading.TradingError(
         E240, code="240",
-        detail="The word “authentic” requires proof of authenticity.")
+        said="The word “authentic” requires proof of authenticity.")
     issue = ebay_errors.from_trading_error(exc)[0]
     assert "authenticity" in issue["fix"]
     assert "Customer Service" not in issue["fix"]
+
+
+def test_ebays_reason_is_in_the_title_not_only_the_fix():
+    """Every one-line surface renders the title alone. A reason that lives only
+    in `fix` is a reason the seller never reads — which is how "eBay won't
+    accept this listing" managed to say less than the placeholder it replaced.
+    """
+    exc = ebay_trading.TradingError(
+        E240, code="240",
+        said="The word “authentic” requires proof of authenticity.")
+    issue = ebay_errors.from_trading_error(exc)[0]
+    assert "authentic" in issue["title"]
+    assert issue["title"] != "eBay won't accept this listing"
+
+
+def test_a_warning_is_never_quoted_as_ebays_reason():
+    """`detail` carries warnings and trailing errors as well as <Message>, so
+    it cannot speak for WHY a listing was refused. Reading it as eBay's reason
+    made the app quote a warning about something else as the cause — and, by
+    counting the rejection as explained, pushed the real diagnosis (the probe's
+    verdict) off the card behind it."""
+    exc = ebay_trading.TradingError(
+        E240, code="240",
+        detail="Warning: the item was listed with a shorter handling time.")
+    issue = ebay_errors.from_trading_error(exc)[0]
+    assert "handling time" not in issue["title"]
+    assert "handling time" not in issue["fix"]
+    # Unexplained, so the diagnosis is free to lead instead of trailing it.
+    assert issue["placeholder"] is True
 
 
 # --- a 240 also asks about registration and selling limits ------------------
