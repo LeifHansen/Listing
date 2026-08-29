@@ -590,11 +590,15 @@ and a reload resets the browser's own double-submit guard. Three defences, in
   payload assembled before the first publish carries no `ebay_listing_id` and no
   `source`, and believing it reads as "never listed".
 - **The create carries an idempotency key** — as `UUID`, and (fixed-price) as
-  `InventoryTrackingNumber`, which is separately queryable. eBay refuses a
-  second create under the same key even when the two attempts never meet in one
-  process, and the app then adopts the listing that already exists rather than
-  posting a twin. A relist keys on the item it replaces, so an intentional
+  `SKU` with `InventoryTrackingMethod=SKU`, which makes the listing findable by
+  `GetItem` afterwards. eBay refuses a second create under the same `UUID` even
+  when the two attempts never meet in one process, answering error 488 with the
+  item id the first attempt produced, and the app adopts that listing rather
+  than posting a twin. A relist keys on the item it replaces, so an intentional
   relist still goes through while a retried one doesn't double-list.
+  (This previously sent `InventoryTrackingNumber`, which is not an element of
+  eBay's `ItemType` — it was ignored, and the `GetItem` lookup built on it could
+  never succeed. See <https://developer.ebay.com/support/kb-article?KBid=1462>.)
 
 ### Finding the duplicates already out there
 

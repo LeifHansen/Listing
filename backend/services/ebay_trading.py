@@ -576,23 +576,25 @@ def get_listing(token: str, item_id: str) -> dict:
     return _item_to_listing(item)
 
 
-def item_id_for_tracking_number(token: str, tracking_number: str) -> str:
-    """The item id of the listing carrying this InventoryTrackingNumber, or "".
+def item_id_for_sku(token: str, sku: str) -> str:
+    """The item id of the listing carrying this SKU, or "".
 
-    GetItem accepts an InventoryTrackingNumber in place of an ItemID, which is
-    what makes the tracking number a usable idempotency key: after a publish
-    whose response never arrived, this answers "did that listing actually go
-    up, and what is it?" without guessing from titles. Never raises — a lookup
-    failure just means "unknown".
+    After a publish whose response never arrived, this answers "did that
+    listing actually go up, and what is it?" without guessing from titles.
+
+    GetItem accepts SKU in place of ItemID only for listings created with
+    InventoryTrackingMethod=SKU, which is why build_add_item sets it on every
+    fixed-price create. The previous version queried by
+    InventoryTrackingNumber — not a GetItem input, and not an ItemType
+    element either — so this recovery arm could never succeed and was in
+    practice dead code. Never raises: a lookup failure just means "unknown".
     """
-    if not tracking_number:
+    if not sku:
         return ""
     try:
-        root = _call("GetItem", token,
-                     f"<InventoryTrackingNumber>{_esc(tracking_number)}</InventoryTrackingNumber>")
+        root = _call("GetItem", token, f"<SKU>{_esc(sku)}</SKU>")
     except TradingError as exc:
-        log.info("trading: no item for tracking number %s (%s)",
-                 tracking_number, exc)
+        log.info("trading: no item for sku %s (%s)", sku, exc)
         return ""
     item = _find(root, "Item")
     return _text(item, "ItemID") if item is not None else ""
@@ -688,11 +690,12 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     one operation here that isn't naturally idempotent — a second call means a
     second live listing, which is both a duplicate on the seller's account and
     an eBay policy problem. The key rides along two ways: as UUID, which eBay
-    checks against calls it has already processed, and (fixed-price only) as
-    InventoryTrackingNumber, which must be unique among the seller's active
-    listings and is separately queryable, so a caller that loses the response
-    can find the listing it made. Either collision raises AlreadyListedError
-    instead of duplicating. Pass "" to opt out.
+    checks against calls it has already processed (answering error 488 with
+    the item id the first attempt produced), and (fixed-price only) as
+    Item.SKU alongside InventoryTrackingMethod=SKU, which is what makes the
+    listing findable by GetItem afterwards -- so a caller that loses the
+    response can still find what it made. A collision raises
+    AlreadyListedError instead of duplicating. Pass "" to opt out.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -790,11 +793,22 @@ def build_add_item(listing: Listing, image_urls: list[str],
         parts.append(f"<SellerProfiles>{profiles}</SellerProfiles>")
 
     if idempotency_key:
-        # InventoryTrackingNumber is fixed-price only, and can't be combined
-        # with an item-level SKU (this path sends none).
+        # SKU tracking, which is eBay's documented answer to "the response
+        # never arrived — did the listing go up, and what is it?"
+        #
+        # This used to send <InventoryTrackingNumber>, which is not an element
+        # of eBay's ItemType at all: AddFixedPriceItem ignores it, so the
+        # "unique among the seller's active listings" second guard the code
+        # promised never existed, and the GetItem lookup built on it could
+        # never succeed. SKU + InventoryTrackingMethod=SKU is the real
+        # pairing, and BOTH must be set on the create — ReviseFixedPriceItem
+        # drops InventoryTrackingMethod, so it cannot be retrofitted later.
+        # Fixed-price only; auctions keep UUID alone.
+        # https://developer.ebay.com/support/kb-article?KBid=1462
         if not is_auction:
-            parts.append("<InventoryTrackingNumber>"
-                         f"{_esc(idempotency_key[:50])}</InventoryTrackingNumber>")
+            parts.append(f"<SKU>{_esc(idempotency_key[:50])}</SKU>")
+            parts.append("<InventoryTrackingMethod>SKU"
+                         "</InventoryTrackingMethod>")
         parts.append(f"<UUID>{_esc(_uuid_form(idempotency_key))}</UUID>")
 
     call = "AddItem" if is_auction else "AddFixedPriceItem"
@@ -828,9 +842,8 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
     _call(_VERIFY_CALL[call], token, body)
 
 
-# eBay's error codes for "you already sent this": a reused UUID, and an
-# InventoryTrackingNumber already on an active listing. Codes are matched
-# first, with a text fallback so a code eBay adds later still lands here —
+# eBay's error codes for "you already sent this". Codes are matched first,
+# with a text fallback so a code eBay adds later still lands here —
 # duplicating a listing is worse than one publish reported as already-live.
 #
 # 21919188 is NOT one of them: it is "this listing would cause you to exceed
@@ -839,13 +852,29 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
 # create a duplicate", when nothing had been created and the real fix is to
 # ask eBay to raise the limit. (eBay's duplicate-LISTING-policy code is
 # 21919067, which is a different thing again and not an idempotency signal.)
-_DUPLICATE_CODES = {"21916884", "21916885", "21916752"}
+# 488 is eBay's actual duplicate-UUID code ("Duplicate UUID used."), and it
+# was missing. 21916884/21916885 were in here and are NOT idempotency signals
+# — they belong to eBay's item-CONDITION family (21916885 is "Dropped
+# condition from Item specifics"; 21916886 is "Item condition definitions
+# have changed"). Treating a condition rejection as a duplicate told the
+# seller their listing was already live and swallowed the message saying what
+# to fix, so it hid a problem they could have fixed in a few seconds.
+#
+# 21916752 is kept: it has been observed on this path and no evidence
+# contradicts it. The text fallback below is the real safety net either way —
+# it matches eBay's own duplicate wording whatever code arrives — which is
+# also why removing the two condition codes loses no genuine coverage.
+_DUPLICATE_CODES = {"488", "21916752"}
 _DUPLICATE_TEXT = re.compile(
     r"(uuid|inventory\s*tracking\s*number).{0,60}?"
     r"(already\s+(been\s+)?(used|exists|specified)|not\s+unique|duplicate)"
     r"|duplicate.{0,30}(uuid|inventory\s*tracking)", re.I | re.S)
-# eBay names the offending listing inside the message often enough to be worth
-# reading ("...already used for item 123456789012").
+# eBay names the offending listing inside the message ("...already been used;
+# ListedByRequestAppId=1, item ID=110040602158"). Prefer the number eBay
+# actually LABELS as the item id: the bare fallback would happily adopt
+# ListedByRequestAppId, and pointing the seller's record at another listing is
+# worse than not recovering at all.
+_ERROR_ITEM_LABELLED_RE = re.compile(r"item\s*ID\s*[=:]\s*(\d{9,})", re.I)
 _ERROR_ITEM_RE = re.compile(r"\b(\d{9,})\b")
 
 
@@ -854,6 +883,9 @@ def _is_duplicate_rejection(exc: TradingError) -> bool:
 
 
 def _item_id_in_error(message: str) -> str:
+    labelled = _ERROR_ITEM_LABELLED_RE.search(message or "")
+    if labelled:
+        return labelled.group(1)
     found = _ERROR_ITEM_RE.search(message or "")
     return found.group(1) if found else ""
 

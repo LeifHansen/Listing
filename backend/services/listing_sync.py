@@ -662,9 +662,11 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     except AlreadyListedError as exc:
         # This publish already produced a listing — a retry, or a second
         # request that raced this one. Adopt what's there instead of creating a
-        # twin: eBay names the item sometimes, and the tracking number finds it
-        # the rest of the time.
-        item_id = exc.item_id or ebay_trading.item_id_for_tracking_number(
+        # twin: eBay names the item in the 488 message most of the time, and a
+        # GetItem by SKU finds it the rest of the time. (That lookup used to
+        # query a field GetItem does not accept, so this arm never actually
+        # recovered anything; see ebay_trading.item_id_for_sku.)
+        item_id = exc.item_id or ebay_trading.item_id_for_sku(
             token, idempotency_key)
         if not item_id:
             # Nothing to adopt and nothing created. Re-raising as an ordinary
