@@ -585,10 +585,22 @@ def verifier(token: str, image_urls: list[str],
     if not postal:
         return None
 
-    def verify(candidate: Listing) -> None:
-        ebay_trading.verify_listing(token, candidate, image_urls,
-                                    policies=publish_policies(candidate, c),
-                                    postal_code=postal)
+    def verify(candidate: Listing, *, with_policies: bool = True,
+               with_photos: bool = True) -> None:
+        """Re-put `candidate` to eBay's validator, optionally without the two
+        things that are not part of the listing's own content.
+
+        The business policies and the photo URLs are attached HERE, not on the
+        Listing, so a probe that wants to ask "is it the policies?" cannot do
+        it by editing the draft — it has to be able to turn them off at the
+        point they are added. Everything else the probe varies lives on the
+        Listing and is varied there.
+        """
+        ebay_trading.verify_listing(
+            token, candidate,
+            image_urls if with_photos else [],
+            policies=publish_policies(candidate, c) if with_policies else None,
+            postal_code=postal)
     return verify
 
 
