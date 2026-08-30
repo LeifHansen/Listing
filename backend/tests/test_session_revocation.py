@@ -211,3 +211,75 @@ def test_every_added_column_matches_the_type_create_all_would_emit():
         checked += 1
 
     assert checked >= 6, "the migration list stopped being readable"
+
+
+def test_every_widened_column_matches_the_type_create_all_would_emit():
+    """The same check for the other half of the list, which nothing read.
+
+    Two statements widen a column that already exists rather than adding one,
+    and both hold an ENCRYPTED refresh token — roughly 1.5x its plaintext, as
+    the note beside them says, and "a silently truncated one disconnects a
+    seller with no error". The check above skips them, so a model declaring
+    String(2048) against a migration widening to 4096 would give a fresh
+    Postgres database the narrow column and truncate every token written to
+    it. SQLite ignores VARCHAR lengths, so no test here would see it, and the
+    failure looks like sellers being randomly signed out of a marketplace.
+    """
+    import re
+
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateColumn
+
+    from backend import db
+
+    tables = {t.name: t for t in db.Base.metadata.tables.values()}
+    checked = 0
+    for stmt in db._MIGRATIONS:
+        m = re.match(r"ALTER TABLE (\w+) ALTER COLUMN (\w+) TYPE (.+?)$", stmt)
+        if not m:
+            continue
+        table, column, declared = m.groups()
+        assert table in tables, f"{stmt}: no such table in the models"
+        assert column in tables[table].c, f"{stmt}: no such column in the models"
+
+        emitted = str(CreateColumn(tables[table].c[column])
+                      .compile(dialect=postgresql.dialect()))
+        model_type = emitted.split(None, 1)[1].split(" NOT NULL")[0].strip()
+        assert model_type.upper() == declared.strip().upper(), (
+            f"{table}.{column}: the migration widens it to {declared.strip()!r} "
+            f"but create_all emits {model_type!r} — one of the two deployments "
+            f"gets a column that truncates the token written to it")
+        checked += 1
+
+    assert checked >= 2, (
+        "the widening statements stopped being readable — if they were "
+        "removed, an old deployment still has the narrow column")
+
+
+def test_the_index_the_bell_polls_names_columns_that_exist():
+    """The one statement that is neither an add nor a widen.
+
+    A CREATE INDEX naming a column that has been renamed does not fail the
+    boot -- the guard swallows it -- it just quietly stops existing, and the
+    unread-badge poll goes back to scanning every notification the seller has
+    ever received. Slow, not wrong, which is why nothing would report it.
+    """
+    import re
+
+    from backend import db
+
+    tables = {t.name: t for t in db.Base.metadata.tables.values()}
+    checked = 0
+    for stmt in db._MIGRATIONS:
+        m = re.search(r"CREATE INDEX(?: IF NOT EXISTS)? \w+\s+ON (\w+) \(([^)]+)\)",
+                      stmt)
+        if not m:
+            continue
+        table, columns = m.groups()
+        assert table in tables, f"{stmt}: no such table in the models"
+        for column in (c.strip() for c in columns.split(",")):
+            assert column in tables[table].c, (
+                f"{stmt}: {table} has no column {column!r} in the models")
+        checked += 1
+
+    assert checked >= 1, "the index statement stopped being readable"
