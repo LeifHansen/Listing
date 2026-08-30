@@ -5410,9 +5410,15 @@ def _run_import_job(job_id: str, token: str, uid: str, account: str = "") -> Non
     except ebay_trading.TradingError as exc:
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface a clear reason
-        log.warning("import-listings failed for user=%s: %s", uid, exc)
-        jobstore.update(job_id, done=True, phase="failed",
-                        error=f"Couldn't import your eBay listings: {exc}")
+        # The TradingError arm above carries eBay's own mapped sentence. This
+        # one is whatever was thrown, and for an httpx failure that is the API
+        # base, the path and a status line — rendered in the import panel.
+        reference = _support_reference()
+        log.warning("import-listings failed for user=%s [%s]: %s",
+                    uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't import your eBay listings just now. Try again in a "
+            f"moment — if it keeps happening, quote {reference} to support."))
     finally:
         with _IMPORT_LOCK:
             if _IMPORT_JOBS.get(uid) == job_id:
