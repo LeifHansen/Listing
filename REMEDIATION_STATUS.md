@@ -219,6 +219,20 @@ encoded wrong behaviour were corrected in place, each saying why.
    snapshots over newer Seller Hub work. The server diffs against its own
    stored copy; it does not need to be told.
 
+10. **A test that measures the machine instead of the code.** Third time in
+    this branch. `test_saving_starts_before_the_fetching_finishes` asserted
+    that the first save appeared before the last fetch in a log — but the
+    fetch pool runs ahead of the consumer by design, and with instant doubles
+    it can drain its whole queue before the main thread records anything. It
+    passed locally and failed in CI once, then passed again, which is worse
+    than failing outright. The fix is the same one the publish-guard and photo
+    tests already use: make the second call WAIT on the thing the assertion is
+    about (an `Event` the first save sets), so the passing case costs nothing
+    and the failing case is deterministic. If a test contains a sleep, a
+    duration comparison, or a bet on which thread runs first, it is measuring
+    the runner. Verified both ways before committing: five clean runs at 0.3s,
+    three runs against the old behaviour failing at 10s each.
+
 ## Two operational consequences of the CI change — read before merging
 
 1. **The required-check NAMES change.** A called workflow prefixes its job
