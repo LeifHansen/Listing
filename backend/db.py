@@ -276,6 +276,61 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+# Lightweight migrations for databases created before a column existed. Each
+# statement is guarded separately in _get_engine so an already-applied one does
+# not skip the rest.
+#
+# Kept as a module constant rather than inline so tests can read the REAL
+# statements. Column types here must match what create_all emits from the
+# models: SQLite ignores types entirely, so a mismatch is invisible in every
+# test and only appears on a Postgres deployment old enough to need the ALTER.
+# test_session_revocation.py checks the pair.
+_MIGRATIONS = (
+    "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
+    "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
+    "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
+    "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN prefs JSON",
+    # Encrypted tokens are roughly 1.5x their plaintext, and a
+    # silently truncated one disconnects a seller with no error.
+    # SQLite ignores VARCHAR lengths entirely, so these are a
+    # no-op there and the guard below swallows the syntax error.
+    "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
+    "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
+    # The unread badge polls every minute and filters on both of
+    # these; user_id alone left the read_at test to a scan of every
+    # notification the seller has ever received. IF NOT EXISTS is
+    # understood by Postgres and SQLite alike, so this is a no-op
+    # after the first boot rather than something the guard below
+    # has to swallow on every start.
+    "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
+    "ON notifications (user_id, read_at)",
+    # eBay's immutable account id. Deletion notices identify the
+    # account by this and nothing else, and it is what every
+    # ownership check should key on instead of the mutable
+    # username.
+    "ALTER TABLE ebay_accounts ADD COLUMN ebay_user_id VARCHAR(64) DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS ix_ebay_accounts_ebay_user_id "
+    "ON ebay_accounts (ebay_user_id)",
+    # Session revocation. Nullable with no default: NULL means
+    # this account has never revoked, which is every account on
+    # the day this ships, and must keep every live session working.
+    #
+    # WITH TIME ZONE, matching the model's DateTime(timezone=True)
+    # — which is what create_all emits on a fresh database, so a
+    # bare TIMESTAMP here would give existing and new deployments
+    # different column types. On Postgres that difference is not
+    # cosmetic: an aware datetime written into a naive column is
+    # converted to the SESSION's timezone, so on any deployment
+    # not running in UTC the stored cutoff would be off by the
+    # offset — and being off in the lenient direction means a
+    # revocation quietly does not take effect for hours.
+    "ALTER TABLE users ADD COLUMN sessions_valid_from "
+    "TIMESTAMP WITH TIME ZONE",
+)
+
+
 def _get_engine():
     global _engine, _initialized
     if not enabled():
@@ -320,53 +375,7 @@ def _get_engine():
             )
         if not _initialized:
             Base.metadata.create_all(_engine)  # may raise if DB unreachable
-            # Lightweight migrations for DBs created before a column existed.
-            # Each ALTER is separately guarded so an already-applied one
-            # doesn't skip the rest.
-            for stmt in (
-                "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
-                "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
-                "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
-                "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
-                "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
-                "ALTER TABLE users ADD COLUMN prefs JSON",
-                # Encrypted tokens are roughly 1.5x their plaintext, and a
-                # silently truncated one disconnects a seller with no error.
-                # SQLite ignores VARCHAR lengths entirely, so these are a
-                # no-op there and the guard below swallows the syntax error.
-                "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
-                "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
-                # The unread badge polls every minute and filters on both of
-                # these; user_id alone left the read_at test to a scan of every
-                # notification the seller has ever received. IF NOT EXISTS is
-                # understood by Postgres and SQLite alike, so this is a no-op
-                # after the first boot rather than something the guard below
-                # has to swallow on every start.
-                "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
-                "ON notifications (user_id, read_at)",
-                # eBay's immutable account id. Deletion notices identify the
-                # account by this and nothing else, and it is what every
-                # ownership check should key on instead of the mutable
-                # username.
-                "ALTER TABLE ebay_accounts ADD COLUMN ebay_user_id VARCHAR(64) DEFAULT ''",
-                "CREATE INDEX IF NOT EXISTS ix_ebay_accounts_ebay_user_id "
-                "ON ebay_accounts (ebay_user_id)",
-                # Session revocation. Nullable with no default: NULL means
-                # this account has never revoked, which is every account on
-                # the day this ships, and must keep every live session working.
-                #
-                # WITH TIME ZONE, matching the model's DateTime(timezone=True)
-                # — which is what create_all emits on a fresh database, so a
-                # bare TIMESTAMP here would give existing and new deployments
-                # different column types. On Postgres that difference is not
-                # cosmetic: an aware datetime written into a naive column is
-                # converted to the SESSION's timezone, so on any deployment
-                # not running in UTC the stored cutoff would be off by the
-                # offset — and being off in the lenient direction means a
-                # revocation quietly does not take effect for hours.
-                "ALTER TABLE users ADD COLUMN sessions_valid_from "
-                "TIMESTAMP WITH TIME ZONE",
-            ):
+            for stmt in _MIGRATIONS:
                 try:
                     with _engine.begin() as conn:
                         conn.execute(text(stmt))

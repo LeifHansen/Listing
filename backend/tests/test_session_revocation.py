@@ -169,25 +169,45 @@ def test_no_revocation_means_no_extra_checking(signed_in, store):
 
 # ------------------------------------------- the column the migration adds
 
-def test_the_migration_matches_the_model_column_type():
+def test_every_added_column_matches_the_type_create_all_would_emit():
     """`create_all` on a fresh database emits the model's type; the guarded
-    ALTER is what an EXISTING deployment gets. If they differ, the same code
-    runs against two different column types.
+    ALTERs are what an EXISTING deployment gets. If they differ, the same code
+    runs against two different column types depending on when the database was
+    made — and SQLite ignores types entirely, so nothing in this suite would
+    otherwise notice.
 
-    On Postgres that is not cosmetic. An aware datetime written into a
-    TIMESTAMP WITHOUT TIME ZONE is converted to the session's timezone, so on
-    any deployment not running in UTC the stored cutoff is off by the offset —
-    and being off in the lenient direction means a revocation quietly does not
-    take effect for hours.
+    On Postgres the difference is not cosmetic. `sessions_valid_from` was
+    added as a bare TIMESTAMP against a model declaring
+    DateTime(timezone=True): an aware datetime written into a naive column is
+    converted to the SESSION's timezone, so on a deployment not running in UTC
+    the stored revocation cutoff would be off by the offset — and being off in
+    the lenient direction means "sign out everywhere" quietly does not take
+    effect for hours.
     """
-    import inspect
+    import re
+
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateColumn
 
     from backend import db
 
-    source = inspect.getsource(db._get_engine)
-    alter = next(line for line in source.splitlines()
-                 if "sessions_valid_from" in line and "ALTER TABLE" in line)
-    following = source[source.index(alter) + len(alter):]
+    tables = {t.name: t for t in db.Base.metadata.tables.values()}
+    checked = 0
+    for stmt in db._MIGRATIONS:
+        m = re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+) (.+?)"
+                     r"(?: DEFAULT .*)?$", stmt)
+        if not m:
+            continue  # an index, or a type change to an existing column
+        table, column, declared = m.groups()
+        assert table in tables, f"{stmt}: no such table in the models"
+        assert column in tables[table].c, f"{stmt}: no such column in the models"
 
-    assert "TIMESTAMP WITH TIME ZONE" in (alter + following[:80]), alter
-    assert db.User.__table__.c.sessions_valid_from.type.timezone is True
+        emitted = str(CreateColumn(tables[table].c[column])
+                      .compile(dialect=postgresql.dialect()))
+        model_type = emitted.split(None, 1)[1].split(" NOT NULL")[0].strip()
+        assert model_type.upper() == declared.strip().upper(), (
+            f"{table}.{column}: the migration adds {declared.strip()!r} but "
+            f"create_all emits {model_type!r}")
+        checked += 1
+
+    assert checked >= 6, "the migration list stopped being readable"
