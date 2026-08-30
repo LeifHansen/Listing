@@ -127,7 +127,12 @@ SERVER_OWNED_FIELDS = (
     "has_variations",
     # eBay's own numbers. Two of them add up to the Sold total the seller
     # reads as fact, and none of them is something a client observes.
-    "sold_price", "sold_quantity", "watch_count", "ebay_start_time",
+    # `sold_at` is the third part of the same observation: eBay's transaction
+    # date, or the moment the sync watched the listing flip to sold. Its two
+    # siblings were protected and it was not — which left the dashboard's
+    # "sold in the last N days" tile counting against a date a client could
+    # set, and the sold archive's ordering forgeable with it.
+    "sold_price", "sold_quantity", "sold_at", "watch_count", "ebay_start_time",
     # The EPS URLs of an imported listing's photos, written by the sync from
     # eBay's answer and never by anything the seller does. The revise reads
     # them as its fallback ("untouched photos → reuse the live EPS URLs") and
