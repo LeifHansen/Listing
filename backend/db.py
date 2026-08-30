@@ -1316,7 +1316,11 @@ def save_marketplace_account(user_id: str, marketplace: str, **fields) -> bool:
     try:
         eng = _get_engine()
         if eng is None:
-            return
+            # False, not a bare return: this function's whole contract is
+            # "did the write land", and nowhere to write is a no. Both are
+            # falsy, so callers reading it as a failure were already right --
+            # but the next one to write `is False` would quietly not be.
+            return False
         with Session(eng) as s:
             acct = s.get(MarketplaceAccount, (user_id, marketplace))
             if acct is None:

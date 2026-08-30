@@ -5638,7 +5638,15 @@ def save_etsy_settings_options(request: Request, payload: dict) -> dict:
               if k in payload}
     if not fields:
         raise HTTPException(400, "No settings provided.")
-    db.save_marketplace_account(uid, "etsy", settings=fields)
+    # The answer is a claim about a write. P0-06's rule, on a route that kept
+    # its own copy of the old behaviour: a save that did not land must not
+    # come back as `{"ok": true}`, or the seller closes Settings believing
+    # their shipping profile is chosen and every Etsy publish goes out with
+    # the old one.
+    if not db.save_marketplace_account(uid, "etsy", settings=fields):
+        raise errors.StorageUnavailable(
+            "Couldn't save your Etsy settings just now. Try again in a "
+            "moment.")
     return {"ok": True, "selected": fields}
 
 
@@ -5716,7 +5724,15 @@ def marketplace_callback(marketplace: str, request: Request,
     except Exception as exc:  # noqa: BLE001 - the redirect is the error surface
         log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
         return _finish_connect(request, f"/?connect_error={marketplace}")
-    db.save_marketplace_account(uid, marketplace, **fields)
+    # Same reasoning as the eBay callback: the marketplace authorised, so the
+    # grant is real and the seller has no reason to doubt a screen that says
+    # "connected" -- while every later publish fails on it. A connection that
+    # did not commit is a failed connect, and this is the one moment the
+    # seller is still here to retry it.
+    if not db.save_marketplace_account(uid, marketplace, **fields):
+        log.warning("%s connect authorised but did not persist (uid=%s)",
+                    marketplace, uid)
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     # Connecting a different account of the same marketplace must not leave the
     # previous account's access token cached against this user id.
     forget = getattr(provider, "forget_cached_creds", None)
