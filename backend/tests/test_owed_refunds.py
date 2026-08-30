@@ -163,3 +163,29 @@ def test_a_refund_that_works_records_nothing(store, monkeypatch):
     tokens.refund({"ok": True, "entry_id": "ledger-9", "user_id": "u1"})
 
     assert store.pending() == []
+
+
+# ------------------------------------- and the batch settlement stays honest
+
+def test_a_failed_mid_run_refund_does_not_shrink_the_final_settlement(store,
+                                                                      monkeypatch):
+    """`bg_refunded` is subtracted from the batch's closing refund. Counting a
+    refund that did not commit would shrink that remainder by money the seller
+    never received — and the queued debt plus the closing refund would then
+    still leave them short.
+
+    Both paths are capped by the ledger (db.token_refund refunds at most what
+    the spend has left), so attempting the full remainder cannot over-pay.
+    """
+    from backend import db
+    from backend.services import tokens
+
+    monkeypatch.setattr(db, "token_refund", lambda *a, **k: False)
+    spend = {"ok": True, "entry_id": "ledger-b", "user_id": "u1"}
+
+    bg_refunded = 0
+    if tokens.refund(spend, units=4):
+        bg_refunded += 4
+
+    assert bg_refunded == 0, "a refund that never committed was counted"
+    assert [o["units"] for o in store.pending()] == [4]

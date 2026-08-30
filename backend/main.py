@@ -3707,8 +3707,16 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                       **({"bg_error": reason} if reason else {}))
         if owed_now:
             # Photos that kept their background weren't the AI they paid for.
-            tokens.refund(bg_spent, units=owed_now)
-            bg_refunded += owed_now
+            #
+            # Counted only if it actually LANDED. `bg_refunded` is subtracted
+            # from the final settlement below, so counting a refund that did
+            # not commit would shrink the remainder by money the seller never
+            # got. A failure here is also queued for a later pass (see
+            # services/owed_refunds), and db.token_refund caps every refund at
+            # what the spend has left — so the two paths converge on the right
+            # total and neither can over-pay.
+            if tokens.refund(bg_spent, units=owed_now):
+                bg_refunded += owed_now
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
