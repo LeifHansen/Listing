@@ -775,15 +775,42 @@ def delete_user(user_id: str) -> Optional[list[str]]:
         return None
 
 
+# How many listing ids go into one queue statement. Chosen for SQLite's
+# default 999-host-parameter ceiling with room to spare; Postgres allows far
+# more, and the round-trip saving is already flat by this point.
+_PURGE_BATCH = 400
+
+
 def _queue_media_purges(session, user_id: str, listing_ids: list[str]) -> None:
     """Record, in the caller's open transaction, that these listings' photos
-    are still in storage. Raising here fails the whole delete, which is the
-    intended behaviour: better to tell the seller the deletion did not happen
-    than to delete the rows and lose track of the photos."""
+    are still in storage.
+
+    Set-wise, in batches, NOT row by row. `session.merge()` per listing issues
+    a SELECT and an INSERT each: a 2,000-listing account is four thousand
+    serial round trips inside the open delete transaction, which against a
+    cross-region Postgres is long enough to hit a statement timeout — and then
+    the whole deletion rolls back and the seller is told it failed. The
+    listings themselves are already deleted set-wise a few lines up, for the
+    same reason.
+
+    The delete before the insert is not an optimisation: a listing whose purge
+    keeps failing still has its row, and re-queueing it must not collide with
+    the primary key. Deleting first re-arms it from zero attempts, which is
+    right — this is a fresh request to erase the same objects.
+
+    Raising here fails the whole delete, which is the intended behaviour:
+    better to tell the seller the deletion did not happen than to delete the
+    rows and lose track of the photos.
+    """
     now = _now()
-    for lid in listing_ids:
-        session.merge(MediaPurge(listing_id=lid, user_id=user_id or "",
-                                 attempts=0, last_error="", requested_at=now))
+    for start in range(0, len(listing_ids), _PURGE_BATCH):
+        batch = listing_ids[start:start + _PURGE_BATCH]
+        session.execute(
+            delete(MediaPurge).where(MediaPurge.listing_id.in_(batch)))
+        session.execute(
+            MediaPurge.__table__.insert(),
+            [{"listing_id": lid, "user_id": user_id or "", "attempts": 0,
+              "last_error": "", "requested_at": now} for lid in batch])
 
 
 def pending_media_purges(limit: int = 500) -> list[dict]:

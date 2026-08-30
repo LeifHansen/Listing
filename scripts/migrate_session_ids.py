@@ -41,7 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend import config, db, objstore, storage  # noqa: E402
+from backend import config, db, errors, objstore, storage  # noqa: E402
 
 
 def _legacy_dir(session_id: str) -> Path:
@@ -206,7 +206,16 @@ def main() -> int:
     if not args.apply:
         print("DRY RUN — nothing will be moved. Re-run with --apply.\n")
 
-    ids = _session_ids()
+    try:
+        ids = _session_ids()
+    except errors.StorageUnavailable as exc:
+        # An unreadable database used to answer []. This script would then
+        # print "0 session id(s)", find nothing to move, and exit 0 -- a
+        # migration reporting success having done nothing, which is worse
+        # than not running it, because the next person believes it ran.
+        print(f"ABORTED: couldn't read the listings from the database ({exc}).")
+        print("Nothing was moved. Fix the connection and run this again.")
+        return 2
     print(f"{len(ids)} session id(s) from the database\n")
 
     print("Local disk:")

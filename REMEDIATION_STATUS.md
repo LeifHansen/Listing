@@ -76,7 +76,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | P0-07 publish idempotency | `57eed10` | Guarded by `InventoryTrackingNumber`, which is not an eBay `ItemType` element — ignored on write, and the `GetItem` lookup built on it could never succeed. Now `SKU` + `InventoryTrackingMethod=SKU`. Also **added 488** (the real duplicate-UUID code) and **removed 21916884/21916885**, which are eBay's item-*condition* codes — a fixable condition rejection was being reported as "already published". The audit missed this one. |
 | P0-08 three-way sync | `66fcb16` | Inbound refused newer remote content; outbound sent the whole payload. A price edit overwrote a title fixed in Seller Hub. Added `remote_shadow` as the base, conflict records, and minimal revise payloads. |
 
-### Five traps already hit and fixed — do not reintroduce
+### Traps already hit and fixed — do not reintroduce
 
 1. **The read-side legacy fallback (P0-01).** A first draft of `session_dir`
    fell back to the old stripped name when the canonical directory was
@@ -109,6 +109,18 @@ encoded wrong behaviour were corrected in place, each saying why.
 | Finding | Commit | What it was |
 | --- | --- | --- |
 | A failed store read reported an empty store | `9381df8` | `db.list_listings` answered `[]` on any exception, like every read in `db.py`. For this one that is not a survivable degradation: the eBay import matches incoming items against the records it finds and imports whatever it does not, so **one Postgres blip during a sync imported a second copy of the seller's entire eBay store**, reported as a successful sync, leaving real duplicate listings to merge by hand. The same `[]` also let a release pass report "released 0", a status sweep report checking a store it never read, and the session-id migration report nothing to migrate. The read now raises `StorageUnavailable`; `list_listings_best_effort` exists for the three callers where empty genuinely only thins the answer (metrics, the weight pre-fill, the deletion preview's "unknown" path). No database configured is still `[]` — a configuration, not a failure. Client-side had the mirror image: a failed `/api/listings` left the cache at its initial `items: []`, so the store the app could not read rendered as "No listings yet" with a button to create a first listing. |
+
+8. **Recording work per row inside a transaction that deletes set-wise.**
+   The media-purge queue was first written with one `session.merge()` per
+   listing: a SELECT and an INSERT each, inside the open `delete_user`
+   transaction. 2,000 listings measured 4,009 statements — fine on SQLite,
+   thousands of serial round trips against a cross-region Postgres, long
+   enough to hit a statement timeout and roll the whole deletion back, so
+   the seller is told their deletion failed. Batched deletes+inserts bring
+   the same 2,000 listings to 19 statements. `delete_user` deletes the
+   listings set-wise for exactly this reason; anything added to that
+   transaction has to be set-wise too. Pinned by a statement-count test
+   (not a timing one, which would pass on a laptop and prove nothing).
 
 ## Two operational consequences of the CI change — read before merging
 

@@ -242,3 +242,42 @@ def test_the_backlog_is_countable_without_naming_anyone(store):
     backlog = deletion_queue.backlog()
     assert backlog == {"media_purges": 2, "deletion_notices": 0}
     assert "u1" not in str(backlog)
+
+
+# ------------------------------------------- the debt must be cheap to record
+
+def test_recording_the_debt_does_not_cost_a_round_trip_per_listing(store):
+    """Queued row-by-row this was one SELECT and one INSERT per listing,
+    inside the open delete transaction. On SQLite that is merely slow; against
+    a cross-region Postgres a 2,000-listing account is thousands of serial
+    round trips, which is long enough to hit a statement timeout — and then
+    the whole deletion rolls back and the seller is told it failed.
+
+    The bound is on statement COUNT rather than wall time: a timing assertion
+    would pass on a laptop and say nothing about the database this actually
+    runs against.
+    """
+    from sqlalchemy import event
+
+    _a_user(store)
+    for i in range(200):
+        store.upsert_listing(f"u1-x{i}", {"title": "x"}, status="draft",
+                             user_id="u1")
+
+    eng = store._get_engine()
+    statements: list[int] = []
+
+    def _count(*_a, **_k):
+        statements.append(1)
+
+    event.listen(eng, "before_cursor_execute", _count)
+    try:
+        assert len(store.delete_user("u1")) == 202
+    finally:
+        event.remove(eng, "before_cursor_execute", _count)
+
+    # Generous, and still an order of magnitude below per-row: the fixed cost
+    # is the eight table deletes plus a couple of statements per batch.
+    assert len(statements) < 40, (
+        f"{len(statements)} statements to delete 202 listings — the purge "
+        "queue is being written a row at a time")

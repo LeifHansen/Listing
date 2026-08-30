@@ -100,6 +100,24 @@ def test_the_application_quota_wording_is_recognised(ebay):
         ebay_trading.get_listing("tok", "110")
 
 
+def test_a_monthly_selling_allowance_is_not_a_call_limit(ebay):
+    """The likeliest misfire, and a harmful one. eBay caps how many items a
+    seller may LIST in a month; that refusal also says "exceeded" and "limit"
+    and it is not a rate limit. Reporting it as one tells the seller to wait a
+    few seconds for something that will not change until eBay raises their
+    allowance or the month turns — advice that wastes their time and hides the
+    real answer, which is to request a higher limit."""
+    ebay(_Resp(content=_xml(
+        "21919188",
+        "You have exceeded your monthly listing limit of 10 items. Request a "
+        "higher selling limit from eBay.")))
+
+    with pytest.raises(ebay_trading.TradingError) as caught:
+        ebay_trading.get_listing("tok", "110")
+    assert not isinstance(caught.value, ebay_trading.RateLimited), \
+        "a monthly SELLING allowance was reported as a call rate limit"
+
+
 def test_an_ordinary_rejection_is_still_an_ordinary_rejection(ebay):
     """The guard must be narrow. A listing eBay refuses on its merits is a
     seller-fixable problem, and calling it a rate limit would tell them to
