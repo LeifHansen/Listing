@@ -19,7 +19,8 @@ import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
-import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
+import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
+         salesSummary } from "@/lib/sales";
 import { listingsView, storeTotal } from "@/lib/listingsView";
 import { storeMirrorView } from "@/lib/storeMirror";
 
@@ -370,10 +371,15 @@ function soldSub(sales, soldEnded) {
   // The window itself is named by the picker in the corner, so this line
   // spends its width on what the total is made of instead of repeating it.
   const parts = [`${sales.count} sale${sales.count === 1 ? "" : "s"}`];
-  if (sales.profit != null) {
+  // Only when there is one currency to name it in. Profit summed across
+  // currencies is a number with no meaning, and printing it with a default
+  // dollar sign is how a seller on eBay.co.uk was told their £45 item sold
+  // "for $45.00" -- fixed once, at the sold notification, and still here.
+  if (sales.profit != null && sales.currency) {
     const sign = sales.profit >= 0 ? "+" : "−";
-    parts.push(`${sign}${formatMoney(Math.abs(sales.profit))} profit`);
+    parts.push(`${sign}${formatMoney(Math.abs(sales.profit), sales.currency)} profit`);
   }
+  if (sales.mixedCurrency) parts.push("more than one currency");
   // Say when the total is leaning on asking prices rather than reported sale
   // amounts, instead of presenting a guess as the takings.
   if (sales.approx) parts.push(`${sales.approx} estimated`);
@@ -541,6 +547,9 @@ export function Dashboard() {
     writeLocal(SOLD_RANGE_KEY, id);
   };
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
+  // The same question for the live listings: one currency, or a sum that
+  // cannot be shown as money at all.
+  const liveMoney = currencyOf(live);
   const watcherTotal = live.reduce((sum, i) => {
     const m = metricsById[i.id];
     const w = m?.watchers ?? i.listing?.watch_count ?? 0;
@@ -643,9 +652,10 @@ export function Dashboard() {
             screen, at the same moment, as the card below explaining that the
             listings could not be loaded. storeTotal is what stops that. */}
         <StatCard icon={Coins} tone="green" label="Active on eBay"
-          {...storeTotal(storeView.kind, live.length, revenue > 0
-            ? `${formatMoney(revenue)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
-            : "everything currently live")}
+          {...storeTotal(storeView.kind, live.length,
+            revenue > 0 && liveMoney.currency
+              ? `${formatMoney(revenue, liveMoney.currency)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
+              : "everything currently live")}
           onClick={() => openListings("active")} />
         <StatCard icon={FileText} tone="yellow" label="Drafts in progress"
           {...storeTotal(storeView.kind, drafts.length, inventory.length
@@ -653,7 +663,16 @@ export function Dashboard() {
             : "open one to finish & publish")}
           onClick={() => openListings("drafts")} />
         <StatCard icon={DollarSign} tone="blue" label="Sold"
-          {...storeTotal(storeView.kind, formatMoney(sales.total) || "$0.00",
+          {...storeTotal(storeView.kind,
+                         // A dash for a total that spans currencies, the same
+                         // answer this tile gives for one it could not
+                         // measure -- because a mixed sum is not a figure the
+                         // seller can act on whatever symbol goes in front.
+                         sales.mixedCurrency
+                           ? "—"
+                           : formatMoney(sales.total,
+                                         sales.currency || DEFAULT_CURRENCY)
+                             || "$0.00",
                          soldSub(sales, soldEnded))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />

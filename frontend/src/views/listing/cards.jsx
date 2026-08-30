@@ -1173,6 +1173,10 @@ export function PromoteCard({ w }) {
   const rate = Number(w.form.ad_rate_percent) || 0;
   const price = Number(w.form.price) || 0;
   const fee = price > 0 && rate > 0 ? (price * rate) / 100 : 0;
+  // The fee is a percentage of THIS listing's price, so it is in this
+  // listing's money. The price fields two panels up already label themselves
+  // with it; this one was formatting a pound fee with a dollar sign.
+  const currency = w.form.currency || "USD";
 
   const toggle = () => {
     if (on) { w.set("promote", false); return; }
@@ -1231,7 +1235,7 @@ export function PromoteCard({ w }) {
                 {fee > 0 ? (
                   <>
                     <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
-                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee)}</p>
+                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee, currency)}</p>
                   </>
                 ) : (
                   <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>

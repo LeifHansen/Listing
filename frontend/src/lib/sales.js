@@ -25,6 +25,11 @@ export const SOLD_RANGES = [
 
 export const DEFAULT_SOLD_RANGE = "week";
 
+// What a record with no `currency` is assumed to be. Imported listings
+// always carry one (the sync reads eBay's own Currency field); a draft
+// created before that field existed may not.
+export const DEFAULT_CURRENCY = "USD";
+
 export function soldRange(id) {
   return SOLD_RANGES.find((r) => r.id === id)
     || SOLD_RANGES.find((r) => r.id === DEFAULT_SOLD_RANGE);
@@ -81,6 +86,23 @@ export function saleTime(item) {
  * the next store sync backfills them from eBay's own transaction dates, and
  * the tile says so rather than leaving the seller to wonder.
  */
+/* Which money a set of listings is in, for a total that spans several.
+ *
+ * `currency` is the single code when they agree and `null` when they do not,
+ * because a sum across currencies is wrong next to any symbol -- and `null`
+ * for an empty set too, since there is nothing to be in. `mixed` separates
+ * those two, which the caller needs: nothing to show and cannot be shown are
+ * different sentences.
+ */
+export function currencyOf(items) {
+  const seen = new Set();
+  for (const item of items || []) {
+    seen.add((item.listing || {}).currency || DEFAULT_CURRENCY);
+  }
+  return { currency: seen.size === 1 ? [...seen][0] : null, mixed: seen.size > 1 };
+}
+
+
 export function salesSummary(items, rangeId, now = Date.now()) {
   const range = soldRange(rangeId);
   const since = now - range.days * 24 * 60 * 60 * 1000;
@@ -91,6 +113,11 @@ export function salesSummary(items, rangeId, now = Date.now()) {
   let withCost = 0;
   let approx = 0;
   let undated = 0;
+  // Which money the total is in. A sum across currencies is wrong next to any
+  // symbol, so this records what was actually counted rather than letting the
+  // formatter default to dollars -- which is how a seller on eBay.co.uk was
+  // told their £45 item sold "for $45.00".
+  const currencies = new Set();
   for (const item of items || []) {
     if (item.status !== "sold") continue;
     const at = saleTime(item);
@@ -102,6 +129,11 @@ export function salesSummary(items, rangeId, now = Date.now()) {
     count += 1;
     units += soldUnits(l);
     total += proceeds;
+    // Only sales inside the window: last year's GBP sale must not make this
+    // week's dollar total unreportable. A record with no currency at all --
+    // a draft from before the field existed -- takes the app's default rather
+    // than counting as a second currency and blanking the seller's number.
+    currencies.add(l.currency || DEFAULT_CURRENCY);
     if (!hasSalePrice(l)) approx += 1;
     if (l.purchase_price != null && !Number.isNaN(Number(l.purchase_price))) {
       withCost += 1;
@@ -112,5 +144,10 @@ export function salesSummary(items, rangeId, now = Date.now()) {
     range, since, total, count, units, undated, approx,
     profit: withCost ? profit : null,
     withCost,
+    // `null` for both "nothing was counted" and "more than one currency was".
+    // The caller has to decide what to show either way, and neither is a
+    // number it may put a symbol on.
+    currency: currencies.size === 1 ? [...currencies][0] : null,
+    mixedCurrency: currencies.size > 1,
   };
 }
