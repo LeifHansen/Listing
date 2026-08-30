@@ -32,12 +32,28 @@ Baseline measured before any change, at `c819fd7`:
 The audit expected 944; the +17 is the tests added by the 2 intervening
 commits (`#200`, `#201`).
 
-**The 2 failures are environmental, not defects.** `Dockerfile:28` bakes the
-~176MB `isnet-general-use` rembg model into the image. This container has no
-`~/.u2net` cache, so the first inference in `test_readiness.py` blocks on a
-model download past the test's 5s window and leaves `_INFER_LOCK` held, which
-fails the second test too. They fail identically with none of these changes
-applied. Do not attribute them to the remediation.
+**The 2 failures were a test bug, and are now fixed** (`f3a90bb`). They are
+not attributable to the remediation — they failed identically before any of
+these changes — but the earlier reading of them here, that they were purely
+environmental, was wrong and is corrected.
+
+`test_a_batch_photo_queues_for_the_model_instead_of_giving_up` parks a worker
+behind `_INFER_LOCK`, releases it, and waited a flat **5 seconds** for the
+worker to settle. That budget is a bet on the environment rather than on the
+behaviour under test: CI installs the server WITHOUT rembg, so there the
+thread raises the instant it has the slot, while anywhere rembg is present it
+pays for a model load and a real inference first — which on a cold shared box
+overruns. The failure then read as `outcome == []`, i.e. "the queued photo
+never got the slot", the exact opposite of what happened; and the worker was
+left holding `_INFER_LOCK`, so `engine_state()["busy"]` stayed True and
+`test_the_engine_state_a_probe_reads_is_cheap_and_complete` failed too,
+pointing at a readiness probe that was working perfectly.
+
+One slow machine, two red tests, neither naming the cause — and a suite that
+is red for reasons nobody can act on is one people stop reading. It now waits
+on the deadline actually under test and JOINs, so the lock cannot outlive the
+test that took it. No assertion was loosened: giving up raises `CutoutBusy`
+and still fails the same check.
 
 Environment setup in a fresh container:
 
@@ -57,7 +73,21 @@ Fast backend loop (skips the slow image suites):
   --ignore=backend/tests/test_bg_holes.py --ignore=backend/tests/test_dark_backdrop.py
 ```
 
-Currently **922 passed** on that subset, Ruff clean. Full suite: **1100+ passed, the 2 environmental failures above**.
+Where things stand, measured rather than remembered:
+
+| Suite | Result |
+| --- | --- |
+| Full backend (`pytest backend/tests`) | **1485 passed, 0 failed** |
+| A CI-`checks`-equivalent env (no image/AI stack) | **1033 passed, 35 skipped** |
+| The smoke job's API-tests step | **243 passed, 0 skipped** (it fails on a skip) |
+| Frontend Vitest | **14 files, 165 tests** |
+| Ruff · ESLint · `npm run build` | clean |
+
+The skips in the middle row are deliberate: those files `importorskip` the
+image/AI stack and run in the `smoke` job instead, whose API-tests step fails
+if any of them skips — so a test cannot quietly stop running. Anything new
+that imports `backend.main` belongs in that list in `gates.yml`; one added
+without it ERRORS in `checks` rather than skipping, and takes the job red.
 
 ## Done — all 8 P0 release blockers
 
