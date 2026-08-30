@@ -369,7 +369,18 @@ one failing never rolls back the others — and per-marketplace state
   built in), who-made/when-made attribution, and a shipping profile
   (defaults per account under Settings). Note: Etsy allows only handmade,
   vintage (20+ years), and craft supplies, and rotates refresh tokens —
-  both are handled.
+  both are handled. First connect stopping on Etsy's own page with *"Only
+  the app owner may authorize a seller app"* is app **type**, not config: a
+  Seller app is authorizable by the one Etsy account that registered the
+  keystring and nobody else, so either sign in as that account, or request
+  Commercial Access to let other sellers connect. Reaching that page proves
+  `ETSY_CLIENT_ID` and `ETSY_REDIRECT_URI` are registered correctly — a
+  wrong one fails before the consent screen. While that approval is pending,
+  set `ETSY_OWNER_EMAILS` to the owner's login for *this* app (not their Etsy
+  one — it's matched against the account record): they keep connecting, and
+  every other seller gets a "Pending approval" card instead of being sent to
+  Etsy to be refused. `ETSY_COMMERCIAL_ACCESS=true` retires the gate once
+  Etsy grants it. Details in `.env.example`.
 - **Depop** — official Selling API, which is **partner-gated**: apply via
   Depop partnerships, then set the five `DEPOP_*` vars from onboarding
   (`.env.example`). Until then Depop simply stays hidden. No drafts or

@@ -183,3 +183,80 @@ def test_flag_set_properly_is_silent(fresh_config):
     assert fresh_config(TOKENS_ENABLED="true").config_warnings() == []
     assert fresh_config(TOKENS_ENABLED="1").config_warnings() == []
     assert fresh_config().config_warnings() == []
+
+
+# --- Etsy's seller-app wall -------------------------------------------------
+# Etsy grants a Seller app to exactly one account. Every other seller is
+# refused on Etsy's OWN page ("Only the app owner may authorize a seller
+# app"), after leaving this site, with nothing redirected back for the app to
+# catch — so the only place to be kind about it is before the redirect.
+
+def test_etsy_gate_is_off_until_an_owner_is_named(fresh_config):
+    """No owner named = no way to tell the owner from anyone else, and
+    guessing wrong locks the operator out of their own shop. Unconfigured
+    therefore behaves exactly as it did before the gate existed."""
+    cfg = fresh_config(ETSY_CLIENT_ID="key123",
+                       ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
+    assert cfg.etsy_oauth_ready()
+    assert cfg.etsy_access_pending("owner@example.com") is False
+    assert cfg.etsy_access_pending("anyone@example.com") is False
+    assert cfg.etsy_access_pending("") is False
+
+
+def test_etsy_owner_connects_while_everyone_else_waits(fresh_config):
+    cfg = fresh_config(ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_gate_active() is True
+    assert cfg.etsy_access_pending("owner@example.com") is False
+    assert cfg.etsy_access_pending("seller@example.com") is True
+
+
+def test_gate_active_is_false_in_both_do_nothing_states(fresh_config):
+    """The provider checks this to skip a database round-trip per roster
+    build, so it has to be false in exactly the cases where the answer can
+    only be "not pending" anyway."""
+    assert fresh_config().etsy_gate_active() is False          # no owner named
+    assert fresh_config(ETSY_COMMERCIAL_ACCESS="true",         # nothing to gate
+                        ETSY_OWNER_EMAILS="owner@example.com"
+                        ).etsy_gate_active() is False
+
+
+def test_etsy_owner_match_survives_case_and_padding(fresh_config):
+    """The value is typed into a secrets dashboard by hand, once."""
+    cfg = fresh_config(ETSY_OWNER_EMAILS=" Owner@Example.com , second@example.com ")
+    assert cfg.ETSY_OWNER_EMAILS == ("owner@example.com", "second@example.com")
+    assert cfg.etsy_access_pending("OWNER@EXAMPLE.COM ") is False
+    assert cfg.etsy_access_pending("second@example.com") is False
+    assert cfg.etsy_access_pending("third@example.com") is True
+
+
+def test_etsy_unknown_caller_is_gated_not_waved_through(fresh_config):
+    """"We don't know who this is" must not read as "this is the owner" — the
+    roster is built for logged-out visitors too."""
+    cfg = fresh_config(ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_access_pending("") is True
+    assert cfg.etsy_access_pending(None) is True
+
+
+def test_commercial_access_retires_the_gate_for_everyone(fresh_config):
+    """The end state: Etsy approved the app, so the owner list stops
+    mattering and nobody is held back."""
+    cfg = fresh_config(ETSY_COMMERCIAL_ACCESS="true",
+                       ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_access_pending("anyone@example.com") is False
+
+
+def test_unparsed_commercial_access_flag_is_reported(fresh_config):
+    """This flag fails CLOSED, which is the dangerous direction to be silent
+    about: the operator believes they opened Etsy to every seller, and the app
+    is still quietly showing them a pending-review card."""
+    cfg = fresh_config(ETSY_COMMERCIAL_ACCESS="True_but_typo",
+                       ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.ETSY_COMMERCIAL_ACCESS is False
+    assert cfg.etsy_access_pending("seller@example.com") is True
+    warning = [w for w in cfg.config_warnings() if "ETSY_COMMERCIAL_ACCESS" in w]
+    assert warning and "True_but_typo" in warning[0]
+
+
+def test_a_properly_set_commercial_access_flag_is_silent(fresh_config):
+    assert fresh_config(ETSY_COMMERCIAL_ACCESS="true").config_warnings() == []
+    assert fresh_config(ETSY_COMMERCIAL_ACCESS="1").config_warnings() == []
