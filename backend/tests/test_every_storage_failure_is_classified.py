@@ -95,6 +95,9 @@ MUST_RAISE = {
     "get_marketplace_account": "same, for every non-eBay marketplace",
     "save_ebay_account": "OAuth redirected to 'connected' on a token that was never stored",
     "count_pending_media_purges": "zero owed is a clean bill on somebody's erasure",
+    "get_listings":
+        "an empty answer told a seller every listing they had just ticked did "
+        "not exist",
     "count_listings":
         "zero live listings is what suppresses the 'these stay up on eBay' "
         "warning on the delete-account dialog",

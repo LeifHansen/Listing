@@ -15,7 +15,7 @@ import datetime as _dt
 import threading
 import time as _time
 import uuid as _uuid
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import (DateTime, Index, JSON, String, create_engine, delete,
                         func,
@@ -580,6 +580,43 @@ def list_listings_best_effort(limit: int = 50,
         return list_listings(limit=limit, user_id=user_id)
     except StorageUnavailable:
         return []
+
+
+def get_listings(listing_ids: Sequence[str], user_id: str) -> list[dict]:
+    """The seller's listings among `listing_ids`, in one query.
+
+    RAISES on a read failure, like every other read whose blank would be a
+    claim: the caller is a bulk action, and an empty answer there is reported
+    to the seller as "Listing not found." against every listing they ticked.
+
+    Ownership is enforced in the read rather than left to the caller, so a
+    bulk route cannot forget it. An id that is absent from the result is
+    genuinely absent or genuinely not theirs -- which is a real answer, and
+    the reason this asks for the ids instead of filtering a page of the
+    store: the page is ordered newest-first, so on a store past the list cap
+    a ticked listing only has to be edited past by the cap's worth of others
+    between opening the screen and pressing the button to be reported as one
+    that does not exist.
+    """
+    ids = [str(i) for i in listing_ids if str(i)]
+    if not ids:
+        return []
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            rows = s.execute(
+                select(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(ListingRecord.id.in_(ids))
+            ).scalars().all()
+            return [_record_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t look those listings up just now — they haven’t gone "
+            "anywhere. Try again in a moment.") from exc
 
 
 def count_listings(user_id: str,

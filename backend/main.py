@@ -4649,8 +4649,14 @@ def lower_prices(payload: dict, request: Request) -> dict:
     if not ids:
         raise HTTPException(400, "Pick at least one listing to reprice.")
     wanted = set(ids)
-    mine = [r for r in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-            if r["id"] in wanted]
+    # The ids, asked for. This used to read the seller's newest LIST_CAP
+    # records and filter -- every one of their JSON blobs across a
+    # cross-region link to keep at most BULK_PRICE_CAP of them, and, worse,
+    # anything outside that window came back to the seller as "Listing not
+    # found." The list is newest-first, so on a store past the cap a ticked
+    # listing only has to be edited past by 3,000 others between opening the
+    # screen and pressing the button. Ownership is enforced inside the read.
+    mine = db.get_listings(ids, user["id"])
     # Each listing is its own revise round-trip to eBay, run one after another.
     # Past this many the request outlives the gateway and the seller sees a
     # timeout instead of a result, so the run is bounded and the remainder is
