@@ -774,7 +774,18 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
                 updates, _sale_for(str(data.get("ebay_listing_id") or "")),
                 mark_now=rec.get("status") != "sold")
         if status != rec.get("status") or updates != data:
-            db.upsert_listing(rec["id"], updates, status=status, user_id=user_id)
+            # Checked BEFORE the archive below. The purge is right when this
+            # write lands -- a sold listing is archived, eBay hosts the photos
+            # it went live with, and the working copies are dead weight on a
+            # small volume. It is wrong when the write does not: the record
+            # still says the listing is LIVE, so the app goes on offering to
+            # edit and revise something whose photos are gone.
+            landed = db.upsert_listing(rec["id"], updates, status=status,
+                                       user_id=user_id)
+            if db.enabled() and not landed:
+                log.warning("sync: couldn't record %s as %s — leaving its "
+                            "photos alone", rec["id"], status)
+                continue
             if status == "sold":
                 if rec.get("status") != "sold":
                     notifications.notify_sold(user_id, rec["id"], updates,

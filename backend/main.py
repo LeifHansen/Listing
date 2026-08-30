@@ -5104,8 +5104,18 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
             data = listing_sync.stamp_sale(
                 data, sales.get(str(data.get("ebay_listing_id") or "")),
                 mark_now=True)
-        db.upsert_listing(req.session_id, data,
-                          status=new_status, user_id=_uid(request))
+        # Checked, because the branch below DELETES the photos. Same rule as
+        # the merge: nothing is destroyed for a status change that did not
+        # happen, or the record goes on saying the listing is live with
+        # nothing left to edit or relist it from.
+        landed = db.upsert_listing(req.session_id, data,
+                                   status=new_status, user_id=_uid(request))
+        if db.enabled() and not landed:
+            log.error("end-listing: eBay ended %s but the status write failed "
+                      "— photos kept", req.session_id)
+            raise errors.StorageUnavailable(
+                "It came off eBay, but we couldn't update your copy here. "
+                "Refresh in a moment — don't end it again.")
         if new_status == "sold" and rec.get("status") != "sold":
             notifications.notify_sold(
                 _uid(request) or rec.get("user_id"), req.session_id, data,
