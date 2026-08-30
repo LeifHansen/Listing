@@ -120,13 +120,41 @@ def _order_to_dict(o: dict) -> dict:
     }
 
 
-def awaiting_shipment(token: str, limit: int = 50) -> list[dict]:
-    """The seller's orders still waiting to ship, newest first."""
+def awaiting_page(token: str, limit: int = 50) -> dict:
+    """One page of orders still waiting to ship, and how many there are.
+
+    {orders, total, partial}. `total` is eBay's own count for the filter, and
+    `partial` says the page does not cover it — which the caller needs,
+    because this is the list a seller reads to decide what still has to be
+    packed. A page of 50 out of 80 used to be indistinguishable from 50 out of
+    50, and eBay measures late dispatch: the thirty invisible orders cost the
+    seller's standing, not just their afternoon.
+
+    `total` is never invented. When eBay omits it, it falls back to what this
+    page actually holds and `partial` stays False — the honest reading of "we
+    were not told".
+    """
     data = _get(token, f"{_FULFILLMENT}/order", params={
         "filter": "orderfulfillmentstatus:{NOT_STARTED|IN_PROGRESS}",
         "limit": str(max(1, min(limit, 200))),
     })
-    return [_order_to_dict(o) for o in data.get("orders") or []]
+    orders = [_order_to_dict(o) for o in data.get("orders") or []]
+    try:
+        total = int(data.get("total"))
+    except (TypeError, ValueError):
+        total = len(orders)
+    return {"orders": orders, "total": total,
+            "partial": total > len(orders)}
+
+
+def awaiting_shipment(token: str, limit: int = 50) -> list[dict]:
+    """The seller's orders still waiting to ship, newest first.
+
+    The bare list, for callers that only need to find one order in it (see
+    order_for_item). Anything SHOWING the pile should use awaiting_page, which
+    also says whether the page is the whole of it.
+    """
+    return awaiting_page(token, limit)["orders"]
 
 
 def get_order(token: str, order_id: str) -> dict:

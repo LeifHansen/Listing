@@ -5263,10 +5263,15 @@ def ebay_orders_awaiting(request: Request) -> dict:
     matching listing recorded one) the package weight/dims pre-filled."""
     creds = _orders_creds(request)
     try:
-        orders = ebay_orders.awaiting_shipment(creds["access_token"])
+        page = ebay_orders.awaiting_page(creds["access_token"])
     except ebay_orders.OrdersError as exc:
         raise HTTPException(502, str(exc)) from exc
-    return {"orders": _attach_packages(creds["_uid"], orders)}
+    # `total` and `partial` ride along because this is the list a seller reads
+    # to decide what still has to be packed: a page of 50 out of 80 read as
+    # the whole pile leaves thirty orders unshipped, and eBay scores late
+    # dispatch.
+    return {"orders": _attach_packages(creds["_uid"], page["orders"]),
+            "total": page["total"], "partial": page["partial"]}
 
 
 @app.get("/api/ebay/orders/for-listing/{listing_id}")
