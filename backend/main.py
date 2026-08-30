@@ -3220,6 +3220,69 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     return {"saved": True}
 
 
+# What a card-level control may change without opening the editor. Small on
+# purpose: a patch route that accepts anything is a full replace with extra
+# steps, and the caller can then send every field and reintroduce the very
+# lost update this exists to prevent.
+_PATCHABLE = ("fulfillment_policy_id", "category_id", "category_suggestion",
+              "price", "quantity", "condition")
+
+
+@app.patch("/api/listings/{session_id}")
+def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
+    """Change named fields on a listing, leaving the rest as stored.
+
+    `POST /api/save/{id}` is a full REPLACE and has to be — clearing a
+    subtitle means sending the listing without one. The problem is what got
+    built on top: a card that changes a shipping policy or a category does it
+    by spreading the whole listing it happens to be holding, which came from
+    the last /api/listings load. A title fixed in the editor in another tab,
+    or anything a background sync pulled in since, is overwritten by that
+    older copy the moment somebody picks from a dropdown.
+
+    Same reasoning as PATCH .../images/order above, which exists because "a
+    reorder could overwrite a title edit made in another tab with a stale
+    copy". A patch says what changed and nothing else, so there is no stale
+    copy to send.
+
+    The merged listing comes back so the caller can refresh from the answer
+    rather than from the copy it already had — which is the copy that was
+    stale.
+    """
+    _assert_session_owner(session_id, request)
+    rec = db.get_listing(session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+    changes = {k: v for k, v in (payload or {}).items() if k in _PATCHABLE}
+    if not changes:
+        raise HTTPException(
+            400, "Nothing to change. Send one of: "
+                 + ", ".join(_PATCHABLE) + ".")
+
+    merged = dict(rec.get("listing") or {})
+    merged.update(changes)
+    try:
+        listing = Listing(**merged)
+    except Exception as exc:  # noqa: BLE001 - a bad value is the caller's
+        raise HTTPException(400, f"That value isn't valid: {exc}") from exc
+    # Marked so the next revise actually carries it: a live listing's shipping
+    # policy changed from a card has to reach eBay, and a revise only sends
+    # fields the seller is known to have edited.
+    listing.mark_dirty(*changes)
+
+    storage.save_listing(session_id, listing)
+    data = listing.model_dump()
+    if db.enabled() and not db.upsert_listing(
+            session_id, data, status=_sticky_status(rec),
+            user_id=rec.get("user_id")):
+        raise errors.StorageUnavailable(
+            "Couldn't save that change just now. Try again in a moment.")
+    return {"ok": True, "listing": data}
+
+
 @app.patch("/api/listings/{session_id}/images/order")
 def reorder_images(session_id: str, req: ImageOrderRequest,
                    request: Request) -> dict:

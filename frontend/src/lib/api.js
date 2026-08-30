@@ -181,6 +181,17 @@ export function postJson(path, body) {
   });
 }
 
+// PATCH sends only what changed. Use it wherever a control changes one field
+// on a record the caller is holding a possibly-stale copy of — spreading that
+// copy into a full save is how an edit made somewhere else gets overwritten.
+export function patchJson(path, body) {
+  return api(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 // Poll a background job (see /api/bulk/status) until it finishes, then resolve
 // with its `result` (or throw its `error`). Used so slow AI steps run as a job
 // the client polls instead of a single long request that a gateway or the
