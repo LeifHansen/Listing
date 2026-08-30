@@ -702,9 +702,18 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
         with Session(eng) as s:
             u = s.get(User, user_id)
             return _user_to_dict(u) if u else None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Not None. This is the end of every "who is asking" check in the app,
+        # and None means "no valid session" — so swallowing a read failure
+        # here logged every signed-in seller out server-side, silently: the
+        # store rendered as the logged-out pitch, the bell reported nothing
+        # sold, eBay reported itself disconnected, and writes came back as
+        # 404s for a record that "belonged to someone else". A lookup that
+        # could not run is not a session that does not exist.
         log.warning(f"db: get_user_by_id failed: {exc}")
-        return None
+        raise StorageUnavailable(
+            "We couldn't verify your session just now. Try again in a "
+            "moment.") from exc
 
 
 def revoke_sessions(user_id: str,

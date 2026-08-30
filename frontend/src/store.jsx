@@ -194,7 +194,21 @@ export function AppProvider({ children }) {
     try {
       const res = await api("/api/auth/me");
       setUser(res.user);
-    } catch (e) { setUser(null); }
+    } catch (e) {
+      // A server that cannot ANSWER is not a server saying "not signed in".
+      // /api/auth/me is 503 when the session lookup itself fails (a database
+      // blip used to make that lookup answer "anonymous" instead), and a
+      // dropped request is the same kind of silence. Clearing `user` on
+      // either dropped a seller mid-session into the logged-out app and took
+      // everything gated on it — the listings, the bell, the eBay state, the
+      // token balance — with it, for one bad poll.
+      //
+      // Only a definitive answer clears the session: a 4xx, or the ordinary
+      // expiry, which is a 200 with a null user and never reaches here. On a
+      // cold load there is nothing to keep, so a first-time visitor still
+      // lands on the signed-out app.
+      if (e.status && e.status < 500) setUser(null);
+    }
   }, []);
 
   const openAuth = useCallback((resume) => {

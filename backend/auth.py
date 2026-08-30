@@ -82,33 +82,54 @@ def make_token(user_id: str) -> str:
 
 
 def current_user(request: Request) -> Optional[dict]:
-    """Return the logged-in user dict, or None. Never raises.
+    """Return the logged-in user dict, or None.
 
     Accepts either the session cookie (web) or an `Authorization: Bearer`
     header (native/mobile clients).
+
+    None means "no valid session": no token, an expired or garbled one, or a
+    revoked one. It does NOT mean "we could not check" — that raises
+    StorageUnavailable, which the app answers as a 503.
+
+    The distinction is the whole point. Every ownership check, every uid, and
+    every logged-in screen ends here, so a swallowed read failure did not
+    surface as an error; it logged the seller out. The store came back as the
+    logged-out pitch, the notifications bell reported nothing sold, eBay
+    reported itself disconnected without the account ever being read, and
+    writes failed as 404s because the record "belonged to someone else".
+
+    A caller with no token, or one whose token does not decode, never reaches
+    storage — so the logged-out flows keep working through an outage, and only
+    the requests that were being silently downgraded get the 503.
     """
     # Memoized per request: handlers call this several times (uid checks,
     # creds building, ownership asserts) and each call was a full DB
     # round-trip to Neon — several serial cross-region queries per publish.
     if hasattr(request.state, "auth_user"):
         return request.state.auth_user
-    request.state.auth_user = None
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         authz = request.headers.get("Authorization", "")
         if authz.startswith("Bearer "):
             token = authz[7:].strip()
     if not token:
+        request.state.auth_user = None
         return None
     try:
         payload = jwt.decode(token, config.SECRET_KEY, algorithms=["HS256"])
-        user = db.get_user_by_id(payload.get("sub", ""))
-        if user is not None and _revoked(payload, user):
-            return None
-        request.state.auth_user = user
-        return request.state.auth_user
-    except Exception:  # noqa: BLE001 - expired/invalid token -> treat as anonymous
+    except Exception:  # noqa: BLE001 - expired/invalid token -> anonymous
+        request.state.auth_user = None
         return None
+    # Deliberately outside a catch-all, and deliberately before the memo is
+    # written: a handler calls this several times, and recording a failure as
+    # "anonymous" would hand the later calls the answer the first one refused.
+    user = db.get_user_by_id(payload.get("sub", ""))
+    try:
+        revoked = user is not None and _revoked(payload, user)
+    except Exception:  # noqa: BLE001 - unplaceable token -> not authenticated
+        revoked = True
+    request.state.auth_user = None if revoked else user
+    return request.state.auth_user
 
 
 def _revoked(payload: dict, user: dict) -> bool:
