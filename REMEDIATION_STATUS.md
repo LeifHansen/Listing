@@ -165,7 +165,7 @@ erasure this app promised somebody and has not managed to do.
       It follows the audit and the remediation prompt, but reverses a
       product choice made in response to seller complaints.
 
-### 2. P1 items — three closed, the rest open
+### 2. P1 and P2 items — what has landed, and what has not
 
 | P1 | Commit | What it was |
 | --- | --- | --- |
@@ -257,7 +257,34 @@ Still open:
 
 ## Release posture
 
-Unchanged from the prompt: **not approved for external beta.** The P0 set is
-closed in code with tests, but none of it has been exercised against the eBay
-Sandbox, the session-id migration has not been run, and the P1 security,
-privacy and quota items remain open.
+**Still not approved for external beta**, and the reasons have narrowed rather
+than gone away.
+
+What is now true: all 8 P0 blockers are closed in code with regression tests
+written before each fix; P1-06, P1-07, P1-09 and P1-12 are closed outright;
+P1-01, P1-03, P1-04, P1-05, P1-08 and P1-11 are partly closed (see the table
+above for exactly which halves); P2-03 and P2-07 are closed.
+
+What still blocks it:
+
+1. **Nothing here has been exercised against the eBay Sandbox.** Every eBay
+   contract in this branch was checked against eBay's published documentation
+   and pinned with XML fixture tests, which is the strongest thing available
+   in this environment — and is not the same as a real call. The contract
+   tests are the readiness step the audit asks for and they have not been run.
+2. **The session-id migration has not been run** (see the deploy-time list).
+3. **P1-02 and P1-10 are untouched**: jobs still run from process-local
+   threads (the WORK is durable now; the runner is not), and the data model
+   is still one JSON document per listing with unbounded list responses.
+4. **No Alembic, and the container still runs as root** — the latter needs one
+   local `docker build && docker run`, which this environment cannot do.
+5. **P1-05's legal half is outstanding**: counsel review, a retention
+   schedule, a legal identity and address, and a support address on a company
+   domain rather than a personal Gmail. None of that is a code change.
+
+A fair summary for whoever picks this up: the *silent-failure* class the audit
+was really about — an outcome reported as success, a read failure reported as
+emptiness, a fee or a commitment entered into without being shown — has been
+worked through systematically, in code and in tests. The *infrastructure*
+class (durable jobs, migrations, normalized schema, non-root, sandbox
+verification) is largely still ahead.
