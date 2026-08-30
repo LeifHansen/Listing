@@ -132,6 +132,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | --- | --- | --- |
 | P1-06 promotion consent | `97122c7` | Promoted Listings (COST_PER_SALE, 10% default rate) was enabled when the preference was ABSENT and when the prefs read RAISED — so silence and a database outage both counted as agreeing to a fee. Now off unless explicitly on. **This reverses a deliberate product choice** (the old default was on because sellers reported publishes landing unpromoted); the commit message says so. The UI mirrored the old default independently and was changed with it. |
 | P1-09 public surface | `e2ca586` | Anonymous `/api/health` returned 26 operator keys including raw DB/R2 exception text (Neon host and role, R2 account id). Moved to `/api/admin/diagnostics` behind `ADMIN_TOKEN`, which **fails closed**. `build` deliberately stays public — deploy.yml, deploy.sh and health-watch.yml all poll it. Also: an unconnected production publish no longer answers `ok: true` with the Trading XML and a server path. |
+| P1-08 security headers (partial) | `46b89d3` | None of CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or Permissions-Policy were sent. Now all present, verified against the booted app. The CSP keeps `'unsafe-inline'` in script-src because index.html has an inline theme script — tightening to a nonce is worth its own change. The REST of P1-08 (revocable sessions, password reset/verify/MFA, distributed rate limiting, fail-closed keys) is untouched. |
 | P1-12 side-effect-free GET | `a8d8f0e` | A plain read downloaded up to 24 photos, wrote up to 48 files, started an R2 upload and wrote the DB row. Now `POST /api/listings/{id}/prepare-for-editing`, called by the frontend when the seller opens the editor. |
 
 Still open:
@@ -142,8 +143,9 @@ Still open:
 - [ ] P1-05 user-initiated deletion is not durable and the privacy policy
       overpromises (also: Stripe is undisclosed).
 - [ ] P1-07 settings combine partial operations and hide remote uncertainty.
-- [ ] P1-08 auth baseline: 30-day irrevocable JWTs, no reset/verify/MFA, no
-      security headers, process-local rate limiting.
+- [ ] P1-08 auth baseline, MINUS the headers (done, `46b89d3`): 30-day
+      irrevocable JWTs, no reset/verify/MFA, process-local rate limiting, and
+      a CSP still carrying `'unsafe-inline'` for scripts.
 - [ ] P1-11 deploy gates only on the lightweight backend job; actions are not
       SHA-pinned; `create_all` instead of Alembic; container runs as root.
 
