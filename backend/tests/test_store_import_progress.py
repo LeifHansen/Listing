@@ -32,7 +32,7 @@ class FakeDb:
     def __init__(self):
         self.records: dict[str, dict] = {}
 
-    def list_listings(self, limit=50, user_id=None):
+    def list_listings(self, limit=50, user_id=None, statuses=None, before=None):
         return list(self.records.values())
 
     def upsert_listing(self, listing_id, listing, status="draft", user_id=None,
@@ -84,21 +84,28 @@ def ticks(monkeypatch):
 
 
 def test_progress_covers_every_listing(ticks):
+    """One running count, not two passes.
+
+    The import used to fetch every listing and then save every listing, and
+    reported a `fetching` count followed by a `saving` one. It is a single
+    pass now — each listing is fetched and written down as one unit, so an
+    interruption keeps what it has paid for — and two counts no longer
+    describe anything that happens. See
+    test_an_interrupted_import_keeps_what_it_paid_for.
+    """
     seen, result = ticks()
     assert result["found"] == len(ITEMS)
-    fetching = [t for t in seen if t[0] == "fetching"]
+    syncing = [t for t in seen if t[0] == "syncing"]
     # One tick per listing (plus the opening 0), each carrying the total.
-    assert [t[1] for t in fetching] == list(range(0, len(ITEMS) + 1))
-    assert {t[2] for t in fetching} == {len(ITEMS)}
-    assert [t[1] for t in seen if t[0] == "saving"] == list(range(0, len(ITEMS) + 1))
+    assert [t[1] for t in syncing] == list(range(0, len(ITEMS) + 1))
+    assert {t[2] for t in syncing} == {len(ITEMS)}
 
 
 def test_progress_never_runs_backwards_or_past_the_total(ticks):
     seen, _ = ticks()
-    for phase in ("fetching", "saving"):
-        counts = [t[1] for t in seen if t[0] == phase]
-        assert counts == sorted(counts)
-        assert max(counts) <= len(ITEMS)
+    counts = [t[1] for t in seen if t[0] == "syncing"]
+    assert counts == sorted(counts)
+    assert max(counts) <= len(ITEMS)
 
 
 def test_a_listing_ebay_refuses_still_ticks(ticks):
@@ -106,7 +113,7 @@ def test_a_listing_ebay_refuses_still_ticks(ticks):
     stalls short of the total and the sync looks stuck at the end."""
     seen, result = ticks(bad={ITEMS[2]})
     assert result["failed"] == 1
-    assert max(t[1] for t in seen if t[0] == "fetching") == len(ITEMS)
+    assert max(t[1] for t in seen if t[0] == "syncing") == len(ITEMS)
 
 
 def test_import_without_a_progress_callback_still_works(monkeypatch):

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -611,19 +611,38 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
 
     # Fetch in parallel, but write to the DB from this thread only, in eBay's
     # original order — so the import stays deterministic and needs no locking.
-    _tick("fetching", 0, len(jobs))
-    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(1, len(jobs)))) as pool:
-        # submit + as_completed rather than pool.map: the results are still read
-        # in eBay's order below (futures keep their slots), but the count can
-        # tick as each GetItem lands instead of only when the last one does.
-        futures = [pool.submit(_fetch, job) for job in jobs]
-        for done_n, _ in enumerate(as_completed(futures), 1):
-            _tick("fetching", done_n, len(jobs))
-        fetched = [f.result() for f in futures]
+    #
+    # ONE pass, not two. Every GetItem used to finish before the first save,
+    # and a real store is minutes of that, so a machine that went away at 95%
+    # (an OOM, a deploy, a restart) left the seller with nothing: hundreds of
+    # eBay calls spent, their answers in a dead process's memory. The two
+    # passes were never independent — the save loop reads only state built
+    # before the fetching started, plus the `claimed` set it builds itself in
+    # eBay's order — so consuming the futures IN ORDER and saving each as it
+    # lands is the same sequence of writes, arriving earlier. What it buys is
+    # that an interruption keeps everything up to where it happened.
+    #
+    # In order rather than as_completed, because that order is load-bearing:
+    # first claim wins, and eBay's active list comes before its ended one (see
+    # the claim guard below). Blocking on one future does not idle the pool —
+    # the rest keep fetching ahead.
+    def _as_they_land():
+        """(item_id, status, detail) in eBay's order, yielded as each lands.
 
-    _tick("saving", 0, len(fetched))
-    for done_n, (item_id, status, fresh) in enumerate(fetched, 1):
-        _tick("saving", done_n, len(fetched))
+        A generator so the pool stays open across the saves below without the
+        whole save loop having to live inside the `with`. Iterating the
+        futures in submission order blocks only on the next one; the rest of
+        the pool keeps fetching ahead of the consumer.
+        """
+        with ThreadPoolExecutor(
+                max_workers=min(_FETCH_WORKERS, max(1, len(jobs)))) as pool:
+            futures = [pool.submit(_fetch, job) for job in jobs]
+            for fut in futures:
+                yield fut.result()
+
+    _tick("syncing", 0, len(jobs))
+    for done_n, (item_id, status, fresh) in enumerate(_as_they_land(), 1):
+        _tick("syncing", done_n, len(jobs))
         if fresh is SKIPPED:
             continue
         if fresh is None:

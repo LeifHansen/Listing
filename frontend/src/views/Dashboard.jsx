@@ -306,11 +306,13 @@ function MirrorStatus() {
     // A store of any size takes minutes (one eBay call per listing), so the
     // line carries the count the background job reports — a bare spinner with
     // no end in sight reads as broken.
+    // One count, because it is now one pass: each listing is fetched from
+    // eBay and written down as a single unit, so there is no longer a
+    // "fetching" stage followed by a "saving" one to tell apart. The number
+    // is how many of the seller's listings are actually here.
     const p = storeSync.progress;
     const detail = p && p.total
-      ? (p.phase === "saving"
-        ? ` saving ${Math.min(p.done, p.total)} of ${p.total}`
-        : ` ${Math.min(p.done, p.total)} of ${p.total} listings`)
+      ? ` ${Math.min(p.done, p.total)} of ${p.total} listings`
       : "";
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary">
