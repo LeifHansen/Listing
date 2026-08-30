@@ -113,6 +113,34 @@ def test_the_route_does_not_read_the_whole_store_to_find_twenty_rows(
         "No longer live")
 
 
+def test_the_ask_itself_is_bounded(seller):
+    """The read is by id now, so the SIZE of the ask reaches the database.
+
+    Under the old code a huge `listing_ids` cost nothing extra -- the store
+    read was capped and the list was only a filter. Asking for the ids means
+    an unbounded body becomes an unbounded `IN (...)`, which is a way to make
+    one request expensive for everybody. At most BULK_PRICE_CAP are repriced
+    in a pass anyway, so nothing useful is lost by refusing to look up more
+    than a pass could act on.
+    """
+    client, _dbmod, _uid = seller
+    many = [f"id-{i}" for i in range(5000)]
+    r = client.post("/api/ebay/lower-prices",
+                    json={"percent": 10, "listing_ids": many})
+    assert r.status_code == 400, r.text
+    assert "too many" in r.json()["detail"].lower()
+
+
+def test_a_selection_a_pass_could_act_on_is_still_accepted(seller):
+    """The bound has to sit above what the screen can actually select, or it
+    refuses ordinary work."""
+    client, _dbmod, _uid = seller
+    ids = [f"id-{i}" for i in range(main.BULK_PRICE_CAP)]
+    r = client.post("/api/ebay/lower-prices",
+                    json={"percent": 10, "listing_ids": ids})
+    assert r.status_code == 200, r.text
+
+
 def test_an_id_that_is_not_the_sellers_is_still_reported_missing(
         seller, monkeypatch):
     """The real 'not found' survives: this is the answer the route is entitled

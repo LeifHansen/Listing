@@ -4419,7 +4419,7 @@ def _projected_for_list(rec: dict) -> dict:
     return {**rec, "listing": trimmed}
 
 
-def _cursor_for(rec: dict) -> str:
+def _cursor_for(rec: dict) -> Optional[str]:
     """The opaque token naming one row, for the page that follows it.
 
     Base64url of "<updated_at>|<id>" — encoded so the timestamp's colons and
@@ -4427,8 +4427,18 @@ def _cursor_for(rec: dict) -> str:
     hand-assembling one. It is the server's own words handed back; the read it
     feeds is scoped by `user_id` exactly like every other, so a cursor says
     WHERE to start and never whose store to start in.
+
+    None when the row cannot name a place in the order. The column is
+    non-nullable so this is defensive, but the failure it prevents is the loud
+    kind: a blank half mints a token the next request rejects as malformed —
+    a 400 in the middle of a walk the seller started. No cursor degrades
+    honestly instead: the page still says it was cut, and the button that
+    could not have worked is simply not offered.
     """
-    raw = f"{rec.get('updated_at') or ''}|{rec.get('id') or ''}"
+    stamp, rid = rec.get("updated_at"), rec.get("id")
+    if not stamp or not rid:
+        return None
+    raw = f"{stamp}|{rid}"
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
@@ -4722,6 +4732,11 @@ def promote_all(request: Request) -> dict:
 # this keeps the request inside the gateway's patience, and whatever is left
 # over comes back as `deferred` for the seller to run again.
 BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
+# How many ids one bulk request may NAME. Above BULK_PRICE_CAP so a
+# selection bigger than one pass is still accepted and deferred rather
+# than refused, and far below anything that makes an `IN (...)` a
+# problem. Same role as the 200 the bulk delete already applies.
+BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
 
 
 @app.post("/api/ebay/lower-prices")
@@ -4744,8 +4759,19 @@ def lower_prices(payload: dict, request: Request) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
     if not ids:
         raise HTTPException(400, "Pick at least one listing to reprice.")
+    # Bounded, because the lookup below is BY id: an unbounded body used to
+    # cost nothing (the store read was capped and this was only a filter) and
+    # now becomes an unbounded `IN (...)`, which is a way to make one request
+    # expensive for everyone. Nothing useful is lost -- a pass reprices at
+    # most BULK_PRICE_CAP of them either way, and the remainder is already
+    # reported as deferred for a second pass.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
     wanted = set(ids)
     # The ids, asked for. This used to read the seller's newest LIST_CAP
     # records and filter -- every one of their JSON blobs across a

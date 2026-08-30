@@ -124,6 +124,22 @@ def test_a_malformed_cursor_is_refused_not_ignored(seller):
     assert "listing" in r.json()["detail"].lower()
 
 
+def test_a_row_with_no_timestamp_does_not_break_the_walk(seller):
+    """Defensive, and the failure it prevents is the loud kind.
+
+    The cursor is built from the last row's `updated_at`. The column is
+    non-nullable, but a row that somehow lacks one would mint `"|id"`, which
+    the next request rejects as malformed -- a 400 in the middle of a walk the
+    seller started. No cursor is the honest degradation: the page still says
+    it was cut, and the button that cannot work is simply not offered.
+    """
+    client, dbmod, _uid = seller
+    rows = dbmod.list_listings(limit=3, user_id=_uid)
+    assert main._cursor_for(rows[-1]), "fixture assumption: normal rows page"
+    assert main._cursor_for({**rows[-1], "updated_at": None}) is None
+    assert main._cursor_for({**rows[-1], "id": ""}) is None
+
+
 def test_an_empty_cursor_is_simply_the_first_page(seller):
     """Clients send "" for "from the start"; that is not a malformed cursor."""
     client, _dbmod, _uid = seller
