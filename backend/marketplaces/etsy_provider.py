@@ -17,12 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-import httpx
-
 from .. import config, db, etsy_auth, storage
 from ..config import log
 from ..models import Listing
-from ..services import etsy
+from ..services import etsy, image_import
 from . import register
 from .base import PublishContext, PublishOutcome
 from . import mapping_etsy
@@ -174,7 +172,20 @@ class EtsyProvider:
     def _image_batches(self, ctx: PublishContext) -> list[tuple[str, bytes]]:
         """(filename, bytes) for up to MAX_PHOTOS photos — local optimized
         files first (the editable truth); a listing imported from eBay may
-        only have remote URLs, so those are fetched and re-uploaded."""
+        only have remote URLs, so those are fetched and re-uploaded.
+
+        The remote fetch goes through image_import.fetch_ebay_image rather
+        than httpx directly, and that is a security boundary, not a tidy-up.
+        `image_urls` is not a server-owned field: it round-trips through the
+        publish request body, so a bare `httpx.get(url)` here let a caller
+        aim a request from inside the app at the metadata service, the
+        database's private address or anything on localhost, and read the
+        answer back off their own Etsy listing. fetch_ebay_image is HTTPS
+        only, ebayimg.com only (re-checked on every redirect hop), with
+        bounded redirects, a size cap and a content-type check — and nothing
+        legitimate is outside it, because image_urls is only ever populated
+        from eBay's own EPS URLs on import.
+        """
         out: list[tuple[str, bytes]] = []
         opt = storage.optimized_dir(ctx.session_id)
         for name in (ctx.listing.images or [])[:mapping_etsy.MAX_PHOTOS]:
@@ -184,9 +195,7 @@ class EtsyProvider:
         if not out:
             for i, url in enumerate((ctx.listing.image_urls or [])[:mapping_etsy.MAX_PHOTOS]):
                 try:
-                    resp = httpx.get(url, timeout=60)
-                    resp.raise_for_status()
-                    out.append((f"photo-{i + 1}.jpg", resp.content))
+                    out.append((f"photo-{i + 1}.jpg", image_import.fetch_ebay_image(url)))
                 except Exception as exc:  # noqa: BLE001 - skip the bad one, keep going
                     log.warning("etsy: couldn't fetch %s: %s", url, exc)
         return out
