@@ -356,10 +356,29 @@ def _with_stored_identity(ctx: PublishContext) -> PublishContext:
     one the create-vs-revise decision is made from: any earlier publish of this
     listing has already finished and committed its item id.
     """
+    # get_listing_STRICT, not get_listing. The plain one collapses "no such
+    # listing" and "the read could not be performed" into None -- its own
+    # comment says that is right for callers who just want the record and
+    # wrong for a security check, and this is neither. It is the read the
+    # create-vs-revise decision is made from, and the note above is explicit
+    # about what believing a lost identity costs: a duplicate live listing.
+    # One Postgres blip used to read as a brand-new session.
+    #
+    # Refusing is free here because nothing has been sent yet: the route
+    # turns this into a 503, which says we could not check whether the
+    # listing is already live, so we did not publish. The idempotency key
+    # narrows that window rather than closing it -- it refuses a create
+    # repeated soon after the first, not one sent long enough afterwards that
+    # eBay no longer holds the UUID.
+    # db.get_listing RAISES on a read failure rather than answering None, and
+    # this deliberately does not catch it. Nothing has been sent yet, so
+    # refusing costs nothing and the route turns it into a 503 -- whereas
+    # believing "nothing stored" would mean creating a second live listing
+    # for an item that is already up, which is what the note above is about.
     fresh = db.get_listing(ctx.session_id)
     if not fresh:
-        # Nothing stored (a brand-new session, or no DB): the payload is all
-        # there is. The idempotency key still guards the create itself.
+        # Nothing stored: a brand-new session that has never been saved. The
+        # payload is all there is, and the idempotency key guards the create.
         return ctx
     stored = fresh.get("listing") or {}
     # The item id is this function's own: it is what the create-vs-revise

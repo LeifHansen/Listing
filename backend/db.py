@@ -1533,6 +1533,38 @@ def disconnect_marketplace_account(user_id: str, marketplace: str) -> None:
 
 
 def get_listing(listing_id: str) -> Optional[dict]:
+    """The listing record, or None when there is genuinely no such row.
+    RAISES on a read failure.
+
+    It used to collapse the two, and ten route handlers turned the result
+    into `404 "Listing not found"` -- a claim about the seller's account made
+    on the strength of not being able to ask. `_assert_session_owner` had
+    already reasoned this through for the ownership guard and refuses with a
+    503; this is the same reasoning, in the one place all of them read.
+
+    A listing that really is missing still answers None and still 404s: a 503
+    for every unknown id would hide a genuinely bad link behind "try again in
+    a moment".
+
+    Callers that would rather have a blank than a refusal -- shaping a draft,
+    picking a sticky status -- call get_listing_best_effort, so the tolerance
+    is visible where it is chosen.
+    """
+    res = get_listing_strict(listing_id)
+    if res is UNAVAILABLE:
+        raise StorageUnavailable(
+            "We couldn’t look up that listing just now — it hasn’t gone "
+            "anywhere. Try again in a moment.")
+    return res
+
+
+def get_listing_best_effort(listing_id: str) -> Optional[dict]:
+    """get_listing, but an unreadable store answers None.
+
+    Only where a missing record degrades the answer rather than making a
+    claim: deciding whether to write a stub draft, and choosing the status a
+    re-save keeps.
+    """
     res = get_listing_strict(listing_id)
     return None if res is UNAVAILABLE else res
 
@@ -1577,13 +1609,22 @@ def touch_listing(listing_id: str) -> None:
 
 
 def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
-    """Delete a listing row; returns True if a row was removed. Ownership-
-    checked: a listing owned by an account can only be deleted by that owner.
-    Never raises."""
+    """Delete a listing row; returns True if a row was removed. RAISES on a
+    write failure.
+
+    Ownership-checked: a listing owned by an account can only be deleted by
+    that owner. `False` means exactly one thing now -- no such row, or not
+    yours -- because the route turns it into `404 "Listing not found"`, and
+    an unreachable database answering that tells a seller their listing is
+    gone at the moment they are trying to delete it. Callers that would
+    rather skip than fail (the merge, the bulk delete, which both report what
+    they could not remove) catch it at the call site, where the tolerance is
+    visible.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return False
     try:
-        eng = _get_engine()
-        if eng is None:
-            return False
         with Session(eng) as s:
             rec = s.get(ListingRecord, listing_id)
             if rec is None:
@@ -1599,7 +1640,9 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
             return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: delete_listing failed: {exc}")
-        return False
+        raise StorageUnavailable(
+            "We couldn’t delete that listing just now — nothing was removed. "
+            "Try again in a moment.") from exc
 
 
 # --- AI tokens (monetization) ----------------------------------------------

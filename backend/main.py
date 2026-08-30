@@ -3323,7 +3323,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # tabs. Autofill also runs by itself when the editor opens
     # (IdentifyResult.specifics_autofilled), so nobody had to click anything.
     db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(db.get_listing(session_id)),
+                      status=_sticky_status(db.get_listing_best_effort(session_id)),
                       user_id=_uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
@@ -4194,7 +4194,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # so the photos land in Drafts and Start over can retry the AI.
         try:
             names = storage.list_optimized(session_id)
-            if names and not db.get_listing(session_id):
+            if names and not db.get_listing_best_effort(session_id):
                 stub = Listing(images=names, missing_info=[
                     f"The AI couldn't identify this item ({reason}). "
                     "Your photos are safe — use Start over to retry, or fill "
@@ -4934,7 +4934,20 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
     if not ids:
         raise HTTPException(400, "No listings selected.")
     uid = _uid(request)
-    deleted = [lid for lid in ids if db.delete_listing(lid, uid)]
+    # Each id on its own: the documented behaviour is that ids which do not
+    # exist or are not owned are skipped and reported back, and a row the
+    # database refused belongs in the same list rather than sinking the other
+    # nineteen. What must not happen -- and is why the reader below is
+    # separate -- is that one being reported as "not yours".
+    deleted = []
+    refused = []
+    for lid in ids:
+        try:
+            if db.delete_listing(lid, uid):
+                deleted.append(lid)
+        except errors.StorageUnavailable as exc:
+            log.warning("bulk delete: couldn't remove %s: %s", lid, exc)
+            refused.append(lid)
     for lid in deleted:
         _in_background(_purge_session_images_best_effort, lid,
                            what="bulk-delete cleanup")
@@ -5092,7 +5105,16 @@ def merge_listings(payload: dict, request: Request) -> dict:
     # consumed. Its photos stay too: they are the only copy left of it.
     removed: list[str] = []
     for sid in source_ids:
-        if not db.delete_listing(sid, uid):
+        try:
+            removed_it = db.delete_listing(sid, uid)
+        except errors.StorageUnavailable as exc:
+            # Same outcome as a refusal: the source and its photos stay, and
+            # the caller is told which ones did not go. Raising here would
+            # abandon the sources after this one with the merge already
+            # committed.
+            log.warning("merge: couldn't remove source %s: %s", sid, exc)
+            removed_it = False
+        if not removed_it:
             log.warning("merge: couldn't remove source %s — leaving it and "
                         "its photos alone", sid)
             continue

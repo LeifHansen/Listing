@@ -1,6 +1,6 @@
 """Every read and write in db.py has to say what it does when it fails.
 
-This branch has now fixed the same bug seven times: a storage failure answered
+This branch has now fixed the same bug ten times: a storage failure answered
 with the shape of a real, empty answer, and a screen presented that as a fact
 about the seller's account. The session lookup returning `None` logged
 everyone out. `list_listings` returning `[]` made the eBay import duplicate an
@@ -8,7 +8,10 @@ entire store. `get_prefs` returning `{}` showed the app's fallbacks as saved
 settings, one Save away from overwriting the real ones. `token_history`
 returning `[]` said nothing had ever been charged. `pending_*` returning `[]`
 reported an erasure backlog of zero to the operator watching for exactly that
-number.
+number. `get_listing` returning `None` answered ten routes with "Listing not
+found" — and told the publish path it was looking at a brand-new session, which
+is how a revise becomes a second live listing. `delete_listing` returning
+`False` for a write that never reached the database was read as "no such row".
 
 They were found one at a time, by reading. This is the sweep that stops the
 next one needing to be found: every public function in `db.py` with an
@@ -36,21 +39,43 @@ BACKEND = pathlib.Path(__file__).resolve().parents[1]
 MODULES = ("db.py", "objstore.py", "storage.py")
 
 
-def _classify(module: str = "db.py") -> tuple[set[str], set[str]]:
-    """(functions that raise from an except arm, functions that swallow)."""
+# Raising one of these is the refusal, wherever it is written. A wrapper that
+# checks a sentinel and raises is doing exactly what an `except: raise` arm
+# does, and the sweep has to see both or the seam becomes a hiding place.
+REFUSALS = ("StorageUnavailable", "ObjectStoreUnavailable")
+
+
+def _public_functions(module: str) -> list[ast.FunctionDef]:
     tree = ast.parse((BACKEND / module).read_text())
+    return [fn for fn in tree.body
+            if isinstance(fn, ast.FunctionDef) and not fn.name.startswith("_")]
+
+
+def _refuses(fn: ast.FunctionDef) -> bool:
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Raise):
+            continue
+        exc = node.exc
+        if isinstance(exc, ast.Call):
+            exc = exc.func
+        name = getattr(exc, "attr", None) or getattr(exc, "id", None)
+        if name in REFUSALS:
+            return True
+    return False
+
+
+def _classify(module: str = "db.py") -> tuple[set[str], set[str]]:
+    """(functions that refuse when storage fails, functions that swallow)."""
     raises: set[str] = set()
     swallows: set[str] = set()
-    for fn in tree.body:
-        if not isinstance(fn, ast.FunctionDef) or fn.name.startswith("_"):
-            continue
+    for fn in _public_functions(module):
         handlers = [h for node in ast.walk(fn) if isinstance(node, ast.Try)
                     for h in node.handlers]
-        if not handlers:
-            continue
         if any(isinstance(x, ast.Raise) for h in handlers for x in ast.walk(h)):
             raises.add(fn.name)
-        else:
+        elif _refuses(fn):
+            raises.add(fn.name)
+        elif handlers:
             swallows.add(fn.name)
     return raises, swallows
 
@@ -70,6 +95,12 @@ MUST_RAISE = {
     "get_marketplace_account": "same, for every non-eBay marketplace",
     "save_ebay_account": "OAuth redirected to 'connected' on a token that was never stored",
     "count_pending_media_purges": "zero owed is a clean bill on somebody's erasure",
+    "get_listing":
+        "returning None answered ten routes with 'Listing not found', and told "
+        "the publish path a live listing was a brand-new session",
+    "delete_listing":
+        "returning False for a write that never landed reads as 'no such row', "
+        "so a failed delete was reported to the seller as a finished one",
     "count_pending_deletion_notices": "same, for the notices eBay is waiting on",
     "delete_prefix_strict":
         "counting zero for an unreachable bucket let a dropped erasure be recorded as done",
@@ -99,8 +130,6 @@ WHY_A_BLANK_IS_SAFE = {
         "returns False for a write that did not land, and the publish path checks it",
     "save_marketplace_account":
         "returns False for a write that did not land, and the caller checks it",
-    "delete_listing":
-        "returns False when no row was removed, which the merge path checks",
     "token_refund":
         "returns False, and an unrefunded spend is recorded as owed rather than lost",
 
@@ -262,15 +291,14 @@ def test_every_best_effort_has_a_strict_twin_that_raises():
     A `*_best_effort` on its own is just a swallow with a longer name: the
     strict version is what makes choosing the tolerant one a decision.
     """
-    raises, swallows = _classify("db.py")
-    everything = raises | swallows
+    raises = _classify("db.py")[0]
     orphans = []
-    for name in sorted(everything):
-        if not name.endswith("_best_effort"):
+    for fn in _public_functions("db.py"):
+        if not fn.name.endswith("_best_effort"):
             continue
-        strict = name[: -len("_best_effort")]
+        strict = fn.name[: -len("_best_effort")]
         if strict not in raises:
-            orphans.append(f"{name} (no {strict} that raises)")
+            orphans.append(f"{fn.name} (no {strict} that raises)")
     assert not orphans, "\n".join(orphans)
 
 

@@ -375,7 +375,17 @@ def _drop_stale_mirrors(known: dict, owned: dict, user_id: str) -> int:
         keeper = owned.get(item)
         if not keeper or keeper["id"] == rid:
             continue
-        if db.delete_listing(rid, user_id=user_id):
+        # A mirror row this pass could not drop stays, and the next sweep
+        # finds it again -- the same tolerance every other cleanup here has.
+        # `removed_it`, not `dropped`: that name is the running count three
+        # lines down, and shadowing it made every successful delete set the
+        # total to True and then 2.
+        try:
+            removed_it = db.delete_listing(rid, user_id=user_id)
+        except Exception as exc:  # noqa: BLE001 - one stale row, not the pass
+            log.info("sync: couldn't drop stale mirror %s: %s", rid, exc)
+            removed_it = False
+        if removed_it:
             known.pop(rid, None)
             dropped += 1
             log.info("sync: dropped duplicate %s — item %s already lives on %s",
