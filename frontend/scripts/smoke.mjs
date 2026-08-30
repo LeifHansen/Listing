@@ -277,6 +277,9 @@ if (signedIn) {
     await page.waitForTimeout(1500);
 
     const body = (await page.textContent('body')) || '';
+    // Three panels each render this, so it survives one of them regressing --
+    // which is what the fallback check below is for. Together they cover both
+    // "no panel said anything" and "one panel said it anyway".
     if (!/couldn.t load your saved defaults/i.test(body)) {
       prefsOut.push('the defaults could not be read and the panels did not say so');
     }
@@ -315,6 +318,79 @@ if (signedIn) {
   prefsOut.push(...drain());
   expected = null;
   problems.push(['an unread setting is not a saved one', prefsOut]);
+}
+
+// --- deleting an account asks, warns, and takes a password ------------------
+//
+// The most irreversible button in the app, and the two things that guard it
+// are on opposite sides of the wire. In the browser: the dialog must warn that
+// anything already published STAYS LIVE on eBay -- deleting here removes only
+// this app's copy, and a seller who does not know that walks away from
+// listings still taking orders. That warning keys off `counted`, so the read
+// failing must make it MORE cautious, not less: no count is named, and the
+// warning is given anyway. On the server: a session token is not enough, so a
+// wrong password has to be refused there, not merely disabled here.
+//
+// Nothing is deleted. The wrong password is the point, and the account is
+// still standing at the end -- which the log-out journey below then uses.
+const del = [];
+if (signedIn) {
+  expected = /503|account\/summary/;
+  try {
+    await page.route('**/api/account/summary', r => r.fulfill({
+      status: 503, contentType: 'application/json',
+      body: JSON.stringify({ detail: "We couldn't count your listings." }),
+    }));
+    await visit(page, 'Settings', del);
+    await page.getByRole('button', { name: /Delete my account/ }).first().click();
+    await page.waitForTimeout(1200);
+
+    // Scoped to the dialog, not the page. The card BEHIND it carries the same
+    // sentence permanently, so a body-wide match would pass on a dialog that
+    // said nothing at all -- a tripwire that can never trip, which is worse
+    // than no test.
+    const box = page.getByRole('dialog');
+    const dialog = (await box.textContent()) || '';
+    if (!/stays live on eBay/i.test(dialog)) {
+      del.push('the count could not be read and the dialog dropped the eBay warning');
+    }
+    if (/\d+ listings? and every photo/i.test(dialog)) {
+      del.push('the dialog named a listing count it never read');
+    }
+    // The confirm button stays out of reach until a password is typed, so a
+    // stray tap on a borrowed phone cannot do this.
+    const confirmBtn = box.getByRole('button', { name: 'Delete permanently' });
+    if (!await confirmBtn.isDisabled()) {
+      del.push('delete is clickable with no password typed');
+    }
+
+    // And the half only the server can answer. A leaked session must not be
+    // enough: the wrong password is refused THERE.
+    expected = /40[0-9]|account\/delete|account\/summary|503/;
+    await page.locator('input[type=password]').last().fill('not-the-password');
+    await confirmBtn.click();
+    await page.waitForTimeout(2000);
+    if (!await page.getByRole('button', { name: 'Delete permanently' }).count()) {
+      del.push('the wrong password closed the dialog');
+    }
+    await page.getByRole('button', { name: 'Keep my account' }).click();
+    await page.waitForTimeout(500);
+
+    // Still here. If the account had gone, this reload would land on the
+    // signed-out landing page -- which is the failure this journey exists to
+    // catch, and the reason it uses a wrong password rather than the real one.
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(1500);
+    if (!((await page.textContent('body')) || '').includes(email)) {
+      del.push('a refused delete took the account anyway');
+    }
+  } catch (e) {
+    del.push(`delete account: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute('**/api/account/summary').catch(() => {});
+  del.push(...drain());
+  expected = null;
+  problems.push(['deleting asks before it erases', del]);
 }
 
 // --- signing out has to end the session ------------------------------------
