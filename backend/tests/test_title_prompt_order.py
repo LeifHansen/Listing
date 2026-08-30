@@ -100,11 +100,14 @@ def test_a_refine_cannot_undo_the_order():
 def test_identify_still_feeds_the_model_this_schema():
     """The prompt moved out of claude_ai.py; a constant nothing sends is a
     rule that silently stops applying. Read as text — the SDK that module
-    imports is not installed here."""
+    imports is not installed here. Matched loosely on purpose: this should
+    fail when the schema is unhooked from the prompt, not when someone
+    reflows the import."""
     source = (Path(__file__).resolve().parents[1]
               / "services" / "claude_ai.py").read_text()
-    assert "from .listing_prompt import (" in source
-    identify_system = source[source.index("_IDENTIFY_SYSTEM = ("):]
-    identify_system = identify_system[:identify_system.index("\n\n")]
-    assert "LISTING_SCHEMA" in identify_system
+    assert re.search(r"from \.listing_prompt import\b", source)
+    # The _IDENTIFY_SYSTEM assignment, up to the next line starting in
+    # column 0 — however its continuation lines happen to be wrapped.
+    block = re.split(r"\n(?=\S)", source[source.index("_IDENTIFY_SYSTEM"):])[0]
+    assert "LISTING_SCHEMA" in block, "identify's prompt no longer carries the schema"
     assert "REFINE_ORDER_RULE" in source
