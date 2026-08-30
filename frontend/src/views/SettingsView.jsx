@@ -248,14 +248,20 @@ export function SettingsView() {
   const checkPayout = async () => {
     setChecking(true);
     try {
+      // The server answers with a product STATE and the sentence to show. It
+      // used to hand back the deployment's eBay environment, a raw HTTP
+      // status and eBay's whole JSON body, and this pasted all three into a
+      // toast — none of which a seller can act on, and which did not
+      // distinguish "wait" from "finish your bank setup" from "reconnect".
       const s = await api("/api/ebay/payments-status");
-      if (s.opted_in) {
-        toast(`Payments are set up on eBay (${s.env}): status ${s.status}. Bank/payout onboarding is complete — you can publish live listings.`, { kind: "success" });
-      } else if (s.error) {
-        toast(`Couldn't verify payments setup (${s.env}): ${s.error}\n${s.detail || ""}`, { kind: "warning" });
-      } else {
-        toast(`eBay (${s.env}) reports payments status "${s.status || "unknown"}". Finish payout setup in eBay Seller Hub → Payments (bank verification can take 1–2 days).`, { kind: "warning" });
-      }
+      const KIND = {
+        ready: "success",
+        action_required: "warning",
+        reconnect_required: "warning",
+        unavailable: "warning",
+        contact_support: "error",
+      };
+      toast(s.message, { kind: KIND[s.state] || "warning" });
     } catch (e) {
       toast(`Payments check failed: ${e.message}`, { kind: "error" });
     } finally {

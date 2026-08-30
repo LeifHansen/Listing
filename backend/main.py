@@ -2346,12 +2346,37 @@ def ebay_disconnect(request: Request) -> dict:
     return {"ok": True}
 
 
+def _support_reference() -> str:
+    """A short id tying what the seller was told to what the logs recorded.
+
+    Short because someone has to read it out or paste it into an email. It is
+    not a secret and identifies nothing on its own — it exists so mapping a
+    failure to a product state does not throw the evidence away.
+    """
+    return secrets.token_hex(4)
+
+
 @app.get("/api/ebay/payments-status")
 def ebay_payments_status(request: Request) -> dict:
     """Live check of the connected eBay account's payments onboarding.
 
     Answers "did my bank account link actually work?": eBay reports the
     account as OPTED_IN to the payments program once payout setup is done.
+
+    The answer is a product STATE, not eBay's HTTP response. This used to
+    return the deployment's eBay environment, a raw status code and eBay's
+    entire response body, and Settings put all three in a toast:
+
+        Couldn't verify payments setup (production): eBay API error: 500
+        {"errors":[{"errorId":20403,"domain":"ACCESS", ...}]}
+
+    None of which a seller can act on. Worse, it did not distinguish the three
+    answers that lead to three different buttons — wait, finish your bank
+    setup, or reconnect the account — and `production` is deployment
+    configuration on a route any signed-in seller can call.
+
+    The raw detail is not discarded; it goes to the log under `reference`,
+    which comes back to the seller so support can join the two.
     """
     if not _uid(request):
         raise HTTPException(401, "Log in first.")
@@ -2360,20 +2385,56 @@ def ebay_payments_status(request: Request) -> dict:
         raise HTTPException(400, "eBay is not connected for this account.")
     try:
         program = ebay_auth.fetch_payments_program(creds["access_token"])
-    except httpx.HTTPStatusError as exc:
-        return {
-            "env": config.EBAY_ENV,
-            "opted_in": False,
-            "error": f"eBay API error: {exc.response.status_code}",
-            "detail": exc.response.text,
-        }
+    except Exception as exc:  # noqa: BLE001 - mapped below, never re-raised
+        return _payments_failure_state(exc)
+
     status = str(program.get("status", "")).upper()
+    if status == "OPTED_IN":
+        return {"state": "ready", "opted_in": True,
+                "message": "Payouts are set up on eBay — you can publish live "
+                           "listings."}
     return {
-        "env": config.EBAY_ENV,
-        "status": status,
-        "opted_in": status == "OPTED_IN",
-        "program": program,
+        "state": "action_required", "opted_in": False,
+        "message": "eBay hasn't finished setting up your payouts. Finish it "
+                   "in eBay Seller Hub under Payments — bank verification "
+                   "can take a day or two.",
     }
+
+
+def _payments_failure_state(exc: Exception) -> dict:
+    """Map a failed payments check to a state, and log what actually happened.
+
+    The states exist because they lead to different next actions, and telling
+    them apart is the whole value: "reconnect eBay" and "finish payout setup"
+    are different buttons, and sending a seller to the wrong one costs them a
+    support round trip.
+    """
+    reference = _support_reference()
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", 0) or 0
+    log.warning("payments check failed [%s]: status=%s detail=%s",
+                reference, status or type(exc).__name__,
+                (getattr(resp, "text", "") or str(exc))[:600])
+
+    if status in (401, 403):
+        return {"state": "reconnect_required", "opted_in": False,
+                "reference": reference,
+                "message": "eBay wouldn't accept the connection. Reconnect "
+                           "eBay in Settings and check again."}
+    if status == 429 or status >= 500 or resp is None:
+        # `resp is None` is a transport failure — a timeout or a refused
+        # connection — which is the same answer as eBay being down: unknown,
+        # try again. It is deliberately NOT reported as a problem with the
+        # seller's account, which is what a generic error message implies.
+        return {"state": "unavailable", "opted_in": False,
+                "reference": reference,
+                "message": "We couldn't reach eBay to check your payouts. "
+                           "Nothing has changed — try again in a moment."}
+    return {"state": "contact_support", "opted_in": False,
+            "reference": reference,
+            "message": ("eBay gave an answer we don't recognise. Nothing has "
+                        f"changed. If it keeps happening, quote {reference} "
+                        "to support.")}
 
 
 # --- eBay marketplace account deletion notifications ------------------------
