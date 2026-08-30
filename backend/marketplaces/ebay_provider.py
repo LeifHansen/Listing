@@ -464,7 +464,8 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
     return issues
 
 
-def revise_message(conflicts: Optional[dict], relist: bool) -> str:
+def revise_message(conflicts: Optional[dict], relist: bool,
+                   remapped: str = "") -> str:
     """What to tell the seller after eBay accepted the change.
 
     A revise deliberately omits every field the seller and eBay have BOTH
@@ -478,9 +479,14 @@ def revise_message(conflicts: Optional[dict], relist: bool) -> str:
     if relist:
         return ("Relisted! It's live on eBay as a fresh listing with a new "
                 "item number.")
+    # eBay retires categories and moves the listing itself. Saying so matters
+    # because the seller's next surprise is otherwise a set of required item
+    # specifics they have never seen, for a category they did not choose.
+    moved = (" eBay also moved it to a different category, because the one it "
+             "was in has been retired." if remapped else "")
     held = [d["label"] for d in sync_merge.describe_conflicts(conflicts)]
     if not held:
-        return "Your eBay listing has been updated."
+        return "Your eBay listing has been updated." + moved
     seen, names = set(), []
     for label in held:  # the label map folds several fields onto one word
         if label not in seen:
@@ -489,7 +495,8 @@ def revise_message(conflicts: Optional[dict], relist: bool) -> str:
     listed = names[0] if len(names) == 1 else (
         ", ".join(names[:-1]) + " and " + names[-1])
     return (f"Your eBay listing has been updated — except the {listed}, which "
-            f"you and eBay both changed. Choose which version to keep.")
+            f"you and eBay both changed. Choose which version to keep."
+            + moved)
 
 
 def _view_url(listing: Listing, listing_id: str) -> str:
@@ -762,6 +769,14 @@ class EbayProvider:
             if not listing.ebay_account_id:
                 listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
                                            or "").strip()
+            # eBay moved the listing to a live category, exactly as it can on
+            # a create: store what it actually FILED. This has to happen
+            # before the record is written below — set afterwards it would
+            # live only in memory, and the next load would be back to the
+            # retired id that every aspect lookup and revise is built from.
+            remapped = str(res.get("category_id") or "")
+            if remapped:
+                listing.category_id = remapped
             # eBay took the edit, so the record and the listing agree again
             # and there is nothing left pending. Cleared here — on acceptance
             # — and not when the request was built: a revise that failed
@@ -783,7 +798,7 @@ class EbayProvider:
                      session_id, res.get("listing_id"),
                      "local-updated" if pushed_local else "unchanged")
             listing_id = str(res.get("listing_id") or "")
-            message = revise_message(listing.conflicts, relist)
+            message = revise_message(listing.conflicts, relist, remapped)
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),

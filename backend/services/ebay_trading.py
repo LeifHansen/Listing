@@ -1168,7 +1168,22 @@ def revise_listing(token: str, item_id: str, listing: Listing,
     root = _call(call, token, body)
     returned = _text(root, "ItemID") or item_id
     log.info("trading: %s ok item=%s", call, returned)
-    return {"ok": True, "listing_id": returned}
+    out = {"ok": True, "listing_id": returned}
+    # eBay returns CategoryID on a revise when the primary category CHANGED —
+    # including when eBay itself remapped the one we sent. That remapping
+    # happens when CategoryMappingAllowed is true OR OMITTED, and this
+    # request omits it, so the revise is precisely where a silent move can
+    # occur. create_listing has always read this; the revise threw it away.
+    #
+    # The stored id is what every later aspect lookup, condition list and
+    # revise is built from, so holding one the listing is no longer in sends
+    # all of them somewhere else.
+    remapped = _text(root, "CategoryID")
+    if remapped and remapped != (listing.category_id or "").strip():
+        log.warning("trading: eBay remapped category %s -> %s on revise "
+                    "(item %s)", listing.category_id or "?", remapped, returned)
+        out["category_id"] = remapped
+    return out
 
 
 def end_listing(token: str, item_id: str, reason: str = "NotAvailable") -> dict:
