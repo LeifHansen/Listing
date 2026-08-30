@@ -14,6 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -88,3 +89,46 @@ def dbmod(monkeypatch, tmp_path):
     importlib.reload(db)
     monkeypatch.setattr(db.config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     return db
+
+
+# --- no test may talk to the internet ---------------------------------------
+#
+# Three tests in test_ebay_error_240.py were making REAL HTTPS requests to
+# https://api.sandbox.ebay.com/sell/account/v1/privilege on every run, with the
+# literal token "tok". They inject the payments lookup and stop there, and
+# `publish_block_issues` asks a second API (selling privileges) that they left
+# un-injected; `fetch_privileges` swallows its own failure, so the tests passed
+# while the branch they exist to cover never ran.
+#
+# The cost is not only slowness. A suite that reaches a third party depends on
+# the network to be correct, sends unauthenticated requests to somebody else's
+# service from CI on every push, and — the part that matters here — reports a
+# green result for a code path it never executed. That is the same failure as
+# the four flaky safety tests this branch already fixed, one layer down.
+#
+# httpx.HTTPTransport is where a request stops being a mock. Sockets are the
+# wrong layer: with HTTPS_PROXY set every request connects to 127.0.0.1, so a
+# socket guard sees nothing. Starlette's TestClient uses its own ASGI transport
+# and never reaches this one, so in-process API tests are unaffected.
+_REAL_TRANSPORT = httpx.HTTPTransport.handle_request
+
+
+def _refuse_outbound(self, request):
+    raise AssertionError(
+        f"a test made a real network request: {request.method} {request.url}\n"
+        "Stub the client (monkeypatch httpx.post/get on the module under "
+        "test) or inject the lookup. If a test genuinely needs the network, "
+        "mark it @pytest.mark.allow_network — and say why.")
+
+
+@pytest.fixture(autouse=True)
+def _no_network(request, monkeypatch):
+    if request.node.get_closest_marker("allow_network"):
+        return
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _refuse_outbound)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "allow_network: this test really does need the internet (say why)")
