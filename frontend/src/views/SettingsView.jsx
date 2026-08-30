@@ -1026,6 +1026,10 @@ function EbayAccountMirror() {
     // Without it this panel reported an unreadable lookup as "not opted into
     // any programs", which is the one answer that makes a seller act.
     programs_known: programsKnown = false, privileges = null,
+    // Same tri-state, and more is riding on it: publishing needs a ship-from
+    // location, so "No inventory locations found" after a failed lookup sends
+    // the seller to create a second one on an account that already had it.
+    locations_known: locationsKnown = false,
   } = data;
   const hasPolicyProgram = programs.includes("SELLING_POLICY_MANAGEMENT");
   return (
@@ -1106,8 +1110,13 @@ function EbayAccountMirror() {
                 );
               })}
             </ul>
-          ) : (
+          ) : locationsKnown ? (
             <p className="text-[13px] text-ink-secondary">No inventory locations found.</p>
+          ) : (
+            <p className="text-[13px] text-ink-secondary">
+              Couldn’t read your locations from eBay just now — this doesn’t
+              mean you have none.
+            </p>
           )}
         </div>
 

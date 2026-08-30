@@ -535,7 +535,8 @@ def account_overview(access_token: str) -> dict:
     intact (e.g. a seller with no business policies still gets locations)."""
     out: dict = {"policies": {"fulfillment": [], "payment": [], "return": []},
                  "locations": [], "programs": [], "payments": {},
-                 "programs_known": False, "privileges": None}
+                 "programs_known": False, "locations_known": False,
+                 "privileges": None}
     try:
         out["policies"] = list_business_policies(access_token)
     except Exception:  # noqa: BLE001
@@ -548,6 +549,13 @@ def account_overview(access_token: str) -> dict:
         )
         if resp.status_code == 200:
             out["locations"] = resp.json().get("locations", []) or []
+            # Same tri-state as `programs_known` below, for the same reason
+            # and with more at stake: publishing needs a ship-from location,
+            # so "No inventory locations found" sends a seller to create a
+            # second one on an account that already had it. A timeout, a 401
+            # or an outage all landed in the same empty list as a genuine
+            # none.
+            out["locations_known"] = True
     except Exception:  # noqa: BLE001
         pass
     programs = opted_in_programs(access_token)
