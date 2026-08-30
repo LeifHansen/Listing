@@ -1225,6 +1225,43 @@ def _revise_call_name(listing: Listing) -> str:
             else "ReviseFixedPriceItem")
 
 
+# What a revise can actually put in the request. `_item_fields` gates ten
+# fields on `wanted()`, and build_revise_item adds three of its own — price,
+# quantity and the shipping policy — each on the same dirty check.
+#
+# Everything else in dirty_fields.TRACKED is marked by an edit, travels
+# through the whole revise, and never appears in the XML. Most of it eBay does
+# not let a live listing change (format, auction duration and start price,
+# currency). One is the everyday case: the PACKAGE. A seller who listed with
+# the wrong weight and fixes it here was told the listing was updated while
+# eBay went on charging buyers calculated postage off the old number.
+#
+# This app deliberately does NOT start sending ShippingPackageDetails on a
+# revise to fix that. eBay's documented behaviour for shipping fields on a
+# revise is that omitting one REMOVES it, `_package_details` emits dimensions
+# only when all three are present, and the reference this would need to be
+# checked against is not reachable from here. A weight-only revise could
+# therefore clear dimensions the seller never touched — a worse failure than
+# the one being fixed, and unverifiable. So the app says what it did not do
+# instead, which is what it does everywhere else it cannot be sure.
+REVISABLE_FIELDS = frozenset({
+    "title", "subtitle", "description", "brand", "category_id", "condition",
+    "condition_description", "item_specifics", "images", "image_urls",
+    "price", "quantity", "fulfillment_policy_id",
+})
+
+
+def unsendable_revise_fields(listing: Listing) -> list[str]:
+    """The seller's edits this revise will not carry, in a stable order.
+
+    Empty for an ordinary edit. Non-empty means the listing on eBay will
+    still differ from the copy here after a successful revise, and the seller
+    has to be told which part.
+    """
+    dirty = set(listing.dirty_fields or ())
+    return sorted(dirty - REVISABLE_FIELDS)
+
+
 def build_revise_item(listing: Listing, item_id: str,
                       image_urls: Optional[list[str]] = None) -> tuple[str, str]:
     """(call name, request body) for revising one listing.
@@ -1314,6 +1351,14 @@ def revise_listing(token: str, item_id: str, listing: Listing,
         log.warning("trading: eBay remapped category %s -> %s on revise "
                     "(item %s)", listing.category_id or "?", remapped, returned)
         out["category_id"] = remapped
+    # Edits the seller made that this request could not carry. Reported from
+    # here rather than worked out again upstream, so the one place that knows
+    # what went into the XML is the one place that answers for it.
+    unsent = unsendable_revise_fields(listing)
+    if unsent:
+        log.info("trading: revise of %s could not carry %s",
+                 returned, ", ".join(unsent))
+        out["unsent"] = unsent
     return out
 
 

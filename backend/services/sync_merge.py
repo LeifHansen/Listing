@@ -135,7 +135,7 @@ def shadow_from(remote: dict) -> dict:
 
 # Field names as a seller would say them. `package_weight_lb` is a column
 # name; putting it in a sentence asks somebody to work out what the app meant.
-_LABELS = {
+FIELD_LABELS = {
     "title": "title",
     "subtitle": "subtitle",
     "description": "description",
@@ -192,7 +192,7 @@ def describe_conflicts(conflicts: Optional[dict]) -> list[dict]:
     for name, pair in sorted((conflicts or {}).items()):
         out.append({
             "field": name,
-            "label": _LABELS.get(name, name.replace("_", " ")),
+            "label": FIELD_LABELS.get(name, name.replace("_", " ")),
             "mine": _preview((pair or {}).get("local")),
             "ebay": _preview((pair or {}).get("remote")),
         })

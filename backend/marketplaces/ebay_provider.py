@@ -491,8 +491,26 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
     return issues
 
 
+def _label_list(names) -> str:
+    """Field names as the words a seller uses, deduped, in a sentence.
+
+    The label map folds several fields onto one word — both halves of a
+    package weight are "package weight" — so "the package weight and the
+    package weight" has to be impossible.
+    """
+    seen, out = set(), []
+    for name in names:
+        label = sync_merge.FIELD_LABELS.get(name, name.replace("_", " "))
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    if not out:
+        return ""
+    return out[0] if len(out) == 1 else ", ".join(out[:-1]) + " and " + out[-1]
+
+
 def revise_message(conflicts: Optional[dict], relist: bool,
-                   remapped: str = "") -> str:
+                   remapped: str = "", unsent: Optional[list] = None) -> str:
     """What to tell the seller after eBay accepted the change.
 
     A revise deliberately omits every field the seller and eBay have BOTH
@@ -502,6 +520,14 @@ def revise_message(conflicts: Optional[dict], relist: bool,
     seller who had edited the title got a success message, an unchanged
     listing on eBay, and no reason. An error would have been kinder; at least
     an error prompts.
+
+    `unsent` is the other half of the same honesty, for a different reason:
+    edits this app CANNOT put in a revise at all (see
+    ebay_trading.REVISABLE_FIELDS). In practice that is the package — a
+    corrected weight is the commonest edit after a listing goes live, and
+    eBay's calculated postage is charged off it — so "updated" on its own was
+    a claim about the listing that was not true of the part the seller had
+    just fixed.
     """
     if relist:
         return ("Relisted! It's live on eBay as a fresh listing with a new "
@@ -511,9 +537,14 @@ def revise_message(conflicts: Optional[dict], relist: bool,
     # specifics they have never seen, for a category they did not choose.
     moved = (" eBay also moved it to a different category, because the one it "
              "was in has been retired." if remapped else "")
+    stayed = ""
+    if unsent:
+        stayed = (f" The {_label_list(unsent)} stayed here — eBay doesn't let "
+                  "this app change that on a live listing. Update it in Seller "
+                  "Hub, or end the listing and relist it.")
     held = [d["label"] for d in sync_merge.describe_conflicts(conflicts)]
     if not held:
-        return "Your eBay listing has been updated." + moved
+        return "Your eBay listing has been updated." + moved + stayed
     seen, names = set(), []
     for label in held:  # the label map folds several fields onto one word
         if label not in seen:
@@ -523,7 +554,7 @@ def revise_message(conflicts: Optional[dict], relist: bool,
         ", ".join(names[:-1]) + " and " + names[-1])
     return (f"Your eBay listing has been updated — except the {listed}, which "
             f"you and eBay both changed. Choose which version to keep."
-            + moved)
+            + moved + stayed)
 
 
 def _view_url(listing: Listing, listing_id: str) -> str:
@@ -808,7 +839,15 @@ class EbayProvider:
             # and there is nothing left pending. Cleared here — on acceptance
             # — and not when the request was built: a revise that failed
             # leaves its edits marked, so the retry still carries them.
+            # Everything eBay took is settled. What it could not take is
+            # NOT: the record still holds a value the live listing does not,
+            # so those marks stay — the same rule as a failed revise, where
+            # the edits stay marked so the retry still carries them. Clearing
+            # them would file the seller's correction as delivered.
+            unsent = list(res.get("unsent") or ())
             listing.clear_dirty()
+            if unsent:
+                listing.mark_dirty(*unsent)
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             if pushed_local:
@@ -825,7 +864,8 @@ class EbayProvider:
                      session_id, res.get("listing_id"),
                      "local-updated" if pushed_local else "unchanged")
             listing_id = str(res.get("listing_id") or "")
-            message = revise_message(listing.conflicts, relist, remapped)
+            message = revise_message(listing.conflicts, relist, remapped,
+                                     unsent=unsent)
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),
@@ -838,6 +878,11 @@ class EbayProvider:
                      # seller's held-back edit stays invisible.
                      "held_back": sync_merge.describe_conflicts(
                          listing.conflicts),
+                     # Edits eBay was never offered, as opposed to the ones
+                     # above that it was and we withheld. Different question,
+                     # different answer: nobody chooses between two versions
+                     # here — the app simply cannot send this one.
+                     "unsent": unsent,
                      **({} if recorded else {"record_warning": RECORD_WARNING}),
                      "message": message})
 
