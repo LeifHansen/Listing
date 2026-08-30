@@ -165,3 +165,29 @@ def test_no_revocation_means_no_extra_checking(signed_in, store):
     auth, token = signed_in
     assert store.get_user_by_id("u1").get("sessions_valid_from") in (None, "")
     assert auth.current_user(_request(token))["id"] == "u1"
+
+
+# ------------------------------------------- the column the migration adds
+
+def test_the_migration_matches_the_model_column_type():
+    """`create_all` on a fresh database emits the model's type; the guarded
+    ALTER is what an EXISTING deployment gets. If they differ, the same code
+    runs against two different column types.
+
+    On Postgres that is not cosmetic. An aware datetime written into a
+    TIMESTAMP WITHOUT TIME ZONE is converted to the session's timezone, so on
+    any deployment not running in UTC the stored cutoff is off by the offset —
+    and being off in the lenient direction means a revocation quietly does not
+    take effect for hours.
+    """
+    import inspect
+
+    from backend import db
+
+    source = inspect.getsource(db._get_engine)
+    alter = next(line for line in source.splitlines()
+                 if "sessions_valid_from" in line and "ALTER TABLE" in line)
+    following = source[source.index(alter) + len(alter):]
+
+    assert "TIMESTAMP WITH TIME ZONE" in (alter + following[:80]), alter
+    assert db.User.__table__.c.sessions_valid_from.type.timezone is True

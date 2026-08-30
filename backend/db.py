@@ -354,7 +354,18 @@ def _get_engine():
                 # Session revocation. Nullable with no default: NULL means
                 # this account has never revoked, which is every account on
                 # the day this ships, and must keep every live session working.
-                "ALTER TABLE users ADD COLUMN sessions_valid_from TIMESTAMP",
+                #
+                # WITH TIME ZONE, matching the model's DateTime(timezone=True)
+                # — which is what create_all emits on a fresh database, so a
+                # bare TIMESTAMP here would give existing and new deployments
+                # different column types. On Postgres that difference is not
+                # cosmetic: an aware datetime written into a naive column is
+                # converted to the SESSION's timezone, so on any deployment
+                # not running in UTC the stored cutoff would be off by the
+                # offset — and being off in the lenient direction means a
+                # revocation quietly does not take effect for hours.
+                "ALTER TABLE users ADD COLUMN sessions_valid_from "
+                "TIMESTAMP WITH TIME ZONE",
             ):
                 try:
                     with _engine.begin() as conn:
