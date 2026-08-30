@@ -1275,8 +1275,25 @@ def tokens_checkout(request: Request, payload: dict) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - stripe/network problem
-        log.warning("tokens: checkout failed for %s: %s", uid, exc)
-        raise HTTPException(502, f"Couldn't start the purchase: {exc}") from exc
+        # Never Stripe's own words. They are written for whoever integrated
+        # the API, not for the person buying: "No such price: price_1ABC",
+        # "Invalid API Key provided: sk_live_51H4x***". The last of those puts
+        # a fragment of a live secret in a toast, on the screen where someone
+        # is trying to give us money.
+        reference = _support_reference()
+        log.warning("tokens: checkout failed for %s [%s]: %s",
+                    uid, reference, exc)
+        # The reference goes IN the sentence rather than beside it: the
+        # client reads `detail` as a string (lib/api.js), so a structured body
+        # here renders as "[object Object]" in the toast.
+        #
+        # "you have not been charged" is a fact, not a reassurance: creating a
+        # Checkout Session moves no money. It is also the one thing the log
+        # cannot tell them and the thing they will actually be wondering.
+        raise HTTPException(502, (
+            "We couldn't start your purchase just now, and you have not been "
+            "charged. Try again in a moment — if it keeps happening, quote "
+            f"{reference} to support.")) from exc
     return {"url": url}
 
 
@@ -1292,8 +1309,17 @@ def tokens_confirm(request: Request, session_id: str = "") -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        log.warning("tokens: confirm failed for %s: %s", uid, exc)
-        raise HTTPException(502, str(exc)) from exc
+        reference = _support_reference()
+        log.warning("tokens: confirm failed for %s [%s]: %s",
+                    uid, reference, exc)
+        # The opposite reassurance from checkout above: here the money may
+        # already have moved, so the honest thing to say is that the tokens
+        # are still coming. They are — the Stripe webhook credits the same
+        # session idempotently, and this route is only the redirect fallback.
+        raise HTTPException(502, (
+            "We couldn't confirm your purchase just now. If the payment went "
+            "through, your tokens will be credited automatically — quote "
+            f"{reference} to support if they don't appear shortly.")) from exc
     res["balance"] = tokens.status(uid)
     return res
 
