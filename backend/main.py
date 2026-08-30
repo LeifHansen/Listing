@@ -4174,8 +4174,16 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
         raise HTTPException(401, "Log in to save items to your inventory.")
     _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
-    db.upsert_listing(req.session_id, req.listing.model_dump(),
-                      status="unlisted", user_id=uid)
+    # Shop Mode's "Buy" is a decision made in a shop, on this answer: the
+    # seller taps it and then pays for the item. A write that did not land
+    # means the thing they just bought is not in the dashboard they will look
+    # for it in, and `ok: true` gave them no reason to check.
+    landed = db.upsert_listing(req.session_id, req.listing.model_dump(),
+                               status="unlisted", user_id=uid)
+    if db.enabled() and not landed:      # see the note in merge_listings
+        raise errors.StorageUnavailable(
+            "Couldn't save that to your inventory just now. Try again in a "
+            "moment.")
     log.info("inventory add: session=%s user=%s", req.session_id, uid)
     return {"ok": True, "id": req.session_id}
 
@@ -4693,7 +4701,14 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     listing.images = copied
 
     storage.save_listing(new_id, listing)
-    db.upsert_listing(new_id, listing.model_dump(), status="draft", user_id=uid)
+    # Same rule, lower stakes: nothing is deleted here, but answering with a
+    # new draft id that is not in the store sends the client to a listing that
+    # does not exist.
+    landed = db.upsert_listing(new_id, listing.model_dump(),
+                               status="draft", user_id=uid)
+    if db.enabled() and not landed:      # see the note in merge_listings
+        raise errors.StorageUnavailable(
+            "Couldn't create the new draft just now. Try again in a moment.")
     log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
              listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
     return {"ok": True, "id": new_id, "from": listing_id,
@@ -4853,7 +4868,26 @@ def merge_listings(payload: dict, request: Request) -> dict:
     if added:
         objstore.upload_optimized(target_id, tdir, added)
     storage.save_listing(target_id, listing)
-    db.upsert_listing(target_id, listing.model_dump(), status="draft", user_id=uid)
+    # BEFORE the destructive half, and checked. db.upsert_listing swallows its
+    # failures by design, so this write could fail while the deletes below
+    # went ahead regardless -- leaving the seller with the sources gone, their
+    # photos purged, the master still on its pre-merge record, and `ok: true`
+    # on the screen. Unlike almost everything else here that is not
+    # recoverable by trying again: there is nothing left to try it on.
+    #
+    # The order is the fix, not the check. Same strict rule as PATCH
+    # /api/listings/{id}, applied where it decides whether anything may be
+    # deleted at all.
+    landed = db.upsert_listing(target_id, listing.model_dump(),
+                               status="draft", user_id=uid)
+    # Called unconditionally and only ENFORCED when there is a database:
+    # `db.enabled() and not db.upsert_listing(...)` short-circuits, so
+    # without one the write never happens at all. Here that would skip the
+    # save and still delete the sources.
+    if db.enabled() and not landed:
+        raise errors.StorageUnavailable(
+            "Couldn't save the merged listing just now, so nothing was "
+            "merged or removed. Try again in a moment.")
     # Sources are consumed: remove their records and reclaim their storage.
     for sid in source_ids:
         db.delete_listing(sid, uid)
