@@ -33,6 +33,28 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+# The hash a login checks against when there is no account for that address.
+#
+# `login` used to return before bcrypt ran when the email was unknown, so a
+# failed attempt cost ~270ms for an address that HAS an account here and
+# essentially nothing for one that does not. The message was correctly
+# identical either way; the clock was the answer. That is a legible oracle
+# over any network, on an endpoint built to take an email and a guess -- and
+# what it confirms is which sellers have a connected eBay identity, their
+# photos and their listings behind one password, which is exactly the list a
+# credential-stuffing run wants first.
+#
+# So the work happens either way. Built at import from the same gensalt() the
+# real hashes use, so the cost factor tracks whatever this app hashes with
+# rather than being pinned to a number that would drift; of a token no request
+# can carry, because anything a caller could supply and match here would log
+# them in as nobody. It costs one bcrypt per unknown-email attempt, which the
+# auth rate limiter already bounds -- and that limiter counts every attempt,
+# successful or not, precisely so this cost is capped.
+_ABSENT_PASSWORD_HASH = bcrypt.hashpw(
+    b"\x00 no account -- see verify_password", bcrypt.gensalt()).decode()
+
+
 def _make_token(user_id: str) -> str:
     now = _dt.datetime.now(_dt.timezone.utc)
     payload = {"sub": user_id, "iat": now, "exp": now + _dt.timedelta(days=TOKEN_TTL_DAYS)}
@@ -179,9 +201,17 @@ def signup(email: str, password: str):
 
 
 def login(email: str, password: str) -> Optional[dict]:
-    """Verify credentials; returns the user dict (no hash) or None."""
+    """Verify credentials; returns the user dict (no hash) or None.
+
+    The comparison runs whether or not the account exists -- see
+    _ABSENT_PASSWORD_HASH. Deliberately not short-circuited on `rec`: doing so
+    answers "is there an account for this address?" in the time it takes to
+    fail, which is the one thing this endpoint's own error message is careful
+    not to say.
+    """
     rec = db.get_user_by_email(email.strip().lower())
-    if not rec or not verify_password(password, rec.get("password_hash", "")):
+    stored = (rec or {}).get("password_hash") or _ABSENT_PASSWORD_HASH
+    if not verify_password(password, stored) or not rec:
         return None
     return {"id": rec["id"], "email": rec["email"],
             "display_name": rec.get("display_name", ""),
