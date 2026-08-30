@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
+import { priceView } from "@/lib/priceLookup";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -935,10 +936,11 @@ export function PricingCard({ w }) {
         {p?.loading && <AIStatusInline message="Finding comparable listings…" />}
         {p?.error && <p className="text-sm text-ink-secondary">{p.error}</p>}
         {p && !p.loading && !p.error && (
-          !p.suggestion ? (
-            <p className="text-sm text-ink-secondary">
-              No comparable listings found — try a simpler title or set a category first.
-            </p>
+          priceView(p).kind !== "estimate" ? (
+            // "We couldn't check" and "the market has nothing like this" are
+            // different answers; the second one also tells the seller to
+            // rewrite a title that was never the problem. See lib/priceLookup.
+            <p className="text-sm text-ink-secondary">{priceView(p).message}</p>
           ) : (
             <div className="flex flex-col gap-2">
               {(p.sources || []).map((src) => (
