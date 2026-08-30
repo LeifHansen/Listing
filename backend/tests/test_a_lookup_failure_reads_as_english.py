@@ -125,6 +125,27 @@ def test_a_working_conditions_lookup_says_it_checked(client, monkeypatch):
     assert res.json()["conditions"] == [{"id": "1000"}]
 
 
+def test_autofill_uses_the_same_answer_as_the_lookup_beside_it(client,
+                                                              monkeypatch,
+                                                              tmp_path):
+    """`/api/autofill-specifics` makes the same taxonomy call as
+    `/api/item-aspects`, one route over, and pasted the raw error where the
+    other one no longer does."""
+    main, api = client
+    monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
+    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.taxonomy, "item_aspects", _boom)
+
+    res = api.post("/api/autofill-specifics/s1", json={
+        "session_id": "s1",
+        "listing": {"title": "A jacket", "category_id": "11450"}})
+    assert res.status_code == 502, res.text[:200]
+    shown = res.json()["detail"]
+    for leak in LEAKS:
+        assert leak not in shown, shown
+    assert re.search(r"[0-9a-f]{8}", shown)
+
+
 def test_the_etsy_lookups_keep_the_shop_id_out_of_the_message(client, monkeypatch):
     """Etsy's own httpx error carries the API base, the path AND the seller's
     shop_id — the id is in the URL of every shop-scoped call."""

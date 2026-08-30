@@ -3254,7 +3254,10 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     try:
         aspects = taxonomy.item_aspects(listing.category_id).get("aspects", [])
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Couldn't load eBay item specifics: {exc}") from exc
+        # The same taxonomy call /api/item-aspects makes, so the same answer:
+        # httpx's words name the API base, the path and the category id.
+        raise _lookup_failed("load eBay's item specifics for that category",
+                             exc) from exc
     opt_dir = storage.optimized_dir(session_id)
     names = listing.images or storage.list_optimized(session_id)
     paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
