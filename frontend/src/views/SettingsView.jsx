@@ -647,19 +647,24 @@ export function SettingsView() {
 
 // Cross-posting marketplaces — every registered marketplace except eBay
 // (which keeps its own card above). One section per marketplace: connected →
-// account + Disconnect; configured but not connected → Connect button;
-// coming soon (access pending on the marketplace's side) → a "Coming soon"
-// pill and the wait explained; not configured on the server → the same
-// missing-env explainer the eBay card uses. Renders nothing while eBay is
-// the only marketplace registered.
+// account + Disconnect; the marketplace hasn't approved us for this seller's
+// shop yet (Etsy's seller-app wall) → a "Pending approval" pill and the wait
+// explained, with the Connect button held back rather than walking them into
+// the marketplace's own error page; configured but not connected → Connect
+// button; coming soon (credentials pending on the marketplace's side) → a
+// "Coming soon" pill; not configured on the server → the same missing-env
+// explainer the eBay card uses. Renders nothing while eBay is the only
+// marketplace registered.
 function MarketplaceConnections() {
   const { marketplaces, loadMarketplaces } = useApp();
   const { toast, confirm } = useToast();
-  // Coming-soon marketplaces sink below the ones you can actually connect.
+  // Marketplaces you can't act on yet sink below the ones you can, whether
+  // the wait is on their credentials or on them approving us for other shops.
+  const waiting = (m) => (m.coming_soon || m.access_pending ? 1 : 0);
   const others = marketplaces
     .filter((m) => m.key !== "ebay")
     .slice()
-    .sort((a, b) => (a.coming_soon ? 1 : 0) - (b.coming_soon ? 1 : 0));
+    .sort((a, b) => waiting(a) - waiting(b));
   if (!others.length) return null;
 
   const disconnect = async (m) => {
@@ -692,9 +697,10 @@ function MarketplaceConnections() {
               <div className="min-w-0 flex-1">
                 <p className="font-semibold text-ink flex items-center gap-2">
                   {m.label}
-                  {!m.connected && m.coming_soon && (
+                  {!m.connected && (m.coming_soon || m.access_pending) && (
                     <TagPill tone="blue">
-                      <Clock size={11} aria-hidden /> Coming soon
+                      <Clock size={11} aria-hidden />{" "}
+                      {m.access_pending ? "Pending approval" : "Coming soon"}
                     </TagPill>
                   )}
                 </p>
@@ -703,6 +709,11 @@ function MarketplaceConnections() {
                     Connected{m.username ? (
                       <> as <strong className="text-ink">{m.username}</strong></>
                     ) : null}.
+                  </p>
+                ) : m.access_pending ? (
+                  <p className="text-sm text-ink-secondary">
+                    {m.access_pending_note
+                      || `${m.label} hasn’t approved this app for other shops yet — cross-posting turns on as soon as they do.`}
                   </p>
                 ) : m.oauth_ready ? (
                   <p className="text-sm text-ink-secondary">
@@ -722,6 +733,10 @@ function MarketplaceConnections() {
               {m.connected ? (
                 <Button variant="danger" onClick={() => disconnect(m)}>
                   <Unlink aria-hidden /> Disconnect
+                </Button>
+              ) : m.access_pending ? (
+                <Button variant="secondary" disabled>
+                  <Clock aria-hidden /> Connect {m.label}
                 </Button>
               ) : m.oauth_ready ? (
                 <Button
