@@ -16,6 +16,7 @@ from typing import Optional
 
 from .. import db
 from ..config import log
+from ..money import money
 
 
 def notify_sold(user_id: Optional[str], record_id: str, listing: dict,
@@ -35,10 +36,12 @@ def notify_sold(user_id: Optional[str], record_id: str, listing: dict,
         price = listing.get("sold_price")
         if price is None:
             price = listing.get("price")
-        try:
-            price_part = f" for ${float(price):,.2f}" if price else ""
-        except (TypeError, ValueError):
-            price_part = ""
+        # In the listing's OWN currency. This used to hardcode a dollar sign,
+        # so a seller on eBay.co.uk was told their GBP item sold "for $45.00"
+        # -- in the message they use to decide whether the sale was worth
+        # shipping. See backend/money.
+        shown = money(price, listing.get("currency")) if price else None
+        price_part = f" for {shown}" if shown else ""
         qty = max(0, int(sold_quantity or 0))
         db.add_notification(
             user_id,
