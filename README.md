@@ -372,15 +372,20 @@ one failing never rolls back the others — and per-marketplace state
   both are handled. First connect stopping on Etsy's own page with *"Only
   the app owner may authorize a seller app"* is app **type**, not config: a
   Seller app is authorizable by the one Etsy account that registered the
-  keystring and nobody else, so either sign in as that account, or request
-  Commercial Access to let other sellers connect. Reaching that page proves
+  keystring and nobody else. Opening it up is three tiers, not two, and
+  Commercial Access cannot be requested straight from a Seller app —
+  **Seller** (your shop) → **Personal** (yours plus a handful more, Etsy
+  documents 4; deeper review) → **Commercial Access** (unlimited, and only
+  on an *approved* Personal app). Reaching that page proves
   `ETSY_CLIENT_ID` and `ETSY_REDIRECT_URI` are registered correctly — a
   wrong one fails before the consent screen. While that approval is pending,
   set `ETSY_OWNER_EMAILS` to the owner's login for *this* app (not their Etsy
   one — it's matched against the account record): they keep connecting, and
   every other seller gets a "Pending approval" card instead of being sent to
-  Etsy to be refused. `ETSY_COMMERCIAL_ACCESS=true` retires the gate once
-  Etsy grants it. Details in `.env.example`.
+  Etsy to be refused. It takes a comma-separated list, which is what makes a
+  Personal-app beta possible — name the handful of shops you're onboarding
+  and everyone else keeps the card. `ETSY_COMMERCIAL_ACCESS=true` retires the
+  gate once Etsy grants it. Details in `.env.example`.
 - **Depop** — official Selling API, which is **partner-gated**: apply via
   Depop partnerships, then set the five `DEPOP_*` vars from onboarding
   (`.env.example`). Until then Depop simply stays hidden. No drafts or
