@@ -34,21 +34,28 @@ const browser = await chromium.launch(
     ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM } : {});
 const problems = [];
 
+// Set while a journey is DELIBERATELY breaking a request, so the browser's
+// own complaint about it is not counted as the app misbehaving. Nulled the
+// moment that journey is done: anything it does not match is still a failure.
+let expected = null;
+
 /** Attach the four listeners that decide whether a page is broken. */
 function watch(page, errs) {
   page.on('pageerror', e => errs.push(`pageerror: ${e.message}`));
   page.on('console', m => {
     const t = m.text();
-    if (m.type() === 'error' && !/ERR_CONNECTION_RESET|fonts\.googleapis/.test(t)) {
-      errs.push(`console: ${t.slice(0, 200)}`);
-    }
+    if (m.type() !== 'error') return;
+    if (/ERR_CONNECTION_RESET|fonts\.googleapis/.test(t)) return;
+    if (expected && expected.test(t)) return;
+    errs.push(`console: ${t.slice(0, 200)}`);
   });
   // Same-origin only: this sandbox blocks the Google Fonts CDN, which is an
   // egress policy here and not an app fault.
   page.on('requestfailed', r => {
-    if (r.url().startsWith(BASE)) {
-      errs.push(`requestfailed: ${r.url().slice(0, 120)} ${r.failure()?.errorText}`);
-    }
+    if (!r.url().startsWith(BASE)) return;
+    const text = `${r.url()} ${r.failure()?.errorText}`;
+    if (expected && expected.test(text)) return;
+    errs.push(`requestfailed: ${r.url().slice(0, 120)} ${r.failure()?.errorText}`);
   });
 }
 
@@ -86,9 +93,16 @@ for (const view of VIEWS) {
 // carries between them.
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
 const page = await ctx.newPage();
-const journey = [];
-watch(page, journey);
+// One shared buffer the listeners write into, DRAINED after each step so the
+// errors land under the step that caused them. Pushing this array itself was
+// the bug: `problems` stored a reference, so a later step's console noise
+// appeared under "first run", and the `signedIn` guards below -- which used
+// to read its length -- turned themselves off for the rest of the run.
+const seen = [];
+watch(page, seen);
+const drain = () => seen.splice(0);
 const email = `smoke+${Date.now()}@example.com`;
+let signedIn = false;
 
 try {
   await page.goto(BASE, { waitUntil: 'networkidle', timeout: 30000 });
@@ -109,32 +123,33 @@ try {
   // only that the dialog closed would pass on a dismissed dialog.
   if (await page.getByRole('button', { name: 'Create account' }).count()) {
     const shown = (await page.textContent('body')) || '';
-    journey.push(
+    seen.push(
       /database/i.test(shown)
         ? 'sign-up refused: the server has no database. Set DATABASE_URL — '
           + 'the signed-in half of this test cannot run without one.'
         : 'sign-up did not complete: the dialog is still open');
   } else if (!((await page.textContent('body')) || '').includes(email)) {
-    journey.push('signed up, but the account is not shown anywhere');
+    seen.push('signed up, but the account is not shown anywhere');
   }
 } catch (e) {
-  journey.push(`sign-up: ${e.message.slice(0, 200)}`);
+  seen.push(`sign-up: ${e.message.slice(0, 200)}`);
 }
-problems.push(['first run (sign up)', journey]);
+const signup = drain();
+signedIn = !signup.length;
+problems.push(['first run (sign up)', signup]);
 
 // The same four screens, now with a seller behind them. Each one fetches for
 // real here: listings, notifications, marketplaces, tokens, eBay status.
-if (!journey.length) {
+if (signedIn) {
   for (const view of VIEWS) {
     const errs = [];
-    const before = journey.length;
     try {
       await visit(page, view, errs);
     } catch (e) {
       errs.push(`navigation: ${e.message.slice(0, 200)}`);
     }
     // Anything the shared listeners caught during THIS screen belongs to it.
-    errs.push(...journey.splice(before));
+    errs.push(...drain());
     problems.push([`signed-in ${view}`, errs]);
   }
 }
@@ -147,7 +162,7 @@ if (!journey.length) {
 // The app simply opens in light mode for a seller who chose dark, on every
 // load, with the toggle agreeing. Only a real reload catches it.
 const theme = [];
-if (!journey.length) {
+if (signedIn) {
   try {
     await page.getByRole('button', { name: 'Home', exact: true }).first().click();
     await page.waitForTimeout(500);
@@ -176,7 +191,68 @@ if (!journey.length) {
   } catch (e) {
     theme.push(`theme: ${e.message.slice(0, 200)}`);
   }
+  theme.push(...drain());
   problems.push(['theme survives a reload', theme]);
+}
+
+// --- a store we could not read is not an empty store ------------------------
+//
+// The one journey here that needs the server to misbehave, so the browser
+// does it: page.route() answers /api/listings with a 503 without the app
+// knowing the difference. That is the whole outage, from the seller's side.
+//
+// Every number on the dashboard is counted off that one read, so a failure
+// makes them all zero -- and a zero on this screen is a decision: nothing
+// live is a reason to go list something, nothing sold this week is a reason
+// to cut prices. Both, on a morning when the database was briefly slow.
+const outage = [];
+if (signedIn) {
+  // The 503 below is this test's doing, so the browser's complaint about it
+  // is not a finding. Scoped to this journey and cleared straight after.
+  expected = /503|api\/listings/;
+  try {
+    await page.route('**/api/listings*', r => r.fulfill({
+      status: 503, contentType: 'application/json',
+      body: JSON.stringify({ detail: "We couldn't load your listings just now." }),
+    }));
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(2000);
+
+    const dash = (await page.textContent('body')) || '';
+    if (!/couldn.t check/i.test(dash)) {
+      outage.push('the store could not be read and the tiles did not say so');
+    }
+    for (const claim of ['everything currently live', 'nothing in the last 7 days',
+                         'open one to finish & publish']) {
+      if (dash.includes(claim)) outage.push(`tile still claims "${claim}" after a failed read`);
+    }
+
+    // And the listings area itself, one card down and one click away.
+    await page.getByRole('button', { name: /Active on eBay/ }).first().click();
+    await page.waitForTimeout(1500);
+    const list = (await page.textContent('body')) || '';
+    if (!/couldn.t load your listings/i.test(list)) {
+      outage.push('the listings area did not say the read failed');
+    }
+    if (list.includes('Nothing live yet')) {
+      outage.push('a failed read rendered as the empty store');
+    }
+    // The tab badges sit directly above that explanation and are counted off
+    // the same empty page, so an outage used to read "Active 0" and "we
+    // couldn't load your listings" at once, six lines apart.
+    if (/Active\s*0/.test(list)) {
+      outage.push('a tab still badges a count after a failed read');
+    }
+  } catch (e) {
+    outage.push(`outage: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute('**/api/listings*').catch(() => {});
+  // Drained INTO the journey, not discarded: `expected` above already
+  // dropped the noise this test made, so anything still here is the app
+  // reacting badly to an outage -- which is exactly what this asks about.
+  outage.push(...drain());
+  expected = null;
+  problems.push(['an outage is not an empty store', outage]);
 }
 
 // --- signing out has to end the session ------------------------------------
@@ -186,7 +262,7 @@ if (!journey.length) {
 // standing on the server, which on a shared machine is someone else's store
 // one refresh away.
 const out = [];
-if (!journey.length) {
+if (signedIn) {
   try {
     await page.getByText('Log out').first().click();
     await page.getByRole('button', { name: 'Log in', exact: true })
@@ -206,6 +282,7 @@ if (!journey.length) {
   } catch (e) {
     out.push(`log out: ${e.message.slice(0, 200)}`);
   }
+  out.push(...drain());
   problems.push(['log out ends the session', out]);
 }
 await ctx.close();

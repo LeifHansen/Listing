@@ -20,7 +20,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
-import { listingsView } from "@/lib/listingsView";
+import { listingsView, storeTotal } from "@/lib/listingsView";
 import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
@@ -638,26 +638,29 @@ export function Dashboard() {
       {/* Your store, mirrored — the tiles are the seller's REAL numbers and
           each one jumps to the matching view. */}
       <motion.div variants={rise} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Every one of these is counted off `items`, so when the store read
+            fails they all count zero and say so as a fact -- on the same
+            screen, at the same moment, as the card below explaining that the
+            listings could not be loaded. storeTotal is what stops that. */}
         <StatCard icon={Coins} tone="green" label="Active on eBay"
-          value={live.length}
-          sub={revenue > 0
+          {...storeTotal(storeView.kind, live.length, revenue > 0
             ? `${formatMoney(revenue)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
-            : "everything currently live"}
+            : "everything currently live")}
           onClick={() => openListings("active")} />
         <StatCard icon={FileText} tone="yellow" label="Drafts in progress"
-          value={drafts.length}
-          sub={inventory.length
+          {...storeTotal(storeView.kind, drafts.length, inventory.length
             ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"} from Shop Mode`
-            : "open one to finish & publish"}
+            : "open one to finish & publish")}
           onClick={() => openListings("drafts")} />
         <StatCard icon={DollarSign} tone="blue" label="Sold"
-          value={formatMoney(sales.total) || "$0.00"}
-          sub={soldSub(sales, soldEnded)}
+          {...storeTotal(storeView.kind, formatMoney(sales.total) || "$0.00",
+                         soldSub(sales, soldEnded))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
-          value={todays.length}
-          sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}
+          {...storeTotal(storeView.kind, todays.length,
+                         todays.length ? "keep the streak going"
+                                       : "photos in, listing out — ~30s")}
           onClick={startNew} />
       </motion.div>
 

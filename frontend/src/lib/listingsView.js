@@ -50,3 +50,32 @@ export function listingsView({
       : "",
   };
 }
+
+
+/**
+ * What one of the dashboard's store totals may say.
+ *
+ * The four tiles across the top -- Active on eBay, Drafts in progress, Sold,
+ * Listed today -- are all counted off the same page of listings that
+ * `listingsView` above is about. When that read fails the page is empty, so
+ * every tile counts zero and then states it as a fact: "Active on eBay 0 /
+ * everything currently live", "Sold $0.00 / nothing in the last 7 days".
+ * Nothing there was measured.
+ *
+ * It matters more here than in most places a zero appears, because a seller
+ * reads these to decide what to do next. Nothing live is a reason to go list
+ * something; nothing sold in a week is a reason to cut prices. Both
+ * conclusions, on a morning when the database was briefly slow -- and the
+ * card directly below was saying "we couldn't load your listings, this
+ * doesn't mean you don't have any" at the same moment, from the same failed
+ * read.
+ *
+ * Same rule as `metricsStatus` for eBay's traffic numbers and `checked` on
+ * the notification bell: a number nobody could measure is a dash, not a zero.
+ */
+export function storeTotal(kind, value, sub) {
+  if (kind === "unavailable") {
+    return { value: "—", sub: "we couldn’t check just now" };
+  }
+  return { value, sub };
+}

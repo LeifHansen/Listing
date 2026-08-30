@@ -352,7 +352,12 @@ export function ListingsView({ search = "" }) {
               "font-display tabular-nums text-[11px] font-bold rounded-full px-1.5 min-w-5 h-5 grid place-items-center",
               tabId === t.id ? "bg-white/20" : "bg-bg-sunken",
             )}>
-              {counts[t.id]}
+              {/* Same rule as the card below and the dashboard tiles: these
+                  are counted off a page that a failed read left empty, so
+                  during an outage every tab would badge a confident 0 --
+                  directly above a card explaining that the listings could
+                  not be loaded. A number nobody could measure is a dash. */}
+              {view.kind === "unavailable" ? "—" : counts[t.id]}
             </span>
           </button>
         ))}
