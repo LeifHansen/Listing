@@ -130,7 +130,15 @@ encoded wrong behaviour were corrected in place, each saying why.
    saving from it erased the base the three-way merge reconciles against.
    The next sync would then reconcile nothing and silently ignore a title
    fixed in Seller Hub, which is the whole bug P0-08 was about. Anything
-   the server maintains and a client merely carries belongs in that list.
+   the server maintains and a client merely carries belongs in that list —
+   which on a second pass also turned up `ebay_account_id` (the immutable id
+   P0-04 decides ownership on), `sku` (P0-07's idempotency key),
+   `has_variations`, and eBay's own numbers. `dirty_fields` had the same
+   shape one level down: a save UNIONED the client's claim about what it had
+   edited into the server's, and every field a revise sends overwrites
+   whatever eBay has now, so a client naming extra ones could push stale
+   snapshots over newer Seller Hub work. The server diffs against its own
+   stored copy; it does not need to be told.
 
 ## Two operational consequences of the CI change — read before merging
 

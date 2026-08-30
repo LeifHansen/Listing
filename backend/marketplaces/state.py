@@ -110,8 +110,25 @@ def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, st
 # does the matching damage on the other side: the field becomes sendable
 # again, resolving a both-sides edit in the local copy's favour without
 # asking.
-SERVER_OWNED_FIELDS = ("source", "view_url", "ebay_account",
-                       "remote_shadow", "conflicts")
+SERVER_OWNED_FIELDS = (
+    "source", "view_url", "ebay_account",
+    # The sync's own bookkeeping — see the note above.
+    "remote_shadow", "conflicts",
+    # The immutable eBay account id ownership is decided on (P0-04). It keys
+    # on this precisely BECAUSE it cannot be renamed, and a save that could
+    # set it points the app at the wrong seller's listings.
+    "ebay_account_id",
+    # The idempotency key a publish is recovered by (P0-07). Change it and the
+    # duplicate check that stops a retried publish minting a second live
+    # listing no longer matches.
+    "sku",
+    # The flag that stops this app rewriting a listing whose shape it cannot
+    # represent.
+    "has_variations",
+    # eBay's own numbers. Two of them add up to the Sold total the seller
+    # reads as fact, and none of them is something a client observes.
+    "sold_price", "sold_quantity", "watch_count", "ebay_start_time",
+)
 
 
 def restore_server_fields(listing, stored: dict) -> list[str]:

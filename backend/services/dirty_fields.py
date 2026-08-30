@@ -96,8 +96,17 @@ def accumulate(incoming: Listing, stored: Optional[dict]) -> Listing:
 
     They are cleared when the marketplace accepts them, not when they are sent
     — see Listing.clear_dirty.
+
+    What accumulates is the SERVER's record plus what this save actually
+    changed, measured by diffing against the stored copy. `incoming`'s own
+    list is deliberately ignored: it arrives from a client, every field a
+    revise sends overwrites whatever eBay has now, and a client naming one it
+    did not change would push a stale snapshot over newer Seller Hub work —
+    the same harm the three-way merge exists to prevent, reached from the
+    other end. Nothing is lost by ignoring it: the diff sees every real
+    change, and server-side callers that mark a field explicitly write through
+    upsert_listing rather than through here.
     """
     pending = set((stored or {}).get("dirty_fields") or [])
-    incoming.dirty_fields = sorted(pending | set(incoming.dirty_fields)
-                                   | set(changed_fields(incoming, stored)))
+    incoming.dirty_fields = sorted(pending | set(changed_fields(incoming, stored)))
     return incoming
