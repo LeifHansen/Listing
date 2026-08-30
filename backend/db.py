@@ -66,6 +66,13 @@ class User(Base):
     # unreachable. NULL means nothing has ever been revoked.
     sessions_valid_from: Mapped[Optional[_dt.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
+    # When this account last spent the eBay per-item sweeps. It rations a
+    # DAILY allowance that belongs to the whole application, so the mark has
+    # to outlive the process that made it: in memory alone, every deploy or
+    # OOM re-armed a ~100-call sweep for every account with a tab open. See
+    # services/sync_guard. NULL means this account has never swept.
+    last_sweep_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     # New-listing defaults (package weight/dims, quantity, condition, …) that
     # pre-fill every AI draft so repeat sellers stop re-typing them.
     prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -327,6 +334,15 @@ _MIGRATIONS = (
     # offset — and being off in the lenient direction means a
     # revocation quietly does not take effect for hours.
     "ALTER TABLE users ADD COLUMN sessions_valid_from "
+    "TIMESTAMP WITH TIME ZONE",
+    # The eBay sweep cooldown, moved out of process memory. Same WITH TIME
+    # ZONE reasoning as the line above: it must match what create_all emits
+    # for DateTime(timezone=True) on a fresh database, or existing and new
+    # deployments get different column types and the comparison this drives
+    # is off by the session offset. NULL means never swept, which is every
+    # account on the day this ships -- and the first sweep after it is free,
+    # which is the same answer the in-memory dict gave.
+    "ALTER TABLE users ADD COLUMN last_sweep_at "
     "TIMESTAMP WITH TIME ZONE",
 )
 
@@ -713,6 +729,61 @@ def revoke_sessions(user_id: str,
         raise StorageUnavailable(
             "Couldn't sign out your other sessions just now. Try again in a "
             "moment.") from exc
+
+
+def last_sweep(user_id: str) -> Optional[_dt.datetime]:
+    """When this account last ran the eBay per-item sweeps, or None if never.
+
+    Raises StorageUnavailable rather than answering None when the record
+    cannot be read. None means "never swept", which grants a sweep -- so
+    reporting an outage as None is how a database blip would turn into ~100
+    Trading calls per account against an allowance shared by every seller.
+    The caller (services/sync_guard) refuses the background sweep instead.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                # A signed-in caller whose row is missing is not "has never
+                # swept"; it is a read that did not find what it was told
+                # exists. Same reasoning as revoke_sessions.
+                raise StorageUnavailable("no such account")
+            return getattr(u, "last_sweep_at", None)
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: last_sweep failed: {exc}")
+        raise StorageUnavailable("couldn't read the sweep mark") from exc
+
+
+def mark_sweep(user_id: str, at: Optional[_dt.datetime] = None) -> _dt.datetime:
+    """Record that this account is spending its eBay sweep allowance now.
+
+    Written BEFORE the sweep runs and raising when it cannot be written: a
+    spend that was not recorded cannot be rationed, and the next process to
+    start would grant the same account another one. `at` is for tests and for
+    an operator ageing a mark deliberately.
+    """
+    stamp = (at or _dt.datetime.now(_dt.timezone.utc)).replace(microsecond=0)
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                raise StorageUnavailable("no such account")
+            u.last_sweep_at = stamp
+            s.commit()
+            return stamp
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: mark_sweep failed: {exc}")
+        raise StorageUnavailable("couldn't record the sweep mark") from exc
 
 
 def get_password_hash(user_id: str) -> Optional[str]:
