@@ -20,21 +20,29 @@ from __future__ import annotations
 
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from . import ebay_account, ebay_trading, notifications, taxonomy
-from .ebay_trading import AlreadyListedError, TradingError
+from . import (ebay_account, ebay_trading, notifications, publish_guard,
+               sync_merge, taxonomy)
+from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
 # live/market facts from eBay but keep everything else the record already has,
 # so a local edit isn't silently reverted by a background sync.
 _LIVE_FIELDS = ("price", "quantity", "watch_count", "sold_quantity",
-                "view_url", "image_urls")
+                "view_url", "image_urls",
+                # eBay's own answer about the listing's SHAPE, and it can
+                # change both ways: a seller who adds variations must have
+                # the record quarantined, and one who removes them must get
+                # it back. Left out of this list it would only ever latch on,
+                # so a listing fixed on eBay would stay read-only here for
+                # good.
+                "has_variations")
 # Detail fetches run a few at a time: each listing is its own GetItem round
 # trip, so a 300-item store takes minutes when they run one after another —
 # long enough for the browser to give up on the request. Small pool, because
@@ -86,19 +94,105 @@ def named_account_of(listing: Listing | dict) -> str:
     return "" if owner == UNKNOWN_ACCOUNT else owner
 
 
-def belongs_to(listing: Listing | dict, account: str) -> bool:
-    """True when this record may be read or written on `account`'s behalf.
+def account_id_of(listing: Listing | dict) -> str:
+    """The IMMUTABLE eBay account id a record is stamped with ("" = none).
 
-    A record with no account recorded is legacy — it predates the field, and
-    the only account it can plausibly belong to is the one connected when it
-    was made, so it passes. A record stamped with a DIFFERENT account never
-    does: its item id belongs to another seller, and eBay's GetItem will
-    happily answer for it anyway (item detail is public), which is precisely
-    how a second connected account kept re-confirming the first account's
-    listings as live.
+    Records written before this field existed have only `ebay_account`, the
+    seller's mutable username. See `owns` for how the two are combined.
     """
-    owner = account_of(listing)
-    return not owner or not account or owner == (account or "").strip()
+    value = (listing.get("ebay_account_id") if isinstance(listing, dict)
+             else getattr(listing, "ebay_account_id", ""))
+    return (value or "").strip()
+
+
+def _identity(account) -> tuple[str, str]:
+    """(immutable id, username) from whatever the caller holds.
+
+    Accepts a creds bundle, an account row, or a bare username string — the
+    call sites hold different things and none of them should have to care.
+    """
+    if isinstance(account, dict):
+        return ((account.get("ebay_user_id") or "").strip(),
+                (account.get("ebay_username") or "").strip())
+    return "", (account or "").strip()
+
+
+def owns(listing: Listing | dict, account) -> bool:
+    """True when this record may be READ on `account`'s behalf.
+
+    Ownership is decided on eBay's immutable userId whenever both sides carry
+    one, with no username fallback: a username agreeing does not rescue an id
+    that disagrees, because handles get renamed and re-registered.
+
+    A record stamped with an immutable id is never matched by a caller who
+    has none. That closes the fail-open that mattered most — a connected
+    account whose identity could not be read (the identity scope 403s on
+    older connections) used to match EVERY record, and since GetItem answers
+    for any seller's item, a status sweep then re-confirmed another account's
+    listings as live under this one.
+
+    Records that predate immutable ids fall back to the username, which is
+    all they have. Refusing those outright would strand sellers who did
+    nothing wrong, so they stay readable — but see `may_write`.
+    """
+    owner_id = account_id_of(listing)
+    caller_id, caller_name = _identity(account)
+    if owner_id:
+        return bool(caller_id) and owner_id == caller_id
+    owner_name = account_of(listing)
+    if owner_name == UNKNOWN_ACCOUNT:
+        # "We could not name the account" must never match whoever is
+        # connected now — that is the sentinel's entire purpose.
+        return False
+    return not owner_name or not caller_name or owner_name == caller_name
+
+
+def may_write(listing: Listing | dict, account) -> bool:
+    """True when this record may be WRITTEN on `account`'s behalf.
+
+    Stricter than `owns`, because the failures are not symmetric: showing a
+    seller a listing that turns out not to be theirs is a confusing screen,
+    while REVISING one is an edit to a stranger's live listing that no later
+    correction undoes.
+
+    So a write needs the caller to be identified, and needs the record to
+    agree — by immutable id where there is one, by a named username where the
+    record is too old to have anything better.
+    """
+    caller_id, caller_name = _identity(account)
+    if not caller_id and not caller_name:
+        # Nothing to prove ownership against.
+        return False
+    owner_id = account_id_of(listing)
+    if owner_id:
+        return bool(caller_id) and owner_id == caller_id
+    owner_name = account_of(listing)
+    if owner_name == UNKNOWN_ACCOUNT:
+        return False
+    if not owner_name:
+        # A legacy record with no owner recorded. The connected account is
+        # the only one it can plausibly belong to, and refusing would make
+        # every pre-existing listing permanently uneditable.
+        return True
+    return bool(caller_name) and owner_name == caller_name
+
+
+def belongs_to(listing: Listing | dict, account: str) -> bool:
+    """Deprecated alias for `owns`, kept for callers that hold only a name.
+
+    This used to be the ownership rule itself, and it decided on the seller's
+    eBay USERNAME — a display name they can change. Worse, it returned True
+    when EITHER side was blank, so a connected account whose identity could
+    not be read (the identity scope 403s on older connections) matched every
+    record in the database. Since eBay's GetItem answers for any seller's
+    item, a status sweep then re-confirmed another account's listings as live
+    under this one.
+
+    It delegates now so there is exactly ONE ownership rule. Prefer `owns`
+    for reads and `may_write` for writes, passing the creds bundle so the
+    immutable account id is available.
+    """
+    return owns(listing, account)
 
 
 def _is_blank(value) -> bool:
@@ -115,6 +209,39 @@ def _is_blank(value) -> bool:
     if isinstance(value, (int, float)):
         return value == 0
     return len(value) == 0 if hasattr(value, "__len__") else False
+
+
+def _reconcile(prior: Optional[dict], merged: dict, fresh: dict) -> dict:
+    """Three-way reconcile `merged` against eBay, and re-baseline the shadow.
+
+    `_merge` above is the legacy field-precedence pass and stays as the
+    starting point; this decides the content fields it deliberately leaves
+    alone, using the shadow of what eBay last said.
+
+    Best-effort: a record that cannot be reconciled keeps exactly what
+    `_merge` produced, which is the behaviour that shipped before. Losing a
+    remote edit is bad; failing an entire store import over one odd record is
+    worse.
+    """
+    shadow = (prior or {}).get("remote_shadow") or None
+    try:
+        local = Listing(**{k: v for k, v in merged.items()
+                           if k in Listing.model_fields})
+        result = sync_merge.three_way(local, shadow, fresh)
+    except Exception as exc:  # noqa: BLE001 - never fail a whole import
+        log.info("sync: could not reconcile %s: %s",
+                 fresh.get("ebay_listing_id") or "?", exc)
+        return merged
+    out = result.listing.model_dump()
+    # The new base: what eBay is telling us right now. Written whether or not
+    # anything changed, so the next sync compares against the latest agreement.
+    out["remote_shadow"] = sync_merge.shadow_from(fresh)
+    out["conflicts"] = result.conflicts
+    if result.conflicts:
+        log.info("sync: %s has %d field(s) changed on both sides: %s",
+                 fresh.get("ebay_listing_id") or "?", len(result.conflicts),
+                 ", ".join(sorted(result.conflicts)))
+    return out
 
 
 def _merge(existing: Optional[dict], fresh: dict, *, own_source: bool = False) -> dict:
@@ -189,6 +316,49 @@ def _is_mirror(record: dict) -> bool:
     return str(record.get("id") or "").startswith("ebay-")
 
 
+def _index_by_publish_key(records) -> dict[str, dict]:
+    """The SKU a publish travelled under -> the record that sent it.
+
+    This is how a listing the app CREATED but never learned the item id for
+    finds its way home. Every fixed-price create stamps `Item.SKU` with
+    publish_guard's deterministic key and sets InventoryTrackingMethod=SKU, so
+    eBay keeps it and hands it back on GetItem -- which the sync already
+    reads. Without this, a publish whose response was lost imports as
+    `ebay-<item>`, and the seller has their draft AND a copy of the very
+    listing it became.
+
+    The keys are built by calling publish_guard.idempotency_key rather than
+    by formatting a string here, so the two cannot drift: the day that format
+    changes (or its 50-character SKU truncation moves), a hand-rolled copy
+    stops matching and this quietly does nothing.
+
+    Two rules keep it from claiming a listing that isn't ours:
+
+      * the plain key is indexed only for a record with NO item id. A record
+        that already names a live listing is matched by that id, and letting a
+        stale key match too would point one card at two eBay listings and
+        abandon the one it was actually publishing.
+      * the relist key is indexed for the item the record currently holds,
+        because that is the only thing a relist of THIS record could have
+        sent. It is specific to that item, so it cannot collide with anything
+        else.
+
+    Mirrors are skipped: a record this sync created never published anything.
+    """
+    out: dict[str, dict] = {}
+    for rec in records:
+        rid = str(rec.get("id") or "").strip()
+        if not rid or _is_mirror(rec):
+            continue
+        item = _item_id_of(rec.get("listing") or {})
+        keys = ([publish_guard.idempotency_key(rid, replacing_item_id=item)]
+                if item else [publish_guard.idempotency_key(rid)])
+        for key in keys:
+            if key:
+                out.setdefault(key, rec)
+    return out
+
+
 def _drop_stale_mirrors(known: dict, owned: dict, user_id: str) -> int:
     """Delete mirror rows for items the app already has its own record of.
 
@@ -205,7 +375,17 @@ def _drop_stale_mirrors(known: dict, owned: dict, user_id: str) -> int:
         keeper = owned.get(item)
         if not keeper or keeper["id"] == rid:
             continue
-        if db.delete_listing(rid, user_id=user_id):
+        # A mirror row this pass could not drop stays, and the next sweep
+        # finds it again -- the same tolerance every other cleanup here has.
+        # `removed_it`, not `dropped`: that name is the running count three
+        # lines down, and shadowing it made every successful delete set the
+        # total to True and then 2.
+        try:
+            removed_it = db.delete_listing(rid, user_id=user_id)
+        except Exception as exc:  # noqa: BLE001 - one stale row, not the pass
+            log.info("sync: couldn't drop stale mirror %s: %s", rid, exc)
+            removed_it = False
+        if removed_it:
             known.pop(rid, None)
             dropped += 1
             log.info("sync: dropped duplicate %s — item %s already lives on %s",
@@ -241,9 +421,18 @@ def _started_at(data: dict) -> Optional[datetime]:
     if not raw:
         return None
     try:  # eBay sends "2026-07-30T18:04:11.000Z"
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # "Aware" was the contract and the Z was the only thing enforcing it. The
+    # value goes into a DateTime(timezone=True) column, and Postgres reads a
+    # NAIVE datetime written there as being in the session's timezone -- the
+    # same silent offset as the sessions_valid_from trap, arriving from the
+    # value side instead of the column side. eBay's times are UTC; anything
+    # that reaches here without a zone came through this app's own storage,
+    # where they are UTC too. duplicates._listed_at and recommender._age_days
+    # already do exactly this with the same values.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def recent_sales(token: str) -> dict[str, dict]:
@@ -366,11 +555,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # are meaningless here (worse than meaningless — a collision would merge
     # two different sellers' listings into one row).
     known = {r["id"]: r for r in all_known
-             if belongs_to(r.get("listing") or {}, account)}
+             if owns(r.get("listing") or {}, account)}
     foreign = len(all_known) - len(known)
     if foreign:
         log.info("sync: user=%s skipping %d record(s) from another eBay "
-                 "account (connected=%s)", user_id, foreign, account or "?")
+                 "account (connected=%s)", user_id, foreign,
+                 _identity(account)[1] or _identity(account)[0] or "?")
     if len(all_known) >= _KNOWN_LIMIT:
         # Never silently: past this the dedupe is working from a partial view.
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
@@ -381,40 +571,130 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # "ebay-<item>" alone imported it again as a separate card on every sync —
     # the duplicate pairs (one Thryft, one eBay) sellers were seeing.
     owned = _index_by_item(known.values())
+    # And by the SKU a publish went out under, so a listing this app created
+    # but never got an answer for is reclaimed instead of imported as a
+    # second card. See _index_by_publish_key.
+    by_key = _index_by_publish_key(known.values())
+    # Records already written by an earlier listing in this run. See the
+    # first-claim-wins guard in the save loop.
+    claimed: set[str] = set()
     imported = updated = failed = 0
+    # eBay's call limits are per seller and windowed. Once one is hit, every
+    # further call is refused AND keeps the window open, so carrying on makes
+    # the wait longer rather than shorter. This is the flag that stops the
+    # pass; SKIPPED marks the listings eBay never looked at, so they can be
+    # kept out of the failure count.
+    SKIPPED = object()
+    limit_hit: dict = {}
 
     def _fetch(job: tuple[str, str]):
-        """(item_id, status, detail) — None detail when that listing failed."""
+        """(item_id, status, detail).
+
+        `None` detail means this listing failed. `SKIPPED` means the pass had
+        already stopped -- eBay never saw it, so it is not a failure of any
+        kind and must not be counted as one.
+        """
         item_id, status = job
+        if limit_hit:
+            return item_id, status, SKIPPED
         try:
             return item_id, status, ebay_trading.get_listing(token, item_id)
+        except ebay_trading.RateLimited as exc:
+            # First one wins: the wait eBay quoted when it started refusing.
+            limit_hit.setdefault("retry_after", exc.retry_after)
+            log.info("sync: user=%s hit eBay's call limit, stopping this pass "
+                     "(retry after %ss)", user_id, exc.retry_after)
+            return item_id, status, SKIPPED
         except Exception as exc:  # noqa: BLE001 - skip one bad listing
             log.info("sync: couldn't import eBay item %s: %s", item_id, exc)
             return item_id, status, None
 
     # Fetch in parallel, but write to the DB from this thread only, in eBay's
     # original order — so the import stays deterministic and needs no locking.
-    _tick("fetching", 0, len(jobs))
-    with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, max(1, len(jobs)))) as pool:
-        # submit + as_completed rather than pool.map: the results are still read
-        # in eBay's order below (futures keep their slots), but the count can
-        # tick as each GetItem lands instead of only when the last one does.
-        futures = [pool.submit(_fetch, job) for job in jobs]
-        for done_n, _ in enumerate(as_completed(futures), 1):
-            _tick("fetching", done_n, len(jobs))
-        fetched = [f.result() for f in futures]
+    #
+    # ONE pass, not two. Every GetItem used to finish before the first save,
+    # and a real store is minutes of that, so a machine that went away at 95%
+    # (an OOM, a deploy, a restart) left the seller with nothing: hundreds of
+    # eBay calls spent, their answers in a dead process's memory. The two
+    # passes were never independent — the save loop reads only state built
+    # before the fetching started, plus the `claimed` set it builds itself in
+    # eBay's order — so consuming the futures IN ORDER and saving each as it
+    # lands is the same sequence of writes, arriving earlier. What it buys is
+    # that an interruption keeps everything up to where it happened.
+    #
+    # In order rather than as_completed, because that order is load-bearing:
+    # first claim wins, and eBay's active list comes before its ended one (see
+    # the claim guard below). Blocking on one future does not idle the pool —
+    # the rest keep fetching ahead.
+    def _as_they_land():
+        """(item_id, status, detail) in eBay's order, yielded as each lands.
 
-    _tick("saving", 0, len(fetched))
-    for done_n, (item_id, status, fresh) in enumerate(fetched, 1):
-        _tick("saving", done_n, len(fetched))
+        A generator so the pool stays open across the saves below without the
+        whole save loop having to live inside the `with`. Iterating the
+        futures in submission order blocks only on the next one; the rest of
+        the pool keeps fetching ahead of the consumer.
+        """
+        with ThreadPoolExecutor(
+                max_workers=min(_FETCH_WORKERS, max(1, len(jobs)))) as pool:
+            futures = [pool.submit(_fetch, job) for job in jobs]
+            for fut in futures:
+                yield fut.result()
+
+    _tick("syncing", 0, len(jobs))
+    for done_n, (item_id, status, fresh) in enumerate(_as_they_land(), 1):
+        _tick("syncing", done_n, len(jobs))
+        if fresh is SKIPPED:
+            continue
         if fresh is None:
             failed += 1
             continue
         mirror_id = record_id(item_id)
-        prior = owned.get(item_id) or known.get(mirror_id)
+        # Item id first: it is eBay's own identity for the listing and the
+        # strongest match there is. The publish key only ever answers for a
+        # record that has no item id to match on -- which is exactly the
+        # record a lost publish leaves behind.
+        #
+        # The one exception is a MIRROR. `_index_by_item` already prefers the
+        # app's own record over a mirror when both carry the id, for the
+        # reason in its docstring: the app-created one owns the photos on disk
+        # and everything the AI wrote. The same preference applies when only
+        # the mirror carries the id -- which is the state a store is left in
+        # once it has synced since a lost publish, with the seller's draft
+        # stranded beside an `ebay-<item>` copy of the listing it became.
+        # Without this, that pair is permanent: the mirror wins the match
+        # every time and the draft is never reclaimed.
+        #
+        # The mirror is not deleted here. _drop_stale_mirrors removes it on
+        # the next pass, once the record actually names the item.
+        by_item = owned.get(item_id)
+        keyed = by_key.get(str(fresh.get("sku") or "").strip())
+        prior = (keyed if keyed is not None
+                 and (by_item is None or _is_mirror(by_item))
+                 else by_item or known.get(mirror_id))
+        # One record, one listing per run. A reclaimed relist is matched by
+        # TWO eBay items at once -- the new live one (by publish key) and the
+        # ended one it replaced, which the record still names (by item id) --
+        # and eBay's ended list is walked after the active one, so without
+        # this the predecessor is written over the relist: the card goes back
+        # to Inactive and the live listing ends up with no row anywhere.
+        #
+        # Active listings come first, so first-claim-wins keeps the current
+        # truth and sends the loser to its own `ebay-<item>` mirror. That is
+        # not a special case: it is exactly what a relist whose response DID
+        # arrive already produces for its predecessor.
+        if prior is not None and prior["id"] in claimed:
+            log.info("sync: item %s also matched record %s, already taken by "
+                     "another listing this run — importing it separately",
+                     item_id, prior["id"])
+            prior = None
         rid = prior["id"] if prior else mirror_id
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
+        # Reconcile against what eBay last said, so a change made in Seller
+        # Hub actually arrives instead of being kept out by a non-blank local
+        # copy — and so a field BOTH sides changed becomes a visible conflict
+        # rather than one of them silently winning.
+        data = _reconcile(prior.get("listing") if prior else None, data, fresh)
         # Whose store this item is in. Written on every sync, so a record made
         # before the field existed is labelled the first time it's seen again.
         data["ebay_account"] = account
@@ -434,6 +714,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             continue
         db.upsert_listing(rid, data, status=status, user_id=user_id,
                           when=_started_at(data))
+        # Claimed only once the write has actually happened. Marking it at the
+        # point of MATCHING would let a listing that then failed validation
+        # (and wrote nothing) lock a record out for the rest of the run, so a
+        # second listing with a real claim on it would be diverted to a mirror
+        # while the record kept its stale state.
+        claimed.add(rid)
         # A listing we already knew flipping to sold IS the sale event. A
         # first-time import of an old sold listing stays silent — backfilling
         # a store must not fire a notification per historical sale.
@@ -448,7 +734,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     log.info("sync: user=%s found=%d imported=%d updated=%d deduped=%d failed=%d",
              user_id, len(jobs), imported, updated, deduped, failed)
     return {"found": len(jobs), "imported": imported, "updated": updated,
-            "deduped": deduped, "failed": failed}
+            "deduped": deduped, "failed": failed,
+            # So a caller can say "we got through 120 of your 400, eBay asked
+            # us to wait" instead of reporting a complete sync -- or, worse,
+            # 280 failures for listings eBay never looked at.
+            "rate_limited": bool(limit_hit),
+            "retry_after": limit_hit.get("retry_after")}
 
 
 def refresh_statuses(token: str, user_id: str, records: list[dict],
@@ -470,18 +761,29 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
     Status calls run in parallel (each is its own eBay round-trip; serially
     a 60-listing sweep pinned a request thread for a minute); DB writes stay
     on this thread, in order."""
+    # Same reason as the import above: once eBay's per-seller window is full,
+    # the remaining probes cannot succeed and each one holds the window open.
+    # A None status changes nothing either way, so stopping costs the sweep
+    # only the listings it was never going to be told about.
+    limited: list[int] = []
+
     def _probe(rec):
         item_id = str((rec.get("listing") or {}).get("ebay_listing_id") or "")
-        if not item_id:
+        if not item_id or limited:
             return rec, None
         try:
             return rec, ebay_trading.listing_status(token, item_id)
+        except ebay_trading.RateLimited as exc:
+            limited.append(1)
+            log.info("sync: user=%s hit eBay's call limit mid-sweep, stopping "
+                     "(retry after %ss)", user_id, exc.retry_after)
+            return rec, None
         except Exception as exc:  # noqa: BLE001 - one blip skips one record
             log.info("sync: status check failed for %s: %s", rec.get("id"), exc)
             return rec, None
 
     records = [r for r in records
-               if belongs_to(r.get("listing") or {}, account)]
+               if owns(r.get("listing") or {}, account)]
     probed = []
     if records:
         with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(records))) as pool:
@@ -510,7 +812,18 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
                 updates, _sale_for(str(data.get("ebay_listing_id") or "")),
                 mark_now=rec.get("status") != "sold")
         if status != rec.get("status") or updates != data:
-            db.upsert_listing(rec["id"], updates, status=status, user_id=user_id)
+            # Checked BEFORE the archive below. The purge is right when this
+            # write lands -- a sold listing is archived, eBay hosts the photos
+            # it went live with, and the working copies are dead weight on a
+            # small volume. It is wrong when the write does not: the record
+            # still says the listing is LIVE, so the app goes on offering to
+            # edit and revise something whose photos are gone.
+            landed = db.upsert_listing(rec["id"], updates, status=status,
+                                       user_id=user_id)
+            if db.enabled() and not landed:
+                log.warning("sync: couldn't record %s as %s — leaving its "
+                            "photos alone", rec["id"], status)
+                continue
             if status == "sold":
                 if rec.get("status") != "sold":
                     notifications.notify_sold(user_id, rec["id"], updates,
@@ -546,7 +859,7 @@ def reconcile_recent(token: str, user_id: str, records: list[dict],
     sales = recent_sales(token)
     finished = set(sales) | _ids(ebay_trading.unsold_listing_ids, "ended")
     candidates = [r for r in records
-                  if belongs_to(r.get("listing") or {}, account)
+                  if owns(r.get("listing") or {}, account)
                   and _item_id_of(r.get("listing") or {}) in finished]
     if not candidates:
         return 0, set()
@@ -647,10 +960,13 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
         postal = ebay_auth.ship_from_postal(
             token, c.get("merchant_location_key") or "")
         if postal and c.get("_uid"):
-            try:
-                db.save_ebay_account(c["_uid"], ship_from_postal=postal)
-            except Exception as exc:  # noqa: BLE001 - caching is optional
-                log.info("sync: couldn't save the resolved ship-from ZIP: %s", exc)
+            # Genuinely optional: eBay can be asked for the ZIP again next
+            # publish, and losing the cache costs one extra lookup. Nothing
+            # is reported to the seller either way, so this is one of the
+            # few writes allowed to fail quietly.
+            if not db.save_ebay_account_best_effort(c["_uid"],
+                                                    ship_from_postal=postal):
+                log.info("sync: couldn't cache the resolved ship-from ZIP")
     try:
         res = ebay_trading.create_listing(
             token, listing, image_urls,
@@ -659,9 +975,11 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     except AlreadyListedError as exc:
         # This publish already produced a listing — a retry, or a second
         # request that raced this one. Adopt what's there instead of creating a
-        # twin: eBay names the item sometimes, and the tracking number finds it
-        # the rest of the time.
-        item_id = exc.item_id or ebay_trading.item_id_for_tracking_number(
+        # twin: eBay names the item in the 488 message most of the time, and a
+        # GetItem by SKU finds it the rest of the time. (That lookup used to
+        # query a field GetItem does not accept, so this arm never actually
+        # recovered anything; see ebay_trading.item_id_for_sku.)
+        item_id = exc.item_id or ebay_trading.item_id_for_sku(
             token, idempotency_key)
         if not item_id:
             # Nothing to adopt and nothing created. Re-raising as an ordinary
@@ -673,6 +991,33 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                 "publishing again — publishing now could create a duplicate."
             ) from exc
         log.info("trading publish: adopted already-created item %s (key=%s)",
+                 item_id, idempotency_key)
+        res = {"published": True, "listing_id": item_id, "already_listed": True,
+               "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    except UnknownOutcome as exc:
+        # The request was on the wire and the answer never came back. eBay may
+        # be holding a live listing for it, and the app is about to tell the
+        # seller their publish failed -- after which nobody retries, the record
+        # stays a draft, and the next store sync imports this app's own listing
+        # as a SECOND card.
+        #
+        # So ask. The create travels under a deterministic SKU (see
+        # publish_guard.idempotency_key), which is exactly what makes "did that
+        # listing actually go up, and what is it?" answerable without guessing
+        # from titles -- and is what item_id_for_sku was written for, though
+        # until now it was only ever reached from eBay's explicit "you already
+        # sent this" rejection, the one case where eBay does answer.
+        item_id = ebay_trading.item_id_for_sku(token, idempotency_key)
+        if not item_id:
+            # Still unknown, and deliberately not downgraded to a failure:
+            # item_id_for_sku answers "" both when eBay has no such listing and
+            # when the lookup ITSELF failed, which during the outage that lost
+            # the publish is the likely one. The seller keeps the message that
+            # tells them to check before retrying.
+            log.warning("trading publish: outcome unknown and unresolved "
+                        "(key=%s, call=%s)", idempotency_key, exc.call)
+            raise
+        log.info("trading publish: lost response resolved to item %s (key=%s)",
                  item_id, idempotency_key)
         res = {"published": True, "listing_id": item_id, "already_listed": True,
                "view_url": f"https://www.ebay.com/itm/{item_id}"}

@@ -155,20 +155,33 @@ def test_a_real_ean_still_lands_on_item_specifics():
 
 # --- the diagnosis attached to a 240 ---------------------------------------
 
+# `publish_block_issues` asks eBay TWO things after a 240 — payments and
+# selling privileges — and these three only ever injected the first. The second
+# therefore ran for real: three live HTTPS requests to
+# api.sandbox.ebay.com/sell/account/v1/privilege on every test run, with the
+# literal token "tok". They passed anyway because `fetch_privileges` swallows
+# its own failure, which is right for the product and wrong for a test: the
+# branch these cover was green without ever executing. `_no_network` in
+# conftest.py now makes that impossible to reintroduce anywhere in the suite.
+_NO_PRIVILEGES = lambda _t: None                          # noqa: E731
+
+
 def test_a_240_asks_ebay_whether_payments_is_the_hold():
     """240 repeats on every listing and names no cause. Payments onboarding is
     the most common one and the only one the API states plainly, so the failure
     path spends one call to find out."""
     issues = ebay_account.publish_block_issues(
         ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"},
-        payments=lambda _t: {"status": "NOT_OPTED_IN"})
+        payments=lambda _t: {"status": "NOT_OPTED_IN"},
+        privileges=_NO_PRIVILEGES)
     assert any("payments setup" in i["title"] for i in issues)
 
 
 def test_an_opted_in_account_gets_no_payments_claim():
     issues = ebay_account.publish_block_issues(
         ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"},
-        payments=lambda _t: {"status": "OPTED_IN"})
+        payments=lambda _t: {"status": "OPTED_IN"},
+        privileges=_NO_PRIVILEGES)
     assert not any("payments setup" in i["title"] for i in issues)
 
 
@@ -179,7 +192,7 @@ def test_the_diagnosis_never_replaces_the_rejection():
 
     issues = ebay_account.publish_block_issues(
         ebay_trading.TradingError(E240, code="240"), {"access_token": "tok"},
-        payments=boom)
+        payments=boom, privileges=boom)
     assert issues and issues[0]["target"] == "account"
 
 

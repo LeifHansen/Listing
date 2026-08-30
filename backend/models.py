@@ -14,6 +14,12 @@ from pydantic import BaseModel, Field, field_validator
 # limit worth holding in the model rather than at the API boundary.
 TITLE_MAX_CHARS = 80
 
+# eBay's ceiling on a Subtitle. Held here for the same reason as the title:
+# one character over and eBay rejects the whole publish, after the photos have
+# already uploaded. (Subtitle is a paid listing upgrade -- see the SubtitleFee
+# note where the Trading request emits it.)
+SUBTITLE_MAX_CHARS = 55
+
 # eBay's own ceiling on a listing description. Nothing this app writes comes
 # near it -- the point is that the field had NO bound at all, and every write
 # path lands on the volume: `POST /api/publish` needs no login, and each new
@@ -88,6 +94,14 @@ class Listing(BaseModel):
     title: str = Field(default="",
                        description=f"eBay title, max {TITLE_MAX_CHARS} chars")
     subtitle: str = ""
+    # This eBay listing carries VARIATIONS (a shirt in S/M/L, each with its own
+    # SKU, price and stock). This app has no variation model, so such a listing
+    # imports as one flat record with a single price and quantity — which is
+    # not what it is. The flag exists so nothing pretends otherwise: the record
+    # stays visible and end-able, and the revise refuses rather than sending an
+    # item-level Quantity into a structure eBay says ReviseItem cannot revise,
+    # where a variation reaching 0 is removed from the listing.
+    has_variations: bool = False
     brand: str = ""
     condition: str = "USED_EXCELLENT"  # eBay condition enum
     condition_description: str = ""
@@ -150,6 +164,12 @@ class Listing(BaseModel):
     # every sync happily re-confirmed the old account's listings as live under
     # the new one.
     ebay_account: str = ""
+    # eBay's IMMUTABLE account id for the same account. `ebay_account` above
+    # is a display name the seller can change, so it cannot decide ownership:
+    # a rename orphans the record, and a released-then-reused handle can make
+    # it match a different seller. This is what listing_sync.owns prefers.
+    # "" on records written before the field existed.
+    ebay_account_id: str = ""
     # ISO-8601 UTC timestamp of when the listing went live on eBay, carried
     # over on import so "most recent first" can mean what the seller expects.
     ebay_start_time: str = ""
@@ -178,6 +198,84 @@ class Listing(BaseModel):
     # Marketplace-specific listing fields, edited in their own cards.
     etsy: EtsyFields = Field(default_factory=EtsyFields)
     depop: DepopFields = Field(default_factory=DepopFields)
+    # Which fields the SELLER actually changed since this record last agreed
+    # with the marketplace. Empty means "nothing known to be edited".
+    #
+    # A revise used to send every field it could build, on the theory that
+    # sending a value equal to the stored one is a no-op. It isn't: the stored
+    # value is a snapshot, and eBay's copy may have moved on (Seller Hub, the
+    # eBay app, a category remap). Re-sending the snapshot then overwrites the
+    # newer value with an older one, and the seller's work vanishes with a
+    # success message. Quantity is the sharpest case — see
+    # tests/test_ebay_quantity_contract.py — because eBay reads the Quantity
+    # on a revise as the new AVAILABLE stock, so re-sending an import-time
+    # total puts already-sold units back on sale.
+    #
+    # What eBay last told us this listing said — the BASE for reconciling it.
+    #
+    # Without it there are only two versions (ours and eBay's), and two
+    # versions cannot tell "the seller edited this here" from "we are holding
+    # an old copy of it": both look like a difference. That is why the old
+    # sync kept every content field local unless blank, and why a revise then
+    # pushed a stale title back over a newer one. See services/sync_merge.py.
+    remote_shadow: dict = Field(default_factory=dict)
+    # Fields the seller and eBay have BOTH changed since the shadow, held as
+    # {"field": {"local": ..., "remote": ...}}. Neither value may be chosen
+    # silently, and a conflicted field is never included in a revise.
+    conflicts: dict = Field(default_factory=dict)
+    # Names are Listing field names ("title", "price", "quantity", ...).
+    #
+    # A sorted list rather than a set because every listing round-trips
+    # through model_dump() into a JSON column and into API responses, and
+    # json.dumps has no set. Sorted so a record's serialization is stable and
+    # two equal drafts don't diff.
+    dirty_fields: list[str] = Field(default_factory=list)
+
+    def mark_dirty(self, *names: str) -> "Listing":
+        """Record that the seller edited these fields. Chainable."""
+        self.dirty_fields = sorted(set(self.dirty_fields) | {n for n in names if n})
+        return self
+
+    def clear_dirty(self, *names: str) -> "Listing":
+        """Forget edits that have now been accepted by the marketplace. With
+        no names, forgets all of them (the record and eBay agree again)."""
+        if names:
+            self.dirty_fields = sorted(set(self.dirty_fields) - set(names))
+        else:
+            self.dirty_fields = []
+        return self
+
+    def is_dirty(self, name: str) -> bool:
+        """True when `name` is a field the seller explicitly changed.
+
+        Records that predate dirty-tracking carry an empty set. That is
+        deliberately read as "nothing to send" rather than "send everything":
+        the whole point is that an unproven field must not overwrite a
+        marketplace value that may be newer.
+        """
+        return name in self.dirty_fields
+
+    @field_validator("dirty_fields", mode="before")
+    @classmethod
+    def _coerce_dirty(cls, value):
+        """Accept anything JSON or a caller might hand over — None from an
+        older record, a set from calling code — and normalize to the sorted,
+        de-duplicated list this field stores."""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return sorted({str(v) for v in value if v})
+        return value
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _floor_quantity_at_zero(cls, value):
+        """Zero is a real inventory state (eBay's out-of-stock control), so it
+        must survive; negative is not, and eBay has been seen reporting sold
+        greater than quantity on variation and out-of-stock listings."""
+        if isinstance(value, (int, float)) and value < 0:
+            return 0
+        return value
 
     @field_validator("title", mode="before")
     @classmethod

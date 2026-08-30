@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
 import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
+import { priceView } from "@/lib/priceLookup";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -230,8 +231,19 @@ export function TitleCard({ w }) {
           />
         </Field>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Subtitle" hint="(optional)">
+          {/* Until now this was collected and thrown away — the Trading
+              request never emitted a SubTitle, so a seller who typed one got
+              no subtitle and no explanation. It goes to eBay now, and a
+              subtitle is a paid listing upgrade there (eBay's SubtitleFee),
+              so the field says so rather than a charge turning up on their
+              eBay invoice for something they were never told about. */}
+          <Field label="Subtitle"
+            hint="(optional · eBay charges a small fee for this)"
+            help="Shown under your title in search results. eBay bills its
+                  subtitle fee when the listing goes live; leave it empty to
+                  avoid the charge.">
             <Input
+              maxLength={55}
               value={w.form.subtitle}
               onChange={(e) => w.set("subtitle", e.target.value)}
             />
@@ -780,7 +792,7 @@ const LISTING_FORMATS = [
 ];
 const AUCTION_DURATIONS = [
   ["DAYS_1", "1 day"], ["DAYS_3", "3 days"], ["DAYS_5", "5 days"],
-  ["DAYS_7", "7 days"], ["DAYS_10", "10 days"],
+  ["DAYS_7", "7 days"], ["DAYS_10", "10 days (eBay charges extra)"],
 ];
 
 export function PricingCard({ w }) {
@@ -847,8 +859,15 @@ export function PricingCard({ w }) {
               />
             </Field>
           )}
+          {/* The chosen duration used to be discarded: every auction went out
+              as Days_7 whatever this said. It is sent now — and eBay charges
+              an auction-length fee for the 10-day option, so the one choice
+              that costs money says so. */}
           {isAuction ? (
-            <Field label="Duration">
+            <Field label="Duration"
+              help={w.form.auction_duration === "DAYS_10"
+                ? "eBay charges an extra fee for a 10-day auction."
+                : undefined}>
               <Select value={w.form.auction_duration}
                 onChange={(e) => w.set("auction_duration", e.target.value)}>
                 {AUCTION_DURATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -894,7 +913,17 @@ export function PricingCard({ w }) {
         {/* Condition gets its own labeled row (not the last cell of the price
             grid, where it was easy to miss) paired with its description. */}
         <div className="grid sm:grid-cols-[minmax(200px,260px)_1fr] gap-4 pt-1 border-t border-line">
-          <Field label="Condition">
+          <Field
+            label="Condition"
+            /* When the lookup could not run, the list below is the generic
+               one, not eBay's for this category — so a pick that looks fine
+               here can still come back as error 25021 at publish. Saying so
+               beats letting the seller find out then. */
+            help={w.categoryMeta.conditionsChecked === false
+              ? "We couldn’t check which conditions eBay allows in this "
+                + "category, so these are the general ones."
+              : undefined}
+          >
             <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </Select>
@@ -917,10 +946,11 @@ export function PricingCard({ w }) {
         {p?.loading && <AIStatusInline message="Finding comparable listings…" />}
         {p?.error && <p className="text-sm text-ink-secondary">{p.error}</p>}
         {p && !p.loading && !p.error && (
-          !p.suggestion ? (
-            <p className="text-sm text-ink-secondary">
-              No comparable listings found — try a simpler title or set a category first.
-            </p>
+          priceView(p).kind !== "estimate" ? (
+            // "We couldn't check" and "the market has nothing like this" are
+            // different answers; the second one also tells the seller to
+            // rewrite a title that was never the problem. See lib/priceLookup.
+            <p className="text-sm text-ink-secondary">{priceView(p).message}</p>
           ) : (
             <div className="flex flex-col gap-2">
               {(p.sources || []).map((src) => (
@@ -1143,6 +1173,10 @@ export function PromoteCard({ w }) {
   const rate = Number(w.form.ad_rate_percent) || 0;
   const price = Number(w.form.price) || 0;
   const fee = price > 0 && rate > 0 ? (price * rate) / 100 : 0;
+  // The fee is a percentage of THIS listing's price, so it is in this
+  // listing's money. The price fields two panels up already label themselves
+  // with it; this one was formatting a pound fee with a dollar sign.
+  const currency = w.form.currency || "USD";
 
   const toggle = () => {
     if (on) { w.set("promote", false); return; }
@@ -1201,7 +1235,7 @@ export function PromoteCard({ w }) {
                 {fee > 0 ? (
                   <>
                     <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
-                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee)}</p>
+                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee, currency)}</p>
                   </>
                 ) : (
                   <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>

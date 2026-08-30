@@ -17,12 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-import httpx
-
 from .. import config, db, etsy_auth, storage
 from ..config import log
 from ..models import Listing
-from ..services import etsy
+from ..services import etsy, image_import
 from . import register
 from .base import PublishContext, PublishOutcome
 from . import mapping_etsy
@@ -194,7 +192,20 @@ class EtsyProvider:
     def _image_batches(self, ctx: PublishContext) -> list[tuple[str, bytes]]:
         """(filename, bytes) for up to MAX_PHOTOS photos — local optimized
         files first (the editable truth); a listing imported from eBay may
-        only have remote URLs, so those are fetched and re-uploaded."""
+        only have remote URLs, so those are fetched and re-uploaded.
+
+        The remote fetch goes through image_import.fetch_ebay_image rather
+        than httpx directly, and that is a security boundary, not a tidy-up.
+        `image_urls` is not a server-owned field: it round-trips through the
+        publish request body, so a bare `httpx.get(url)` here let a caller
+        aim a request from inside the app at the metadata service, the
+        database's private address or anything on localhost, and read the
+        answer back off their own Etsy listing. fetch_ebay_image is HTTPS
+        only, ebayimg.com only (re-checked on every redirect hop), with
+        bounded redirects, a size cap and a content-type check — and nothing
+        legitimate is outside it, because image_urls is only ever populated
+        from eBay's own EPS URLs on import.
+        """
         out: list[tuple[str, bytes]] = []
         opt = storage.optimized_dir(ctx.session_id)
         for name in (ctx.listing.images or [])[:mapping_etsy.MAX_PHOTOS]:
@@ -204,9 +215,7 @@ class EtsyProvider:
         if not out:
             for i, url in enumerate((ctx.listing.image_urls or [])[:mapping_etsy.MAX_PHOTOS]):
                 try:
-                    resp = httpx.get(url, timeout=60)
-                    resp.raise_for_status()
-                    out.append((f"photo-{i + 1}.jpg", resp.content))
+                    out.append((f"photo-{i + 1}.jpg", image_import.fetch_ebay_image(url)))
                 except Exception as exc:  # noqa: BLE001 - skip the bad one, keep going
                     log.warning("etsy: couldn't fetch %s: %s", url, exc)
         return out
@@ -218,7 +227,28 @@ class EtsyProvider:
         payload = mapping_etsy.build_listing_payload(listing, settings)
 
         if not creds:
-            # Dry-run: Etsy has no sandbox, so the exact payload IS the test.
+            if mode == "live":
+                # P1-09's rule. "Published" is a claim about the listing being
+                # live on Etsy, and nothing was created — so ok is False, the
+                # way the eBay provider already answers this. eBay keys its
+                # guard on EBAY_ENV because eBay HAS a sandbox and a dry run
+                # is a real tool there; Etsy has none (see the comment below),
+                # so there is no environment where a live dry run succeeded.
+                # The payload still rides along in `raw` for whoever is
+                # developing against it; what changes is the answer to "did
+                # you list it".
+                message = ("Connect your Etsy shop in Settings to publish. "
+                           "Nothing was listed.")
+                return PublishOutcome(
+                    ok=False, message=message,
+                    issues=[{"target": "account", "level": "error",
+                             "title": "Etsy isn't connected",
+                             "fix": "Connect Etsy in Settings, then publish "
+                                    "again."}],
+                    raw={"dry_run": False, "error": True, "mode": mode,
+                         "message": message, "etsy_payload": payload})
+            # Draft: nothing is claimed to be live, and Etsy has no sandbox —
+            # so the exact payload IS the test.
             return PublishOutcome(
                 ok=True, dry_run=True,
                 message="Etsy dry run — connect Etsy in Settings to post for real.",
@@ -246,6 +276,23 @@ class EtsyProvider:
             if existing_id:
                 # Revise in place. Photos aren't re-synced on revises (Etsy
                 # keeps its copies); new photos ship with new listings.
+                #
+                # KNOWN GAP, recorded rather than half-fixed: this sends the
+                # WHOLE payload, so it is P0-08's problem for Etsy — a seller
+                # who fixed a title on etsy.com and then changed only the
+                # price here has the title replaced by this app's copy, and is
+                # told the update succeeded. eBay's answer to that is a
+                # three-way merge against a remote shadow plus a revise
+                # carrying only the dirty fields.
+                #
+                # Neither half is available here. There is no Etsy store sync,
+                # so there is no shadow to reconcile against and no way to see
+                # that etsy.com moved. And `dirty_fields.TRACKED` is
+                # eBay-shaped: it does not cover `listing.etsy` (taxonomy,
+                # who/when made, tags, materials), so filtering this patch by
+                # it would silently stop sending everything on the Etsy card —
+                # a new failure in place of the old one. Etsy has no sandbox
+                # either, so neither change could be tested before shipping.
                 patch = dict(payload)
                 if mode == "live" and prev_state.get("status") != "published":
                     patch["state"] = "active"

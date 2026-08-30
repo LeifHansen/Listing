@@ -177,3 +177,32 @@ describe("how blockers are shown", () => {
     }
   });
 });
+
+
+describe("a listing with eBay variations", () => {
+  it("is blocked, because the app cannot represent it", () => {
+    // A revise would send an item-level Quantity into a structure eBay says
+    // ReviseItem cannot revise, and a variation reaching 0 is REMOVED from
+    // the listing. See backend/tests/test_variation_listings.py.
+    const blockers = ebayBlockers(draft({ has_variations: true }));
+    expect(blockers.map((b) => b.key)).toEqual(["variations"]);
+  });
+
+  it("says where the seller CAN change it", () => {
+    const [b] = ebayBlockers(draft({ has_variations: true }));
+    expect(b.why.toLowerCase()).toContain("ebay");
+  });
+
+  it("does not hide every other problem on an ordinary listing", () => {
+    expect(ebayBlockers(draft({ has_variations: false, title: "" }))
+      .map((b) => b.key)).toContain("title");
+  });
+
+  it("leaves an Etsy-only publish alone", () => {
+    // The variation limit is about eBay's revise contract; Etsy is a
+    // different provider and this must not gate it.
+    expect(ebayBlockers(draft({ has_variations: true }),
+                        { targets: ["etsy"] })
+      .map((b) => b.key)).not.toContain("variations");
+  });
+});

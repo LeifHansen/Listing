@@ -42,11 +42,18 @@ def resumed(monkeypatch):
     monkeypatch.setattr(main, "_run_bulk_job", _fake)
 
     def _run(records, expect=True):
-        main._resume_interrupted_batches(records)
+        # The RETURN VALUE decides, not a race with a worker thread.
+        # `not started.wait(0.3)` could only ever fail in the safe direction:
+        # a machine slow enough to take 300ms to start the thread turned a
+        # batch that WAS wrongly resumed into a pass. _resume_interrupted_
+        # batches says what it decided, so ask it.
+        picked = main._resume_interrupted_batches(records)
+        assert bool(picked) is expect, (
+            f"resumed={sorted(picked)} (expected {'one' if expect else 'none'})")
         if expect:
-            assert started.wait(5), "the batch was never picked up"
-        else:
-            assert not started.wait(0.3), f"unexpectedly resumed: {calls}"
+            # It also has to actually run, which is a thread and does need a
+            # wait -- but a generous one, because a slow start is not a bug.
+            assert started.wait(5), "decided to resume, then never ran the job"
         return calls
 
     return _run

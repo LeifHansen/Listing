@@ -25,6 +25,10 @@ data/.secret_key
 
 # Frontend build
 frontend/node_modules/
+# Root-level too: running vitest from the repo root (rather than from
+# frontend/) creates node_modules/.vite here, and one of its cache files
+# was committed by accident in 2fe10f1.
+node_modules/
 frontend/dist/
 
 # Capacitor native projects — generated on a Mac by `npx cap add ios/android`

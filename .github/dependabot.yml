@@ -1,0 +1,23 @@
+# Pinning every action to a commit SHA is what stops a compromised or
+# retagged action running with this repo's secrets — FLY_API_TOKEN among
+# them. It also stops the actions ever being updated, which is the failure
+# mode people hit next: a pin nobody refreshes is a known-vulnerable version
+# nobody notices.
+#
+# So the pins are paired with this. Dependabot reads the `# vX.Y.Z` comment
+# beside each SHA, opens a pull request when a newer release exists, and
+# updates both the SHA and the comment. The pull request is the review step
+# the pin exists to create.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # One pull request listing every action, rather than five that each
+    # rerun the whole gate suite.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

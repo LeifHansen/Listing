@@ -3,7 +3,7 @@ import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
   PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck,
-  Trash2, Clock,
+  Trash2, Clock, LogOut,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/utils";
@@ -16,6 +16,9 @@ import { Field, Input, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
+import { PolicyTermsDialog } from "@/components/PolicyTermsDialog";
+import { deleteAccountNotice } from "@/lib/deleteAccount";
+import { policyView, saveSections } from "@/lib/settingsSections";
 import { useToast } from "@/components/ui/Toaster";
 
 // eBay's three business policies. "Shipping policy" is the one that also
@@ -31,6 +34,26 @@ const POLICY_KINDS = [
   { key: "payment", field: "payment_policy_id", label: "Payment policy" },
   { key: "return", field: "return_policy_id", label: "Return policy" },
 ];
+
+// A panel whose data could not be loaded. Deliberately NOT the same thing as
+// a panel with nothing in it: this screen exists to tell the seller what is
+// saved, so rendering the app's fallbacks after a failed read would have it
+// state, confidently, something it does not know.
+function PanelUnavailable({ message, onRetry }) {
+  return (
+    <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm max-w-lg">
+      <p className="text-ink flex gap-2">
+        <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+        <span>{message}</span>
+      </p>
+      {onRetry && (
+        <Button size="sm" variant="soft" className="mt-3" onClick={onRetry}>
+          Try again
+        </Button>
+      )}
+    </div>
+  );
+}
 
 // Settings — eBay account + the listing defaults applied to every publish.
 export function SettingsView() {
@@ -49,9 +72,15 @@ export function SettingsView() {
   const [loadedHere, setLoadedHere] = useState(false);
   const [optingIn, setOptingIn] = useState(false);
   const [creatingPolicies, setCreatingPolicies] = useState(false);
+  const [reviewingTerms, setReviewingTerms] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
   const [prefs, setPrefs] = useState(null); // new-listing defaults (null = loading)
+  // A load that FAILED is not a load that returned nothing. Collapsing the
+  // two showed the app’s fallbacks as if they were the seller’s saved
+  // settings, on a screen whose whole job is to tell them what is saved.
+  const [prefsError, setPrefsError] = useState("");
+  const [policiesError, setPoliciesError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,12 +91,49 @@ export function SettingsView() {
       setPostal(d.ship_from_postal || "");
       setSelected(d.selected || {});
       setLoadedHere(true);
+      setPoliciesError("");
     } catch (e) {
+      // Recorded, not just toasted. A toast is gone in seconds and the panel
+      // stays on screen; without this the empty dropdowns underneath go on
+      // saying the seller has no business policies, which is a claim about
+      // their eBay account made on the strength of having failed to ask.
+      setPoliciesError(e.message || "we couldn't reach eBay");
+      setLoadedHere(false);
       toast(`Couldn't load policies: ${e.message}`, { kind: "error" });
     } finally {
       setLoading(false);
     }
   }, [setPoliciesData, toast]);
+
+  // Runs only from the terms dialog's confirm. `options` are the ones the
+  // preview described, echoed back so the policies created are the policies
+  // shown -- not the server's defaults as they stand a moment later.
+  const createPolicies = useCallback(async (options) => {
+    setCreatingPolicies(true);
+    try {
+      const r = await postJson("/api/ebay/ensure-all-policies",
+                               { ...options, accept_terms: true });
+      const made = r.created || [];
+      const failed = Object.keys(r.errors || {});
+      if (failed.length) {
+        toast(
+          `Couldn't create your ${failed.join(" and ")} policy. `
+          + `eBay said: ${r.errors[failed[0]]}`,
+          { kind: "error" });
+      } else {
+        toast(made.length
+          ? `Created your ${made.join(", ")} policy — you can publish now.`
+          : "You already had all three policies, so nothing was changed.",
+          { kind: "success" });
+      }
+      setReviewingTerms(false);
+      load();
+    } catch (e) {
+      toast(e.message, { kind: "error" });
+    } finally {
+      setCreatingPolicies(false);
+    }
+  }, [load, toast]);
 
   // Policies are fetched once both external systems are ready: an authenticated
   // session and a live eBay link. `load()` flips `loading` synchronously and
@@ -85,46 +151,82 @@ export function SettingsView() {
 
   // New-listing defaults load independently of the eBay connection — they
   // pre-fill every AI draft and apply even in dry-run mode.
+  // The error is cleared on the ANSWER, not on the attempt: a retry that is
+  // still in flight has not learned anything yet, so the tile saying we don't
+  // know stays up until it does.
+  const loadPrefs = useCallback(() => (
+    api("/api/prefs")
+      .then((r) => { setPrefs(r.prefs || {}); setPrefsError(""); })
+      // Not `setPrefs({})`. That rendered the app's fallbacks as the seller's
+      // saved defaults, and a Save from that screen posts whichever field they
+      // then touch -- so a failed read became an edit they never made.
+      .catch((e) => setPrefsError(e.message || "we couldn’t load your defaults"))
+  ), []);
+
   useEffect(() => {
-    if (!user) return;
-    api("/api/prefs").then((r) => setPrefs(r.prefs || {})).catch(() => setPrefs({}));
-  }, [user]);
+    if (user) loadPrefs();
+  }, [user, loadPrefs]);
   const setPref = (k, v) => setPrefs((p) => ({ ...p, [k]: v }));
 
-  // One Save for both default groups: the new-listing packing defaults always,
-  // and the eBay publish defaults (policies + ship-from) when connected. Policy
-  // selections are only sent once loaded, so a click mid-load can't overwrite
-  // them with empty values.
+  // One button, two systems — this app's database and the seller's eBay
+  // account — and they are saved and reported SEPARATELY.
+  //
+  // They used to share a try block: the prefs write committed, the eBay write
+  // failed, and the seller was told "Couldn't save". About settings that had
+  // just been saved. The obvious response to that message is to type it all in
+  // again, so a message that names neither half is worse than no message.
   const save = async () => {
     setSaving(true);
-    try {
-      if (prefs) {
-        const r = await postJson("/api/prefs", prefs);
-        setPrefs(r.prefs || {});
-      }
-      if (ebay.connected && data) {
-        // Sent even when empty — that is how a seller clears the ZIP, and
-        // omitting a blank made clearing a silent no-op reported as "Defaults
-        // saved". But ONLY once this component's own load() has succeeded:
-        // until then `postal` is "" because nothing filled it, not because
-        // anyone cleared it, and the backend reads a present-but-empty value
-        // as an explicit clear. `data` does not prove that — it is seeded from
-        // the store cache — so a mount with a warm cache, or a load that
-        // failed or is still in flight, would post a blank over a good ZIP.
-        const payload = { ...selected };
-        if (loadedHere) payload.ship_from_postal = postal.trim();
-        await postJson("/api/ebay/policies", payload);
-        setPoliciesData(null); // refresh the publish-step summary next time
-        load();
-      }
-      toast("Defaults saved — they apply to every new listing you draft and publish.",
-        { kind: "success" });
-    } catch (e) {
-      toast(`Couldn't save: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
+    const r = await saveSections([
+      {
+        name: "Your listing defaults",
+        // `prefs` is null until the load settles and stays null if it failed:
+        // posting then would send the app's fallbacks as the seller's choices.
+        when: Boolean(prefs),
+        run: async () => {
+          const res = await postJson("/api/prefs", prefs);
+          setPrefs(res.prefs || {});
+        },
+      },
+      {
+        name: "Your eBay publish defaults",
+        // `loadedHere`, not `data`: `data` is seeded from the shared store
+        // cache, so it is truthy having loaded nothing here. Sending on that
+        // basis posts an empty body -- which the API refuses -- and reports a
+        // failure for a save the seller never made. There is also nothing to
+        // send: `selected` and `postal` are only ever filled by a load that
+        // succeeded, and the panel above already says the load did not.
+        when: Boolean(ebay.connected && loadedHere),
+        run: async () => {
+          // The ZIP is sent even when empty — that is how a seller clears it,
+          // and omitting a blank made clearing a silent no-op reported as
+          // "Defaults saved". But ONLY once this component's own load() has
+          // succeeded: until then `postal` is "" because nothing filled it,
+          // not because anyone cleared it, and the backend reads a
+          // present-but-empty value as an explicit clear. `data` does not
+          // prove that — it is seeded from the store cache — so a mount with a
+          // warm cache, or a load that failed or is still in flight, would
+          // post a blank over a good ZIP.
+          const payload = { ...selected };
+          if (loadedHere) payload.ship_from_postal = postal.trim();
+          await postJson("/api/ebay/policies", payload);
+          setPoliciesData(null); // refresh the publish-step summary next time
+          load();
+        },
+      },
+    ]);
+    toast(r.message, { kind: r.ok ? "success" : "error" });
+    setSaving(false);
   };
+
+  // Loading / couldn't-ask / answered are three different things, and only
+  // the last is a statement about the seller's eBay account. See
+  // lib/settingsSections.js.
+  const policies = policyView({
+    status: loading ? "loading" : (policiesError ? "unavailable" : "ready"),
+    error: policiesError,
+    policies: loadedHere ? data?.policies : undefined,
+  });
 
   const disconnect = async () => {
     if (!(await confirm({
@@ -147,14 +249,20 @@ export function SettingsView() {
   const checkPayout = async () => {
     setChecking(true);
     try {
+      // The server answers with a product STATE and the sentence to show. It
+      // used to hand back the deployment's eBay environment, a raw HTTP
+      // status and eBay's whole JSON body, and this pasted all three into a
+      // toast — none of which a seller can act on, and which did not
+      // distinguish "wait" from "finish your bank setup" from "reconnect".
       const s = await api("/api/ebay/payments-status");
-      if (s.opted_in) {
-        toast(`Payments are set up on eBay (${s.env}): status ${s.status}. Bank/payout onboarding is complete — you can publish live listings.`, { kind: "success" });
-      } else if (s.error) {
-        toast(`Couldn't verify payments setup (${s.env}): ${s.error}\n${s.detail || ""}`, { kind: "warning" });
-      } else {
-        toast(`eBay (${s.env}) reports payments status "${s.status || "unknown"}". Finish payout setup in eBay Seller Hub → Payments (bank verification can take 1–2 days).`, { kind: "warning" });
-      }
+      const KIND = {
+        ready: "success",
+        action_required: "warning",
+        reconnect_required: "warning",
+        unavailable: "warning",
+        contact_support: "error",
+      };
+      toast(s.message, { kind: KIND[s.state] || "warning" });
     } catch (e) {
       toast(`Payments check failed: ${e.message}`, { kind: "error" });
     } finally {
@@ -281,7 +389,12 @@ export function SettingsView() {
             title="Pricing strategy"
             hint="Where the AI prices every draft and comp suggestion — from priced-to-move to patient top dollar."
           />
-          {prefs === null ? (
+          {prefsError ? (
+            <PanelUnavailable
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
+              onRetry={loadPrefs}
+            />
+          ) : prefs === null ? (
             <div className="ai-shimmer h-16 rounded-tile" aria-hidden />
           ) : (
             <PricingStrategySlider prefs={prefs} set={setPref} />
@@ -293,18 +406,27 @@ export function SettingsView() {
           <SectionHeader
             icon={Megaphone}
             title="Promoted Listings"
-            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate (pay only when it sells through the ad)."
+            /* The last sentence is not padding: the server now SKIPS the
+               promotion when eBay has no suggested rate, rather than falling
+               back to 10% — a rate this screen never showed. Saying so here
+               is what makes that skip legible instead of mysterious. */
+            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate. Promoted Listings costs a percentage of the sale price when an item sells through the ad, so this stays off until you turn it on. When eBay suggests no rate for a listing, we leave it unpromoted rather than pick one for you — you can still promote it yourself from the listing."
           />
-          {prefs === null ? (
+          {prefsError ? (
+            <PanelUnavailable
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
+              onRetry={loadPrefs}
+            />
+          ) : prefs === null ? (
             <div className="ai-shimmer h-12 rounded-tile" aria-hidden />
           ) : (
             <div className="max-w-lg">
               <Field label="Auto-promote new listings">
                 <Select
-                  value={String(prefs.auto_promote ?? 1)}
+                  value={String(prefs.auto_promote ?? 0)}
                   onChange={(e) => setPref("auto_promote", Number(e.target.value))}
                 >
-                  <option value="1">On — promote at eBay’s recommended rate</option>
+                  <option value="1">On — promote every new listing at eBay’s recommended rate</option>
                   <option value="0">Off — only when I toggle Promote on a listing</option>
                 </Select>
               </Field>
@@ -318,7 +440,12 @@ export function SettingsView() {
             title="New-listing defaults"
             hint="Pre-filled on every listing the AI drafts — tweak any of it per listing. Perfect when most of what you sell packs the same way."
           />
-          {prefs === null ? (
+          {prefsError ? (
+            <PanelUnavailable
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
+              onRetry={loadPrefs}
+            />
+          ) : prefs === null ? (
             <div className="ai-shimmer h-28 rounded-tile" aria-hidden />
           ) : (
             <NewListingDefaultsFields prefs={prefs} set={setPref} />
@@ -337,6 +464,19 @@ export function SettingsView() {
               Connect your eBay account first — your shipping, payment, and return templates
               come from there.
             </p>
+          ) : (!loading && policies.kind === "unavailable" && !data) ? (
+            // A failed load with nothing cached used to shimmer forever: the
+            // panel never left its loading state, so the seller waited on an
+            // answer that was never coming.
+            <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm max-w-lg">
+              <p className="text-ink flex gap-2">
+                <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+                <span>{policies.message}</span>
+              </p>
+              <Button size="sm" variant="soft" className="mt-3" onClick={load}>
+                Try again
+              </Button>
+            </div>
           ) : loading || !data ? (
             <div className="ai-shimmer h-32 rounded-tile" aria-hidden />
           ) : (
@@ -368,7 +508,14 @@ export function SettingsView() {
                 return (
                   <Field
                     key={key} label={label}
-                    help={opts.length ? help : `No ${label.toLowerCase()} on eBay yet.`}
+                    // "None on eBay yet" is a claim about the seller's
+                    // account, so it is only made when eBay answered. A
+                    // failed load says so instead.
+                    help={opts.length
+                      ? help
+                      : (policies.kind === "unavailable"
+                        ? `We couldn’t check your ${label.toLowerCase()} just now.`
+                        : `No ${label.toLowerCase()} on eBay yet.`)}
                   >
                     <Select
                       value={selected[field] || ""}
@@ -385,14 +532,30 @@ export function SettingsView() {
                 );
               })}
 
-              {POLICY_KINDS.some(({ key }) => !(data.policies[key] || []).length) && (
+              {policies.kind === "unavailable" && (
+                <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm">
+                  <p className="text-ink flex gap-2">
+                    <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+                    <span>{policies.message}</span>
+                  </p>
+                  <Button size="sm" variant="soft" className="mt-3" onClick={load}>
+                    Try again
+                  </Button>
+                </div>
+              )}
+
+              {policies.kind === "missing" && (
                 <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 text-sm">
                   <p className="text-ink flex gap-2">
                     <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
                     <span>
-                      eBay requires shipping, payment &amp; return policies to publish. If these
-                      dropdowns are empty, business policies are usually switched off for the
-                      account — they’re an eBay seller program, not a default.
+                      eBay requires shipping, payment &amp; return policies to publish, and your
+                      account has no{" "}
+                      {policies.missing
+                        .map((k) => POLICY_KINDS.find((p) => p.key === k)?.label.toLowerCase())
+                        .join(", ")}
+                      . That usually means business policies are switched off for the account —
+                      they’re an eBay seller program, not a default.
                     </span>
                   </p>
                   {/* The button that used to be a sentence telling the seller to go
@@ -424,34 +587,17 @@ export function SettingsView() {
                         after opting in this one will legitimately fail — and
                         saying which is missing beats one button that hides
                         which half went wrong. */}
+                    {/* Opens the terms first. These policies commit the
+                        seller to a dispatch deadline eBay scores them on, a
+                        30-day return window and who pays return postage —
+                        all of it published to buyers. Creating them from a
+                        button whose whole label is "Create my policies" is
+                        deciding that on their behalf. */}
                     <Button
                       size="sm" variant="soft" disabled={creatingPolicies}
-                      onClick={async () => {
-                        setCreatingPolicies(true);
-                        try {
-                          const r = await postJson("/api/ebay/ensure-all-policies", {});
-                          const made = (r.created || []).length;
-                          const failed = Object.keys(r.errors || {});
-                          if (failed.length) {
-                            toast(
-                              `Couldn't create your ${failed.join(" and ")} policy. `
-                              + `eBay said: ${r.errors[failed[0]]}`,
-                              { kind: "error" });
-                          } else {
-                            toast(made
-                              ? `Created your ${(r.created || []).join(", ")} policy — you can publish now.`
-                              : "You already had all three policies.",
-                              { kind: "success" });
-                          }
-                          load();
-                        } catch (e) {
-                          toast(e.message, { kind: "error" });
-                        } finally {
-                          setCreatingPolicies(false);
-                        }
-                      }}
+                      onClick={() => setReviewingTerms(true)}
                     >
-                      {creatingPolicies ? "Creating…" : "Create my policies"}
+                      {creatingPolicies ? "Creating…" : "Create my policies…"}
                     </Button>
                     <a
                       href={data.manage_url} target="_blank" rel="noopener noreferrer"
@@ -460,6 +606,12 @@ export function SettingsView() {
                       Manage them on eBay <ExternalLink size={13} aria-hidden />
                     </a>
                   </div>
+                  <PolicyTermsDialog
+                    open={reviewingTerms}
+                    busy={creatingPolicies}
+                    onClose={() => setReviewingTerms(false)}
+                    onConfirm={createPolicies}
+                  />
                 </div>
               )}
             </div>
@@ -722,6 +874,9 @@ function DeleteAccountCard() {
   const [password, setPassword] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
+  // Below the hooks, not between them: a plain call sitting in the middle of
+  // a useState run reads like a conditional hook even though it is not.
+  const notice = deleteAccountNotice(summary);
 
   const start = async () => {
     setPassword("");
@@ -731,7 +886,10 @@ function DeleteAccountCard() {
     try {
       setSummary(await api("/api/account/summary"));
     } catch {
-      setSummary({}); // the dialog still works; it just can't show the counts
+      // `counted: false`, not `{}`. The dialog's warning keys on that flag,
+      // and an empty object satisfied neither of its branches -- so a failed
+      // summary call silently dropped the one thing this dialog has to say.
+      setSummary({ counted: false });
     }
   };
 
@@ -786,35 +944,36 @@ function DeleteAccountCard() {
         <div className="flex flex-col gap-4">
           <p className="text-sm text-ink-secondary">
             This permanently erases <strong className="text-ink">{user?.email}</strong>
-            {summary?.counted && summary.listings ? (
+            {notice.listings ? (
               <>, <strong className="text-ink">
-                {summary.listings} listing{summary.listings === 1 ? "" : "s"}
+                {notice.listings} listing{notice.listings === 1 ? "" : "s"}
               </strong> and every photo on them</>
             ) : (
               <> and everything saved to it</>
             )}
-            {summary?.ebay_connected ? ", and disconnects your eBay account." : "."}
+            {notice.ebayConnected ? ", and disconnects your eBay account." : "."}
             {" "}It can&rsquo;t be undone.
           </p>
 
-          {/* Never let a DB hiccup hide this: if the counts couldn't be read,
-              warn generically rather than silently implying nothing is live. */}
-          {summary && (summary.counted === false || !!summary.live_listings) && (
+          {/* Never let a DB hiccup — or a summary call that never landed —
+              hide this. See lib/deleteAccount: only a count that was actually
+              read may be named, and everything else warns. */}
+          {notice.warning && (
             <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink">
               <AlertTriangle size={15} className="inline mr-1.5 -mt-0.5" aria-hidden />
-              {summary.counted === false ? (
+              {notice.warning.kind === "unknown" ? (
                 <>Any listing you already published stays live on eBay under your
                   own seller account and keeps selling — deleting here only removes
                   Thryft Shop&rsquo;s copy. End them in eBay first if you want them
                   taken down.</>
               ) : (
-                <>{summary.live_listings} of your listings
-                  {" "}{summary.live_listings === 1 ? "is" : "are"} live on eBay.
-                  {" "}{summary.live_listings === 1 ? "It stays" : "They stay"} up
-                  and {summary.live_listings === 1 ? "keeps" : "keep"} selling — deleting
+                <>{notice.warning.count} of your listings
+                  {" "}{notice.warning.count === 1 ? "is" : "are"} live on eBay.
+                  {" "}{notice.warning.count === 1 ? "It stays" : "They stay"} up
+                  and {notice.warning.count === 1 ? "keeps" : "keep"} selling — deleting
                   here only removes Thryft Shop&rsquo;s copy. End
-                  {" "}{summary.live_listings === 1 ? "it" : "them"} in eBay first if
-                  you want {summary.live_listings === 1 ? "it" : "them"} taken down.</>
+                  {" "}{notice.warning.count === 1 ? "it" : "them"} in eBay first if
+                  you want {notice.warning.count === 1 ? "it" : "them"} taken down.</>
               )}
             </p>
           )}
@@ -894,6 +1053,10 @@ function EbayAccountMirror() {
     // Without it this panel reported an unreadable lookup as "not opted into
     // any programs", which is the one answer that makes a seller act.
     programs_known: programsKnown = false, privileges = null,
+    // Same tri-state, and more is riding on it: publishing needs a ship-from
+    // location, so "No inventory locations found" after a failed lookup sends
+    // the seller to create a second one on an account that already had it.
+    locations_known: locationsKnown = false,
   } = data;
   const hasPolicyProgram = programs.includes("SELLING_POLICY_MANAGEMENT");
   return (
@@ -974,8 +1137,13 @@ function EbayAccountMirror() {
                 );
               })}
             </ul>
-          ) : (
+          ) : locationsKnown ? (
             <p className="text-[13px] text-ink-secondary">No inventory locations found.</p>
+          ) : (
+            <p className="text-[13px] text-ink-secondary">
+              Couldn’t read your locations from eBay just now — this doesn’t
+              mean you have none.
+            </p>
           )}
         </div>
 
@@ -1158,8 +1326,14 @@ function ForeignListingsNotice() {
     try {
       const res = await postJson("/api/ebay/release-foreign-listings",
         unowned ? { include_unowned: true } : {});
-      toast(`Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`,
-        { kind: "success" });
+      // Each unlink is its own write, so one pass is bounded. A bounded run
+      // that reads like a finished one is the thing to avoid: the banner
+      // above would simply come back with a smaller number and no reason.
+      const left = res.remaining || 0;
+      toast(
+        `Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`
+        + (left ? ` ${left} still to go — press it again to carry on.` : ""),
+        { kind: left ? "warning" : "success" });
       await Promise.all([loadEbayStatus(), loadListings()]);
     } catch (e) {
       toast(`Couldn't unlink them: ${e.message}`, { kind: "error" });
@@ -1193,8 +1367,9 @@ function ForeignListingsNotice() {
 
 // Profile: display name (shown in greetings) + one-tap sync from eBay.
 function ProfileCard() {
-  const { user, setUser, ebay } = useApp();
-  const { toast } = useToast();
+  const { user, setUser, ebay, logout } = useApp();
+  const [signingOutAll, setSigningOutAll] = useState(false);
+  const { toast, confirm } = useToast();
   const displayName = user?.display_name || "";
   const [name, setName] = useState(displayName);
   const [saving, setSaving] = useState(false);
@@ -1261,6 +1436,46 @@ function ProfileCard() {
               <RefreshCw aria-hidden /> Sync from eBay
             </Button>
           )}
+        </div>
+
+        {/* Signing out of a browser does not cancel the token it was using:
+            the session token is self-contained and good for 30 days, so a
+            borrowed phone, a machine left signed in, or a token out of a
+            backup keeps working. This is the control that ends them. */}
+        <div className="pt-4 border-t border-line">
+          <p className="text-sm text-ink-secondary">
+            Signed in somewhere you shouldn’t be — a shared computer, a phone you
+            no longer have? This ends every signed-in device, including this one.
+          </p>
+          <Button
+            variant="secondary" className="mt-2.5" loading={signingOutAll}
+            onClick={async () => {
+              if (!(await confirm({
+                title: "Sign out everywhere?",
+                message: "Every device signed in to this account is signed out, "
+                  + "including this one. Nothing else changes — your listings, "
+                  + "photos and eBay connection stay exactly as they are.",
+                confirmLabel: "Sign out everywhere",
+              }))) return;
+              setSigningOutAll(true);
+              try {
+                const r = await postJson("/api/auth/logout-everywhere", {});
+                toast(r.message, { kind: "success" });
+                // Locally too. The server has already cancelled this token, so
+                // leaving the app looking signed in would just fail the next
+                // request with no explanation.
+                logout();
+              } catch (e) {
+                // Never a shrug: if the revocation did not commit, the other
+                // sessions are still live and the seller has to know that.
+                toast(`Couldn't sign out everywhere: ${e.message}`, { kind: "error" });
+              } finally {
+                setSigningOutAll(false);
+              }
+            }}
+          >
+            <LogOut aria-hidden /> Sign out everywhere
+          </Button>
         </div>
       </div>
     </Card>

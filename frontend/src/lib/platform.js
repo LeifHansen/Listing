@@ -112,24 +112,40 @@ export function storedToken() {
 }
 
 export function storeToken(token) {
-  if (!API_BASE) return;
+  if (!API_BASE) return Promise.resolve();
   memoryToken = token || null;
   const secure = securePlugin();
   if (secure) {
-    // Fire-and-forget: the in-memory copy is already live, and a Keychain
-    // write that fails costs this session's persistence, not the session.
-    const done = token
-      ? secure.set({ key: TOKEN_KEY, value: token })
-      : secure.remove({ key: TOKEN_KEY });
-    Promise.resolve(done).catch(() => {});
     // Never leave a copy behind in the clear.
     try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* ignore */ }
-    return;
+    if (token) {
+      // A Keychain WRITE that fails costs this session's persistence, not
+      // the session: the in-memory copy is already live, and the next launch
+      // simply asks the seller to sign in again.
+      return Promise.resolve(secure.set({ key: TOKEN_KEY, value: token }))
+        .catch(() => {});
+    }
+    // A removal is the other way round. The token is a self-contained JWT
+    // good for 30 days, and loadToken() reads it back on the next cold
+    // start — so a remove that quietly failed means the app reopens signed
+    // in as the person who just signed out. On a shared phone that is
+    // somebody else's store, and the only symptom is that logging out did
+    // not work, discovered on the next launch rather than at the time.
+    //
+    // So a failed removal falls back to the operation already known to work:
+    // overwrite the entry with an empty value. loadToken treats a falsy
+    // value as "nothing stored", which turns an unremovable credential into
+    // an unusable one. If even that fails there is nothing further to try
+    // from here, and it must still not raise into the logout that called it.
+    return Promise.resolve(secure.remove({ key: TOKEN_KEY }))
+      .catch(() => Promise.resolve(secure.set({ key: TOKEN_KEY, value: "" })))
+      .catch(() => {});
   }
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);
   } catch (e) { /* private mode — session lasts until the app closes */ }
+  return Promise.resolve();
 }
 
 // --- external browser -------------------------------------------------------

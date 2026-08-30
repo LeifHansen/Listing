@@ -298,6 +298,36 @@ def from_trading_error(exc: Exception) -> list[dict]:
     # "eBay's reason: <a warning about something else>" on a rejection eBay
     # had in fact declined to explain, and hid the real diagnosis behind it.
     said = str(getattr(exc, "said", "") or "")
+    if getattr(exc, "unreachable", False):
+        # The request never left, so eBay neither acted nor refused. The
+        # generic branch would title this "eBay rejected the listing", which
+        # is what the short surfaces render — and it sends the seller hunting
+        # through fields when the problem is the network. Unlike the unknown
+        # case below, this one CAN say nothing was sent.
+        return [{"error_id": "", "ebay_message": str(exc),
+                 "target": "generic",
+                 "title": "Couldn't reach eBay",
+                 "fix": "We couldn't get a connection to eBay, so nothing was "
+                        "sent. Try again in a moment."}]
+    if getattr(exc, "outcome_unknown", False):
+        # Not a rejection, and it must not be titled as one. The fix panel and
+        # the bulk cards render the TITLE, and the short surfaces render only
+        # the title -- so the generic branch's "eBay rejected the listing" put
+        # the one claim we cannot make in the largest text on the screen,
+        # directly above a body saying the opposite. A seller who reads
+        # "rejected" fixes something and publishes again, which is how the
+        # duplicate live listing happens.
+        # The instruction is written HERE rather than taken from str(exc), so
+        # it cannot go missing depending on how a caller happened to word the
+        # exception. "Check before retrying" is the entire actionable content
+        # of this issue -- everything else is context.
+        return [{"error_id": "", "ebay_message": str(exc),
+                 "target": "generic",
+                 "title": "We could not confirm what eBay did",
+                 "fix": "The request reached eBay and the answer didn't come "
+                        "back, so we can't tell whether it went through. "
+                        "Check this item in your eBay listings before trying "
+                        "again — retrying blind could publish it twice."}]
     issues = [explain({"errorId": code, "message": str(exc),
                        "longMessage": said})]
     if detail and detail not in (issues[0].get("ebay_message") or ""):

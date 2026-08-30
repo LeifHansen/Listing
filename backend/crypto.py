@@ -43,6 +43,14 @@ from .config import log
 _PREFIX = "enc:v1:"
 # Ties the derived key to this purpose: the same SECRET_KEY used for a
 # different job later derives a different key, so one compromise is not both.
+#
+# DO NOT rename this to match the product. It is not a label -- it is an input
+# to the key derivation, and every refresh token in the database was encrypted
+# under the key it produces. A different string is a different key, `decrypt`
+# returns "" rather than raising (see below), and the result is every
+# connected seller silently signed out of every marketplace with nothing
+# logged as an error. Moving it needs a migration that re-encrypts the stored
+# rows first. Pinned by tests/test_the_rename_stops_at_stored_data.py.
 _INFO = b"quickflip/marketplace-refresh-token/v1"
 
 _fernet: Fernet | None = None

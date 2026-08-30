@@ -15,15 +15,19 @@ import datetime as _dt
 import threading
 import time as _time
 import uuid as _uuid
-from typing import Optional
+from typing import Optional, Sequence
 
-from sqlalchemy import (DateTime, JSON, String, create_engine, delete, func,
-                        or_, select, text)
+from sqlalchemy import (DateTime, Index, JSON, String, and_, create_engine,
+                        delete, func, or_, select, text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from . import config, crypto
 from .config import log
+# Re-exported so callers can keep saying db.StorageUnavailable. It is DEFINED
+# in errors.py because reloading this module would otherwise mint a new class
+# and silently unbind main.py's exception handler — see errors.py.
+from .errors import StorageUnavailable  # noqa: F401
 
 _engine = None
 _initialized = False
@@ -48,6 +52,27 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80), default="")
+    # Sessions issued before this instant are refused. It is how "log out
+    # everywhere" is possible at all: the session JWT is self-contained and
+    # lives 30 days, so without somewhere to record a cancellation, a token
+    # that leaks stays good for the rest of the month and clearing the cookie
+    # only affects the browser doing the clearing.
+    #
+    # A stamp on this row rather than a token blocklist, because this row is
+    # ALREADY read on every authenticated request (auth.current_user resolves
+    # the subject to a user dict). A revocation check that costs an extra
+    # round trip is one that gets skipped under load, and a blocklist has to
+    # be kept, expired, and consulted -- and fails open when its store is
+    # unreachable. NULL means nothing has ever been revoked.
+    sessions_valid_from: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # When this account last spent the eBay per-item sweeps. It rations a
+    # DAILY allowance that belongs to the whole application, so the mark has
+    # to outlive the process that made it: in memory alone, every deploy or
+    # OOM re-armed a ~100-call sweep for every account with a tab open. See
+    # services/sync_guard. NULL means this account has never swept.
+    last_sweep_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     # New-listing defaults (package weight/dims, quantity, condition, …) that
     # pre-fill every AI draft so repeat sellers stop re-typing them.
     prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -60,6 +85,13 @@ class EbayAccount(Base):
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     # Holds ciphertext (backend/crypto.py), ~1.5x the plaintext token.
     refresh_token: Mapped[str] = mapped_column(String(4096), default="")
+    # eBay's IMMUTABLE account id, from the Identity API. The username above
+    # is a display name the seller can change, so it cannot be the tenancy
+    # key: a rename orphans the row, and a renamed-then-reused handle can
+    # match the WRONG user. Account-deletion notices identify the account by
+    # this id and nothing else, so without it a notice cannot be resolved to
+    # the data it is asking us to erase.
+    ebay_user_id: Mapped[str] = mapped_column(String(64), index=True, default="")
     ebay_username: Mapped[str] = mapped_column(String(128), default="")
     ebay_email: Mapped[str] = mapped_column(String(255), default="")
     fulfillment_policy_id: Mapped[str] = mapped_column(String(64), default="")
@@ -86,6 +118,75 @@ class MarketplaceAccount(Base):
     external_id: Mapped[str] = mapped_column(String(64), default="")
     settings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DeletionNotice(Base):
+    """One row per eBay account-deletion notification we have accepted.
+
+    eBay requires that an application storing eBay data process account
+    deletion/closure notices. Acknowledging one is a promise that the erasure
+    will happen, so the promise has to outlive the request: the row is written
+    inside the request, and the purge runs against it afterwards. A crash
+    between the two leaves a row in 'pending', which is recoverable — the
+    alternative, a 200 with nothing recorded, is not, because eBay stops
+    resending once acknowledged.
+
+    `notification_id` is the primary key, which is what makes redelivery
+    idempotent: eBay resends until it gets a 2xx, so the same notice arrives
+    more than once as a matter of routine, not as an error.
+    """
+
+    __tablename__ = "ebay_deletion_notices"
+
+    notification_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # eBay's immutable account id from notification.data.userId. This is the
+    # only identifier the notice carries that we can resolve; username is
+    # mutable and eiasToken is legacy.
+    ebay_user_id: Mapped[str] = mapped_column(String(64), index=True, default="")
+    # pending | done | no_match | failed
+    state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    # Deliberately NOT the payload: it is personal data about someone who has
+    # just asked to be erased. Only a digest, so a redelivery can be compared
+    # without retaining what it said.
+    payload_digest: Mapped[str] = mapped_column(String(64), default="")
+    last_error: Mapped[str] = mapped_column(String(255), default="")
+    received_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+
+class MediaPurge(Base):
+    """Photos a deleted account still owns in storage, until they don't.
+
+    Deleting an account drops the rows and then erases the photos — the local
+    directory and the R2 prefix — in a background pass. Nothing recorded that
+    the pass was owed, so a deploy, a restart or a crash part-way through left
+    the rest of the seller's photos in the bucket indefinitely, with the rows
+    that named them already gone. Nothing would ever look for them again, and
+    the app had already said they were deleted.
+
+    The row is written inside delete_user's own transaction. That is the whole
+    point: either the rows go and the debt is recorded, or neither happens.
+    Recording afterwards leaves a window where the listings are gone and the
+    obligation is not written down, which is precisely the state that cannot
+    be detected later.
+
+    Rows are deleted on success, so the table is a work queue and its size is
+    the backlog. A row that keeps failing keeps its place — there is no
+    give-up count, because nothing else remembers these objects exist.
+    """
+
+    __tablename__ = "media_purges"
+
+    # The listing id, which is also the session id the photos live under.
+    listing_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Kept only for operator triage ("whose deletion is stuck?"). The user row
+    # is already gone; this is an opaque id, not personal data.
+    user_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    last_error: Mapped[str] = mapped_column(String(255), default="")
+    requested_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ListingRecord(Base):
@@ -149,6 +250,15 @@ class Notification(Base):
     order the syncs happen to run in."""
 
     __tablename__ = "notifications"
+    # The unread badge polls every minute and filters on BOTH columns; user_id
+    # alone left the read_at test to a scan of every notification the seller
+    # has ever received. Declared on the model, not only in _MIGRATIONS below:
+    # the list runs on every boot so a fresh database does get the index, but
+    # anything reading the models -- a person, or alembic's autogenerate --
+    # could not see that it exists, which is how the two schema sources drift.
+    __table_args__ = (
+        Index("ix_notifications_user_unread", "user_id", "read_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
@@ -180,6 +290,70 @@ def _normalize_url(url: str) -> str:
     if url.startswith("postgresql://"):
         url = "postgresql+psycopg://" + url[len("postgresql://"):]
     return url
+
+
+# Lightweight migrations for databases created before a column existed. Each
+# statement is guarded separately in _get_engine so an already-applied one does
+# not skip the rest.
+#
+# Kept as a module constant rather than inline so tests can read the REAL
+# statements. Column types here must match what create_all emits from the
+# models: SQLite ignores types entirely, so a mismatch is invisible in every
+# test and only appears on a Postgres deployment old enough to need the ALTER.
+# test_session_revocation.py checks the pair.
+_MIGRATIONS = (
+    "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
+    "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
+    "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
+    "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN prefs JSON",
+    # Encrypted tokens are roughly 1.5x their plaintext, and a
+    # silently truncated one disconnects a seller with no error.
+    # SQLite ignores VARCHAR lengths entirely, so these are a
+    # no-op there and the guard below swallows the syntax error.
+    "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
+    "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
+    # The unread badge polls every minute and filters on both of
+    # these; user_id alone left the read_at test to a scan of every
+    # notification the seller has ever received. IF NOT EXISTS is
+    # understood by Postgres and SQLite alike, so this is a no-op
+    # after the first boot rather than something the guard below
+    # has to swallow on every start.
+    "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
+    "ON notifications (user_id, read_at)",
+    # eBay's immutable account id. Deletion notices identify the
+    # account by this and nothing else, and it is what every
+    # ownership check should key on instead of the mutable
+    # username.
+    "ALTER TABLE ebay_accounts ADD COLUMN ebay_user_id VARCHAR(64) DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS ix_ebay_accounts_ebay_user_id "
+    "ON ebay_accounts (ebay_user_id)",
+    # Session revocation. Nullable with no default: NULL means
+    # this account has never revoked, which is every account on
+    # the day this ships, and must keep every live session working.
+    #
+    # WITH TIME ZONE, matching the model's DateTime(timezone=True)
+    # — which is what create_all emits on a fresh database, so a
+    # bare TIMESTAMP here would give existing and new deployments
+    # different column types. On Postgres that difference is not
+    # cosmetic: an aware datetime written into a naive column is
+    # converted to the SESSION's timezone, so on any deployment
+    # not running in UTC the stored cutoff would be off by the
+    # offset — and being off in the lenient direction means a
+    # revocation quietly does not take effect for hours.
+    "ALTER TABLE users ADD COLUMN sessions_valid_from "
+    "TIMESTAMP WITH TIME ZONE",
+    # The eBay sweep cooldown, moved out of process memory. Same WITH TIME
+    # ZONE reasoning as the line above: it must match what create_all emits
+    # for DateTime(timezone=True) on a fresh database, or existing and new
+    # deployments get different column types and the comparison this drives
+    # is off by the session offset. NULL means never swept, which is every
+    # account on the day this ships -- and the first sweep after it is free,
+    # which is the same answer the in-memory dict gave.
+    "ALTER TABLE users ADD COLUMN last_sweep_at "
+    "TIMESTAMP WITH TIME ZONE",
+)
 
 
 def _get_engine():
@@ -223,34 +397,21 @@ def _get_engine():
                 pool_pre_ping=True, pool_size=10, max_overflow=20,
                 pool_timeout=5, pool_recycle=300,
                 connect_args=connect_args,
+                # Keep the VALUES out of the exception string. Every `except`
+                # in this module logs `{exc}`, and SQLAlchemy's default is to
+                # append `[parameters: (...)]` to it — so one Postgres hiccup
+                # during signup writes a seller's email address and the bcrypt
+                # hash of their password to the log, a marketplace token blob
+                # on a connect, the whole listing document on an upsert. The
+                # statement text is still there, which is what an operator
+                # actually needs: it names columns, not data. Set here rather
+                # than at the 44 call sites because that is the version the
+                # next `except` block inherits without having to know.
+                hide_parameters=True,
             )
         if not _initialized:
             Base.metadata.create_all(_engine)  # may raise if DB unreachable
-            # Lightweight migrations for DBs created before a column existed.
-            # Each ALTER is separately guarded so an already-applied one
-            # doesn't skip the rest.
-            for stmt in (
-                "ALTER TABLE listings ADD COLUMN user_id VARCHAR(64)",
-                "ALTER TABLE ebay_accounts ADD COLUMN ebay_username VARCHAR(128) DEFAULT ''",
-                "ALTER TABLE ebay_accounts ADD COLUMN ebay_email VARCHAR(255) DEFAULT ''",
-                "ALTER TABLE ebay_accounts ADD COLUMN ship_from_postal VARCHAR(16) DEFAULT ''",
-                "ALTER TABLE users ADD COLUMN display_name VARCHAR(80) DEFAULT ''",
-                "ALTER TABLE users ADD COLUMN prefs JSON",
-                # Encrypted tokens are roughly 1.5x their plaintext, and a
-                # silently truncated one disconnects a seller with no error.
-                # SQLite ignores VARCHAR lengths entirely, so these are a
-                # no-op there and the guard below swallows the syntax error.
-                "ALTER TABLE ebay_accounts ALTER COLUMN refresh_token TYPE VARCHAR(4096)",
-                "ALTER TABLE marketplace_accounts ALTER COLUMN refresh_token TYPE VARCHAR(8192)",
-                # The unread badge polls every minute and filters on both of
-                # these; user_id alone left the read_at test to a scan of every
-                # notification the seller has ever received. IF NOT EXISTS is
-                # understood by Postgres and SQLite alike, so this is a no-op
-                # after the first boot rather than something the guard below
-                # has to swallow on every start.
-                "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
-                "ON notifications (user_id, read_at)",
-            ):
+            for stmt in _MIGRATIONS:
                 try:
                     with _engine.begin() as conn:
                         conn.execute(text(stmt))
@@ -364,21 +525,235 @@ def mutate_listing_data(
         return None
 
 
-def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+def list_listings(limit: int = 50, user_id: Optional[str] = None,
+                  statuses: Optional[tuple[str, ...]] = None,
+                  before: Optional[tuple[_dt.datetime, str]] = None
+                  ) -> list[dict]:
+    """The user's listings, newest first. RAISES on a read failure.
+
+    `before` is the last row of the previous page — `(updated_at, id)` — and
+    what comes back is what follows THAT ROW. Keyset, not OFFSET: a save
+    between two page loads shifts every row an OFFSET would count past, so the
+    seller skips one listing and sees another twice. On a screen whose
+    checkboxes drive a bulk reprice, that is worse than not paging at all.
+
+    `statuses` narrows the read in SQL. Several callers throw away everything
+    that is not live the moment the rows arrive -- the store sweep, the
+    duplicate advisory, the promote-all pass -- and on a store bigger than
+    `limit` that page is the wrong rows: a seller whose newest records are
+    mostly drafts has their OLDER live listings fall off the end, and those
+    are exactly the ones a sweep is for. Filtering here moves the boundary
+    from "the newest N records" to "the first N matching ones".
+
+    Not `[]`, which is what this used to answer and what every other read in
+    this module still answers. "The seller's store" is the input to decisions
+    that write, and an invented empty answer is indistinguishable from a
+    seller who genuinely has nothing:
+
+      - the eBay import matches incoming items against what it finds here and
+        imports whatever it does not find. One failed read during a sync
+        therefore imported a SECOND copy of the seller's entire eBay store,
+        reported as a successful sync, leaving real duplicate listings to be
+        merged by hand;
+      - a release pass reports "released 0" as success;
+      - a status sweep reports checking a store it never read;
+      - the session-id migration reports nothing to migrate.
+
+    Callers that genuinely tolerate an empty answer call
+    list_listings_best_effort, so the decision sits at the call site where
+    someone can see what it costs.
+    """
+    eng = _get_engine()
+    # No database configured is a configuration, not a failure: nothing is
+    # persisted, so the store really is empty and /api/health says why.
+    if eng is None:
+        return []
     try:
-        eng = _get_engine()
-        if eng is None:
-            return []
         with Session(eng) as s:
             q = select(ListingRecord)
             if user_id is not None:
                 q = q.where(ListingRecord.user_id == user_id)
-            q = q.order_by(ListingRecord.updated_at.desc()).limit(limit)
+            if statuses is not None:
+                q = q.where(ListingRecord.status.in_(statuses))
+            if before is not None:
+                # Spelled out rather than as a row-value comparison, which
+                # older SQLite builds do not accept. `id` breaks the ties:
+                # timestamps collide readily (an import writes a whole store
+                # in one pass), and a cursor that cannot separate two rows
+                # with the same instant either repeats them or skips them.
+                ts, last_id = before
+                q = q.where(or_(ListingRecord.updated_at < ts,
+                                and_(ListingRecord.updated_at == ts,
+                                     ListingRecord.id < last_id)))
+            q = q.order_by(ListingRecord.updated_at.desc(),
+                           ListingRecord.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
             return [_record_to_dict(r) for r in rows]
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: list_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t load your listings just now — this doesn’t mean you "
+            "don’t have any. Try again in a moment.") from exc
+
+
+def list_listings_best_effort(limit: int = 50,
+                              user_id: Optional[str] = None,
+                              statuses: Optional[tuple[str, ...]] = None
+                              ) -> list[dict]:
+    """list_listings, but an unreadable store answers `[]`.
+
+    Only for callers where an empty result degrades the answer rather than
+    changing what gets written — a metrics panel with no numbers in it, a
+    weight lookup that falls back to asking. Never for anything that decides
+    what to create, release, or end.
+    """
+    try:
+        return list_listings(limit=limit, user_id=user_id, statuses=statuses)
+    except StorageUnavailable:
         return []
+
+
+# How many ids one lookup may name. Not a product limit -- every route that
+# reaches this already caps what a client may send -- but the line that makes
+# forgetting to do so a test failure. See get_listings.
+_MAX_IDS_PER_LOOKUP = 500
+
+
+def get_listings(listing_ids: Sequence[str], user_id: str) -> list[dict]:
+    """The seller's listings among `listing_ids`, in one query.
+
+    RAISES on a read failure, like every other read whose blank would be a
+    claim: the caller is a bulk action, and an empty answer there is reported
+    to the seller as "Listing not found." against every listing they ticked.
+
+    Ownership is enforced in the read rather than left to the caller, so a
+    bulk route cannot forget it. An id that is absent from the result is
+    genuinely absent or genuinely not theirs -- which is a real answer, and
+    the reason this asks for the ids instead of filtering a page of the
+    store: the page is ordered newest-first, so on a store past the list cap
+    a ticked listing only has to be edited past by the cap's worth of others
+    between opening the screen and pressing the button to be reported as one
+    that does not exist.
+    """
+    ids = [str(i) for i in listing_ids if str(i)]
+    if not ids:
+        return []
+    if len(ids) > _MAX_IDS_PER_LOOKUP:
+        # The backstop under each route's own cap, so a future caller that
+        # passes a client's list straight through fails loudly in a test
+        # rather than quietly turning one request into an enormous IN (...).
+        # It refuses rather than truncating: `mark_notifications_read` can
+        # silently cap because a seller who wanted the other twenty taps
+        # again, but a truncated lookup here reaches them as "Listing not
+        # found." per listing -- a read limitation reported as absence.
+        raise ValueError(
+            f"get_listings was asked for {len(ids)} ids; bound the caller's "
+            f"input (max {_MAX_IDS_PER_LOOKUP})")
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            rows = s.execute(
+                select(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(ListingRecord.id.in_(ids))
+            ).scalars().all()
+            return [_record_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t look those listings up just now — they haven’t gone "
+            "anywhere. Try again in a moment.") from exc
+
+
+def list_releasable_listings(user_id: str, account: str,
+                             include_unowned: bool = False,
+                             limit: int = 1000) -> list[dict]:
+    """Records the unlink pass should consider — oldest first.
+
+    RAISES on a read failure, like every other read whose blank would be a
+    claim: an empty answer here is reported to the seller as an unlink that
+    ran and found nothing, leaving the banner up with no explanation.
+
+    A deliberate SUPERSET of `ebay_account.releasable`, which stays the single
+    place the decision is made — this only narrows what has to be read. The
+    caller filters, so widening this can never release something the predicate
+    would refuse.
+
+    Oldest first because that is where the previous account's listings are: a
+    record from a store the seller has since disconnected has not been touched
+    since. The old pass read the newest LIST_CAP records and filtered, so on a
+    store past that cap it looked at precisely the wrong end — the banner
+    counted twelve in SQL and the button unlinked seven, every time.
+    """
+    account = (account or "").strip()
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            # Stamped with somebody else's name. The sentinel a switch writes
+            # is just another name, so it lands here too.
+            foreign = and_(account_col.is_not(None), account_col != "",
+                           account_col != account)
+            where = foreign
+            if include_unowned:
+                # No owner recorded at all. Not narrowed to records carrying
+                # an eBay id: `releasable` also accepts a `marketplaces.ebay`
+                # entry, and this query only has to be wide enough to contain
+                # every record that predicate would say yes to.
+                where = or_(foreign, or_(account_col.is_(None),
+                                         account_col == ""))
+            rows = s.execute(
+                select(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(where)
+                .order_by(ListingRecord.updated_at.asc())
+                .limit(limit)
+            ).scalars().all()
+            return [_record_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: list_releasable_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t check which listings belong to the old account just "
+            "now. Try again in a moment.") from exc
+
+
+def count_listings(user_id: str,
+                   statuses: Optional[tuple[str, ...]] = None) -> int:
+    """How many listings this user has, optionally only in `statuses`.
+
+    RAISES on a read failure, for the same reason `list_listings` does and
+    with more at stake: the caller is the delete-account dialog, and a zero it
+    invented suppresses the "anything already published stays live on eBay"
+    warning that is the whole reason that dialog exists.
+
+    Counted in the database, not by measuring a page. The two numbers used to
+    come from `len(list_listings(limit=LIST_CAP))`, which fetched every
+    listing's JSON blob over a cross-region link to produce two integers --
+    and, worse, told a seller with more records than the cap that they were
+    about to erase fewer than they have, live ones included. There is no cap
+    that fixes that: a count is either a count or a floor with no label.
+    """
+    eng = _get_engine()
+    # No database configured is a configuration, not a failure -- nothing is
+    # persisted, so the store really is empty. Same rule as list_listings.
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            q = (select(func.count()).select_from(ListingRecord)
+                 .where(ListingRecord.user_id == user_id))
+            if statuses is not None:
+                q = q.where(ListingRecord.status.in_(statuses))
+            return int(s.execute(q).scalar_one() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t count your listings just now — this doesn’t mean you "
+            "don’t have any. Try again in a moment.") from exc
 
 
 def all_listing_ids() -> Optional[set[str]]:
@@ -402,6 +777,10 @@ def all_listing_ids() -> Optional[set[str]]:
 def _user_to_dict(u: User) -> dict:
     return {"id": u.id, "email": u.email,
             "display_name": getattr(u, "display_name", "") or "",
+            # auth.current_user compares this against the token's `iat`. It
+            # rides along here rather than being fetched separately because
+            # this dict is already the per-request read.
+            "sessions_valid_from": getattr(u, "sessions_valid_from", None),
             "created_at": u.created_at.isoformat()}
 
 
@@ -430,26 +809,68 @@ EMAIL_TAKEN = object()
 
 
 def get_prefs(user_id: str) -> dict:
-    """The user's new-listing defaults ({} when unset). Never raises."""
+    """The user's new-listing defaults. RAISES on a read failure.
+
+    `{}` used to mean both "this seller has saved nothing" and "the read
+    threw", and Settings is the one screen whose entire job is to say what is
+    saved. With the failure swallowed, the panel rendered the app's fallback
+    weight, dimensions, quantity, condition and pricing strategy as the
+    seller's own -- and the browser's prepared error state ("this isn't what
+    you have saved", with a retry) could never fire, because the server never
+    let it.
+
+    It does not stop there: saving MERGES, so a seller looking at those
+    fallbacks who changes one field and presses Save writes the whole set
+    over their real defaults -- the weight they measured, the ship-from
+    address, the pricing strategy -- because a read failed a minute earlier.
+
+    Callers that genuinely tolerate a blank answer call get_prefs_best_effort,
+    so the decision sits at the call site where someone can see what it costs.
+    """
+    eng = _get_engine()
+    # No database configured is a configuration, not a failure: nothing is
+    # persisted, so there really are no saved defaults.
+    if eng is None:
+        return {}
     try:
-        eng = _get_engine()
-        if eng is None:
-            return {}
         with Session(eng) as s:
             u = s.get(User, user_id)
             return dict(u.prefs) if u and isinstance(u.prefs, dict) else {}
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_prefs failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t load your saved defaults just now. Try again in a "
+            "moment.") from exc
+
+
+def get_prefs_best_effort(user_id: str) -> dict:
+    """get_prefs, but an unreadable row answers `{}`.
+
+    Only for callers where missing defaults degrade the answer rather than
+    making a claim: pre-filling a draft, choosing a pricing strategy, filling
+    the gaps in a ship-from address the caller also supplies. Never for
+    anything that reports to the seller what they have saved.
+    """
+    try:
+        return get_prefs(user_id)
+    except StorageUnavailable:
         return {}
 
 
 def save_prefs(user_id: str, prefs: dict) -> dict:
     """Merge new values into the user's defaults; returns the merged dict.
-    Returns {} if there's no DB / no such user (the caller surfaces that)."""
+
+    RAISES on a write failure. `{}` still means "no database configured" or
+    "no such user", which the caller surfaces -- but it used to mean a failed
+    write as well, and the route only refused when there was no database at
+    all. A database that was configured but broken took the other branch, so
+    a write that never landed came back `{"ok": true}` and the seller closed
+    Settings believing their defaults were saved.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return {}
     try:
-        eng = _get_engine()
-        if eng is None:
-            return {}
         with Session(eng) as s:
             u = s.get(User, user_id)
             if u is None:
@@ -461,7 +882,9 @@ def save_prefs(user_id: str, prefs: dict) -> dict:
             return merged
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: save_prefs failed: {exc}")
-        return {}
+        raise StorageUnavailable(
+            "We couldn’t save your defaults just now — nothing was changed. "
+            "Try again in a moment.") from exc
 
 
 def create_user(user_id: str, email: str, password_hash: str):
@@ -507,9 +930,108 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
         with Session(eng) as s:
             u = s.get(User, user_id)
             return _user_to_dict(u) if u else None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Not None. This is the end of every "who is asking" check in the app,
+        # and None means "no valid session" — so swallowing a read failure
+        # here logged every signed-in seller out server-side, silently: the
+        # store rendered as the logged-out pitch, the bell reported nothing
+        # sold, eBay reported itself disconnected, and writes came back as
+        # 404s for a record that "belonged to someone else". A lookup that
+        # could not run is not a session that does not exist.
         log.warning(f"db: get_user_by_id failed: {exc}")
-        return None
+        raise StorageUnavailable(
+            "We couldn't verify your session just now. Try again in a "
+            "moment.") from exc
+
+
+def revoke_sessions(user_id: str,
+                    at: Optional[_dt.datetime] = None) -> _dt.datetime:
+    """End every session issued before now. Returns the instant recorded.
+
+    RAISES rather than reporting a failure as success. Telling a seller their
+    other sessions are gone when the write never landed is the worst outcome
+    available here: they stop looking, and whoever holds the token keeps it.
+    An unknown user raises for the same reason -- there is no version of
+    "nothing to revoke" that is safe to report as "revoked".
+    """
+    stamp = (at or _dt.datetime.now(_dt.timezone.utc)).replace(microsecond=0)
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable(
+                "Couldn't sign out your other sessions just now. Try again "
+                "in a moment.")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                raise StorageUnavailable(
+                    "Couldn't sign out your other sessions just now. Try "
+                    "again in a moment.")
+            u.sessions_valid_from = stamp
+            s.commit()
+            return stamp
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: revoke_sessions failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't sign out your other sessions just now. Try again in a "
+            "moment.") from exc
+
+
+def last_sweep(user_id: str) -> Optional[_dt.datetime]:
+    """When this account last ran the eBay per-item sweeps, or None if never.
+
+    Raises StorageUnavailable rather than answering None when the record
+    cannot be read. None means "never swept", which grants a sweep -- so
+    reporting an outage as None is how a database blip would turn into ~100
+    Trading calls per account against an allowance shared by every seller.
+    The caller (services/sync_guard) refuses the background sweep instead.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                # A signed-in caller whose row is missing is not "has never
+                # swept"; it is a read that did not find what it was told
+                # exists. Same reasoning as revoke_sessions.
+                raise StorageUnavailable("no such account")
+            return getattr(u, "last_sweep_at", None)
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: last_sweep failed: {exc}")
+        raise StorageUnavailable("couldn't read the sweep mark") from exc
+
+
+def mark_sweep(user_id: str, at: Optional[_dt.datetime] = None) -> _dt.datetime:
+    """Record that this account is spending its eBay sweep allowance now.
+
+    Written BEFORE the sweep runs and raising when it cannot be written: a
+    spend that was not recorded cannot be rationed, and the next process to
+    start would grant the same account another one. `at` is for tests and for
+    an operator ageing a mark deliberately.
+    """
+    stamp = (at or _dt.datetime.now(_dt.timezone.utc)).replace(microsecond=0)
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                raise StorageUnavailable("no such account")
+            u.last_sweep_at = stamp
+            s.commit()
+            return stamp
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: mark_sweep failed: {exc}")
+        raise StorageUnavailable("couldn't record the sweep mark") from exc
 
 
 def get_password_hash(user_id: str) -> Optional[str]:
@@ -579,6 +1101,12 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(Notification).where(Notification.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
+            # In THIS transaction, before the commit: the rows that name these
+            # photos are about to stop existing, so the obligation to erase
+            # them has to become durable at the same instant. Queued after the
+            # commit there is a window — small, but the state it produces
+            # (rows gone, debt unrecorded) is undetectable afterwards.
+            _queue_media_purges(s, user_id, listing_ids)
             s.commit()
             return listing_ids
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
@@ -586,20 +1114,177 @@ def delete_user(user_id: str) -> Optional[list[str]]:
         return None
 
 
+# How many listing ids go into one queue statement. Chosen for SQLite's
+# default 999-host-parameter ceiling with room to spare; Postgres allows far
+# more, and the round-trip saving is already flat by this point.
+_PURGE_BATCH = 400
+
+
+def _queue_media_purges(session, user_id: str, listing_ids: list[str]) -> None:
+    """Record, in the caller's open transaction, that these listings' photos
+    are still in storage.
+
+    Set-wise, in batches, NOT row by row. `session.merge()` per listing issues
+    a SELECT and an INSERT each: a 2,000-listing account is four thousand
+    serial round trips inside the open delete transaction, which against a
+    cross-region Postgres is long enough to hit a statement timeout — and then
+    the whole deletion rolls back and the seller is told it failed. The
+    listings themselves are already deleted set-wise a few lines up, for the
+    same reason.
+
+    The delete before the insert is not an optimisation: a listing whose purge
+    keeps failing still has its row, and re-queueing it must not collide with
+    the primary key. Deleting first re-arms it from zero attempts, which is
+    right — this is a fresh request to erase the same objects.
+
+    Raising here fails the whole delete, which is the intended behaviour:
+    better to tell the seller the deletion did not happen than to delete the
+    rows and lose track of the photos.
+    """
+    now = _now()
+    for start in range(0, len(listing_ids), _PURGE_BATCH):
+        batch = listing_ids[start:start + _PURGE_BATCH]
+        session.execute(
+            delete(MediaPurge).where(MediaPurge.listing_id.in_(batch)))
+        session.execute(
+            MediaPurge.__table__.insert(),
+            [{"listing_id": lid, "user_id": user_id or "", "attempts": 0,
+              "last_error": "", "requested_at": now} for lid in batch])
+
+
+def pending_media_purges(limit: int = 500) -> list[dict]:
+    """Photos still owed an erasure, oldest first. `[]` on a read failure --
+    the pass simply runs again later, and inventing work is worse than
+    skipping a round."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(MediaPurge).order_by(MediaPurge.requested_at.asc())
+                .limit(limit)).scalars().all()
+            return [{"listing_id": r.listing_id, "user_id": r.user_id or "",
+                     "attempts": r.attempts or 0,
+                     "last_error": r.last_error or ""} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: pending_media_purges failed: {exc}")
+        return []
+
+
+def count_pending_media_purges() -> int:
+    """How many photo erasures are still owed. RAISES on a read failure.
+
+    Separate from `pending_media_purges` above on purpose. That one feeds the
+    drain loop, where `[]` on a failure is the right answer and is documented
+    as such: a worker that cannot read the queue has nothing to do this pass,
+    which is the same action as an empty queue, and the next pass looks again.
+
+    This one feeds a REPORT — `/api/admin/diagnostics`, where the operator is
+    told to watch the number because one that does not come back down is a
+    promise already made to somebody. Zero there means "nothing is owed", and
+    a failed read must not be able to say it. A COUNT rather than len() of a
+    page, so the answer is the whole queue rather than the first thousand.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            return int(s.execute(
+                select(func.count()).select_from(MediaPurge)).scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_pending_media_purges failed: {exc}")
+        raise StorageUnavailable("couldn’t count the media purge backlog") from exc
+
+
+def count_pending_deletion_notices() -> int:
+    """How many eBay deletion notices are still unresolved. RAISES on a read
+    failure, for the same reason as the count above."""
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            # Same filter as pending_deletion_notices: a "failed" notice is
+            # still owed -- it stopped being retried, which is precisely when
+            # somebody has to look at it.
+            return int(s.execute(
+                select(func.count()).select_from(DeletionNotice)
+                .where(DeletionNotice.state.in_(("pending", "failed")))
+            ).scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_pending_deletion_notices failed: {exc}")
+        raise StorageUnavailable("couldn’t count the deletion-notice backlog") from exc
+
+
+def finish_media_purge(listing_id: str) -> None:
+    """The photos are gone; drop the debt. Only ever called after a purge
+    that raised nothing."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            s.execute(delete(MediaPurge)
+                      .where(MediaPurge.listing_id == listing_id))
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        # The row survives, so the next pass tries again. Purging twice is
+        # harmless -- both deletes are by prefix and idempotent -- while
+        # dropping the row on a failed write would lose the obligation.
+        log.warning(f"db: finish_media_purge failed: {exc}")
+
+
+def note_media_purge_failure(listing_id: str, error: str) -> None:
+    """Count an attempt and keep the row. There is deliberately no give-up
+    threshold: nothing else remembers these objects exist, so a purge that
+    stops being retried is a purge that never happens."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            row = s.get(MediaPurge, listing_id)
+            if row is None:
+                return
+            row.attempts = (row.attempts or 0) + 1
+            row.last_error = (error or "")[:255]
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: note_media_purge_failure failed: {exc}")
+
+
 # --- eBay accounts ---------------------------------------------------------
 
 _EBAY_FIELDS = (
-    "refresh_token", "ebay_username", "ebay_email",
+    "refresh_token", "ebay_user_id", "ebay_username", "ebay_email",
     "fulfillment_policy_id", "payment_policy_id",
     "return_policy_id", "merchant_location_key", "ship_from_postal",
 )
 
 
 def save_ebay_account(user_id: str, **fields) -> None:
-    """Create/update a user's eBay connection. Never raises."""
+    """Create/update a user's eBay connection.
+
+    Raises StorageUnavailable when the write did not commit. That is the
+    point: this used to swallow every failure and return None, which a caller
+    cannot tell from a clean commit — so the OAuth callback redirected to
+    "eBay connected" and Settings answered {"ok": true} while nothing had
+    been stored. The seller then believes the work is done and stops
+    checking, and the next publish fails for a reason that makes no sense on
+    a screen that says connected.
+
+    Strict is the DEFAULT so that a call site nobody thought about gets the
+    safe behaviour. Writes that are genuinely optional — caching something
+    eBay can be asked for again — call save_ebay_account_best_effort, which
+    says so in its name.
+    """
     try:
         eng = _get_engine()
         if eng is None:
+            # No database configured at all is this app's supported
+            # single-box mode, not a failure to report.
             return
         with Session(eng) as s:
             acct = s.get(EbayAccount, user_id)
@@ -614,8 +1299,25 @@ def save_ebay_account(user_id: str, **fields) -> None:
                     setattr(acct, key, value)
             acct.updated_at = _now()
             s.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - re-raised as a typed failure
         log.warning(f"db: save_ebay_account failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't save your eBay connection just now.") from exc
+
+
+def save_ebay_account_best_effort(user_id: str, **fields) -> bool:
+    """save_ebay_account for writes that may be lost without harming anyone.
+
+    Returns True when the write committed (or there is no database to write
+    to) and False when it failed. Use ONLY where the value can be recomputed
+    or re-fetched — a cached ship-from ZIP, a remembered inventory-location
+    key. Anything the seller is told about must use the strict command.
+    """
+    try:
+        save_ebay_account(user_id, **fields)
+        return True
+    except StorageUnavailable:
+        return False
 
 
 def get_ebay_account(user_id: str) -> Optional[dict]:
@@ -634,9 +1336,130 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
             # cache in ebay_provider keys on the same value as before.
             out["refresh_token"] = crypto.decrypt(out.get("refresh_token") or "")
             return out
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Same rule as get_marketplace_account above, and the same harm: None
+        # is "eBay is not connected", which turns a live publish into a dry
+        # run reported as ok.
         log.warning(f"db: get_ebay_account failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn't check your eBay connection just now. Try again in a "
+            "moment.") from exc
+
+
+def get_ebay_account_best_effort(user_id: str) -> Optional[dict]:
+    """get_ebay_account for advisory callers — see
+    get_marketplace_account_best_effort."""
+    try:
+        return get_ebay_account(user_id)
+    except StorageUnavailable:
         return None
+
+
+def record_deletion_notice(notification_id: str, ebay_user_id: str,
+                           payload_digest: str) -> str:
+    """Durably accept one deletion notice. Returns "new" or "duplicate".
+
+    Raises StorageUnavailable if it could not be written. The endpoint MUST
+    let that reach eBay as a non-2xx: acknowledging a notice we did not
+    record means eBay stops resending and the erasure silently never happens.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured for deletion notices")
+        with Session(eng) as s:
+            if s.get(DeletionNotice, notification_id) is not None:
+                return "duplicate"
+            s.add(DeletionNotice(
+                notification_id=notification_id, ebay_user_id=ebay_user_id,
+                payload_digest=payload_digest, state="pending",
+                received_at=_now()))
+            try:
+                s.commit()
+            except IntegrityError:
+                # Two deliveries raced. The row exists either way, which is
+                # exactly what idempotent means here.
+                s.rollback()
+                return "duplicate"
+            return "new"
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - re-raised as a typed failure
+        log.warning(f"db: record_deletion_notice failed: {exc}")
+        raise StorageUnavailable("could not record the deletion notice") from exc
+
+
+def finish_deletion_notice(notification_id: str, state: str,
+                           last_error: str = "") -> None:
+    """Mark a notice done / no_match / failed. Best-effort by design: the
+    purge has already run, and losing the bookkeeping must not undo it."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            row = s.get(DeletionNotice, notification_id)
+            if row is None:
+                return
+            row.state = state
+            row.attempts = (row.attempts or 0) + 1
+            row.last_error = (last_error or "")[:255]
+            row.completed_at = _now() if state in ("done", "no_match") else None
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: finish_deletion_notice failed: {exc}")
+
+
+def pending_deletion_notices(limit: int = 100) -> list[dict]:
+    """Notices accepted but not yet completed — what a restart has to pick
+    back up, and what an operator alert should be counting."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(DeletionNotice)
+                .where(DeletionNotice.state.in_(("pending", "failed")))
+                .order_by(DeletionNotice.received_at)
+                .limit(limit)).scalars().all()
+            return [{"notification_id": r.notification_id,
+                     "ebay_user_id": r.ebay_user_id,
+                     "state": r.state, "attempts": r.attempts,
+                     "last_error": r.last_error} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: pending_deletion_notices failed: {exc}")
+        return []
+
+
+def find_users_by_ebay_user_id(ebay_user_id: str):
+    """Our user ids connected to this eBay account, or UNAVAILABLE.
+
+    A LIST, not one id: the same eBay account can legitimately be connected
+    by more than one of our users, and a deletion notice has to reach all of
+    them. An empty list means "connected by nobody"; UNAVAILABLE means the
+    question could not be answered.
+
+    That distinction is the whole point. An account-deletion notice must not
+    be acknowledged as handled when the lookup failed — eBay would stop
+    resending, and the erasure it asked for would never happen with nothing
+    recording that it was missed.
+    """
+    ebay_user_id = (ebay_user_id or "").strip()
+    if not ebay_user_id:
+        return []
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(EbayAccount.user_id)
+                .where(EbayAccount.ebay_user_id == ebay_user_id)).all()
+            return [r[0] for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: find_users_by_ebay_user_id failed: {exc}")
+        return UNAVAILABLE
 
 
 def _json_text(column, key: str):
@@ -801,7 +1624,11 @@ def save_marketplace_account(user_id: str, marketplace: str, **fields) -> bool:
     try:
         eng = _get_engine()
         if eng is None:
-            return
+            # False, not a bare return: this function's whole contract is
+            # "did the write land", and nowhere to write is a no. Both are
+            # falsy, so callers reading it as a failure were already right --
+            # but the next one to write `is False` would quietly not be.
+            return False
         with Session(eng) as s:
             acct = s.get(MarketplaceAccount, (user_id, marketplace))
             if acct is None:
@@ -836,8 +1663,29 @@ def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
             out["settings"] = out.get("settings") or {}
             out["refresh_token"] = crypto.decrypt(out.get("refresh_token") or "")
             return out
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Not None. None here means "this seller has not connected this
+        # marketplace", and the publish path acts on it: `creds_for` returns
+        # None, `publish` takes its dry-run branch, and the seller who pressed
+        # Publish is handed ok=True with nothing listed. The provider's own
+        # comment already names that outcome for a failed token SAVE; the read
+        # underneath it had the same hole. Advisory callers take
+        # get_marketplace_account_best_effort instead, by name.
         log.warning(f"db: get_marketplace_account failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn't check your marketplace connection just now. Try "
+            "again in a moment.") from exc
+
+
+def get_marketplace_account_best_effort(user_id: str,
+                                        marketplace: str) -> Optional[dict]:
+    """get_marketplace_account for callers that only DECORATE a screen with
+    the connection state — a badge, a settings default, a status row. They opt
+    in to None-on-failure by name, so the choice is visible at the call site
+    rather than being every caller's silent default."""
+    try:
+        return get_marketplace_account(user_id, marketplace)
+    except StorageUnavailable:
         return None
 
 
@@ -859,6 +1707,38 @@ def disconnect_marketplace_account(user_id: str, marketplace: str) -> None:
 
 
 def get_listing(listing_id: str) -> Optional[dict]:
+    """The listing record, or None when there is genuinely no such row.
+    RAISES on a read failure.
+
+    It used to collapse the two, and ten route handlers turned the result
+    into `404 "Listing not found"` -- a claim about the seller's account made
+    on the strength of not being able to ask. `_assert_session_owner` had
+    already reasoned this through for the ownership guard and refuses with a
+    503; this is the same reasoning, in the one place all of them read.
+
+    A listing that really is missing still answers None and still 404s: a 503
+    for every unknown id would hide a genuinely bad link behind "try again in
+    a moment".
+
+    Callers that would rather have a blank than a refusal -- shaping a draft,
+    picking a sticky status -- call get_listing_best_effort, so the tolerance
+    is visible where it is chosen.
+    """
+    res = get_listing_strict(listing_id)
+    if res is UNAVAILABLE:
+        raise StorageUnavailable(
+            "We couldn’t look up that listing just now — it hasn’t gone "
+            "anywhere. Try again in a moment.")
+    return res
+
+
+def get_listing_best_effort(listing_id: str) -> Optional[dict]:
+    """get_listing, but an unreadable store answers None.
+
+    Only where a missing record degrades the answer rather than making a
+    claim: deciding whether to write a stub draft, and choosing the status a
+    re-save keeps.
+    """
     res = get_listing_strict(listing_id)
     return None if res is UNAVAILABLE else res
 
@@ -903,13 +1783,22 @@ def touch_listing(listing_id: str) -> None:
 
 
 def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
-    """Delete a listing row; returns True if a row was removed. Ownership-
-    checked: a listing owned by an account can only be deleted by that owner.
-    Never raises."""
+    """Delete a listing row; returns True if a row was removed. RAISES on a
+    write failure.
+
+    Ownership-checked: a listing owned by an account can only be deleted by
+    that owner. `False` means exactly one thing now -- no such row, or not
+    yours -- because the route turns it into `404 "Listing not found"`, and
+    an unreachable database answering that tells a seller their listing is
+    gone at the moment they are trying to delete it. Callers that would
+    rather skip than fail (the merge, the bulk delete, which both report what
+    they could not remove) catch it at the call site, where the tolerance is
+    visible.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return False
     try:
-        eng = _get_engine()
-        if eng is None:
-            return False
         with Session(eng) as s:
             rec = s.get(ListingRecord, listing_id)
             if rec is None:
@@ -925,7 +1814,9 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
             return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: delete_listing failed: {exc}")
-        return False
+        raise StorageUnavailable(
+            "We couldn’t delete that listing just now — nothing was removed. "
+            "Try again in a moment.") from exc
 
 
 # --- AI tokens (monetization) ----------------------------------------------
@@ -1192,11 +2083,23 @@ def token_reverse_purchase(ref: str, reason: str = "") -> Optional[dict]:
 
 
 def token_history(user_id: str, limit: int = 50) -> list[dict]:
-    """Recent ledger entries, newest first. Never raises."""
+    """Recent ledger entries, newest first. RAISES on a read failure.
+
+    `[]` meant both "nothing has been spent" and "the read threw", and the
+    tokens dialog renders the first as "Nothing yet — your AI activity will
+    show up here." That is the screen someone opens to find out whether they
+    were charged for the identify that just failed, so a failure answering it
+    with `[]` told them they were not. The dialog already has the other branch
+    ("Couldn't load your activity"); it just never got the chance to show it.
+
+    Unlike the balance functions below, this is a read for DISPLAY and takes
+    no part in the billing invariant, so it follows this module's read policy
+    rather than their deliberate return-None-and-let-the-caller-choose one.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return []
     try:
-        eng = _get_engine()
-        if eng is None:
-            return []
         with Session(eng) as s:
             rows = s.execute(
                 select(TokenLedger).where(TokenLedger.user_id == user_id)
@@ -1208,7 +2111,9 @@ def token_history(user_id: str, limit: int = 50) -> list[dict]:
                     for r in rows]
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: token_history failed: {exc}")
-        return []
+        raise StorageUnavailable(
+            "We couldn’t load your activity just now. Try again in a moment."
+        ) from exc
 
 
 # --- notifications ---------------------------------------------------------
@@ -1272,9 +2177,17 @@ def list_notifications(user_id: str, limit: int = 50,
                 q = q.where(Notification.read_at.is_(None))
             q = q.order_by(Notification.created_at.desc()).limit(limit)
             return [_notification_to_dict(n) for n in s.execute(q).scalars().all()]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Not []. The bell's empty state says "Nothing yet — when an item
+        # sells, it lands here so you can ship it fast", which is a claim
+        # about the seller's SALES; answering it from a failed read turns one
+        # Neon blip into "nothing has sold" on the surface someone checks to
+        # find out whether they owe a buyer a parcel. Same rule as
+        # list_listings. No database configured is still [] — a
+        # configuration, not a failure.
         log.warning(f"db: list_notifications failed: {exc}")
-        return []
+        raise StorageUnavailable(
+            "We couldn't load your notifications just now.") from exc
 
 
 def unread_notification_count(user_id: str) -> int:
@@ -1294,9 +2207,11 @@ def unread_notification_count(user_id: str) -> int:
                 .where(Notification.user_id == user_id,
                        Notification.read_at.is_(None))
             ).scalar() or 0)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # A badge of zero is the same claim as the empty list above.
         log.warning(f"db: unread_notification_count failed: {exc}")
-        return 0
+        raise StorageUnavailable(
+            "We couldn't count your notifications just now.") from exc
 
 
 def mark_notifications_read(user_id: str,

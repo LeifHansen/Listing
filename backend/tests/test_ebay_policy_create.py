@@ -106,11 +106,25 @@ def test_a_refused_create_carries_ebays_words(no_policies, monkeypatch):
     assert caught.value.status == 400
 
 
-def test_an_unreadable_policy_list_still_creates(monkeypatch, captures):
-    """"Couldn't ask" is treated as "none" HERE on purpose: this caller creates
-    one either way, and a duplicate policy is recoverable while publishing with
-    none is not."""
+def test_an_unreadable_policy_list_creates_nothing(monkeypatch, captures):
+    """This asserted the opposite -- that "couldn't ask" creates one anyway,
+    because "a duplicate policy is recoverable while publishing with none is
+    not".
+
+    The recoverable half does not hold up. Every timeout, 500 or token blip
+    minted another "Thryft Shop" policy on the seller's REAL eBay account;
+    they accumulate, they are visible in Seller Hub, and nothing in this app
+    removes them, so recovering means the seller deleting them by hand. The
+    other half is a false choice: refusing here does not publish with no
+    policy, it declines to guess and says to try again.
+
+    ebay_auth already states this rule for the same kind of question, in
+    fulfillment_policy_lookup: "we couldn't ask" must never be reported as
+    "you don't have one".
+    """
     def _boom(path, token):
         raise httpx.ConnectError("eBay unreachable")
     monkeypatch.setattr(ebay_auth, "_account_get", _boom)
-    assert ebay_auth.ensure_payment_policy("tok")["created"] is True
+    with pytest.raises(ebay_auth.PolicyLookupUnavailable):
+        ebay_auth.ensure_payment_policy("tok")
+    assert captures == {}, "an outage created a policy on the seller's account"

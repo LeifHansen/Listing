@@ -1,0 +1,229 @@
+name: Gates
+
+# The single definition of "has this commit been checked", called by BOTH
+# ci.yml (on a pull request) and deploy.yml (before shipping to Fly).
+#
+# It exists because those two were separate copies of the same intent and had
+# already drifted: deploy.yml gated production on the lightweight lint + unit
+# job ALONE. The cutout-safety suite (which decides whether the background
+# remover ate the seller's product), the frontend build (the only thing that
+# type-checks the JSX) and the smoke test (the only thing that catches a
+# screen a seller cannot open) never gated a deploy at all — and because
+# ci.yml triggers only on `pull_request`, a direct push to main or a manual
+# dispatch ran none of them either.
+#
+# deploy.yml's own comment already warned that its install list had to be kept
+# in sync with ci.yml's "by hand"; one workflow means there is nothing to keep
+# in sync.
+
+on:
+  workflow_call:
+
+# Every third-party action is pinned to a commit SHA, with the release it came
+# from in the comment beside it. A tag is a mutable pointer the action's owner
+# can move, so `@v4` means "whatever that account publishes next", running in
+# a job that can read this repo's secrets. .github/dependabot.yml keeps the
+# pins current: it reads those comments and opens a pull request when a newer
+# release exists, so the pin buys review rather than staleness.
+
+jobs:
+  # Lint + the pure-unit suite. Deliberately does NOT install the heavy image
+  # stack; the tests that need it importorskip here and run in `smoke` below,
+  # which fails on a skip so they cannot quietly stop running.
+  #
+  # cryptography is not optional despite the name: backend/db.py imports
+  # backend/crypto.py at module scope, so without it every test that touches
+  # the DB fails at COLLECTION.
+  checks:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography alembic
+      - name: Ruff
+        run: ruff check backend
+      - name: Tests
+        run: pytest backend/tests -q
+
+  # The image gate. The fast job above skips the image stack, so the rules
+  # that decide whether a cutout deleted the product would run nowhere — and
+  # "the background remover ate my item" is the failure that actually reaches
+  # sellers. Pillow/NumPy/SciPy only: no rembg, no onnxruntime, no model
+  # download. The suite works on synthetic mattes with known ground truth,
+  # which is what makes that possible.
+  cutout:
+    name: Cutout safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install pytest pillow numpy scipy python-dotenv pydantic
+      - name: Mask-safety rules
+        run: pytest backend/tests/test_matte.py -q
+      - name: Cutout regression suite
+        run: pytest backend/tests/test_cutout_regression.py backend/tests/test_bg_border.py -q
+      # Failing on a SKIP is the point. Every test here importorskips, because
+      # the fast `checks` job collects the whole directory without the image
+      # stack. That is also how a suite quietly stops running: the deps drift,
+      # the file skips in the one job built for it, and green stops meaning
+      # anything. This job asserts it actually ran.
+      - name: Photo-pass resume rules
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest backend/tests/test_photo_resume.py -q -rs | tee /tmp/photo-resume.log
+          if grep -qE '[0-9]+ skipped' /tmp/photo-resume.log; then
+            echo "::error::test_photo_resume.py skipped in the job built to run it"
+            exit 1
+          fi
+      - name: Export contract
+        run: pytest backend/tests/test_export_pipeline.py backend/tests/test_orientation.py -q
+
+  # The Vite build is the only thing that type-checks the JSX. Without it a
+  # broken import or syntax error in the frontend only surfaced during the
+  # production Docker build, i.e. after merge.
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Lint
+        run: npm run lint
+        working-directory: frontend
+      - name: Unit tests
+        run: npm test
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+
+  # Boots the real app and clicks through every screen. The unit tests and the
+  # build both pass happily on a UI that throws on mount — this is the job that
+  # catches a screen a seller cannot open.
+  smoke:
+    name: App smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      - name: Browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      # Installed FROM requirements.txt, minus only the two packages the app
+      # imports lazily (rembg pulls onnxruntime and a ~176MB model). A
+      # hand-written second list is what put this job in a loop: it was missing
+      # anthropic, then python-multipart, each found one CI run at a time.
+      # Deriving it from the real file means a new dependency cannot drift out
+      # of sync with what the app actually needs to boot.
+      - name: Server deps
+        run: |
+          grep -vE '^(rembg|onnxruntime)' requirements.txt > /tmp/ci-reqs.txt
+          pip install -r /tmp/ci-reqs.txt pytest
+      # This is the only job with fastapi AND Pillow together, so it is the
+      # only place these can run at all. In `checks` they importorskip on the
+      # missing Pillow and in `cutout` there is no fastapi — which meant they
+      # were passing by never executing. The skip guard below is what stops
+      # that happening again.
+      - name: API tests
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
+                 backend/tests/test_bulk_resume.py backend/tests/test_aspect_checkboxes.py \
+                 backend/tests/test_sold_archive.py backend/tests/test_store_scale.py \
+                 backend/tests/test_ebay_reconnect_identity.py \
+                 backend/tests/test_ebay_save_path.py \
+                 backend/tests/test_ebay_optin_route.py \
+                 backend/tests/test_session_alias_authorization.py \
+                 backend/tests/test_ebay_deletion_notices.py \
+                 backend/tests/test_strict_persistence.py \
+                 backend/tests/test_get_is_side_effect_free.py \
+                 backend/tests/test_public_surface.py \
+                 backend/tests/test_security_headers.py \
+                 backend/tests/test_no_create_on_unknown.py \
+                 backend/tests/test_sweep_scope.py \
+                 backend/tests/test_policy_terms_consent.py \
+                 backend/tests/test_csp_script_hashes.py \
+                 backend/tests/test_conflict_endpoint.py \
+                 backend/tests/test_partial_listing_update.py \
+                 backend/tests/test_payments_status_states.py \
+                 backend/tests/test_purchase_errors.py \
+                 backend/tests/test_sync_state_survives_a_save.py \
+                 backend/tests/test_taxonomy_quota_guard.py \
+                 backend/tests/test_listings_page_is_complete_or_says_so.py \
+                 backend/tests/test_marketplace_writes_are_not_assumed.py \
+                 backend/tests/test_a_merge_never_deletes_what_it_did_not_save.py \
+                 backend/tests/test_adobe_poll_stays_on_adobe.py \
+                 backend/tests/test_a_save_that_did_not_land_is_not_saved.py \
+                 backend/tests/test_a_full_disk_is_not_an_internal_error.py \
+                 backend/tests/test_a_storage_failure_keeps_its_own_name.py \
+                 backend/tests/test_no_route_answers_internal_server_error.py \
+                 backend/tests/test_a_photo_we_cannot_sign_for_is_not_missing.py \
+                 backend/tests/test_a_lookup_failure_reads_as_english.py \
+                 backend/tests/test_a_blip_does_not_blame_the_sellers_zip.py \
+                 backend/tests/test_the_list_does_not_ship_the_sync_ledger.py \
+                 backend/tests/test_a_settings_panel_shows_what_is_saved.py \
+                 backend/tests/test_a_number_we_could_not_read_is_not_zero.py \
+                 backend/tests/test_an_erasure_that_failed_is_not_finished.py \
+                 backend/tests/test_a_listing_we_cannot_read_is_not_missing.py \
+                 backend/tests/test_a_publish_that_cannot_check_does_not_create.py \
+                 backend/tests/test_a_count_is_not_capped_by_a_page_size.py \
+                 backend/tests/test_a_bulk_action_looks_up_what_it_was_given.py \
+                 backend/tests/test_the_unlink_reaches_what_the_banner_counted.py \
+                 backend/tests/test_the_sweep_reaches_the_live_end_of_a_big_store.py \
+                 backend/tests/test_a_truncated_page_can_say_how_many.py \
+                 backend/tests/test_the_older_listings_can_be_reached.py \
+                 backend/tests/test_an_interrupted_import_keeps_what_it_paid_for.py \
+                 -q -rs | tee /tmp/api-tests.log
+          if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
+            echo "::error::API tests skipped in the only job that can run them"
+            exit 1
+          fi
+      # A database, because half the smoke test is a seller signing up: with
+      # no DATABASE_URL the app refuses accounts, and the signed-in journey --
+      # the only pass that makes the app actually fetch anything -- cannot
+      # run. SQLite in a temp file, thrown away with the runner.
+      - name: Boot
+        run: |
+          SECRET_KEY=ci-smoke DATABASE_URL="sqlite:////tmp/smoke.db" \
+            nohup python -m uvicorn backend.main:app --port 8099 \
+            > /tmp/server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8099/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server never became healthy:" >&2; cat /tmp/server.log >&2; exit 1
+      - name: Smoke
+        run: npm run smoke
+        working-directory: frontend
+      - name: Server log on failure
+        if: failure()
+        run: cat /tmp/server.log || true

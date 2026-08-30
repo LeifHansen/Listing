@@ -39,6 +39,7 @@ import httpx
 
 from .. import config, db
 from ..config import log
+from . import owed_refunds
 
 # --- Feature costs (tokens) -------------------------------------------------
 # Overridable per deployment: TOKENS_COST_IDENTIFY=4 etc. lets the operator
@@ -160,13 +161,28 @@ def spend(user_id: str, feature: str, units: int = 1) -> Optional[dict]:
     return res
 
 
-def refund(spend_result: Optional[dict], units: Optional[int] = None) -> None:
+def refund(spend_result: Optional[dict], units: Optional[int] = None) -> bool:
     """Give back a (possibly partial) spend after an AI failure. Accepts the
-    exact dict spend() returned; no-ops on None/declined/free spends."""
+    exact dict spend() returned; no-ops on None/declined/free spends.
+
+    Returns whether the refund actually committed — and when it did not, the
+    debt is written to the volume so a later pass can settle it.
+
+    That answer used to be discarded. `db.token_refund` returns False when the
+    write did not happen, so a database blip in the refund window left the
+    seller charged for AI that failed, with nothing anywhere recording that
+    they were owed anything. The crash recovery in main only covers jobs whose
+    PROCESS died; a job that finished normally with a failed refund was never
+    revisited. See services/owed_refunds for why the record goes on the volume
+    rather than into the database that just refused the write.
+    """
     if not spend_result or not spend_result.get("ok") or not spend_result.get("entry_id"):
-        return
+        return False
     user_id = spend_result.get("user_id", "")
-    db.token_refund(user_id, spend_result["entry_id"], units=units)
+    paid = db.token_refund(user_id, spend_result["entry_id"], units=units)
+    if not paid:
+        owed_refunds.owe(spend_result, units=units)
+    return bool(paid)
 
 
 def receipts(*spend_results: Optional[dict]) -> list[dict]:

@@ -95,7 +95,58 @@ def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, st
 #
 # `ebay_listing_id` is deliberately NOT here: owned_state_from fills it only
 # when the client didn't carry one, and both callers keep that.
-SERVER_OWNED_FIELDS = ("source", "view_url", "ebay_account")
+# Fields no client may overwrite on a save. Each is written by the server on a
+# publish, an end, or a sync, and a client's copy of one can only ever be as
+# fresh as the moment it loaded — which is the assumption restore_server_fields
+# exists to refuse.
+#
+# `remote_shadow` and `conflicts` are the sync's own bookkeeping and were the
+# ones missing. The shadow is what eBay last told us a listing said: the BASE
+# the three-way merge reconciles against, and with no shadow the merge
+# deliberately does nothing and the local copy stands. So a tab opened before
+# the first sync, saving its shadow-less copy, would erase the base — and the
+# next sync would silently ignore a title the seller had fixed in Seller Hub,
+# which is exactly the bug the shadow was added to fix. Clearing `conflicts`
+# does the matching damage on the other side: the field becomes sendable
+# again, resolving a both-sides edit in the local copy's favour without
+# asking.
+SERVER_OWNED_FIELDS = (
+    "source", "view_url", "ebay_account",
+    # The sync's own bookkeeping — see the note above.
+    "remote_shadow", "conflicts",
+    # The immutable eBay account id ownership is decided on (P0-04). It keys
+    # on this precisely BECAUSE it cannot be renamed, and a save that could
+    # set it points the app at the wrong seller's listings.
+    "ebay_account_id",
+    # The idempotency key a publish is recovered by (P0-07). Change it and the
+    # duplicate check that stops a retried publish minting a second live
+    # listing no longer matches.
+    "sku",
+    # The flag that stops this app rewriting a listing whose shape it cannot
+    # represent.
+    "has_variations",
+    # eBay's own numbers. Two of them add up to the Sold total the seller
+    # reads as fact, and none of them is something a client observes.
+    # `sold_at` is the third part of the same observation: eBay's transaction
+    # date, or the moment the sync watched the listing flip to sold. Its two
+    # siblings were protected and it was not — which left the dashboard's
+    # "sold in the last N days" tile counting against a date a client could
+    # set, and the sold archive's ordering forgeable with it.
+    "sold_price", "sold_quantity", "sold_at", "watch_count", "ebay_start_time",
+    # The EPS URLs of an imported listing's photos, written by the sync from
+    # eBay's answer and never by anything the seller does. The revise reads
+    # them as its fallback ("untouched photos → reuse the live EPS URLs") and
+    # a RELIST requires them, so a stale tab sending an empty list produced
+    # "this listing has no photos left to relist with" for a listing eBay is
+    # still hosting twelve photos for.
+    #
+    # It is also the field the Etsy publish fetches server-side. That hole is
+    # closed at the fetch (image_import.fetch_ebay_image) and this is not a
+    # substitute: the rule below only overrides a stored value that EXISTS, so
+    # a brand-new draft still carries whatever the client sent. Depth, not the
+    # guard.
+    "image_urls",
+)
 
 
 def restore_server_fields(listing, stored: dict) -> list[str]:

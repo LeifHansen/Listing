@@ -19,6 +19,7 @@ import { BulkQueue } from "./listing/BulkMode";
 import { DraftsStrip } from "./listing/DraftsStrip";
 import { ImageEditor } from "./listing/ImageEditor";
 import { SoldArchive } from "./listing/SoldArchive";
+import { ConflictBanner } from "./listing/ConflictBanner";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
@@ -393,6 +394,20 @@ function Workflow() {
       {/* Long waits (publish, save, refine) use a full-screen branded overlay
           so feedback is visible no matter where the page is scrolled. */}
       {w.aiBusy && <LoadingOverlay messages={w.aiBusy} />}
+
+      {/* Above everything: an unanswered conflict is an edit that will never
+          reach eBay, so it is not something to scroll past. */}
+      {(session?.conflicts || []).length > 0 && (
+        <motion.div variants={rise}>
+          <ConflictBanner
+            conflicts={session.conflicts}
+            sessionId={session.sessionId}
+            onResolved={(r) => setSession((cur) => (cur ? {
+              ...cur, listing: r.listing, conflicts: r.conflicts,
+            } : cur))}
+          />
+        </motion.div>
+      )}
 
       <motion.div variants={rise}>
         <RefineBar w={w} />

@@ -4,11 +4,12 @@ import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, Megaphone, TrendingDown, RotateCcw,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign,
+  ChevronDown, DollarSign, AlertTriangle,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { api, postJson } from "@/lib/api";
+import { readLocal, writeLocal } from "@/lib/localPrefs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -18,7 +19,10 @@ import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
-import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
+import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
+         salesSummary } from "@/lib/sales";
+import { listingsView, storeTotal } from "@/lib/listingsView";
+import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
 // it during render is a no-op state write when it is already empty, instead of
@@ -283,8 +287,11 @@ const rise = {
 // in the hero so "is this my real store?" is answered before anything else.
 function MirrorStatus() {
   const { user, ebay, storeSync, setView } = useApp();
-  if (!user) return null;
-  if (!ebay.connected) {
+  const mirror = storeMirrorView({
+    user, connected: ebay.connected, ...storeSync,
+  });
+  if (mirror.kind === "hidden") return null;
+  if (mirror.kind === "not-connected") {
     return (
       <button
         type="button"
@@ -295,15 +302,17 @@ function MirrorStatus() {
       </button>
     );
   }
-  if (storeSync.syncing) {
+  if (mirror.kind === "syncing") {
     // A store of any size takes minutes (one eBay call per listing), so the
     // line carries the count the background job reports — a bare spinner with
     // no end in sight reads as broken.
+    // One count, because it is now one pass: each listing is fetched from
+    // eBay and written down as a single unit, so there is no longer a
+    // "fetching" stage followed by a "saving" one to tell apart. The number
+    // is how many of the seller's listings are actually here.
     const p = storeSync.progress;
     const detail = p && p.total
-      ? (p.phase === "saving"
-        ? ` saving ${Math.min(p.done, p.total)} of ${p.total}`
-        : ` ${Math.min(p.done, p.total)} of ${p.total} listings`)
+      ? ` ${Math.min(p.done, p.total)} of ${p.total} listings`
       : "";
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary">
@@ -312,17 +321,23 @@ function MirrorStatus() {
       </span>
     );
   }
-  if (storeSync.error) {
+  if (mirror.kind === "error") {
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warning">
         <RefreshCw size={14} aria-hidden /> Store sync hit a snag — retry from Listings
       </span>
     );
   }
+  // A partial pass is not a failure and must not read as one — the records
+  // below are real, they are just not all of them and not all freshly
+  // checked. Same icon in a quieter colour, and the certainty removed from
+  // both the line and its tooltip. See lib/storeMirror.
   return (
     <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary"
-      title="Everything below reflects your actual eBay store — created here or not.">
-      <CheckCircle2 size={14} className="text-success" aria-hidden /> Live mirror of your eBay store
+      title={mirror.title}>
+      <CheckCircle2 size={14}
+        className={mirror.kind === "partial" ? "text-ink-faint" : "text-success"}
+        aria-hidden /> {mirror.text}
     </span>
   );
 }
@@ -331,11 +346,11 @@ function MirrorStatus() {
 // months shouldn't have to re-pick every morning. Rendered as a plain select:
 // it lives in the tile's corner as a sibling of the tile button (see
 // StatCard's `action`), so it has to be a real control, not a nested one.
-const SOLD_RANGE_KEY = "quickflip-sold-range";
+const SOLD_RANGE_KEY = "sold-range";   // see lib/localPrefs
 
 function readSoldRange() {
   try {
-    const saved = localStorage.getItem(SOLD_RANGE_KEY);
+    const saved = readLocal(SOLD_RANGE_KEY);
     if (SOLD_RANGES.some((r) => r.id === saved)) return saved;
   } catch (e) { /* private mode — the default is fine */ }
   return DEFAULT_SOLD_RANGE;
@@ -358,10 +373,15 @@ function soldSub(sales, soldEnded) {
   // The window itself is named by the picker in the corner, so this line
   // spends its width on what the total is made of instead of repeating it.
   const parts = [`${sales.count} sale${sales.count === 1 ? "" : "s"}`];
-  if (sales.profit != null) {
+  // Only when there is one currency to name it in. Profit summed across
+  // currencies is a number with no meaning, and printing it with a default
+  // dollar sign is how a seller on eBay.co.uk was told their £45 item sold
+  // "for $45.00" -- fixed once, at the sold notification, and still here.
+  if (sales.profit != null && sales.currency) {
     const sign = sales.profit >= 0 ? "+" : "−";
-    parts.push(`${sign}${formatMoney(Math.abs(sales.profit))} profit`);
+    parts.push(`${sign}${formatMoney(Math.abs(sales.profit), sales.currency)} profit`);
   }
+  if (sales.mixedCurrency) parts.push("more than one currency");
   // Say when the total is leaning on asking prices rather than reported sale
   // amounts, instead of presenting a guess as the takings.
   if (sales.approx) parts.push(`${sales.approx} estimated`);
@@ -396,6 +416,9 @@ export function Dashboard() {
   const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
+  const storeView = listingsView({
+    ...listingsState, user, count: items.length,
+  });
 
   // "What to do next" — ranked actions across the user's listings.
   const [insights, setInsights] = useState(NO_INSIGHTS);
@@ -523,9 +546,12 @@ export function Dashboard() {
   const sales = salesSummary(items, soldRangeId);
   const pickSoldRange = (id) => {
     setSoldRangeId(id);
-    try { localStorage.setItem(SOLD_RANGE_KEY, id); } catch (e) { /* private mode */ }
+    writeLocal(SOLD_RANGE_KEY, id);
   };
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
+  // The same question for the live listings: one currency, or a sum that
+  // cannot be shown as money at all.
+  const liveMoney = currencyOf(live);
   const watcherTotal = live.reduce((sum, i) => {
     const m = metricsById[i.id];
     const w = m?.watchers ?? i.listing?.watch_count ?? 0;
@@ -623,26 +649,39 @@ export function Dashboard() {
       {/* Your store, mirrored — the tiles are the seller's REAL numbers and
           each one jumps to the matching view. */}
       <motion.div variants={rise} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Every one of these is counted off `items`, so when the store read
+            fails they all count zero and say so as a fact -- on the same
+            screen, at the same moment, as the card below explaining that the
+            listings could not be loaded. storeTotal is what stops that. */}
         <StatCard icon={Coins} tone="green" label="Active on eBay"
-          value={live.length}
-          sub={revenue > 0
-            ? `${formatMoney(revenue)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
-            : "everything currently live"}
+          {...storeTotal(storeView.kind, live.length,
+            revenue > 0 && liveMoney.currency
+              ? `${formatMoney(revenue, liveMoney.currency)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
+              : "everything currently live")}
           onClick={() => openListings("active")} />
         <StatCard icon={FileText} tone="yellow" label="Drafts in progress"
-          value={drafts.length}
-          sub={inventory.length
+          {...storeTotal(storeView.kind, drafts.length, inventory.length
             ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"} from Shop Mode`
-            : "open one to finish & publish"}
+            : "open one to finish & publish")}
           onClick={() => openListings("drafts")} />
         <StatCard icon={DollarSign} tone="blue" label="Sold"
-          value={formatMoney(sales.total) || "$0.00"}
-          sub={soldSub(sales, soldEnded)}
+          {...storeTotal(storeView.kind,
+                         // A dash for a total that spans currencies, the same
+                         // answer this tile gives for one it could not
+                         // measure -- because a mixed sum is not a figure the
+                         // seller can act on whatever symbol goes in front.
+                         sales.mixedCurrency
+                           ? "—"
+                           : formatMoney(sales.total,
+                                         sales.currency || DEFAULT_CURRENCY)
+                             || "$0.00",
+                         soldSub(sales, soldEnded))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
-          value={todays.length}
-          sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}
+          {...storeTotal(storeView.kind, todays.length,
+                         todays.length ? "keep the streak going"
+                                       : "photos in, listing out — ~30s")}
           onClick={startNew} />
       </motion.div>
 
@@ -773,6 +812,19 @@ export function Dashboard() {
                 metrics={metricsById[item.id]} />
             ))}
           </div>
+        ) : storeView.kind === "unavailable" ? (
+          // Not the empty state: a read that failed is not evidence that the
+          // seller has no listings, and this panel is the first thing they see.
+          <Card>
+            <p className="text-sm text-ink flex gap-2">
+              <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>{storeView.message}</span>
+            </p>
+            <Button variant="soft" size="sm" className="mt-3"
+              onClick={() => loadListings()}>
+              Try again
+            </Button>
+          </Card>
         ) : (
           <Card className="p-0">
             <EmptyState

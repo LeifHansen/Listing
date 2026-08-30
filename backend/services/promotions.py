@@ -273,18 +273,38 @@ def suggested_ad_rates(creds: dict | None, listing_ids: list[str]) -> dict[str, 
 
 
 def active_ads(creds: dict | None) -> dict[str, dict]:
-    """Every listing that currently has an ACTIVE Promoted Listings ad, across
+    """active_ads_status's map alone, for callers that only want the ads.
+
+    Anything DECIDING something on the strength of an empty answer should use
+    active_ads_status instead — an empty map means "no ads" and "we could not
+    ask" here, and those lead to different decisions.
+    """
+    return active_ads_status(creds)[0]
+
+
+def active_ads_status(creds: dict | None) -> tuple[dict[str, dict], bool]:
+    """(ads, did eBay actually answer).
+
+    Every listing that currently has an ACTIVE Promoted Listings ad, across
     ALL of the seller's campaigns (not just ours) — so we correctly see items
     promoted directly in eBay Seller Hub too. Keyed by BOTH the eBay listing id
     and the inventory reference (SKU), since ads can be created either way:
-    {key: {'rate': '8.5', 'status': 'RUNNING'}}. Best-effort, cached."""
+    {key: {'rate': '8.5', 'status': 'RUNNING'}}. Cached.
+
+    The flag is the point. This used to answer `{}` for both "eBay says this
+    seller has no ads" and "the lookup failed", and the insights panel read
+    the empty map as "not promoted yet" — so during an ads-API blip a seller
+    who promotes in Seller Hub was invited to pay for a SECOND ad on listings
+    that were already running one. A fee must not be recommended on the
+    strength of a question nobody managed to ask.
+    """
     token = (creds or {}).get("access_token")
     if not token:
-        return {}
+        return {}, False
     cache_key = token[-16:]
     hit = _ADS_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < _ADS_TTL:
-        return hit[1]
+        return hit[1], True
     base = config.EBAY_API_BASE
     out: dict[str, dict] = {}
     try:
@@ -309,10 +329,12 @@ def active_ads(creds: dict | None) -> dict[str, dict]:
                     for key in (ad.get("listingId"), ad.get("inventoryReferenceId")):
                         if key:
                             out[str(key)] = entry
-    except Exception as exc:  # noqa: BLE001 - ad status is an optional overlay
+    except Exception as exc:  # noqa: BLE001 - reported via the flag, not raised
+        # Deliberately NOT cached: an outage must not be remembered as "this
+        # seller has no ads" for the whole TTL.
         log.info("active ads unavailable: %s", exc)
-        return {}
+        return {}, False
     if len(_ADS_CACHE) > 100:
         _ADS_CACHE.clear()
     _ADS_CACHE[cache_key] = (time.time(), out)
-    return out
+    return out, True

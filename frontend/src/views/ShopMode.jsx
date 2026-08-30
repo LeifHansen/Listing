@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Camera, Video, Plus, RotateCcw, MapPin, Eye } from "lucide-react";
 import { once, mediaUrl } from "@/lib/utils";
+import { priceView } from "@/lib/priceLookup";
 import {
   api, postJson, downscaleForUpload, extractFrames, UPLOAD_TIMEOUT_MS,
   MODEL_TIMEOUT_MS,
@@ -45,8 +46,13 @@ export function ShopMode() {
       const res = await api(`/api/identify/${up.session_id}`,
         { method: "POST", timeoutMs: MODEL_TIMEOUT_MS });
 
-      // Best-effort market price (never block the scan on it).
+      // Best-effort market price (never block the scan on it). `checked`
+      // rides along because the price is missing for two different reasons
+      // and this is the screen where the difference costs money: someone is
+      // standing in a shop deciding whether to buy the thing in their hand,
+      // and "no comps" and "we couldn't ask eBay" are not the same news.
       let price = null;
+      let priceChecked = true;
       if (health.taxonomy_configured) {
         try {
           const l = res.listing;
@@ -55,11 +61,14 @@ export function ShopMode() {
             query, category_id: l.category_id || null, condition: l.condition || null,
           });
           price = pd.suggestion;
-        } catch (e) { /* price is optional */ }
+          priceChecked = pd.checked !== false;
+        } catch (e) {
+          priceChecked = false;   // the request never landed — we did not look
+        }
       }
       setResult({
         session: up.session_id, listing: res.listing,
-        confidence: res.confidence, price,
+        confidence: res.confidence, price, priceChecked,
       });
     } catch (e) {
       toast(`Scan error: ${e.message}`, { kind: "error" });
@@ -194,7 +203,11 @@ export function ShopMode() {
                   </p>
                 </div>
               ) : (
-                <p className="text-sm text-ink-secondary">No price estimate yet — you can set one later.</p>
+                <p className="text-sm text-ink-secondary">
+                  {result.priceChecked === false
+                    ? priceView({ checked: false }).message
+                    : "No price estimate yet — you can set one later."}
+                </p>
               )}
               {/* What you'd pay — auto-read from a visible price sticker when
                   possible, editable, optional. Saved on the Buy so profit can

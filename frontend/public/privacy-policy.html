@@ -35,6 +35,10 @@
         uploaded.</li>
       <li><strong>Listing drafts:</strong> titles, descriptions, prices, and
         other listing details generated or edited in the app.</li>
+      <li><strong>Payments:</strong> if you buy AI tokens, the payment is
+        handled by Stripe. Your card details go to Stripe directly and are
+        never sent to or stored by us; we keep only the record of the
+        purchase.</li>
       <li><strong>Marketplace connections:</strong> if you connect a
         marketplace account (eBay, Etsy, or Depop), we store the OAuth refresh
         token that marketplace issues and — for eBay — the identifiers of your
@@ -61,24 +65,33 @@
     <ul>
       <li>We do not sell your data or share it with anyone beyond the service
         providers named above (Anthropic, the marketplaces you connect —
-        eBay, Etsy, Depop — and our hosting/storage providers Fly.io, Neon,
-        and Cloudflare).</li>
+        eBay, Etsy, Depop — our payment processor Stripe, and our
+        hosting/storage providers Fly.io, Neon, and Cloudflare).</li>
       <li>We do not use your photos or listings for advertising.</li>
     </ul>
 
     <h2>eBay account deletion</h2>
     <p>We subscribe to eBay's marketplace account deletion notifications. When
-    eBay tells us one of its users has requested deletion, we record the
-    notice for audit purposes; we do not key any personal data to eBay
-    usernames.</p>
+    eBay tells us one of its users has requested deletion, we verify that the
+    notice really came from eBay, record it, and then erase the data we hold
+    for the matching account — the connection and its stored token, the
+    listings, and the photos behind them.</p>
+    <p>We match the notice on the permanent account identifier eBay sends,
+    not on a seller's username, because a username can be changed or reused
+    and would match the wrong person. We keep a record that the deletion
+    happened, without the personal details it was about.</p>
 
     <h2>Deleting your account</h2>
     <p>You can delete your account yourself, from inside the app, at any time:
-    <strong>Settings → Delete account</strong>. It immediately removes your
-    account, your listing drafts, and your uploaded photos (from both our
-    database and our image storage), and hands your marketplace authorizations
-    back to those marketplaces so the connections stop existing on their side
-    too. You don't need to email anyone and there's no waiting period.</p>
+    <strong>Settings → Delete account</strong>. Your account, your listing
+    drafts and your stored marketplace tokens are removed straight away. Your
+    uploaded photos are then deleted from our image storage; that part runs
+    just after, so it can take a short while to finish on a large account.
+    You don't need to email anyone and there's no waiting period.</p>
+    <p>Deleting your account removes the marketplace tokens we hold, so this
+    app can no longer reach your marketplace accounts. It does not by itself
+    cancel the authorization on the marketplace's side — to do that, revoke
+    this app's access in your eBay, Etsy or Depop account settings.</p>
     <p>One thing we can't delete: listings you already published stay live on
     eBay, Etsy, or Depop under your own seller account. End those on the
     marketplace itself if you want them taken down.</p>

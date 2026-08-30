@@ -117,15 +117,38 @@ def test_a_batch_photo_queues_for_the_model_instead_of_giving_up(monkeypatch):
             outcome.append("got-the-slot")
         settled.set()
 
+    worker = threading.Thread(target=_queued_photo, daemon=True)
     images._INFER_LOCK.acquire()
     try:
-        threading.Thread(target=_queued_photo, daemon=True).start()
+        worker.start()
         # Well past the interactive deadline, comfortably short of the batch
         # one. Neither outcome yet -- still queued -- is the whole point.
         assert not settled.wait(0.5), f"batch photo settled early: {outcome}"
     finally:
         images._INFER_LOCK.release()
-    settled.wait(5)
+    # Wait on the deadline under test, and JOIN. Both matter.
+    #
+    # The old budget was a flat 5 seconds, which is a bet on the environment
+    # rather than on the behaviour: where rembg is absent (CI installs the
+    # server without it) _alpha_mask raises the moment it has the slot, but
+    # where it is present the winning thread pays for a model load and a real
+    # inference first. On a cold, shared box that overran, and the failure it
+    # produced was `outcome == []` -- which reads as "the photo never got the
+    # slot", the exact opposite of what happened.
+    #
+    # Worse, the thread was left running while holding _INFER_LOCK, so
+    # engine_state()["busy"] stayed True for the rest of the session and the
+    # NEXT test failed too, pointing at a probe that was fine. One slow
+    # machine, two red tests, neither naming the cause. Joining bounds that:
+    # _alpha_mask releases the lock in a finally, so a joined worker cannot
+    # leak it into another test.
+    #
+    # Nothing is loosened by waiting longer. Giving up is not a slow success:
+    # it raises CutoutBusy at BATCH_INFER_WAIT_SECONDS and appends
+    # "gave-up", which still fails the assertion below.
+    worker.join(images.BATCH_INFER_WAIT_SECONDS + 5)
+    assert not worker.is_alive(), (
+        "the queued photo never settled within the batch deadline")
     assert outcome == ["got-the-slot"]
 
 

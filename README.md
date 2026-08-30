@@ -1,4 +1,4 @@
-# QuickFlip
+# Thryft Shop
 
 **Snap it · AI writes it · list it everywhere.**
 
@@ -407,7 +407,7 @@ errors on a DB problem. Tables are auto-created on first use.
 1. **Persistence** ✅ — Neon-backed listing history + My listings.
 2. **Reliability & UX** ✅ — HEIC uploads, clear errors, nav.
 3. **Accounts & auth** ✅ — email/password login; listings scoped per user.
-4. **Brand & UX design** ✅ — QuickFlip identity: eBay palette, retro-modern,
+4. **Brand & UX design** ✅ — Thryft Shop identity: eBay palette, retro-modern,
    90s Jordan/Nike energy, cursive wordmark. (Ongoing design pass each phase.)
 5. **eBay OAuth** ✅ — "Sign in with eBay" (Authorization Code flow) with
    per-user tokens + auto-fetched business policies/location. Set
@@ -606,11 +606,15 @@ and a reload resets the browser's own double-submit guard. Three defences, in
   payload assembled before the first publish carries no `ebay_listing_id` and no
   `source`, and believing it reads as "never listed".
 - **The create carries an idempotency key** — as `UUID`, and (fixed-price) as
-  `InventoryTrackingNumber`, which is separately queryable. eBay refuses a
-  second create under the same key even when the two attempts never meet in one
-  process, and the app then adopts the listing that already exists rather than
-  posting a twin. A relist keys on the item it replaces, so an intentional
+  `SKU` with `InventoryTrackingMethod=SKU`, which makes the listing findable by
+  `GetItem` afterwards. eBay refuses a second create under the same `UUID` even
+  when the two attempts never meet in one process, answering error 488 with the
+  item id the first attempt produced, and the app adopts that listing rather
+  than posting a twin. A relist keys on the item it replaces, so an intentional
   relist still goes through while a retried one doesn't double-list.
+  (This previously sent `InventoryTrackingNumber`, which is not an element of
+  eBay's `ItemType` — it was ignored, and the `GetItem` lookup built on it could
+  never succeed. See <https://developer.ebay.com/support/kb-article?KBid=1462>.)
 
 ### Finding the duplicates already out there
 

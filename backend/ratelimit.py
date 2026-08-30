@@ -30,6 +30,22 @@ MAX_ATTEMPTS = 10           # per client, per window, per bucket
 # for ordinary editing. A generous ceiling instead — far above real editing,
 # far below what it takes to wedge the machine.
 STUDIO_MAX_CALLS = 120
+# The eBay lookups that need no login: category suggestions, item aspects and
+# price comps. They call eBay with the APPLICATION token, which is why they
+# need no seller — and why an unauthenticated flood spends an allowance shared
+# by EVERY seller (eBay's default is 5,000 calls a day for the whole
+# application). The answers are cached, but the cache is bounded, so distinct
+# queries evict it and force a live call each.
+#
+# Exhausting it does not degrade the attacker; it degrades every seller at
+# once — no categories, no item specifics, no price comps, on a listing they
+# are trying to publish. Same argument as STUDIO_MAX_CALLS above, with a
+# third-party quota in place of the CPU.
+#
+# Generous on purpose: an identify looks up categories, aspects and comps per
+# item and a bulk batch does that for a pile, so this has to sit far above a
+# real session and far below a day's allowance.
+TAXONOMY_MAX_CALLS = 300
 # Cap the number of tracked keys so a spray across many IPs can't grow the
 # dict without bound; cold entries are swept when the cap is reached, and if
 # none are cold the coldest are dropped anyway (see check).

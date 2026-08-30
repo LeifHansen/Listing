@@ -8,6 +8,11 @@ pydantic==2.10.5
 python-dotenv==1.0.1
 httpx==0.28.1
 SQLAlchemy==2.0.36
+# Schema migrations. Not on the boot path yet -- the app still calls
+# create_all plus the guarded ALTERs -- but shipped in the image so the
+# cutover is `alembic stamp head` then `alembic upgrade head` on the box
+# rather than a redeploy. See alembic/env.py.
+alembic==1.19.1
 psycopg[binary]==3.2.3
 bcrypt==4.2.1
 PyJWT==2.10.1

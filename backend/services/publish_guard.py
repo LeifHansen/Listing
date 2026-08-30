@@ -70,8 +70,15 @@ def idempotency_key(session_id: str, replacing_item_id: str = "") -> str:
     """The key that makes creating THIS listing safe to repeat.
 
     Deterministic, so a retry of the same publish computes the same key and
-    eBay can recognise it. It travels as both UUID and (fixed-price)
-    InventoryTrackingNumber; see ebay_trading.create_listing.
+    eBay can recognise it. It travels as UUID and, on a fixed-price create, as
+    Item.SKU with InventoryTrackingMethod=SKU; see ebay_trading.create_listing.
+
+    The lock below is process-local, so it does not serialize two machines.
+    What actually prevents a duplicate across processes is eBay's own UUID
+    check, which is server-side and is the guard being relied on; the lock
+    only saves a wasted round trip for the common double-tap. (An earlier
+    version claimed a second server-side guard via InventoryTrackingNumber,
+    which eBay does not implement.)
 
     `replacing_item_id` distinguishes a relist from the publish that came
     before it. A relist is a genuinely new listing — the seller ended the old
@@ -82,10 +89,16 @@ def idempotency_key(session_id: str, replacing_item_id: str = "") -> str:
     session_id = (session_id or "").strip()
     if not session_id:
         return ""
+    # The `qf-` prefix is the app's old name and stays that way: this string
+    # is stamped on live eBay listings as Item.SKU, and eBay is holding the
+    # ones already published. Renaming it matches none of them, so every such
+    # listing imports as a stranger's on the next sync -- a duplicate card for
+    # an item the seller already has, which is the exact failure this module
+    # exists to prevent. Pinned by tests/test_the_rename_stops_at_stored_data.py.
     key = f"qf-{session_id}"
     if replacing_item_id:
         key += f"-r{str(replacing_item_id).strip()}"
-    return key[:50]  # InventoryTrackingNumber's ceiling
+    return key[:50]  # eBay's SKU length ceiling
 
 
 def stored_item_id(record: Optional[dict]) -> str:

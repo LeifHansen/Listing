@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
-import { pollJob, postJson } from "@/lib/api";
+import { patchJson, pollJob, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -33,14 +33,18 @@ function DraftShipping({ item, className }) {
     const previous = value;
     setValue(id);
     try {
-      await postJson(`/api/save/${item.id}`, {
-        ...(item.listing || {}), fulfillment_policy_id: id,
+      // PATCH, not a full save. This used to spread `item.listing` — the copy
+      // loaded whenever /api/listings last ran — so choosing a shipping policy
+      // from a card also wrote back a title someone had since fixed in the
+      // editor, or anything a background sync had pulled in. Sending one field
+      // means there is no stale copy to send.
+      await patchJson(`/api/listings/${item.id}`, {
+        fulfillment_policy_id: id,
       });
-      // Refresh the cache, exactly as DraftCategory below does. /api/save is a
-      // full REPLACE, and publishItem re-saves this card's in-memory
-      // item.listing on the way to publishing -- so without this the policy
-      // just chosen was overwritten with the stale one at the moment it
-      // mattered, and the listing went live with the wrong shipping.
+      // Still refreshed: publishItem re-saves this card's in-memory
+      // item.listing on the way to publishing, so without this the policy just
+      // chosen was overwritten with the stale one at the moment it mattered,
+      // and the listing went live with the wrong shipping.
       await loadListings({ quiet: true });
     } catch (e) {
       // Put the dropdown back. Leaving it on the new value showed a policy
@@ -72,7 +76,9 @@ function DraftCategory({ item }) {
   const save = async (patch) => {
     setSaving(true);
     try {
-      await postJson(`/api/save/${item.id}`, { ...(item.listing || {}), ...patch });
+      // Same reason as DraftShipping above: the patch names the two category
+      // fields and leaves everything else as stored.
+      await patchJson(`/api/listings/${item.id}`, patch);
       // Refresh the cache so the card (and its Publish gate) sees the change.
       await loadListings({ quiet: true });
     } catch (e) {

@@ -44,7 +44,73 @@ _LOGISTICS = "/sell/logistics/v1_beta"
 
 
 class OrdersError(ValueError):
-    """An orders/shipping call failed — carries a user-facing reason."""
+    """An orders/shipping call failed — carries a user-facing reason.
+
+    `outcome_unknown` is False here and True on UnknownOutcome below, so a
+    caller can ask any orders failure whether eBay might still have acted on
+    it.
+    """
+
+    outcome_unknown = False
+
+
+class UnknownOutcome(OrdersError):
+    """The request went out and we never learned what eBay did with it.
+
+    Raised only for the calls that CHANGE something and cannot be repeated for
+    free: buying a label spends the seller's postage money, and filing a
+    shipping fulfillment tells eBay the order shipped and emails the buyer the
+    tracking. Both used to answer a lost response with "Couldn't reach eBay",
+    which reads as "nothing happened" -- so the seller buys a second label, or
+    files a second fulfillment against one order.
+
+    A shipping QUOTE is deliberately not in this class: it costs nothing and
+    reserves nothing, so asking again is free and there is no outcome to be in
+    doubt about. Nor are the reads.
+    """
+
+    outcome_unknown = True
+
+
+# Transport failures that prove the request never reached eBay: no connection
+# was established, so nothing there could have acted on it. Everything else --
+# including an exception type nobody here anticipated -- is treated as
+# unknown, because being wrong in the "nothing happened" direction is what
+# costs the seller a second charge.
+_NEVER_SENT = (
+    httpx.ConnectError,        # DNS failure, connection refused, TLS refused
+    httpx.ConnectTimeout,      # gave up before the connection was made
+    httpx.PoolTimeout,         # never got a connection out of the pool
+    httpx.UnsupportedProtocol,
+    httpx.InvalidURL,
+)
+
+
+def _lost(exc: Exception, unknown: str) -> OrdersError:
+    """The error for a change-making call whose answer never arrived.
+
+    `unknown` is what to tell the seller when eBay may already have acted. A
+    connection that was never made gets the ordinary "couldn't reach eBay"
+    instead -- sending someone to check their postage every time their wifi
+    drops before the request leaves would train them to ignore the warning
+    that matters.
+    """
+    if isinstance(exc, _NEVER_SENT):
+        return OrdersError(f"Couldn't reach eBay: {exc}")
+    return UnknownOutcome(unknown)
+
+
+# What the seller is told when a spend or a fulfillment may have landed.
+# Neither says "nothing happened", which is the one thing that cannot be
+# justified here and the one thing that leads to doing it twice.
+_LABEL_UNKNOWN = (
+    "We lost contact with eBay while buying this label, so we can't tell "
+    "whether it went through. Check the order's labels on eBay before buying "
+    "again — otherwise you may be charged for two.")
+_FULFILLMENT_UNKNOWN = (
+    "We lost contact with eBay while marking this order shipped, so we can't "
+    "tell whether it went through. Check the order on eBay before marking it "
+    "again.")
 
 
 def _headers(token: str) -> dict:
@@ -120,13 +186,41 @@ def _order_to_dict(o: dict) -> dict:
     }
 
 
-def awaiting_shipment(token: str, limit: int = 50) -> list[dict]:
-    """The seller's orders still waiting to ship, newest first."""
+def awaiting_page(token: str, limit: int = 50) -> dict:
+    """One page of orders still waiting to ship, and how many there are.
+
+    {orders, total, partial}. `total` is eBay's own count for the filter, and
+    `partial` says the page does not cover it — which the caller needs,
+    because this is the list a seller reads to decide what still has to be
+    packed. A page of 50 out of 80 used to be indistinguishable from 50 out of
+    50, and eBay measures late dispatch: the thirty invisible orders cost the
+    seller's standing, not just their afternoon.
+
+    `total` is never invented. When eBay omits it, it falls back to what this
+    page actually holds and `partial` stays False — the honest reading of "we
+    were not told".
+    """
     data = _get(token, f"{_FULFILLMENT}/order", params={
         "filter": "orderfulfillmentstatus:{NOT_STARTED|IN_PROGRESS}",
         "limit": str(max(1, min(limit, 200))),
     })
-    return [_order_to_dict(o) for o in data.get("orders") or []]
+    orders = [_order_to_dict(o) for o in data.get("orders") or []]
+    try:
+        total = int(data.get("total"))
+    except (TypeError, ValueError):
+        total = len(orders)
+    return {"orders": orders, "total": total,
+            "partial": total > len(orders)}
+
+
+def awaiting_shipment(token: str, limit: int = 50) -> list[dict]:
+    """The seller's orders still waiting to ship, newest first.
+
+    The bare list, for callers that only need to find one order in it (see
+    order_for_item). Anything SHOWING the pile should use awaiting_page, which
+    also says whether the page is the whole of it.
+    """
+    return awaiting_page(token, limit)["orders"]
 
 
 def get_order(token: str, order_id: str) -> dict:
@@ -170,8 +264,12 @@ def mark_shipped(token: str, order_id: str, tracking_number: str,
         resp = httpx.post(
             f"{config.EBAY_API_BASE}{_FULFILLMENT}/order/{order_id}/shipping_fulfillment",
             headers=_headers(token), json=body, timeout=_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001
-        raise OrdersError(f"Couldn't reach eBay: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+        raise _lost(exc, _FULFILLMENT_UNKNOWN) from exc
+    if resp.status_code >= 500:
+        # Something that already had the request in hand failed to answer for
+        # it. Not a refusal.
+        raise UnknownOutcome(_FULFILLMENT_UNKNOWN)
     if resp.status_code not in (200, 201):
         if _scope_missing(resp):
             raise OrdersError(
@@ -306,8 +404,10 @@ def purchase_label(token: str, shipping_quote_id: str, rate_id: str) -> dict:
         resp = httpx.post(
             f"{config.EBAY_API_BASE}{_LOGISTICS}/shipment/create_from_shipping_quote",
             headers=_headers(token), json=body, timeout=_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001
-        raise OrdersError(f"Couldn't reach eBay: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+        raise _lost(exc, _LABEL_UNKNOWN) from exc
+    if resp.status_code >= 500:
+        raise UnknownOutcome(_LABEL_UNKNOWN)
     if resp.status_code not in (200, 201):
         raise _logistics_error(resp, "purchase the label")
     data = resp.json()

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import math
 import re
 from typing import Any, Optional
 from xml.etree import ElementTree as ET
@@ -31,7 +32,8 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..models import TITLE_MAX_CHARS, ItemSpecific, Listing
+from ..models import (SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS, ItemSpecific,
+                      Listing)
 from . import taxonomy
 
 # Trading API's XML namespace — every element in a response carries it.
@@ -44,6 +46,9 @@ _TIMEOUT = 45
 
 class TradingError(ValueError):
     """A Trading API call failed — carries a user-facing reason.
+
+    `outcome_unknown` is False here and True on UnknownOutcome below: eBay
+    answered, or never received the request, so this IS the outcome.
 
     `code` is eBay's own ErrorCode when the failure came back as a rejection
     rather than a transport problem, so callers can branch on a specific
@@ -69,6 +74,12 @@ class TradingError(ValueError):
     up abandoning a listing eBay had already explained.
     """
 
+    outcome_unknown = False
+    # True only on Unreachable below: the request never left, so eBay did not
+    # act and did not refuse. Read by backend/ebay_errors, which must not
+    # title it as a rejection.
+    unreachable = False
+
     def __init__(self, message: str, code: str = "", detail: str = "",
                  said: str = "", codes: Optional[list[str]] = None):
         super().__init__(message)
@@ -80,6 +91,169 @@ class TradingError(ValueError):
     def has_code(self, wanted: str) -> bool:
         """Did eBay return this ErrorCode anywhere in the response?"""
         return wanted in self.codes
+
+
+# eBay's seller-level call-limit error. Documented (developer.ebay.com KB
+# 2137): returned in the response body with Ack=Failure, NOT as an HTTP
+# status, when a seller's requests in the window reach the limit. The limits
+# are per SELLER and windowed -- 5000 Add-listing calls / 30s, 1200 Revise /
+# 30s -- so one busy store reaches them, not just a busy application.
+_RATE_LIMIT_CODES = {"21919144"}
+
+# The application-level daily quota is a separate refusal, and this repository
+# cannot cite its numeric code with confidence -- so it is matched on eBay's
+# published wording instead of a code invented to look authoritative. Narrow
+# on purpose: it must not swallow a listing eBay refused on its merits, which
+# is a seller-fixable problem and not something waiting will cure.
+_RATE_LIMIT_PHRASES = (
+    "exceeded usage limit",
+    "exceeded your maximum call limit",
+    "call limit exceeded",
+)
+
+# "…Try again after 5 seconds." — eBay answering the only question that
+# matters here, in the body rather than a header.
+_TRY_AGAIN_RE = re.compile(r"try again (?:in|after)\s+(\d+)\s*second",
+                           re.IGNORECASE)
+
+
+class RateLimited(TradingError):
+    """eBay is refusing because of a call limit, not because of the request.
+
+    Kept apart from every other TradingError because the right response is the
+    opposite one. An ordinary rejection means this listing needs fixing and
+    the next listing is fine; a rate limit means nothing was wrong with the
+    listing and the NEXT call is the problem. Counting these as per-listing
+    failures told sellers eBay had rejected listings it never looked at, and
+    carrying on fired hundreds more calls into a windowed limit -- which does
+    not merely fail, it holds the window open and lengthens the wait.
+
+    `retry_after` is eBay's own answer in seconds, from the Retry-After header
+    or from its message, and it is None when neither said. None rather than a
+    default: a number here is a promise about when eBay will answer, and this
+    client is not in a position to invent one.
+    """
+
+    def __init__(self, message: str, code: str = "", detail: str = "",
+                 retry_after: Optional[int] = None):
+        super().__init__(message, code=code, detail=detail)
+        self.retry_after = retry_after
+
+
+class UnknownOutcome(TradingError):
+    """The request went out and we never learned what eBay did with it.
+
+    Distinct from every other TradingError because it is not a failure --
+    it is an absence of an answer, and the two lead somewhere different.
+    "eBay rejected this" means fix the listing and try again; "we don't know"
+    means find out FIRST, because trying again could mean a second live
+    listing, a second ended one, or a revise applied twice.
+
+    Only ever raised for a WRITE. A read that times out changed nothing, and
+    sending a seller to check eBay after a failed GetItem is a false alarm on
+    a call the sync makes thousands of times.
+
+    `call` is the Trading call whose outcome is unknown, so a caller can say
+    which operation is in doubt rather than "something went wrong".
+
+    `outcome_unknown` is how the consumer-facing layer recognises this without
+    importing the Trading client -- a flag rather than a class check, because
+    a rejection and an unanswered request need DIFFERENT WORDS and the module
+    that writes those words (backend/ebay_errors) has no business depending on
+    the transport. TradingError carries it as False for the same reason: a
+    caller should be able to ask any eBay error this question.
+    """
+
+    outcome_unknown = True
+
+    def __init__(self, message: str, call: str = "", code: str = "",
+                 detail: str = ""):
+        super().__init__(message, code=code, detail=detail)
+        self.call = call
+
+
+class Unreachable(TradingError):
+    """No connection was made, so eBay never saw the request.
+
+    The other half of the UnknownOutcome rule, and the same reason: the fix
+    panel and the short surfaces render an issue's TITLE, and the generic
+    branch's "eBay rejected the listing" is a claim about something eBay did.
+    On a refused connection it did nothing, and sending the seller hunting
+    through fields when the problem is their network wastes the one thing
+    that message is for.
+
+    Unlike UnknownOutcome this one CAN say nothing was sent, which is the most
+    useful sentence available here.
+    """
+
+    unreachable = True
+
+
+# The calls that CHANGE something on eBay. A failure with no answer means
+# something different for each side of this line, which is why the line is
+# drawn explicitly rather than inferred from the call name -- "Verify..." and
+# "Get..." both happen to start with a safe-looking word, and one wrong guess
+# here either raises false alarms on every timed-out read or stays silent on
+# a publish that may have landed.
+#
+# VerifyAddItem / VerifyAddFixedPriceItem are deliberately NOT here: they are
+# eBay's dry run and create nothing, which is the entire reason this client
+# calls them.
+_WRITE_CALLS = frozenset({
+    "AddItem", "AddFixedPriceItem", "ReviseItem", "ReviseFixedPriceItem",
+    "ReviseInventoryStatus", "EndItem", "EndFixedPriceItem", "RelistItem",
+    "RelistFixedPriceItem", "AddItems", "ReviseItems",
+})
+
+# Transport failures that prove the request never reached eBay: no connection
+# was ever established, so no bytes were delivered and nothing there could
+# have acted on it. Everything NOT in this list is treated as unknown --
+# including exception types nobody here anticipated. That default is the
+# whole point: being wrong in the "nothing happened" direction is how a live
+# listing ends up with no record of itself, while being wrong the other way
+# costs one unnecessary look at the seller's eBay listings.
+_NEVER_SENT = (
+    httpx.ConnectError,        # DNS failure, connection refused, TLS refused
+    httpx.ConnectTimeout,      # gave up before the connection was made
+    httpx.PoolTimeout,         # never even got a connection out of the pool
+    httpx.UnsupportedProtocol,
+    httpx.InvalidURL,
+)
+
+# What the seller is told when a write's outcome is unknown. Deliberately does
+# NOT say "nothing was changed" -- that is the one sentence that cannot be
+# justified here, and it is the sentence that produces a duplicate when they
+# act on it.
+_UNKNOWN_MESSAGE = (
+    "We lost contact with eBay while sending this, so we can't tell whether "
+    "it went through. Check your eBay listings before trying again.")
+
+
+def _retry_after_seconds(value: str) -> Optional[int]:
+    """Seconds from a Retry-After header, or None.
+
+    HTTP allows an HTTP-date as well as a delta in seconds. A date is not
+    parsed into a wait here: it would need clock-skew handling to be worth
+    anything, and "we do not know" is an honest answer that the caller
+    already has to handle.
+    """
+    try:
+        seconds = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _rate_limit_wait(text: str) -> Optional[int]:
+    match = _TRY_AGAIN_RE.search(text or "")
+    return int(match.group(1)) if match else None
+
+
+def _is_rate_limit(codes: list[str], text: str) -> bool:
+    if any(code in _RATE_LIMIT_CODES for code in codes):
+        return True
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in _RATE_LIMIT_PHRASES)
 
 
 class AlreadyListedError(TradingError):
@@ -147,17 +321,58 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         f"{body}"
         f"</{call}Request>"
     )
+    # Whether an unanswered request may have changed something over there.
+    # Only a write can be in doubt; see _WRITE_CALLS.
+    writes = call in _WRITE_CALLS
+
+    def _lost(reason: str, exc: Optional[Exception] = None) -> TradingError:
+        """The error for a call that produced no usable answer.
+
+        For a read this is an ordinary failure: nothing on eBay moved, and the
+        caller retries or reports it. For a write it is an UNKNOWN OUTCOME,
+        which is a different thing entirely -- the request was in eBay's hands
+        and the answer is what went missing.
+        """
+        if writes:
+            return UnknownOutcome(_UNKNOWN_MESSAGE, call=call, detail=reason)
+        # A read, or a call whose sent-ness is unproven but which changes
+        # nothing. Still not a rejection — see Unreachable.
+        return Unreachable(f"Couldn't reach eBay: {reason}"
+                           if exc is not None else reason)
+
     try:
         resp = httpx.post(_endpoint(), headers=_headers(call, token),
                           content=xml.encode("utf-8"), timeout=_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001 - network/timeout
-        raise TradingError(f"Couldn't reach eBay: {exc}") from exc
+    except _NEVER_SENT as exc:
+        # No connection was made, so eBay never saw this. Safe to call a
+        # failure even for a write.
+        raise Unreachable(f"Couldn't reach eBay: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+        raise _lost(str(exc), exc) from exc
+    if resp.status_code == 429:
+        # The transport refusing before eBay's XML is ever produced. Same
+        # condition, different layer. Checked BEFORE the unknown-outcome rule:
+        # a 429 is eBay declining to process the request, not a lost answer.
+        raise RateLimited(
+            "eBay is limiting how often we can talk to your account right "
+            "now. Nothing was changed — this will pick up again shortly.",
+            retry_after=_retry_after_seconds(
+                resp.headers.get("Retry-After", "")))
+    if resp.status_code >= 500:
+        # Something that already had the request in hand failed to answer for
+        # it. eBay's own gateways sit in front of the API, so a 5xx on a write
+        # is exactly the case that cannot be called a rejection.
+        raise _lost(f"eBay returned {resp.status_code} for {call}.")
     if resp.status_code != 200:
+        # 4xx: refused at the gate (auth, a malformed request) before eBay
+        # processed it. A definite no.
         raise TradingError(f"eBay returned {resp.status_code} for {call}.")
     try:
         root = ET.fromstring(resp.content)
     except ET.ParseError as exc:
-        raise TradingError(f"eBay sent an unreadable response for {call}.") from exc
+        # eBay answered and we could not read it. That is our failure to
+        # establish the outcome, not evidence there wasn't one.
+        raise _lost(f"eBay sent an unreadable response for {call}.") from exc
     graded = [((_text(e, "SeverityCode") or "").lower(), e)
               for e in _findall(root, "Errors")]
     errors = [e for sev, e in graded if sev == "error"]
@@ -219,6 +434,16 @@ def _failure(call: str, root: ET.Element, errors: list[ET.Element],
                 "msg=%s detail=%s", call, code or "?", len(errors),
                 len(warnings or []), headline[:200], detail[:300] or "(none)")
     all_codes = [c for c in (_text(e, "ErrorCode") or "" for e in errors) if c]
+    # Checked before the branches below, because a call limit is not a
+    # rejection of the request: nothing about the listing needs fixing, and
+    # the next call is the problem. Telling the seller to reconnect eBay or to
+    # correct a field would send them after something that is not there.
+    if _is_rate_limit(all_codes, f"{headline} {detail}"):
+        return RateLimited(
+            "eBay is limiting how often we can talk to your account right "
+            "now. Nothing was changed — this will pick up again shortly.",
+            code=code, detail=detail,
+            retry_after=_rate_limit_wait(f"{headline} {detail}"))
     if code in ("931", "932", "16110", "21917053"):  # auth/token codes
         return TradingError(
             "eBay didn't accept the account connection — reconnect eBay "
@@ -317,6 +542,11 @@ def _listing_format(listing_type: str, has_bin: bool) -> str:
     return "FIXED_PRICE"
 
 
+def _quantity_sold(selling: Optional[ET.Element]) -> int:
+    """Units already sold on this listing (0 when eBay didn't say)."""
+    return _int(selling, "QuantitySold") if selling is not None else 0
+
+
 def _item_to_listing(item: ET.Element) -> dict:
     """Map one Trading API <Item> to this app's Listing shape (as a dict)."""
     selling = _find(item, "SellingStatus")
@@ -361,22 +591,51 @@ def _item_to_listing(item: ET.Element) -> dict:
         "description": _text(item, "Description"),
         "price": round(price, 2) if price is not None else None,
         "currency": _text(item, "Currency") or config.EBAY_CURRENCY,
-        "quantity": max(1, _int(item, "Quantity", 1)),
+        # What is still BUYABLE, which is not what eBay puts in Item.Quantity.
+        #
+        # GetItem reports Item.Quantity as the quantity the listing was
+        # created with and SellingStatus.QuantitySold as how many of those
+        # have gone; the remainder is the difference. Importing Item.Quantity
+        # directly overstates stock by exactly the number already sold — and
+        # because ReviseFixedPriceItem reads the Quantity it is sent as the
+        # new available stock, the next edit would put the sold units back on
+        # sale. max(1, ...) compounded it by making a sold-out listing import
+        # as "1 available", so the one listing with nothing left to sell was
+        # the one offering a unit that does not exist.
+        #
+        # Zero is a real state here (eBay's out-of-stock control), so the
+        # floor is 0, not 1. Clamped because eBay does report sold greater
+        # than quantity on some variation/out-of-stock listings.
+        # https://developer.ebay.com/devzone/xml/docs/reference/ebay/getitem.html
+        "quantity": max(0, _int(item, "Quantity", 0) - _quantity_sold(selling)),
         "listing_format": fmt,
         "auction_start_price": round(auction_start, 2) if auction_start else None,
         "package_weight_lb": float(weight_major or 0),
         "package_weight_oz": round(weight_minor or 0.0, 1),
-        "package_length_in": float(_int(dims, "PackageLength") if dims is not None else 0),
-        "package_width_in": float(_int(dims, "PackageWidth") if dims is not None else 0),
-        "package_height_in": float(_int(dims, "PackageDepth") if dims is not None else 0),
+        # `_float`, not `float(_int(...))`. These are eBay MeasureType
+        # (decimal) fields, and `_int` runs them through int() first -- so a
+        # package eBay reported as 10.5 inches was read back as 10 and, on the
+        # seller's next edit, sent back to eBay a shrunken box. Read what eBay
+        # said; the ROUNDING belongs at the emit, where eBay's "whole number of
+        # inches" rule applies (see _whole_inches).
+        "package_length_in": _float(dims, "PackageLength") or 0.0,
+        "package_width_in": _float(dims, "PackageWidth") or 0.0,
+        "package_height_in": _float(dims, "PackageDepth") or 0.0,
         "item_specifics": specifics,
         "images": [],           # no local files — this listing came from eBay
         "image_urls": pictures,  # eBay-hosted photos, shown as-is
         "ebay_listing_id": _text(item, "ItemID"),
+        # eBay's Variations container. Nothing here ever looked for it, so a
+        # multi-variation listing imported as ONE flat record -- a single
+        # price (eBay reports the lowest variation's), a single item-level
+        # quantity, and no sign the other sizes exist. Knowing is the whole
+        # point: it is what stops the revise below rewriting a structure this
+        # app cannot see.
+        "has_variations": _find(item, "Variations") is not None,
         "sku": _text(item, "SKU"),
         "source": "ebay",
         "watch_count": _int(item, "WatchCount"),
-        "sold_quantity": (_int(selling, "QuantitySold") if selling is not None else 0),
+        "sold_quantity": _quantity_sold(selling),
         "view_url": _text(item, "ListingDetails/ViewItemURL"),
         # When the listing actually went live on eBay. The only true recency
         # signal an imported listing has — without it every listing looks as
@@ -555,45 +814,76 @@ def get_listing(token: str, item_id: str) -> dict:
     return _item_to_listing(item)
 
 
-def item_id_for_tracking_number(token: str, tracking_number: str) -> str:
-    """The item id of the listing carrying this InventoryTrackingNumber, or "".
+def item_id_for_sku(token: str, sku: str) -> str:
+    """The item id of the listing carrying this SKU, or "".
 
-    GetItem accepts an InventoryTrackingNumber in place of an ItemID, which is
-    what makes the tracking number a usable idempotency key: after a publish
-    whose response never arrived, this answers "did that listing actually go
-    up, and what is it?" without guessing from titles. Never raises — a lookup
-    failure just means "unknown".
+    After a publish whose response never arrived, this answers "did that
+    listing actually go up, and what is it?" without guessing from titles.
+
+    GetItem accepts SKU in place of ItemID only for listings created with
+    InventoryTrackingMethod=SKU, which is why build_add_item sets it on every
+    fixed-price create. The previous version queried by
+    InventoryTrackingNumber — not a GetItem input, and not an ItemType
+    element either — so this recovery arm could never succeed and was in
+    practice dead code. Never raises: a lookup failure just means "unknown".
     """
-    if not tracking_number:
+    if not sku:
         return ""
     try:
-        root = _call("GetItem", token,
-                     f"<InventoryTrackingNumber>{_esc(tracking_number)}</InventoryTrackingNumber>")
+        root = _call("GetItem", token, f"<SKU>{_esc(sku)}</SKU>")
     except TradingError as exc:
-        log.info("trading: no item for tracking number %s (%s)",
-                 tracking_number, exc)
+        log.info("trading: no item for sku %s (%s)", sku, exc)
         return ""
     item = _find(root, "Item")
     return _text(item, "ItemID") if item is not None else ""
 
 
-def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> list[str]:
-    """The <Item> children shared by create and revise: the listing's content."""
+def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
+                 only: Optional[set[str]] = None) -> list[str]:
+    """The <Item> children shared by create and revise: the listing's content.
+
+    `only` restricts the output to the named Listing fields, and is how a
+    revise stays minimal. A create passes None and sends everything, because
+    it has no remote state to overwrite.
+
+    Every field this omits on a revise is a field eBay keeps as it is. Every
+    field it INCLUDES is one eBay overwrites — with a value this app may have
+    read weeks ago. That is the difference between "update the price" and
+    "replace the listing with my copy of it".
+    """
+    def wanted(name: str) -> bool:
+        return only is None or name in only
+
     parts: list[str] = []
-    if listing.title:
+    if listing.title and wanted("title"):
         parts.append(f"<Title>{_esc(listing.title[:TITLE_MAX_CHARS])}</Title>")
-    if listing.description:
+    # The editor has had a Subtitle field all along and this never emitted one,
+    # so a seller who typed a subtitle got no subtitle and no explanation. It
+    # is a paid eBay listing upgrade (SubtitleFee), which is why it is sent
+    # only when the seller actually filled the field in -- and why the editor
+    # now says so where they type it.
+    #
+    # Only when non-empty: an empty <SubTitle/> is not "no subtitle". On a
+    # revise it is a request to REMOVE one, which is a different thing to say.
+    if listing.subtitle and wanted("subtitle"):
+        parts.append(f"<SubTitle>{_esc(listing.subtitle[:SUBTITLE_MAX_CHARS])}"
+                     "</SubTitle>")
+    if listing.description and wanted("description"):
         parts.append(f"<Description>{_cdata(listing.description)}</Description>")
-    if listing.category_id:
+    if listing.category_id and wanted("category_id"):
         parts.append("<PrimaryCategory><CategoryID>"
                      f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
     cond_id = _CONDITION_TO_ID.get((listing.condition or "").upper())
-    if cond_id:
+    if cond_id and wanted("condition"):
         parts.append(f"<ConditionID>{cond_id}</ConditionID>")
-    if listing.condition_description:
+    if listing.condition_description and wanted("condition_description"):
         parts.append("<ConditionDescription>"
                      f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
-    specifics = [s for s in listing.item_specifics if s.name.strip() and s.value.strip()]
+    if not wanted("item_specifics") and not wanted("brand"):
+        specifics = []
+    else:
+        specifics = [s for s in listing.item_specifics
+                     if s.name.strip() and s.value.strip()]
     # CRITICAL: identify, the maker double-check, and the editor's Brand field
     # all write the brand to listing.brand — not to a specifics row. The old
     # Inventory path seeded the Brand aspect from it (services/ebay.py); this
@@ -623,10 +913,55 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None) -> li
             + "</NameValueList>"
             for name, values in list(grouped.items())[:60])
         parts.append(f"<ItemSpecifics>{rows}</ItemSpecifics>")
-    if image_urls:
+    # PictureDetails REPLACES the listing's whole photo set, so sending it on
+    # an unrelated edit silently discards anything the seller added on eBay
+    # since the last sync.
+    if image_urls and (wanted("image_urls") or wanted("images")):
         urls = "".join(f"<PictureURL>{_esc(u)}</PictureURL>" for u in image_urls[:24])
         parts.append(f"<PictureDetails>{urls}</PictureDetails>")
     return parts
+
+
+# eBay's ListingDuration tokens for a Chinese auction. The model stores the
+# editor's own spelling (DAYS_10); eBay wants Days_10, and its own spelling is
+# the only one it accepts.
+_AUCTION_DURATIONS = {
+    "DAYS_1": "Days_1", "DAYS_3": "Days_3", "DAYS_5": "Days_5",
+    "DAYS_7": "Days_7", "DAYS_10": "Days_10",
+}
+_DEFAULT_AUCTION_DURATION = "Days_7"
+
+
+def _auction_duration(listing: Listing) -> str:
+    """The duration the seller chose, in eBay's spelling.
+
+    This was hard-coded to Days_7 while the editor offered 1/3/5/7/10 days —
+    so a seller who picked ten days got a seven-day auction, and nothing said
+    so. An unrecognised value falls back rather than being passed through: a
+    stale client or a hand-edited record must not produce a listing eBay
+    rejects outright, and seven days is both eBay's default and what this
+    always sent.
+
+    Days_10 carries eBay's AuctionLengthFee, which is why the editor now says
+    so next to the choice.
+    """
+    chosen = str(listing.auction_duration or "").strip().upper()
+    return _AUCTION_DURATIONS.get(chosen, _DEFAULT_AUCTION_DURATION)
+
+
+def _whole_inches(value) -> int:
+    """A package dimension as eBay wants it: a whole number of inches.
+
+    Rounded UP, not truncated. `int(10.5)` is 10, and a 10.5-inch item does
+    not fit in a 10-inch box — on calculated postage that under-declaration
+    is money the seller pays out of the sale, on every sale. Rounding up
+    costs the buyer pennies and is the side to be wrong on.
+
+    Floored at 0 so a nonsense value cannot reach eBay: the caller only emits
+    the dimensions when all three are truthy, so a negative one becomes 0 and
+    takes the whole container out of the request rather than being sent.
+    """
+    return max(0, int(math.ceil(float(value or 0))))
 
 
 def _package_details(listing: Listing) -> str:
@@ -635,11 +970,19 @@ def _package_details(listing: Listing) -> str:
     oz = float(listing.package_weight_oz or 0)
     if not (lb or oz):
         return ""
+    # Rounded FIRST, then gated on the rounded values. Gating on the raw ones
+    # let a nonsense entry through as a zero dimension: -5 is truthy, so the
+    # container was emitted and the floor turned it into
+    # <PackageLength>0</PackageLength>, which is a claim about the box rather
+    # than the absence of one.
+    length = _whole_inches(listing.package_length_in)
+    width = _whole_inches(listing.package_width_in)
+    depth = _whole_inches(listing.package_height_in)
     dims = ""
-    if listing.package_length_in and listing.package_width_in and listing.package_height_in:
-        dims = (f"<PackageLength>{int(listing.package_length_in)}</PackageLength>"
-                f"<PackageWidth>{int(listing.package_width_in)}</PackageWidth>"
-                f"<PackageDepth>{int(listing.package_height_in)}</PackageDepth>")
+    if length and width and depth:
+        dims = (f"<PackageLength>{length}</PackageLength>"
+                f"<PackageWidth>{width}</PackageWidth>"
+                f"<PackageDepth>{depth}</PackageDepth>")
     return ("<ShippingPackageDetails>"
             f"<WeightMajor unit=\"lbs\">{lb}</WeightMajor>"
             f"<WeightMinor unit=\"oz\">{oz:g}</WeightMinor>"
@@ -667,11 +1010,12 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     one operation here that isn't naturally idempotent — a second call means a
     second live listing, which is both a duplicate on the seller's account and
     an eBay policy problem. The key rides along two ways: as UUID, which eBay
-    checks against calls it has already processed, and (fixed-price only) as
-    InventoryTrackingNumber, which must be unique among the seller's active
-    listings and is separately queryable, so a caller that loses the response
-    can find the listing it made. Either collision raises AlreadyListedError
-    instead of duplicating. Pass "" to opt out.
+    checks against calls it has already processed (answering error 488 with
+    the item id the first attempt produced), and (fixed-price only) as
+    Item.SKU alongside InventoryTrackingMethod=SKU, which is what makes the
+    listing findable by GetItem afterwards -- so a caller that loses the
+    response can still find what it made. A collision raises
+    AlreadyListedError instead of duplicating. Pass "" to opt out.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -736,7 +1080,8 @@ def build_add_item(listing: Listing, image_urls: list[str],
         if fmt == "AUCTION_BIN" and listing.price:
             parts.append(f"<BuyItNowPrice>{float(listing.price):.2f}</BuyItNowPrice>")
         parts.append("<ListingType>Chinese</ListingType>"
-                     "<ListingDuration>Days_7</ListingDuration>"
+                     f"<ListingDuration>{_auction_duration(listing)}"
+                     "</ListingDuration>"
                      "<Quantity>1</Quantity>")
     else:
         parts.append(f"<StartPrice>{float(listing.price or 0):.2f}</StartPrice>")
@@ -769,11 +1114,22 @@ def build_add_item(listing: Listing, image_urls: list[str],
         parts.append(f"<SellerProfiles>{profiles}</SellerProfiles>")
 
     if idempotency_key:
-        # InventoryTrackingNumber is fixed-price only, and can't be combined
-        # with an item-level SKU (this path sends none).
+        # SKU tracking, which is eBay's documented answer to "the response
+        # never arrived — did the listing go up, and what is it?"
+        #
+        # This used to send <InventoryTrackingNumber>, which is not an element
+        # of eBay's ItemType at all: AddFixedPriceItem ignores it, so the
+        # "unique among the seller's active listings" second guard the code
+        # promised never existed, and the GetItem lookup built on it could
+        # never succeed. SKU + InventoryTrackingMethod=SKU is the real
+        # pairing, and BOTH must be set on the create — ReviseFixedPriceItem
+        # drops InventoryTrackingMethod, so it cannot be retrofitted later.
+        # Fixed-price only; auctions keep UUID alone.
+        # https://developer.ebay.com/support/kb-article?KBid=1462
         if not is_auction:
-            parts.append("<InventoryTrackingNumber>"
-                         f"{_esc(idempotency_key[:50])}</InventoryTrackingNumber>")
+            parts.append(f"<SKU>{_esc(idempotency_key[:50])}</SKU>")
+            parts.append("<InventoryTrackingMethod>SKU"
+                         "</InventoryTrackingMethod>")
         parts.append(f"<UUID>{_esc(_uuid_form(idempotency_key))}</UUID>")
 
     call = "AddItem" if is_auction else "AddFixedPriceItem"
@@ -807,9 +1163,8 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
     _call(_VERIFY_CALL[call], token, body)
 
 
-# eBay's error codes for "you already sent this": a reused UUID, and an
-# InventoryTrackingNumber already on an active listing. Codes are matched
-# first, with a text fallback so a code eBay adds later still lands here —
+# eBay's error codes for "you already sent this". Codes are matched first,
+# with a text fallback so a code eBay adds later still lands here —
 # duplicating a listing is worse than one publish reported as already-live.
 #
 # 21919188 is NOT one of them: it is "this listing would cause you to exceed
@@ -818,13 +1173,29 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
 # create a duplicate", when nothing had been created and the real fix is to
 # ask eBay to raise the limit. (eBay's duplicate-LISTING-policy code is
 # 21919067, which is a different thing again and not an idempotency signal.)
-_DUPLICATE_CODES = {"21916884", "21916885", "21916752"}
+# 488 is eBay's actual duplicate-UUID code ("Duplicate UUID used."), and it
+# was missing. 21916884/21916885 were in here and are NOT idempotency signals
+# — they belong to eBay's item-CONDITION family (21916885 is "Dropped
+# condition from Item specifics"; 21916886 is "Item condition definitions
+# have changed"). Treating a condition rejection as a duplicate told the
+# seller their listing was already live and swallowed the message saying what
+# to fix, so it hid a problem they could have fixed in a few seconds.
+#
+# 21916752 is kept: it has been observed on this path and no evidence
+# contradicts it. The text fallback below is the real safety net either way —
+# it matches eBay's own duplicate wording whatever code arrives — which is
+# also why removing the two condition codes loses no genuine coverage.
+_DUPLICATE_CODES = {"488", "21916752"}
 _DUPLICATE_TEXT = re.compile(
     r"(uuid|inventory\s*tracking\s*number).{0,60}?"
     r"(already\s+(been\s+)?(used|exists|specified)|not\s+unique|duplicate)"
     r"|duplicate.{0,30}(uuid|inventory\s*tracking)", re.I | re.S)
-# eBay names the offending listing inside the message often enough to be worth
-# reading ("...already used for item 123456789012").
+# eBay names the offending listing inside the message ("...already been used;
+# ListedByRequestAppId=1, item ID=110040602158"). Prefer the number eBay
+# actually LABELS as the item id: the bare fallback would happily adopt
+# ListedByRequestAppId, and pointing the seller's record at another listing is
+# worse than not recovering at all.
+_ERROR_ITEM_LABELLED_RE = re.compile(r"item\s*ID\s*[=:]\s*(\d{9,})", re.I)
 _ERROR_ITEM_RE = re.compile(r"\b(\d{9,})\b")
 
 
@@ -833,6 +1204,9 @@ def _is_duplicate_rejection(exc: TradingError) -> bool:
 
 
 def _item_id_in_error(message: str) -> str:
+    labelled = _ERROR_ITEM_LABELLED_RE.search(message or "")
+    if labelled:
+        return labelled.group(1)
     found = _ERROR_ITEM_RE.search(message or "")
     return found.group(1) if found else ""
 
@@ -851,6 +1225,106 @@ def _revise_call_name(listing: Listing) -> str:
             else "ReviseFixedPriceItem")
 
 
+# What a revise can actually put in the request. `_item_fields` gates ten
+# fields on `wanted()`, and build_revise_item adds three of its own — price,
+# quantity and the shipping policy — each on the same dirty check.
+#
+# Everything else in dirty_fields.TRACKED is marked by an edit, travels
+# through the whole revise, and never appears in the XML. Most of it eBay does
+# not let a live listing change (format, auction duration and start price,
+# currency). One is the everyday case: the PACKAGE. A seller who listed with
+# the wrong weight and fixes it here was told the listing was updated while
+# eBay went on charging buyers calculated postage off the old number.
+#
+# This app deliberately does NOT start sending ShippingPackageDetails on a
+# revise to fix that. eBay's documented behaviour for shipping fields on a
+# revise is that omitting one REMOVES it, `_package_details` emits dimensions
+# only when all three are present, and the reference this would need to be
+# checked against is not reachable from here. A weight-only revise could
+# therefore clear dimensions the seller never touched — a worse failure than
+# the one being fixed, and unverifiable. So the app says what it did not do
+# instead, which is what it does everywhere else it cannot be sure.
+REVISABLE_FIELDS = frozenset({
+    "title", "subtitle", "description", "brand", "category_id", "condition",
+    "condition_description", "item_specifics", "images", "image_urls",
+    "price", "quantity", "fulfillment_policy_id",
+})
+
+
+def unsendable_revise_fields(listing: Listing) -> list[str]:
+    """The seller's edits this revise will not carry, in a stable order.
+
+    Empty for an ordinary edit. Non-empty means the listing on eBay will
+    still differ from the copy here after a successful revise, and the seller
+    has to be told which part.
+    """
+    dirty = set(listing.dirty_fields or ())
+    return sorted(dirty - REVISABLE_FIELDS)
+
+
+def build_revise_item(listing: Listing, item_id: str,
+                      image_urls: Optional[list[str]] = None) -> tuple[str, str]:
+    """(call name, request body) for revising one listing.
+
+    Split out of revise_listing so the payload can be asserted on without a
+    network call — what this request does NOT contain is now a correctness
+    rule, not a detail (see tests/test_ebay_quantity_contract.py).
+    """
+    if not item_id:
+        raise TradingError("This listing has no eBay item id to update.")
+    if listing.has_variations:
+        # eBay's own documentation: ReviseItem does not support revisions of
+        # multiple-variation listings, and a variation whose quantity reaches
+        # 0 is REMOVED from the listing (error 21916620), with the listing
+        # ending once none are left. This used to build an item-level Quantity
+        # and StartPrice revise regardless — one "update stock" away from
+        # editing a structure it could not see.
+        #
+        # Refused here rather than at the route, because every path to a
+        # revise goes through this builder.
+        raise TradingError(
+            "This listing has size or colour variations, and Thryft Shop "
+            "can't edit those yet — changing it here could remove them. "
+            "Edit it on eBay in Seller Hub; everything else about it still "
+            "works here.")
+    # Only what the seller actually changed. Everything else this app holds is
+    # a snapshot of eBay taken at the last sync, and sending a snapshot is not
+    # a no-op — it overwrites whatever eBay has now, which may be newer
+    # (Seller Hub, the eBay app, a category remap eBay applied itself). A
+    # seller who fixed a title on eBay and later changed only the price here
+    # had the stale title pushed back over their newer one, and was told the
+    # update succeeded.
+    dirty = set(listing.dirty_fields)
+    parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
+    parts.extend(_item_fields(listing, image_urls, only=dirty))
+    is_auction = (listing.listing_format or "").upper().startswith("AUCTION")
+    if "price" in dirty and listing.price is not None and listing.price > 0:
+        # On an auction the editable price is Buy It Now; the start price can't
+        # be revised once bids exist, so it's left alone.
+        tag = "BuyItNowPrice" if is_auction else "StartPrice"
+        parts.append(f"<{tag}>{listing.price:.2f}</{tag}>")
+    # Quantity ONLY when the seller actually changed stock.
+    #
+    # eBay reads the Quantity on a revise as the new AVAILABLE quantity, not
+    # as a restatement of the original listing size. The value this app holds
+    # is a snapshot from the last import, so re-sending it on an unrelated
+    # edit (a title fix, a price change) tells eBay to make that many units
+    # available again — including the ones that already sold. A seller who
+    # renamed an item found stock they no longer had back on sale.
+    #
+    # `> 0` was the second half: it dropped zero, so the single edit that
+    # takes a listing out of stock was the one that never reached eBay.
+    if listing.is_dirty("quantity") and listing.quantity is not None:
+        parts.append(f"<Quantity>{max(0, int(listing.quantity))}</Quantity>")
+    if "fulfillment_policy_id" in dirty and listing.fulfillment_policy_id:
+        # The seller picked a shipping service for THIS listing — send the
+        # matching business-policy profile so the revise actually changes it.
+        parts.append("<SellerProfiles><SellerShippingProfile><ShippingProfileID>"
+                     f"{_esc(listing.fulfillment_policy_id)}</ShippingProfileID>"
+                     "</SellerShippingProfile></SellerProfiles>")
+    return _revise_call_name(listing), f"<Item>{''.join(parts)}</Item>"
+
+
 def revise_listing(token: str, item_id: str, listing: Listing,
                    image_urls: Optional[list[str]] = None) -> dict:
     """Push an edit back to a listing this app didn't create.
@@ -858,30 +1332,34 @@ def revise_listing(token: str, item_id: str, listing: Listing,
     Sends only the fields this app actually edits, so nothing set elsewhere on
     the listing gets clobbered by omission. Returns {"ok": True, "listing_id"}
     or raises TradingError with eBay's own reason."""
-    if not item_id:
-        raise TradingError("This listing has no eBay item id to update.")
-    parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
-    parts.extend(_item_fields(listing, image_urls))
-    is_auction = (listing.listing_format or "").upper().startswith("AUCTION")
-    if listing.price is not None and listing.price > 0:
-        # On an auction the editable price is Buy It Now; the start price can't
-        # be revised once bids exist, so it's left alone.
-        tag = "BuyItNowPrice" if is_auction else "StartPrice"
-        parts.append(f"<{tag}>{listing.price:.2f}</{tag}>")
-    if listing.quantity and listing.quantity > 0:
-        parts.append(f"<Quantity>{int(listing.quantity)}</Quantity>")
-    if listing.fulfillment_policy_id:
-        # The seller picked a shipping service for THIS listing — send the
-        # matching business-policy profile so the revise actually changes it.
-        parts.append("<SellerProfiles><SellerShippingProfile><ShippingProfileID>"
-                     f"{_esc(listing.fulfillment_policy_id)}</ShippingProfileID>"
-                     "</SellerShippingProfile></SellerProfiles>")
-
-    call = _revise_call_name(listing)
-    root = _call(call, token, f"<Item>{''.join(parts)}</Item>")
+    call, body = build_revise_item(listing, item_id, image_urls)
+    root = _call(call, token, body)
     returned = _text(root, "ItemID") or item_id
     log.info("trading: %s ok item=%s", call, returned)
-    return {"ok": True, "listing_id": returned}
+    out = {"ok": True, "listing_id": returned}
+    # eBay returns CategoryID on a revise when the primary category CHANGED —
+    # including when eBay itself remapped the one we sent. That remapping
+    # happens when CategoryMappingAllowed is true OR OMITTED, and this
+    # request omits it, so the revise is precisely where a silent move can
+    # occur. create_listing has always read this; the revise threw it away.
+    #
+    # The stored id is what every later aspect lookup, condition list and
+    # revise is built from, so holding one the listing is no longer in sends
+    # all of them somewhere else.
+    remapped = _text(root, "CategoryID")
+    if remapped and remapped != (listing.category_id or "").strip():
+        log.warning("trading: eBay remapped category %s -> %s on revise "
+                    "(item %s)", listing.category_id or "?", remapped, returned)
+        out["category_id"] = remapped
+    # Edits the seller made that this request could not carry. Reported from
+    # here rather than worked out again upstream, so the one place that knows
+    # what went into the XML is the one place that answers for it.
+    unsent = unsendable_revise_fields(listing)
+    if unsent:
+        log.info("trading: revise of %s could not carry %s",
+                 returned, ", ".join(unsent))
+        out["unsent"] = unsent
+    return out
 
 
 def end_listing(token: str, item_id: str, reason: str = "NotAvailable") -> dict:

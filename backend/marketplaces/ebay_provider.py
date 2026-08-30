@@ -23,7 +23,7 @@ from ..config import log
 from ..models import Listing
 from ..services import (ebay, ebay_account, ebay_trading, image_import,
                         listing_sync, preflight, promotions, publish_guard,
-                        taxonomy)
+                        sync_merge, taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
@@ -182,8 +182,11 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
     acct = _with_current_policies(uid, acct, access_token)
     return {
         "access_token": access_token,
-        # Which eBay account this token is for. Everything that reads or writes
-        # a listing on eBay is scoped by it — see listing_sync.belongs_to.
+        # Which eBay account this token is for. Everything that reads or
+        # writes a listing on eBay is scoped by it — see listing_sync.owns.
+        # The immutable id is what actually decides; the username is kept for
+        # display and for records too old to carry an id.
+        "ebay_user_id": acct.get("ebay_user_id", "") or "",
         "ebay_username": acct.get("ebay_username", "") or "",
         "fulfillment_policy_id": acct.get("fulfillment_policy_id", ""),
         "payment_policy_id": acct.get("payment_policy_id", ""),
@@ -196,21 +199,44 @@ def creds_for(uid: Optional[str]) -> Optional[dict]:
 
 def auto_promote_enabled(uid: Optional[str]) -> bool:
     """Account default: promote every newly published listing at eBay's
-    recommended ad rate. ON unless explicitly turned off in Settings — sellers
-    reported publishes landing unpromoted and only discovering it later from
-    the Dashboard nags. Anonymous/env-token publishes stay explicit-only."""
+    recommended ad rate. OFF unless the seller explicitly turned it on.
+
+    Promoted Listings Standard is COST_PER_SALE — eBay takes a percentage of
+    the sale price (10% by default here) when an item sells through the
+    promotion. So this is a spending decision, and two things that used to
+    return True are not decisions at all:
+
+      - an ABSENT preference, i.e. every seller who has never opened Settings
+        and saved that field. Silence is not agreement to a fee.
+      - an UNREADABLE preference. db.get_prefs answers {} on a database
+        failure, so an outage enrolled sellers as surely as a choice did, and
+        nothing recorded that it had.
+
+    The second is indefensible whatever the right default is: "we could not
+    find out" is never a yes. The first reverses a deliberate product choice
+    — the previous default was ON because sellers reported publishes landing
+    unpromoted — and it is reversed on purpose: an unpromoted listing is a
+    missed opportunity the seller can fix, while an unasked-for ad fee is
+    money taken from someone who never agreed.
+
+    Per-listing Promote is untouched: ticking it IS explicit consent for that
+    listing. Anonymous/env-token publishes stay explicit-only.
+    """
     if not uid:
         return False
     try:
         value = db.get_prefs(uid).get("auto_promote")
-    except Exception:  # noqa: BLE001 - prefs are optional
-        return True
-    return True if value is None else bool(value)
+    except Exception as exc:  # noqa: BLE001 - an outage is not consent
+        log.warning("promote: couldn't read the auto-promote preference for "
+                    "%s, treating as off: %s", uid, exc)
+        return False
+    return bool(value)
 
 
 def promote(record_id: str, listing: Listing, creds: Optional[dict],
             rate: Optional[float] = None,
-            ebay_listing_id: Optional[str] = None) -> dict:
+            ebay_listing_id: Optional[str] = None,
+            chosen_by_seller: bool = True) -> dict:
     """Turn Promoted Listings on for one listing and run the ad call.
 
     The single place that decides an ad rate: an explicit `rate` wins, else
@@ -219,15 +245,41 @@ def promote(record_id: str, listing: Listing, creds: Optional[dict],
     Promote toggled on were never actually promoted — so the rate is always
     filled in here. Mutates listing.promote/ad_rate_percent so the caller can
     persist what really ran, and never raises: a promotion problem must not
-    fail the publish that preceded it."""
+    fail the publish that preceded it.
+
+    `chosen_by_seller` says whether promoting THIS listing was an explicit
+    choice — the editor's Promote toggle, which sits next to a rate slider and
+    a live fee preview — or came from the account-wide auto-promote setting,
+    whose whole promise is "at eBay's recommended ad rate".
+
+    That distinction decides what happens when eBay has no recommendation.
+    Falling through to DEFAULT_AD_RATE is right for the first: it is the rate
+    the slider already showed them. For the second it is not — eBay's
+    recommendations are usually low single digits, so a silent 10% can be
+    several times what the seller agreed to, on a number no screen ever
+    displayed. There, no rate means no promotion. The listing is live and can
+    be promoted by hand at any time; an ad charged at a rate nobody was quoted
+    cannot be taken back.
+    """
     try:
-        listing.promote = True
         if not rate or rate <= 0:
             rate = None
             if ebay_listing_id:
                 recommended = promotions.suggested_ad_rates(
                     creds, [str(ebay_listing_id)])
                 rate = recommended.get(str(ebay_listing_id))
+        if not rate and not chosen_by_seller:
+            log.info("promote skipped (%s): no rate from eBay and the seller "
+                     "did not pick one", record_id)
+            return {"promoted": False,
+                    "message": ("We didn't promote this one: eBay had no "
+                                "suggested ad rate for it, and auto-promote "
+                                "runs at eBay's rate. Turn on Promote in the "
+                                "listing to pick your own.")}
+        # Only now: the flag is what the editor and the insights panel read as
+        # "this is promoted", so setting it before the decision would leave a
+        # listing marked promoted that never was.
+        listing.promote = True
         listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
         return promotions.promote_listing(record_id, listing, creds)
     except Exception as exc:  # noqa: BLE001 - promotion must never break publish
@@ -304,10 +356,29 @@ def _with_stored_identity(ctx: PublishContext) -> PublishContext:
     one the create-vs-revise decision is made from: any earlier publish of this
     listing has already finished and committed its item id.
     """
+    # get_listing_STRICT, not get_listing. The plain one collapses "no such
+    # listing" and "the read could not be performed" into None -- its own
+    # comment says that is right for callers who just want the record and
+    # wrong for a security check, and this is neither. It is the read the
+    # create-vs-revise decision is made from, and the note above is explicit
+    # about what believing a lost identity costs: a duplicate live listing.
+    # One Postgres blip used to read as a brand-new session.
+    #
+    # Refusing is free here because nothing has been sent yet: the route
+    # turns this into a 503, which says we could not check whether the
+    # listing is already live, so we did not publish. The idempotency key
+    # narrows that window rather than closing it -- it refuses a create
+    # repeated soon after the first, not one sent long enough afterwards that
+    # eBay no longer holds the UUID.
+    # db.get_listing RAISES on a read failure rather than answering None, and
+    # this deliberately does not catch it. Nothing has been sent yet, so
+    # refusing costs nothing and the route turns it into a 503 -- whereas
+    # believing "nothing stored" would mean creating a second live listing
+    # for an item that is already up, which is what the note above is about.
     fresh = db.get_listing(ctx.session_id)
     if not fresh:
-        # Nothing stored (a brand-new session, or no DB): the payload is all
-        # there is. The idempotency key still guards the create itself.
+        # Nothing stored: a brand-new session that has never been saved. The
+        # payload is all there is, and the idempotency key guards the create.
         return ctx
     stored = fresh.get("listing") or {}
     # The item id is this function's own: it is what the create-vs-revise
@@ -437,6 +508,72 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
               "from another account.",
         })
     return issues
+
+
+def _label_list(names) -> str:
+    """Field names as the words a seller uses, deduped, in a sentence.
+
+    The label map folds several fields onto one word — both halves of a
+    package weight are "package weight" — so "the package weight and the
+    package weight" has to be impossible.
+    """
+    seen, out = set(), []
+    for name in names:
+        label = sync_merge.FIELD_LABELS.get(name, name.replace("_", " "))
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    if not out:
+        return ""
+    return out[0] if len(out) == 1 else ", ".join(out[:-1]) + " and " + out[-1]
+
+
+def revise_message(conflicts: Optional[dict], relist: bool,
+                   remapped: str = "", unsent: Optional[list] = None) -> str:
+    """What to tell the seller after eBay accepted the change.
+
+    A revise deliberately omits every field the seller and eBay have BOTH
+    changed since the last agreed state — sending either value would silently
+    overwrite somebody's work, which is what the three-way merge exists to
+    stop. But this said "Your eBay listing has been updated" regardless, so a
+    seller who had edited the title got a success message, an unchanged
+    listing on eBay, and no reason. An error would have been kinder; at least
+    an error prompts.
+
+    `unsent` is the other half of the same honesty, for a different reason:
+    edits this app CANNOT put in a revise at all (see
+    ebay_trading.REVISABLE_FIELDS). In practice that is the package — a
+    corrected weight is the commonest edit after a listing goes live, and
+    eBay's calculated postage is charged off it — so "updated" on its own was
+    a claim about the listing that was not true of the part the seller had
+    just fixed.
+    """
+    if relist:
+        return ("Relisted! It's live on eBay as a fresh listing with a new "
+                "item number.")
+    # eBay retires categories and moves the listing itself. Saying so matters
+    # because the seller's next surprise is otherwise a set of required item
+    # specifics they have never seen, for a category they did not choose.
+    moved = (" eBay also moved it to a different category, because the one it "
+             "was in has been retired." if remapped else "")
+    stayed = ""
+    if unsent:
+        stayed = (f" The {_label_list(unsent)} stayed here — eBay doesn't let "
+                  "this app change that on a live listing. Update it in Seller "
+                  "Hub, or end the listing and relist it.")
+    held = [d["label"] for d in sync_merge.describe_conflicts(conflicts)]
+    if not held:
+        return "Your eBay listing has been updated." + moved + stayed
+    seen, names = set(), []
+    for label in held:  # the label map folds several fields onto one word
+        if label not in seen:
+            seen.add(label)
+            names.append(label)
+    listed = names[0] if len(names) == 1 else (
+        ", ".join(names[:-1]) + " and " + names[-1])
+    return (f"Your eBay listing has been updated — except the {listed}, which "
+            f"you and eBay both changed. Choose which version to keep."
+            + moved + stayed)
 
 
 def _view_url(listing: Listing, listing_id: str) -> str:
@@ -706,6 +843,30 @@ class EbayProvider:
             if not listing.ebay_account:
                 listing.ebay_account = ((creds or {}).get("ebay_username")
                                         or "").strip()
+            if not listing.ebay_account_id:
+                listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
+                                           or "").strip()
+            # eBay moved the listing to a live category, exactly as it can on
+            # a create: store what it actually FILED. This has to happen
+            # before the record is written below — set afterwards it would
+            # live only in memory, and the next load would be back to the
+            # retired id that every aspect lookup and revise is built from.
+            remapped = str(res.get("category_id") or "")
+            if remapped:
+                listing.category_id = remapped
+            # eBay took the edit, so the record and the listing agree again
+            # and there is nothing left pending. Cleared here — on acceptance
+            # — and not when the request was built: a revise that failed
+            # leaves its edits marked, so the retry still carries them.
+            # Everything eBay took is settled. What it could not take is
+            # NOT: the record still holds a value the live listing does not,
+            # so those marks stay — the same rule as a failed revise, where
+            # the edits stay marked so the retry still carries them. Clearing
+            # them would file the seller's correction as delivered.
+            unsent = list(res.get("unsent") or ())
+            listing.clear_dirty()
+            if unsent:
+                listing.mark_dirty(*unsent)
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             if pushed_local:
@@ -722,20 +883,27 @@ class EbayProvider:
                      session_id, res.get("listing_id"),
                      "local-updated" if pushed_local else "unchanged")
             listing_id = str(res.get("listing_id") or "")
+            message = revise_message(listing.conflicts, relist, remapped,
+                                     unsent=unsent)
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),
-                message=("Relisted! It's live on eBay as a fresh listing "
-                         "with a new item number."
-                         if relist else "Your eBay listing has been updated."),
+                message=message,
                 raw={"published": True, "revised": not relist,
                      "relisted": relist, "mode": "live",
                      "listing_id": res.get("listing_id"),
+                     # What eBay was NOT told, and why. Without this the
+                     # editor has no way to render the question, and the
+                     # seller's held-back edit stays invisible.
+                     "held_back": sync_merge.describe_conflicts(
+                         listing.conflicts),
+                     # Edits eBay was never offered, as opposed to the ones
+                     # above that it was and we withheld. Different question,
+                     # different answer: nobody chooses between two versions
+                     # here — the app simply cannot send this one.
+                     "unsent": unsent,
                      **({} if recorded else {"record_warning": RECORD_WARNING}),
-                     "message": ("Relisted! It's live on eBay as a fresh "
-                                 "listing with a new item number."
-                                 if relist else
-                                 "Your eBay listing has been updated.")})
+                     "message": message})
 
         # A listing that's already live must NEVER lose its 'published' status
         # in our records just because a revise attempt was blocked or errored —
@@ -799,7 +967,11 @@ class EbayProvider:
                     creds["access_token"], creds["ship_from_postal"])
                 if key:
                     creds["merchant_location_key"] = key
-                    db.save_ebay_account(creds["_uid"], merchant_location_key=key)
+                    # Remembering the key saves a lookup next time; the
+                    # publish below works without it, and the seller is told
+                    # nothing about it either way.
+                    db.save_ebay_account_best_effort(
+                        creds["_uid"], merchant_location_key=key)
             except Exception as exc:  # noqa: BLE001 - don't block publish on this
                 log.warning(f"ebay: location re-ensure failed: {exc}")
         # NEW live listings go out through the Trading API, not the Inventory
@@ -843,6 +1015,9 @@ class EbayProvider:
             if not listing.ebay_account:
                 listing.ebay_account = ((creds or {}).get("ebay_username")
                                         or "").strip()
+            if not listing.ebay_account_id:
+                listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
+                                           or "").strip()
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", ctx.uid)
             storage.save_listing(session_id, listing)
@@ -857,7 +1032,12 @@ class EbayProvider:
                 result["promote_status"] = promote(
                     session_id, listing, creds,
                     rate=listing.ad_rate_percent,
-                    ebay_listing_id=res["listing_id"])
+                    ebay_listing_id=res["listing_id"],
+                    # Read BEFORE promote() sets it: the per-listing toggle is
+                    # the seller's own choice, made beside a rate slider and a
+                    # fee preview. Without it, everything auto-promote touched
+                    # would look like an explicit request.
+                    chosen_by_seller=bool(listing.promote))
                 # promote() records the rate it actually used on the listing.
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="published", user_id=ctx.uid)
@@ -936,16 +1116,39 @@ class EbayProvider:
         # ship-from ZIP from, and build_add_item omits the element rather than
         # inventing one. create_listing is what refuses a real publish without
         # it, so the preview stays an honest picture of an unconfigured app.
+        # In production this is a FAILED publish, not a successful preview.
+        #
+        # "Published" is a claim about the listing being live on eBay. Nothing
+        # was created here, so ok:true was untrue in the way that matters: the
+        # seller is told their item is listed, closes the app, and finds out
+        # later that it never was. The rendered XML and the export path made
+        # it worse rather than better — neither is something a seller can act
+        # on, and the path describes the server's own filesystem.
+        #
+        # Outside production the payload preview stays, because it is a real
+        # development tool: the only way to see what a publish would send
+        # without connecting an account.
+        message = ("Connect your eBay account in Settings to publish. "
+                   "Nothing was listed.")
+        if config.EBAY_ENV == "production":
+            return PublishOutcome(
+                ok=False, status="draft", message=message,
+                issues=[{"target": "account", "level": "error",
+                         "title": "eBay isn't connected",
+                         "fix": "Connect eBay in Settings, then publish again."}],
+                raw={"dry_run": False, "error": True, "mode": "live",
+                     "message": message})
+
         payload = {"call": call, "xml": body, "mode": "live"}
         export_path = storage.write_export(ctx.session_id, "ebay_payload", payload)
-        message = ("No eBay account connected — generated the "
-                   f"{call} request instead of publishing. Connect eBay in "
-                   "Settings to go live. (Server-side eBay credentials no "
-                   "longer publish on their own; a listing is always created "
-                   "on a connected seller's account.)")
+        dev_message = ("No eBay account connected — generated the "
+                       f"{call} request instead of publishing. Connect eBay in "
+                       "Settings to go live. (Server-side eBay credentials no "
+                       "longer publish on their own; a listing is always created "
+                       "on a connected seller's account.)")
         return PublishOutcome(
-            ok=True, dry_run=True, status="dry_run", message=message,
-            raw={"dry_run": True, "mode": "live", "message": message,
+            ok=True, dry_run=True, status="dry_run", message=dev_message,
+            raw={"dry_run": True, "mode": "live", "message": dev_message,
                  "export_path": str(export_path), "payload": payload})
 
 

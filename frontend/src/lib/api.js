@@ -1,3 +1,6 @@
+import {
+  ensureAiConsent, grantAiConsent, hasAiConsent,
+} from "@/lib/aiConsent";
 import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
 
 // Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
@@ -22,34 +25,23 @@ export async function startConnect(path) {
 // covered automatically.
 const AI_PHOTO_RE = /^\/api\/(upload|upload-more|bulk\/upload|shelf-scan|identify)/;
 
-const AI_CONSENT_KEY = "thryft-ai-consent";
+// Endpoints that CHECK A PASSWORD. Their 401 means "wrong password", not
+// "your session is gone", and the two must not be confused: signing the
+// seller out on a mistyped password would close the dialog they are in the
+// middle of, which is exactly what the delete-account journey caught when
+// this list held only the two auth routes.
+//
+// A password check is the only 401 in the app that is not about the session,
+// so the list is the set of routes that take one — sign-in, sign-up, and the
+// re-authentication that guards account deletion.
+const PASSWORD_CHECK_RE =
+  /^\/api\/(auth\/(login|signup)|account\/delete)/;
 
-export function hasAiConsent() {
-  try { return localStorage.getItem(AI_CONSENT_KEY) === "yes"; } catch (e) { return true; }
-}
-
-export function grantAiConsent() {
-  try { localStorage.setItem(AI_CONSENT_KEY, "yes"); } catch (e) {}
-}
-
-// Resolves once the user has agreed (now, or previously); rejects if they
-// decline. The dialog itself lives in the app shell — this just raises the
-// "ai-consent:needed" event and waits for its verdict.
-function ensureAiConsent() {
-  if (hasAiConsent()) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const detail = {
-      accept: () => { grantAiConsent(); resolve(); },
-      decline: () => reject(new Error(
-        "Photos aren't analyzed without your OK — you can agree any time.")),
-    };
-    try {
-      window.dispatchEvent(new CustomEvent("ai-consent:needed", { detail }));
-    } catch (e) {
-      resolve(); // no listener/some exotic browser — never brick the app
-    }
-  });
-}
+// The answer itself lives in lib/aiConsent, so the "a browser that cannot
+// remember a yes has not given one" rule can be tested without standing up
+// this module's fetch, timeout and token machinery. Re-exported because
+// callers already import it from here.
+export { grantAiConsent, hasAiConsent };
 
 // How long any one request may take before the client stops waiting. Photo
 // work on a shared machine is the slow case: an inference queued behind a
@@ -85,6 +77,18 @@ export function batchModelTimeoutMs(count, removeBg) {
 
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.
+// Methods that are safe to repeat. A timeout on one of these tells the seller
+// nothing was lost, because repeating it cannot do the work twice. Anything
+// else may already have changed something on a marketplace.
+//
+// A missing method is a GET (fetch's own default), which is why the default
+// is the safe side rather than the cautious one.
+const REPEATABLE = new Set(["GET", "HEAD", "OPTIONS"]);
+
+export function isRepeatable(method) {
+  return REPEATABLE.has(String(method || "GET").toUpperCase());
+}
+
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
@@ -117,20 +121,53 @@ export async function api(path, opts = {}) {
     res = await fetch(apiUrl(path), abort ? { ...opts, signal: abort.signal } : opts);
   } catch (e) {
     if (e?.name === "AbortError") {
+      // What a timeout MEANS depends on the method, and saying the wrong
+      // thing here is worse than saying nothing.
+      //
+      // Giving up on a request is not the same as the server giving up on
+      // it. A read can be repeated freely, so "nothing was lost" is true. A
+      // publish, a promotion, a policy creation or a delete may already have
+      // reached eBay and succeeded — the response is what got lost, not the
+      // work. Telling that seller "nothing was lost, try again" invites them
+      // to create a second live listing, and this message used to be sent on
+      // every timeout regardless of method.
+      const seconds = Math.round(timeoutMs / 1000);
       throw new Error(
-        `That took longer than ${Math.round(timeoutMs / 1000)}s and was given up on. `
-        + "Nothing was lost — try again.", { cause: e });
+        isRepeatable(opts.method)
+          ? `That took longer than ${seconds}s and was given up on. `
+            + "Nothing was lost — try again."
+          : `That took longer than ${seconds}s, so we stopped waiting — but it `
+            + "may still have gone through. Check before trying again, so you "
+            + "don't end up doing it twice.",
+        { cause: e });
     }
+    // Not a timeout: the connection itself failed — dropped mid-request, a
+    // machine restarting, a phone changing networks. Same question as the
+    // branch above, and the same answer, because the browser cannot tell a
+    // request that never left from one whose reply was lost. Saying "try
+    // again in a few seconds" to someone whose label purchase or publish may
+    // already have gone through is how they pay twice.
     throw new Error(
-      "Network error — the server may be starting up. Try again in a few seconds.",
+      isRepeatable(opts.method)
+        ? "Network error — the server may be starting up. Try again in a "
+          + "few seconds."
+        : "The connection dropped before we heard back, so we can't tell "
+          + "whether it went through. Check before trying again, so you "
+          + "don't end up doing it twice.",
       { cause: e });
   } finally {
     if (timer) clearTimeout(timer);
   }
   if (!res.ok) {
+    // `served` stays false when the body carried no `detail` of its own — a
+    // proxy's HTML error page, a gateway timeout — and that is the only case
+    // where the status code goes in the message, because there it is the
+    // only information available.
     let detail = res.statusText;
+    let served = false;
     try {
-      detail = (await res.json()).detail || detail;
+      const sent = (await res.json()).detail;
+      if (sent) { detail = sent; served = true; }
     } catch (e) { /* non-JSON error body */ }
     // Out of AI tokens (402 mentioning tokens — distinct from the unrelated
     // 402 the server maps Anthropic-credit exhaustion to): let the app shell
@@ -138,7 +175,33 @@ export async function api(path, opts = {}) {
     if (res.status === 402 && /token/i.test(String(detail))) {
       try { window.dispatchEvent(new CustomEvent("tokens:needed", { detail })); } catch (e) {}
     }
-    const err = new Error(`(${res.status}) ${detail}`);
+    // The session is gone: expired, or cancelled from another device by the
+    // "Sign out everywhere" this branch added. Nothing in the client used to
+    // read this, so the cached account stayed on screen above a store that
+    // would not load, with no prompt to sign in and nothing saying why. The
+    // revocation worked; the app never noticed.
+    //
+    // An event rather than a store import, for the reason the 402 above uses
+    // one: this is the choke point every request goes through and it must not
+    // depend on React. The caller's own error path still runs -- this only
+    // adds the one conclusion no single caller is in a position to draw.
+    //
+    // Password checks are exempt: their 401 is a mistyped password, which the
+    // form itself says better, and signing someone out over one would close
+    // the dialog they are in the middle of. See PASSWORD_CHECK_RE.
+    if (res.status === 401 && !PASSWORD_CHECK_RE.test(path)) {
+      try { window.dispatchEvent(new CustomEvent("auth:expired", { detail })); } catch (e) {}
+    }
+    // The sentence the server wrote IS the message. Prefixing the status was
+    // right when `detail` was a raw exception string and the number was the
+    // only thing in it worth reading; P2-07 turned those into sentences
+    // written for the seller, and this went on dressing each one up. On the
+    // most ordinary failure there is, it produced: "We couldn’t load your
+    // listings ((503) We couldn’t load your listings just now.). This doesn’t
+    // mean you don’t have any" — the same sentence twice, wrapped around a
+    // number nobody can act on. The status stays on `err.status`, which is
+    // where the code that branches on it already looks.
+    const err = new Error(served ? detail : `(${res.status}) ${detail}`);
     err.status = res.status;
     throw err;
   }
@@ -148,6 +211,17 @@ export async function api(path, opts = {}) {
 export function postJson(path, body) {
   return api(path, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// PATCH sends only what changed. Use it wherever a control changes one field
+// on a record the caller is holding a possibly-stale copy of — spreading that
+// copy into a full save is how an edit made somewhere else gets overwritten.
+export function patchJson(path, body) {
+  return api(path, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });

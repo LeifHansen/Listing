@@ -38,6 +38,12 @@ ENV BUILD_SHA=$GIT_SHA
 
 COPY backend ./backend
 COPY --from=frontend /app/frontend/dist ./frontend/dist
+# The revision set travels with the code that expects it, so the cutover from
+# create_all is `alembic stamp head` then `alembic upgrade head` run against
+# the machine, rather than a redeploy carrying a script that is not there.
+# Nothing on the boot path reads these; see alembic/env.py.
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 
 EXPOSE 8080
 

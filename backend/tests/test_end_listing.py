@@ -135,10 +135,18 @@ class FakeDb:
         self.upserts: list[tuple[str, str]] = []  # (record id, status)
         self.saved: dict[str, dict] = {}          # record id -> listing written
 
+    def enabled(self):
+        return True
+
     def upsert_listing(self, listing_id, listing, status="draft", user_id=None,
                        when=None):
         self.upserts.append((listing_id, status))
         self.saved[listing_id] = dict(listing)
+        # True, like the real one. Callers check this before destroying
+        # anything -- refresh_statuses purges a sold listing's photos only
+        # once the status write has landed -- so a double that answers None
+        # makes every such write look like a failure.
+        return True
 
 
 class FakeNotifications:

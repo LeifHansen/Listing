@@ -18,10 +18,16 @@ def test_key_matches_session_dir_name(fresh_config, session_id):
     assert key == f"sessions/{storage.session_dir(session_id).name}/optimized/img_000.jpg"
 
 
-def test_imported_ids_are_sanitized(fresh_config):
+def test_imported_ids_keep_their_own_key(fresh_config):
+    """This used to assert the key was "sessions/ebay123/..." — the hyphen
+    deleted. Stripping collapsed distinct ids onto one prefix, which is both
+    how two sellers' photos could share a directory and how the ownership
+    guard was bypassed (test_session_id_aliasing.py). The id is now the key."""
     fresh_config()
     assert objstore.key_for("ebay-123", "img_001.jpg") \
-        == "sessions/ebay123/optimized/img_001.jpg"
+        == "sessions/ebay-123/optimized/img_001.jpg"
+    assert objstore.key_for("ebay-123", "img_001.jpg") \
+        != objstore.key_for("ebay123", "img_001.jpg")
 
 
 def test_unusable_id_raises(fresh_config):
