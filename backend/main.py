@@ -5673,6 +5673,15 @@ def media(session_id: str, name: str, v: str = ""):
         if url:
             return RedirectResponse(
                 url, headers={"Cache-Control": "private, max-age=300"})
+        # Inside this branch, None means the PRESIGN failed — the object store
+        # is configured, so "there is nothing here" is not what happened. 404
+        # is a claim about the photo, and the caller that acts hardest on it is
+        # eBay: this URL is what a publish hands over as <PictureURL>, and its
+        # ingestion reads 404 as "no such photo" and drops or rejects it, where
+        # a 5xx is something it comes back for.
+        log.warning("media: couldn't sign a URL for %s", key)
+        raise HTTPException(
+            503, "That photo is temporarily unavailable — try again shortly.")
     raise HTTPException(404, "Not found")
 
 
