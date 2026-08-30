@@ -143,6 +143,24 @@ def test_the_duplicate_advisory_asks_for_live_listings_too(seller, monkeypatch):
         "the duplicate scan read the whole store to keep the live rows")
 
 
+def test_the_metrics_panel_asks_for_live_listings_too(seller, monkeypatch):
+    """The fourth: `_live_ebay_id_map` drops everything not live, so the whole
+    page was read to keep the live rows -- and on a big store the live rows
+    past the cap got no numbers at all."""
+    client, dbmod, uid = seller
+    monkeypatch.setattr(main, "_ebay_creds_for",
+                        lambda request: {"access_token": "t"})
+    asked: list = []
+
+    def _spy(limit=50, user_id=None, statuses=None):
+        asked.append(statuses)
+        return []
+
+    monkeypatch.setattr(dbmod, "list_listings_best_effort", _spy)
+    assert client.get("/api/ebay/listing-metrics").status_code == 200
+    assert asked == [("published", "live")]
+
+
 def test_promote_all_asks_for_live_listings_too(seller, monkeypatch):
     """And the third: it filters to live-and-unpromoted on the next line."""
     client, dbmod, uid = seller

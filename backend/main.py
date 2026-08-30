@@ -4525,8 +4525,12 @@ def listing_metrics_route(request: Request) -> dict:
     if not user:
         return {"metrics": {}}
     # Best effort: no numbers is a thinner panel, not a wrong statement, and
-    # it decides nothing that gets written.
-    items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"])
+    # it decides nothing that gets written. Live only, because
+    # `_live_ebay_id_map` drops everything else -- reading the whole page to
+    # keep the live rows left a big store's older live listings with no
+    # numbers at all.
+    items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"],
+                                         statuses=("published", "live"))
     status: dict = {}
     by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status)
     return {"metrics": by_id,
