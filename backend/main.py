@@ -1887,8 +1887,12 @@ def ensure_policy(request: Request, payload: dict) -> dict:
         raise HTTPException(
             502, f"eBay couldn't create the policy: {exc.description}") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(
-            502, f"Couldn't reach eBay to create the policy: {exc}") from exc
+        # Same rule as the ship-from save below: eBay's own refusals answer
+        # through AccountApiError above with eBay's description, so this arm
+        # is only the transport case — and its str() carries the API base,
+        # the path and a status line.
+        raise _lookup_failed("create that policy on your eBay account",
+                             exc, status=503) from exc
     if pol.get("id") and not creds.get("fulfillment_policy_id"):
         db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
     return pol
@@ -2203,7 +2207,15 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
         try:
             key = ebay_auth.ensure_inventory_location(creds["access_token"], postal)
-        except Exception as exc:  # noqa: BLE001
+        except httpx.HTTPError as exc:
+            # Not a 400. A 400 is a claim about what the seller typed, and the
+            # UI acts on it: the field goes red and the ZIP is what they will
+            # change. A request that never reached eBay says nothing about the
+            # ZIP — so it is a 503, and the raw error (which carries the API
+            # base, the path and a status line) goes to the log instead.
+            raise _lookup_failed("save your ship-from ZIP with eBay",
+                                 exc, status=503) from exc
+        except Exception as exc:  # noqa: BLE001 - eBay's own refusal
             raise HTTPException(
                 400, f"eBay rejected that ship-from location: {exc}") from exc
         fields["merchant_location_key"] = key
