@@ -41,6 +41,44 @@ const NO_LISTINGS = {
 // backend picks the bucket from eBay's own error code; "eBay connection
 // failed. Please try again." was the whole message before, which is advice
 // that cannot work for two of these three.
+// How long a mirror rebuild stays good enough to skip.
+//
+// An import is one eBay GetItem per listing, against a default allowance of
+// 5,000 Trading calls a DAY. Rebuilding on every app session spent that on
+// second tabs, phones and reloads; six hours means an unattended day of
+// ordinary use costs a handful of rebuilds instead of one per visit, while a
+// seller who wants it now presses "Sync with eBay".
+const AUTO_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_SYNC_KEY = "quickflip-last-store-sync";
+
+// Per user, so connecting a different eBay account (or a different person on
+// a shared device) still gets the first-run import rather than inheriting
+// someone else's "recently synced".
+function autoSyncKey(userId) {
+  return `${AUTO_SYNC_KEY}:${userId || "anon"}`;
+}
+
+/** Is an AUTOMATIC mirror rebuild worth its eBay quota right now? */
+export function autoSyncDue(userId, now = Date.now()) {
+  try {
+    const last = Number(localStorage.getItem(autoSyncKey(userId)) || 0);
+    // No record at all is the first load after connecting: without this run
+    // the seller sees an empty app, so it is the one automatic rebuild that
+    // earns its cost. A corrupt or future value reads as due for the same
+    // reason -- erring toward showing the store.
+    if (!Number.isFinite(last) || last <= 0 || last > now) return true;
+    return now - last >= AUTO_SYNC_INTERVAL_MS;
+  } catch (e) {
+    // Storage unavailable (private mode, blocked cookies). Falling back to
+    // "due" keeps the app working rather than leaving it permanently empty.
+    return true;
+  }
+}
+
+export function markAutoSynced(userId, now = Date.now()) {
+  try { localStorage.setItem(autoSyncKey(userId), String(now)); } catch (e) {}
+}
+
 const EBAY_CONNECT_ERRORS = {
   expired: "That eBay connection link expired or was already used. Start it again from Settings.",
   config: "eBay rejected this app's credentials, so this isn't something you can fix by retrying — the app's eBay setup needs attention.",
@@ -301,11 +339,21 @@ export function AppProvider({ children }) {
   }, []);
 
   // ---------- eBay store mirror ----------
-  // The app mirrors the seller's WHOLE eBay store, not just what it created:
-  // once eBay is connected, the first load imports every active listing and
-  // reconciles live statuses — so the dashboard and Listings ARE the store.
-  // Runs once per app session; `syncStore({ force: true })` re-runs it (the
-  // "Sync with eBay" button).
+  // The app mirrors the seller's WHOLE eBay store, not just what it created,
+  // so the dashboard and Listings ARE the store.
+  //
+  // The mirror is DURABLE — it lives in the database — so showing it costs
+  // nothing. Rebuilding it does: an import is one eBay GetItem per listing,
+  // and this used to rebuild on every app session. A second tab, a phone, a
+  // reload, a redeploy each spent up to 2,500 calls against a default
+  // allowance of 5,000 a DAY, plus a concurrent forced status sweep, and none
+  // of it was asked for.
+  //
+  // So an automatic sync now runs only when it would otherwise show the
+  // seller nothing or something stale: no record of ever having synced (the
+  // first load after connecting), or the last one was long enough ago to be
+  // worth redoing. Everything else waits for "Sync with eBay", which is the
+  // button that already exists for exactly this.
   const [storeSync, setStoreSync] = useState(NO_STORE_SYNC);
   const syncedOnce = useRef(false);
   const lastReconcile = useRef(0); // ms — throttles the quiet status re-checks
@@ -361,22 +409,27 @@ export function AppProvider({ children }) {
   const syncStore = useCallback(async ({ force = false } = {}) => {
     if (!user || !ebay.connected) return null;
     if (syncedOnce.current && !force) return null;
+    // An automatic run that isn't due does nothing. `force` is the seller
+    // pressing the button, and always runs.
+    if (!force && !autoSyncDue(user.id)) return null;
     syncedOnce.current = true;
     setStoreSync((s) => ({ ...s, syncing: true, error: null, progress: null }));
     try {
       const started = await postJson("/api/ebay/import-listings", {});
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
-      // force: this is the deliberate "Sync with eBay" path (or first load),
-      // so it may run the full per-item sweep; the background heartbeat below
-      // deliberately does not.
+      // The full per-item sweep is reserved for the deliberate "Sync with
+      // eBay" press: it is a second per-listing pass over the store, and
+      // running it alongside an automatic import doubled the quota an
+      // unattended app load could spend.
       lastReconcile.current = Date.now();
-      postJson("/api/ebay/sync-listings", { force: true })
+      postJson("/api/ebay/sync-listings", { force })
         .then((r) => { if (r.changed) loadListings({ quiet: true }); })
         .catch(() => {});
       // job_id: the import runs in the background and we watch it. A body with
       // the counts already in it is a server that still imports inline.
       const res = started?.job_id ? await watchImport(started.job_id) : started;
       await loadListings({ quiet: true });
+      markAutoSynced(user.id);
       setStoreSync({
         syncing: false, lastSynced: Date.now(), error: null, progress: null,
       });
@@ -391,11 +444,12 @@ export function AppProvider({ children }) {
       return { error: e.message };
     }
   }, [user, ebay.connected, loadListings, watchImport]);
-  // Kick the once-per-session mirror import off as soon as we have a user and
-  // a connected eBay account. syncStore bails out immediately in every other
-  // case, and latches `syncedOnce` so re-running this effect is a no-op — the
-  // spinner state it sets synchronously happens once per session, on the run
-  // that actually starts the job, and the deps it reads are not ones it writes.
+  // Offer the mirror an automatic rebuild as soon as we have a user and a
+  // connected eBay account — syncStore decides whether one is actually DUE,
+  // and bails out immediately in every other case (including no user, no
+  // connection, and already run this session). The listings already on screen
+  // come from the database either way, so skipping the rebuild costs the
+  // seller nothing except freshness they can restore with one press.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { syncStore(); }, [syncStore]);
 
