@@ -27,12 +27,18 @@ from __future__ import annotations
 import ast
 import pathlib
 
-DB_PY = pathlib.Path(__file__).resolve().parents[1] / "db.py"
+BACKEND = pathlib.Path(__file__).resolve().parents[1]
+
+# The three modules that stand between the app and something that can be
+# unreachable: the database, the bucket, and the volume. The eighth instance
+# of this bug was in the second one, found by asking db.py's question there --
+# so the sweep asks it of all three.
+MODULES = ("db.py", "objstore.py", "storage.py")
 
 
-def _classify() -> tuple[set[str], set[str]]:
+def _classify(module: str = "db.py") -> tuple[set[str], set[str]]:
     """(functions that raise from an except arm, functions that swallow)."""
-    tree = ast.parse(DB_PY.read_text())
+    tree = ast.parse((BACKEND / module).read_text())
     raises: set[str] = set()
     swallows: set[str] = set()
     for fn in tree.body:
@@ -65,6 +71,8 @@ MUST_RAISE = {
     "save_ebay_account": "OAuth redirected to 'connected' on a token that was never stored",
     "count_pending_media_purges": "zero owed is a clean bill on somebody's erasure",
     "count_pending_deletion_notices": "same, for the notices eBay is waiting on",
+    "delete_prefix_strict":
+        "counting zero for an unreachable bucket let a dropped erasure be recorded as done",
     "record_deletion_notice": "acknowledging to eBay before the row is durable loses the notice",
     "revoke_sessions": "'signed out everywhere' has to be true when it says so",
     "last_sweep": "a forgotten cooldown spends the whole application's daily eBay quota",
@@ -161,11 +169,49 @@ WHY_A_BLANK_IS_SAFE = {
     # --- the probe that must answer during the outage it describes --------
     "db_status":
         "the health probe: refusing to answer is the one thing it must never do",
+
+    # --- objstore.py: best-effort by design, with one strict exception ----
+    "url_for":
+        "None is a signed URL we could not mint; /media answers 503, not 404",
+    "upload":
+        "None means not uploaded, and the offload verifies presence before unlinking",
+    "restore":
+        "False falls back to the local copy or a re-upload, never to 'no photo'",
+    "exists":
+        "False only ever causes another attempt; nothing reads it as 'deleted'",
+    "delete":
+        "one object; the prefix delete is the one erasure depends on, and it raises",
+    "delete_prefix":
+        "the tolerant twin, for the orphan sweep and post-sale cleanup",
+
+    # --- storage.py: the volume, where a failure costs space not truth ----
+    "purge_session":
+        "reclaims space after a sold listing or an abandoned upload, promises nothing",
+    "snapshot_image":
+        "a missed undo step; the edit itself already landed",
+    "image_index":
+        "answers -1, which is not a position and every caller treats as absent",
+    "disk_free_bytes":
+        "0 means unknown, and the low-space guard is written to require knowing",
+    "writable":
+        "False refuses the write, which is the safe direction on a full volume",
+    "prune_originals":
+        "reclaims space; the files it leaves are found by the next pass",
+    "prune_history":
+        "same, and an unpruned history costs disk rather than correctness",
+    "prune_exports":
+        "same; an export left behind is regenerated on demand anyway",
+    "session_touched_at":
+        "an unknown mtime makes the orphan sweep skip the dir rather than delete it",
+    "sweep_orphan_sessions":
+        "an unswept dir stays, which is the only safe direction for a delete pass",
 }
 
 
 def test_every_swallowed_failure_has_a_recorded_reason():
-    _, swallows = _classify()
+    swallows: set[str] = set()
+    for module in MODULES:
+        swallows |= _classify(module)[1]
     missing = sorted(swallows - set(WHY_A_BLANK_IS_SAFE))
     assert not missing, (
         "these answer a storage failure with a blank and nobody has said why "
@@ -177,7 +223,9 @@ def test_every_swallowed_failure_has_a_recorded_reason():
 
 def test_the_reasons_have_not_gone_stale():
     """A function that now raises must not still be listed as safely blank."""
-    raises, _ = _classify()
+    raises: set[str] = set()
+    for module in MODULES:
+        raises |= _classify(module)[0]
     stale = sorted(raises & set(WHY_A_BLANK_IS_SAFE))
     assert not stale, (
         "these raise now, so their entry in WHY_A_BLANK_IS_SAFE is describing "
@@ -185,7 +233,12 @@ def test_the_reasons_have_not_gone_stale():
 
 
 def test_the_reads_that_must_refuse_still_refuse():
-    raises, swallows = _classify()
+    raises: set[str] = set()
+    swallows: set[str] = set()
+    for module in MODULES:
+        r, w = _classify(module)
+        raises |= r
+        swallows |= w
     reverted = sorted(name for name in MUST_RAISE if name in swallows)
     assert not reverted, "\n".join(
         f"{name} stopped raising — {MUST_RAISE[name]}" for name in reverted)
@@ -209,7 +262,7 @@ def test_every_best_effort_has_a_strict_twin_that_raises():
     A `*_best_effort` on its own is just a swallow with a longer name: the
     strict version is what makes choosing the tolerant one a decision.
     """
-    raises, swallows = _classify()
+    raises, swallows = _classify("db.py")
     everything = raises | swallows
     orphans = []
     for name in sorted(everything):
@@ -221,8 +274,11 @@ def test_every_best_effort_has_a_strict_twin_that_raises():
     assert not orphans, "\n".join(orphans)
 
 
-def test_the_sweep_still_finds_the_module():
+def test_the_sweep_still_finds_every_module():
     """A sweep that quietly stops finding anything passes for ever."""
-    raises, swallows = _classify()
-    assert len(raises) >= 15, f"only found {len(raises)} raising functions"
-    assert len(swallows) >= 25, f"only found {len(swallows)} swallowing ones"
+    for module in MODULES:
+        raises, swallows = _classify(module)
+        assert raises or swallows, f"{module} yielded nothing — renamed or moved?"
+    raises, swallows = _classify("db.py")
+    assert len(raises) >= 15, f"only found {len(raises)} raising functions in db.py"
+    assert len(swallows) >= 25, f"only found {len(swallows)} swallowing ones in db.py"
