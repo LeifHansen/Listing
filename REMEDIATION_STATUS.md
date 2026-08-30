@@ -165,6 +165,14 @@ as `ebay_deletion_notices`; nothing else is needed for it. Watch
 it should be 0, and a number that does not come back down is an
 erasure this app promised somebody and has not managed to do.
 
+`users.last_sweep_at` and `users.sessions_valid_from` both ride the guarded
+`ALTER TABLE` list in `db.py` and need nothing at deploy time. Both are
+nullable with no default, which is what makes them safe to add to a live
+table: NULL means "never revoked" and "never swept", which is every account
+on the day this ships and is exactly what the in-memory dict answered before
+it. The first background sweep after the deploy is therefore free, once per
+account, which is the same cost as one restart used to be — and the last one.
+
 - [ ] **Run `scripts/migrate_session_ids.py`** (dry run first, then `--apply`).
       Until it runs, imported listings' photos are filed under the old
       stripped names and will not be found. This is a **required deploy step**,
@@ -214,6 +222,10 @@ erasure this app promised somebody and has not managed to do.
 | Auto-promote no longer invents an ad rate | `d62f1ef` | Auto-promote's promise, in the Settings hint, is "at eBay's recommended ad rate". When the recommendation came back empty -- eBay had none for that listing, or the call failed -- the code fell through to `DEFAULT_AD_RATE = 10.0` and promoted anyway. eBay's own recommendations are usually low single digits, so the seller could be paying several times what they agreed to, at a rate **no screen ever showed them**, chosen because a lookup returned empty. The automatic path now skips the promotion and says why; the MANUAL path is untouched and always was fine (the editor's slider quotes the rate and previews the fee in pounds before anything happens), so the 10% default still applies where the seller has actually seen it. `listing.promote` is also set only after the decision, so a listing that was not promoted is not left flagged as promoted. The Settings hint says all of this. |
 | An anonymous caller could drain every seller's eBay quota | `0f2542d` | `/api/category-suggestions`, `/api/item-aspects` and `/api/price-suggestions` call eBay with the APPLICATION token -- which is why they need no login, and why an unauthenticated flood spends an allowance shared by EVERY seller (eBay's default is 5,000 calls a day for the whole application). The answers are cached, but the cache is bounded at 500 entries, so distinct queries evict it and force a live call each. Exhausting it does not degrade the attacker; it degrades every seller at once -- no categories, no item specifics, no price comps, on a listing they are trying to publish. Metered now on ONE shared budget (three separate ones would let a caller spend the allowance three times over), with the same reasoning and the same brake the photo studio already carries. The route audit that found it also confirmed every other mutating route is ownership-checked. |
 | P2-03 unknown-outcome copy | `8df583b` | Every timed-out request said "Nothing was lost — try again", including a publish or a delete that may already have reached eBay. Writes now say the outcome is unknown and to check first, which is the difference between a retry and a duplicate live listing. |
+| P1-02 the sweep cooldown survives a restart (partial) | `aa0f337` | The per-item probe sweeps cost up to ~100 Trading calls per account, against a DAILY allowance belonging to the whole application (eBay's default is 5,000). `sync_guard` exists to ration them to once per six hours, and its own docstring says what running out costs: "once it's gone EVERY Trading call fails — including the AddFixedPriceItem that publishes a listing." The mark doing that rationing lived in a process-local dict, so it was forgiven on every restart — every deploy, every OOM (background removal is the memory-hungry step), every machine move — re-arming the sweep for EVERY account with a tab open, on work already up to date. Six deploys in a working day across a dozen active sellers is the whole allowance, and the sellers who then cannot publish did nothing and can do nothing. `users.last_sweep_at` now holds it; the dict stays a cache in front of the row, so ordinary polls (already cooling down) still answer without a query and the row is read only on the call about to spend. An outage is not permission: a mark that cannot be read is not evidence nothing has swept, and a spend nobody wrote down cannot be rationed, so a background sweep is refused in both cases — the cheap finished-list pass runs either way. A forced sync is exempt from both, because a person pressed the button. **Still open in P1-02: the job runner itself.** |
+| P1-02 / P0-07 follow-up: "eBay said no" told apart from "we never heard back" | `74b0772` | The Trading client collapsed three endings into one bare TradingError: eBay's own Ack=Failure rejection, a transport failure before a byte reached eBay, and a request that went out whose answer never came back. Only the third costs a seller anything, and the app was calling it the first — "eBay rejected the listing", in the largest text on the screen, above a body saying the opposite. Someone who reads that fixes a field and publishes again. `UnknownOutcome` is now its own condition, and the classification is deliberately asymmetric: only an explicit list of never-sent transport errors counts as "nothing happened", everything else — including an exception type nobody anticipated — is unknown. Being wrong in the "nothing happened" direction loses a live listing; being wrong the other way costs one look at eBay. Only a WRITE can be unknown (a timed-out GetItem changed nothing, and the sync makes thousands; VerifyAddFixedPriceItem is eBay's dry run and creates nothing). A lost create then ASKS: `item_id_for_sku`, whose docstring was written for exactly this and which was only ever reached from eBay's explicit "you already sent this" rejection — the one case where eBay does answer. Finding nothing stays unknown rather than becoming a failure, because that lookup answers "" both when eBay has no such listing and when the lookup itself failed. |
+| P0-07 follow-up: the listing a lost publish left behind is reclaimed | `ee765b8` | The inline lookup above cannot settle the case where it fails too — likely, during the outage that lost the publish. Then the record stays a draft and nothing revisits it, and the next store sync finds a listing it has no record of (this app's own) and imports it as `ebay-<item>`: a second card for one item, the duplicate pair publish_guard exists to prevent, reached from the other end. Not two creates, but one create the app forgot it made. The SKU closes it durably with no new table and no new pass: every fixed-price create stamps `qf-<session id>` (`-r<item>` on a relist) with InventoryTrackingMethod=SKU, and the sync already reads SKU off every item — it just had no way to match a record that never got an item id. Keys are built by calling `publish_guard.idempotency_key` rather than formatting a string, so the two cannot drift. Also fixes a bug this change introduced, caught by re-reading it: a reclaimed relist matches TWO eBay items at once (the live one by key, the ended predecessor by the id the record still holds), and the ended list is walked second, so the predecessor was written over the relist — the card went back to Inactive and the live listing had no row anywhere, worse than the duplicate being removed. One listing per record per run, first claim wins. |
+| A slow machine no longer turns one flake into two red tests | `f3a90bb` | `test_a_batch_photo_queues_for_the_model_instead_of_giving_up` waited a flat 5 seconds for a worker parked behind `_INFER_LOCK` — a bet on the environment rather than on the behaviour under test. CI installs the server WITHOUT rembg, so there the thread raises the instant it has the slot; anywhere rembg is present it pays for a model load and a real inference first, which on a cold shared box overruns. The failure read as `outcome == []` — "the queued photo never got the slot", the opposite of what happened — and the worker was left holding the lock, so `engine_state()["busy"]` stayed True and the NEXT test failed too, pointing at a readiness probe that was fine. It now waits on the deadline actually under test and JOINs, so the lock cannot outlive the test that took it. No assertion is loosened: giving up raises CutoutBusy and still fails the same check. |
 | P1-05 privacy policy accuracy (partial) | `8a41647` | The policy made three claims the code contradicted: that deletion "immediately" removes photos (the media purge runs after the response returns), that it "hands your marketplace authorizations back" (nothing revokes the OAuth grants), and that eBay deletion notices are merely "recorded for audit" keyed on nothing (they are now verified and acted on, keyed on eBay's immutable id). Stripe was also absent from the service-provider list despite processing token purchases. Copy now matches the implementation. **Not legal review** — the audit's ask for counsel review, retention schedule, legal identity and a company-domain contact is untouched. |
 | P1-11 deploy gate (partial) | `1521558` | `deploy` gated production on the lightweight lint+unit job ALONE — cutout safety, the frontend build and the smoke test never gated a deploy, and `ci.yml` runs only on `pull_request` so a push to `main` ran none of them. Both now call one shared `gates.yml`. `superfly/flyctl-actions/setup-flyctl` was pinned off `@master` (it runs in the job holding `FLY_API_TOKEN`). **See the two operational consequences below.** |
 | P1-08 security headers (partial) | `46b89d3` | None of CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or Permissions-Policy were sent. Now all present, verified against the booted app. The CSP keeps `'unsafe-inline'` in script-src because index.html has an inline theme script — tightening to a nonce is worth its own change. The REST of P1-08 (revocable sessions, password reset/verify/MFA, distributed rate limiting, fail-closed keys) is untouched. |
@@ -228,7 +240,16 @@ Still open:
       ahead of time or opens a circuit breaker. What is fixed is the
       behaviour once eBay says stop; what is not is spending less to begin
       with.
-- [ ] P1-02 jobs/locks/cooldowns are process-local and non-resumable.
+- [ ] P1-02, MINUS the sweep cooldown (done, see above): the eBay sweep
+      cooldown is durable now, but the JOB RUNNER is not. Bulk photo batches
+      are picked back up after a restart and every job reports how it ended,
+      so nothing is silently lost — but a store import interrupted mid-run is
+      reported interrupted rather than resumed, and re-running it re-spends
+      every GetItem it already paid for. Locks are still process-local:
+      `publish_guard`'s docstring is honest that its lock is a cheap fast path
+      and eBay's own UUID check is the real cross-process guard, which is
+      correct as designed; `ratelimit` and the eBay caches are per-process and
+      a restart forgives them.
 - [ ] P1-05, MINUS the policy corrections and the durable purge (both done,
       see above): nothing revokes the marketplace OAuth grants — the policy
       says so rather than promising otherwise, which is the honest interim
@@ -285,8 +306,8 @@ than gone away.
 
 What is now true: all 8 P0 blockers are closed in code with regression tests
 written before each fix; P1-06, P1-07, P1-09 and P1-12 are closed outright;
-P1-01, P1-03, P1-04, P1-05, P1-08 and P1-11 are partly closed (see the table
-above for exactly which halves); P2-03 and P2-07 are closed.
+P1-01, P1-02, P1-03, P1-04, P1-05, P1-08 and P1-11 are partly closed (see the
+table above for exactly which halves); P2-03 and P2-07 are closed.
 
 What still blocks it:
 
@@ -296,9 +317,12 @@ What still blocks it:
    in this environment — and is not the same as a real call. The contract
    tests are the readiness step the audit asks for and they have not been run.
 2. **The session-id migration has not been run** (see the deploy-time list).
-3. **P1-02 and P1-10 are untouched**: jobs still run from process-local
-   threads (the WORK is durable now; the runner is not), and the data model
-   is still one JSON document per listing with unbounded list responses.
+3. **P1-10 is untouched and P1-02 is half done**: the data model is still one
+   JSON document per listing with unbounded list responses, and jobs still run
+   from process-local threads. The rationing that protects eBay's shared daily
+   quota now survives a restart, and a publish whose answer went missing is
+   recovered rather than duplicated — but the runner itself is still a thread,
+   and an interrupted store import is reported rather than resumed.
 4. **No Alembic, and the container still runs as root** — the latter needs one
    local `docker build && docker run`, which this environment cannot do.
 5. **P1-05's legal half is outstanding**: counsel review, a retention
