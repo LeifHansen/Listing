@@ -38,12 +38,15 @@ consequences of the CI change*, above the agenda — and P1-06's reversal of the
 Promoted Listings default, the last item in section 1.
 
 **Needs access this environment does not have.** Do not spend time trying:
-an eBay **Sandbox account** would settle three separate items at once — the
-contract tests P2-08 asks for, the four journeys that sit behind a connected
-marketplace, and the one unanswered question blocking P1-01's N+1 fix (what
-`GetMyeBaySelling`/`ActiveList` returns inside each `<Item>`; `developer.ebay.com`
-is blocked by this environment's egress proxy). A **docker daemon** would
-settle the non-root container. **Counsel** would settle P1-05's legal half.
+an eBay **Sandbox account** would settle two items — the contract tests P2-08
+asks for, and the one unanswered question blocking P1-01's N+1 fix (what
+`GetMyeBaySelling`/`ActiveList` returns inside each `<Item>`;
+`developer.ebay.com` is blocked by this environment's egress proxy). It would
+NOT have been needed for the browser journeys, which this document claimed
+four times that it was: all nine are written and none of them needed a
+marketplace. See P2-08 for why that kept being the wrong answer. A **docker
+daemon** would settle the non-root container. **Counsel** would settle
+P1-05's legal half.
 
 How to verify anything you change is in *Ground truth about the baseline*
 immediately below, including the exact four suites and what each one is for.
@@ -625,16 +628,21 @@ What still blocks it:
    in this environment — and is not the same as a real call. The contract
    tests are the readiness step the audit asks for and they have not been run.
 2. **The session-id migration has not been run** (see the deploy-time list).
-3. **P1-10 is barely started and P1-02 is half done**: the data model is
-   still one JSON document per listing, and there is no cursor pagination —
-   the list is capped and honest about the cap, and it no longer ships the
-   sync ledger (17.8 MiB at the cap became 9.3), but 9.3 MiB is an
-   improvement, not a fix, and no part of the normalization the audit asks
-   for has been done. Jobs still run from process-local threads: the
-   rationing that protects eBay's shared daily quota survives a restart, and
-   a publish whose answer went missing is recovered rather than duplicated —
-   but the runner itself is still a thread, and an interrupted store import
-   is reported rather than resumed.
+3. **P1-10's normalization is untouched, and P1-02's runner is still a
+   thread.** The rest of P1-10 is done: the list is honest about its cap and
+   can now say what it was cut from, it no longer ships the sync ledger (17.8
+   MiB at the cap became 9.3), it pages with a keyset cursor so a seller past
+   the cap can actually reach the rest of their store, and every count and
+   bulk read is SQL rather than a page measured in Python. What has NOT been
+   done is the data model: still one JSON document per listing, and 9.3 MiB
+   is an improvement rather than a fix. For P1-02, the rationing that
+   protects eBay's shared daily quota survives a restart, a publish whose
+   answer went missing is recovered rather than duplicated, and a store
+   import now writes each listing down as it fetches it — so an interruption
+   keeps what it paid for instead of losing all of it. The runner itself is
+   still a process-local thread, and an interrupted import is reported rather
+   than RESUMED: closing that needs a per-record sync timestamp, so a resume
+   can skip what the last run already wrote.
 4. **The container still runs as root**, which needs one local
    `docker build && docker run` this environment cannot do. Alembic is in and
    proved consistent with the models; what is left there is the one-time
@@ -661,11 +669,15 @@ A fair summary for whoever picks this up: the *silent-failure* class the audit
 was really about — an outcome reported as success, a read failure reported as
 emptiness, a fee or a commitment entered into without being shown — has been
 worked through systematically, in code and in tests, and then swept for by
-inventory rather than by inspection: four scans now hold the classes shut (every
+inventory rather than by inspection. Six scans now hold the classes shut: every
 scoped route checks its owner; no route answers 500 to a malformed request;
 every typed field survives the Trading XML; every field on `Listing` is
-classified as the seller's or the server's), each verified against a planted
-regression. Two of those four found nothing, which is the point of keeping them.
+classified as the seller's or the server's; every read and write in `db.py`,
+`objstore.py` and `storage.py` declares what it answers when storage fails;
+and the migration list is proved against the models. Each was verified against
+a planted regression, and two of them found nothing at the time — which is the
+point of keeping them. Nine browser journeys sit on top, three of which found
+a live bug that none of the scans or the audit did.
 
 The *infrastructure* class (durable jobs, migrations, normalized schema,
 non-root, sandbox verification) is largely still ahead — and one behaviour
