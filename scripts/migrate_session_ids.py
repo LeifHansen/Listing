@@ -218,14 +218,21 @@ def main() -> int:
         return 2
     print(f"{len(ids)} session id(s) from the database\n")
 
+    # The verbs follow --apply. The summary lines are what somebody pastes
+    # into a ticket, and "12 moved, 0 collision(s)" from a DRY run reads as a
+    # migration that has already happened -- under a header they may well have
+    # scrolled past. A run that reports work it did not do is the same failure
+    # this branch is about, aimed at the operator instead of the seller.
+    did, will = ("moved", "re-keyed") if args.apply else ("to move", "to re-key")
+
     print("Local disk:")
     moved, skipped, collisions = migrate_disk(ids, args.apply)
-    print(f"  {moved} moved, {skipped} already canonical or empty, "
+    print(f"  {moved} {did}, {skipped} already canonical or empty, "
           f"{collisions} collision(s)\n")
 
     print("R2:")
     copied, r2_skipped, failed = migrate_r2(ids, args.apply)
-    print(f"  {copied} object(s) re-keyed, {r2_skipped} already canonical, "
+    print(f"  {copied} object(s) {will}, {r2_skipped} already canonical, "
           f"{failed} failure(s)\n")
 
     if collisions or failed:

@@ -136,3 +136,61 @@ def test_an_unambiguous_legacy_name_still_migrates(sessions):
     moved, _, collisions = mig.migrate_disk(["ok-123"], apply=True)
     assert (moved, collisions) == (1, 0)
     assert (sessions / "ok-123" / "optimized" / "img_000.jpg").exists()
+
+
+# --------------------------------------------------- what the run REPORTS
+#
+# The dry run exists so a person can read its output and decide. Its summary
+# said "12 moved, 0 collision(s)" — the same words the real run prints — under
+# a header they may well have scrolled past, and that summary is what gets
+# pasted into a ticket. A migration that reports having done something it did
+# not do is the same failure this whole branch is about, aimed at the operator
+# instead of the seller.
+
+def _run_main(monkeypatch, capsys, sessions, ids, argv):
+    monkeypatch.setattr(mig, "_session_ids", lambda: ids)
+    monkeypatch.setattr(mig.objstore, "enabled", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["migrate_session_ids.py", *argv])
+    code = mig.main()
+    return code, capsys.readouterr().out
+
+
+def test_a_dry_run_does_not_report_having_moved_anything(
+        monkeypatch, capsys, sessions):
+    _make(sessions, "ebay123")
+    code, out = _run_main(monkeypatch, capsys, sessions, ["ebay-123"], [])
+
+    assert code == 0
+    assert "would move" in out
+    assert "1 moved" not in out, "a dry run reported work it did not do"
+    assert (sessions / "ebay123").exists(), "and it must not have moved it"
+
+
+def test_an_applied_run_says_it_moved(monkeypatch, capsys, sessions):
+    _make(sessions, "ebay123")
+    code, out = _run_main(monkeypatch, capsys, sessions, ["ebay-123"],
+                          ["--apply"])
+
+    assert code == 0
+    assert "1 moved" in out
+    assert (sessions / "ebay-123").exists()
+
+
+def test_an_unreadable_database_aborts_rather_than_reporting_nothing_to_do(
+        monkeypatch, capsys, sessions):
+    """The failure the script's own comment names: an empty answer would print
+    "0 session id(s)", find nothing, and exit 0 — a migration reporting
+    success having done nothing, after which the next person believes it ran."""
+    from backend import errors
+
+    def _down():
+        raise errors.StorageUnavailable("no database")
+
+    monkeypatch.setattr(mig, "_session_ids", _down)
+    monkeypatch.setattr(sys, "argv", ["migrate_session_ids.py", "--apply"])
+    code = mig.main()
+    out = capsys.readouterr().out
+
+    assert code == 2
+    assert "ABORTED" in out
+    assert "Done." not in out
