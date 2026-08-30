@@ -613,6 +613,12 @@ def list_listings_best_effort(limit: int = 50,
         return []
 
 
+# How many ids one lookup may name. Not a product limit -- every route that
+# reaches this already caps what a client may send -- but the line that makes
+# forgetting to do so a test failure. See get_listings.
+_MAX_IDS_PER_LOOKUP = 500
+
+
 def get_listings(listing_ids: Sequence[str], user_id: str) -> list[dict]:
     """The seller's listings among `listing_ids`, in one query.
 
@@ -632,6 +638,17 @@ def get_listings(listing_ids: Sequence[str], user_id: str) -> list[dict]:
     ids = [str(i) for i in listing_ids if str(i)]
     if not ids:
         return []
+    if len(ids) > _MAX_IDS_PER_LOOKUP:
+        # The backstop under each route's own cap, so a future caller that
+        # passes a client's list straight through fails loudly in a test
+        # rather than quietly turning one request into an enormous IN (...).
+        # It refuses rather than truncating: `mark_notifications_read` can
+        # silently cap because a seller who wanted the other twenty taps
+        # again, but a truncated lookup here reaches them as "Listing not
+        # found." per listing -- a read limitation reported as absence.
+        raise ValueError(
+            f"get_listings was asked for {len(ids)} ids; bound the caller's "
+            f"input (max {_MAX_IDS_PER_LOOKUP})")
     eng = _get_engine()
     if eng is None:
         return []

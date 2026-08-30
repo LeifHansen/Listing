@@ -141,6 +141,23 @@ def test_a_selection_a_pass_could_act_on_is_still_accepted(seller):
     assert r.status_code == 200, r.text
 
 
+def test_the_read_itself_refuses_an_unbounded_ask(seller):
+    """The backstop under the route's own cap.
+
+    A future route could call this with whatever a client sent, which is how
+    the unbounded `IN (...)` gets back in. It REFUSES rather than truncating:
+    `mark_notifications_read` can silently cap because a seller who wanted the
+    other twenty taps again, but a truncated lookup here comes back to them as
+    "Listing not found." per listing -- a read limitation reported as absence,
+    which is the exact sentence this branch keeps removing. A caller that
+    forgets to bound its input should fail loudly in a test, not quietly in
+    production.
+    """
+    _client, dbmod, uid = seller
+    with pytest.raises(ValueError):
+        dbmod.get_listings([f"id-{i}" for i in range(10_000)], uid)
+
+
 def test_an_id_that_is_not_the_sellers_is_still_reported_missing(
         seller, monkeypatch):
     """The real 'not found' survives: this is the answer the route is entitled
