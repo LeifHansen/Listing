@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography alembic
       - name: Ruff
         run: ruff check backend
       - name: Tests

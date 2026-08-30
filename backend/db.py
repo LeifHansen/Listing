@@ -17,7 +17,8 @@ import time as _time
 import uuid as _uuid
 from typing import Optional
 
-from sqlalchemy import (DateTime, JSON, String, create_engine, delete, func,
+from sqlalchemy import (DateTime, Index, JSON, String, create_engine, delete,
+                        func,
                         or_, select, text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -250,6 +251,15 @@ class Notification(Base):
     order the syncs happen to run in."""
 
     __tablename__ = "notifications"
+    # The unread badge polls every minute and filters on BOTH columns; user_id
+    # alone left the read_at test to a scan of every notification the seller
+    # has ever received. Declared on the model, not only in _MIGRATIONS below:
+    # the list runs on every boot so a fresh database does get the index, but
+    # anything reading the models -- a person, or alembic's autogenerate --
+    # could not see that it exists, which is how the two schema sources drift.
+    __table_args__ = (
+        Index("ix_notifications_user_unread", "user_id", "read_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
