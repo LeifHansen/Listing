@@ -67,12 +67,14 @@ export function ConflictBanner({ conflicts, sessionId, onResolved }) {
             </p>
             <div className="mt-2 flex flex-col gap-2">
               <Choice
-                who="Yours" value={c.mine}
+                who="Yours" keeps={`Keep your ${c.label.toLowerCase()}`}
+                value={c.mine}
                 busy={busy === `${c.field}:mine`} disabled={!!busy}
                 onPick={() => answer(c.field, "mine")}
               />
               <Choice
-                who="On eBay" value={c.ebay}
+                who="On eBay" keeps={`Keep eBay’s ${c.label.toLowerCase()}`}
+                value={c.ebay}
                 busy={busy === `${c.field}:ebay`} disabled={!!busy}
                 onPick={() => answer(c.field, "ebay")}
               />
@@ -84,7 +86,19 @@ export function ConflictBanner({ conflicts, sessionId, onResolved }) {
   );
 }
 
-function Choice({ who, value, busy, disabled, onPick }) {
+/**
+ * One side of one conflict.
+ *
+ * `keeps` is the accessible name and names both the side and the field. On
+ * screen "Keep this" is right — the button sits beside the value it keeps and
+ * a sentence each would crowd out the values the seller is comparing. To
+ * anything reading the page by its controls, though, two buttons called "Keep
+ * this" (four, with two conflicted fields) are the same question with no
+ * answer: whichever is picked is what eventually reaches the seller's live
+ * listing, and picking the wrong one overwrites a fix they made in Seller Hub
+ * with a stale copy from here.
+ */
+function Choice({ who, keeps, value, busy, disabled, onPick }) {
   return (
     <div className="flex flex-wrap items-start gap-2 justify-between">
       <div className="min-w-0">
@@ -94,7 +108,7 @@ function Choice({ who, value, busy, disabled, onPick }) {
         </span>
       </div>
       <Button size="sm" variant="soft" loading={busy} disabled={disabled}
-        onClick={onPick}>
+        aria-label={keeps} onClick={onPick}>
         Keep this
       </Button>
     </div>
