@@ -544,24 +544,39 @@ P2-01, P2-03 and P2-07 are closed (rows above). Of the rest:
       address, and a support contact on a company domain rather than a
       personal Gmail.
 - [ ] **P2-08, partly started.** The unit suite is kept and much extended
-      (1739 tests, from 961). `scripts/smoke.mjs` now signs a seller up
+      (1775 tests, from 961). `scripts/smoke.mjs` now signs a seller up
       through the real dialog, walks every screen with data actually being
-      fetched, and runs four journeys — the theme surviving a reload, a
-      log-out that survives one, a store that could not be read, and a
-      settings screen whose defaults could not be read (see the rows above).
-      **The last two each found a live bug**, which is the argument for the
-      remaining ones. Still missing: eBay Sandbox contract tests, impossible
-      from this environment (see the release posture below), and journeys for
-      unknown publish outcome, conflict resolution, deletion and reconnect.
-      The two outage journeys are done because they needed nothing faked:
-      `page.route()` breaks `/api/listings` (or `/api/prefs`) and the app
-      cannot tell the difference. The rest all sit behind a CONNECTED
-      marketplace — the policies panel does not even render until
-      `ebay.connected`, and a publish needs an account to publish to — so each
-      would first have to fake the connection, the status, the policies and
-      the publish response, at which point the test is largely checking the
-      fake. What they actually need is a sandbox account, which is the same
-      blocker as the contract tests.
+      fetched, and runs six journeys (see the rows above): the theme surviving
+      a reload; a log-out that survives one; a store that could not be read; a
+      settings screen whose defaults could not be read; an account deletion
+      that warns, takes a password, and is refused by the SERVER on a wrong
+      one; and a big store whose older listings can actually be reached.
+      **Two of them found a live bug and a third found an assertion that could
+      not fail**, which is the argument for the remaining ones. Still missing:
+      eBay Sandbox contract tests, impossible from this environment (see the
+      release posture below), and journeys for unknown publish outcome,
+      conflict resolution and reconnect.
+
+      What made the six writable is that none of them needed a marketplace.
+      Four needed only the server to misbehave, which the browser arranges
+      itself — `page.route()` breaks `/api/listings` or `/api/prefs` (or
+      serves two pages of a store that does not exist) and the app cannot tell
+      the difference. The deletion one needed nothing faked at all: a wrong
+      password is the point, and the account is still standing afterwards. The
+      three left DO sit behind a CONNECTED marketplace — the policies panel
+      does not render until `ebay.connected`, and a publish needs an account
+      to publish to — so each would first have to fake the connection, the
+      status, the policies and the publish response, at which point the test
+      is largely checking the fake. What they actually need is a sandbox
+      account, the same blocker as the contract tests.
+
+      One method note, learned the hard way and worth keeping: scope a
+      journey's assertions to the element under test. The deletion journey's
+      first version matched its warning against the whole page, and the card
+      BEHIND the dialog carries the same sentence permanently — so with the
+      pre-fix code restored it still passed. A tripwire that cannot trip is
+      worse than no test. Every assertion in these six was verified by
+      planting the failure it names.
 
 ## Release posture
 
