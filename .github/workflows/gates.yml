@@ -195,9 +195,14 @@ jobs:
             echo "::error::API tests skipped in the only job that can run them"
             exit 1
           fi
+      # A database, because half the smoke test is a seller signing up: with
+      # no DATABASE_URL the app refuses accounts, and the signed-in journey --
+      # the only pass that makes the app actually fetch anything -- cannot
+      # run. SQLite in a temp file, thrown away with the runner.
       - name: Boot
         run: |
-          SECRET_KEY=ci-smoke nohup python -m uvicorn backend.main:app --port 8099 \
+          SECRET_KEY=ci-smoke DATABASE_URL="sqlite:////tmp/smoke.db" \
+            nohup python -m uvicorn backend.main:app --port 8099 \
             > /tmp/server.log 2>&1 &
           for i in $(seq 1 40); do
             curl -sf http://127.0.0.1:8099/api/health >/dev/null && exit 0
