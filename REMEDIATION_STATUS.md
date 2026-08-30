@@ -118,7 +118,7 @@ Where things stand, measured rather than remembered:
 | Full backend (`pytest backend/tests`) | **1782 passed, 0 failed** |
 | A CI-`checks`-equivalent env (no image/AI stack) | **1183 passed, 49 skipped** |
 | The smoke job's API-tests step | **393 passed, 0 skipped** (it fails on a skip) |
-| Frontend Vitest | **23 files, 225 tests** |
+| Frontend Vitest | **24 files, 229 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
 The skips in the middle row are deliberate: those files `importorskip` the
@@ -389,6 +389,8 @@ account, which is the same cost as one restart used to be — and the last one.
 | P1-10 the rest of a big store can be reached | `2642713` | The cursor pagination the audit asks for. `/api/listings` returned the newest `LIST_CAP` records and said so — honest, and on its own useless: the listings page's search filters the records already loaded, so **for a seller with 4,000 listings 1,000 of them do not exist in this app** — not on the page, not in the tab counts, not findable, not openable. The notice named the wall and offered no door. Keyset, not OFFSET: the list is ordered `updated_at DESC, id DESC` and a save between two page loads shifts every row an OFFSET would count past, so the seller skips one listing and sees another twice — worse than not paging at all on a screen whose checkboxes drive a bulk reprice. `id` breaks the ties because timestamps collide readily (an import writes a whole store in one pass). The cursor is the server's own words handed back, base64url so the timestamp survives a query string; it says WHERE to start and never whose store to start in, since the read it feeds is `user_id`-scoped like every other. A malformed one is **refused rather than ignored** — an ignored cursor answers with page one, which the client reads as the listings that FOLLOW the ones it has, so the store looks like it ends where it began: the same bug arriving through the fix. Client-side the pages APPEND, so the tab counts, the search and the bulk checkboxes all keep working and only ever see more; a double-click is guarded twice, on `loadingMore` and again by id when the page lands, because a page appended twice puts every id on screen twice and the checkboxes are keyed by id. A browser journey walks it, verified by planting both failures — a page that replaces, and a cursor that survives the last page. |
 | P1-02 a store import is written down as it goes | `51c5beb` | The import ran in two passes: every eBay `GetItem` first, then every save. A real store is minutes of the first one, so **a machine that went away at 95% left the seller with nothing** — four hundred calls spent, four hundred listings' worth of answers in a dead process's memory, and a job mirror reporting an interrupted sync. The two passes were never independent: the save loop reads only state built before the fetching started, plus the `claimed` set it builds itself in eBay's order, so consuming the futures IN ORDER and saving each as it lands is the same sequence of writes arriving earlier. In order rather than `as_completed` because that order is load-bearing — first claim wins, and eBay's active list is walked before its ended one; blocking on one future does not idle the pool. A generator holds the pool open across the saves so the loop body did not have to move. The progress phases collapse to one, honestly: "fetching 400 of 400" followed by a separate save pass no longer describes anything that happens, and one running count is what survives a restart in the job mirror. Verified by planting the two-pass import back and watching both new tests fail. **Still open:** re-running re-spends the calls already made — that needs a per-record sync timestamp, not a restructuring. |
 | Two guards a re-read of the same day's diff turned up | `0ab2a39` | Both are consequences of moving reads from "fetch a page and filter" to "ask for what you want", and neither is hypothetical. **The ask itself needs a bound:** `/api/ebay/lower-prices` looks the seller's ids up BY id now, and under the old code a huge `listing_ids` body cost nothing extra — the store read was capped and the list was only a filter — so asking for the ids turns an unbounded body into an unbounded `IN (...)`, one request made expensive for everybody. Capped at `BULK_SELECT_CAP`, deliberately above `BULK_PRICE_CAP` so a selection bigger than one pass is still accepted and deferred rather than refused (the role the 200 on bulk-delete already plays), and ids are deduplicated so the same one twice cannot inflate the count. **A cursor needs both halves:** `_cursor_for` built its token from `updated_at`, and a row without one would mint `"|id"` — which the next request rejects as malformed, a 400 in the middle of a walk the seller started. Defensive (the column is non-nullable), and the honest degradation is no cursor at all. |
+| P0-08 (extended) the two answers to a conflict can be told apart | `09662e7`, `4851ea4` | The banner asks the most consequential question in the sync flow — the seller and eBay both changed a field, the merge sent NEITHER value, and whichever they pick is what eventually reaches their live listing. **Both buttons read "Keep this".** On screen that works, since each sits beside the value it keeps; to anything reading the page by its controls (a screen reader, voice control, a keyboard user tabbing past the surrounding text) it is "Keep this, Keep this" — four of them with two conflicted fields — on a choice where picking the wrong one overwrites a fix made in Seller Hub with a stale copy from here. The visible label stays short (two sit inside a card and a sentence each would crowd out the values being compared); the accessible name now names the side AND the field, and its test asserts they are distinct per field, not just per side. **Found by writing P0-08's browser journey** — the locator for the button had nothing to select on. That journey is the other half of this row: the question has to be on screen with both values and a way to answer, the answer has to reach the server, and a REFUSED answer has to say so and leave the question standing, because a "keep mine" that did not persist means the value is still not going to eBay — the silence the whole feature exists to end. The first resolve is answered with a 503 on purpose and the retry settles it; verified by planting a swallowed refusal. It also needed no marketplace, which the notes had wrongly assumed. |
+| A vitest cache file was committed by mistake | `4851ea4`, `8ee30cd` | Running `npx vitest` from the repo root rather than from `frontend/` creates a top-level `node_modules/.vite` cache, which `.gitignore` did not cover — only `frontend/node_modules/` was listed. One result file went in with `2fe10f1` and churned on every test run after. Ignored and untracked; the file stays on disk. |
 
 Still open:
 
@@ -553,29 +555,34 @@ P2-01, P2-03 and P2-07 are closed (rows above). Of the rest:
 - [ ] **P2-08, partly started.** The unit suite is kept and much extended
       (1775 tests, from 961). `scripts/smoke.mjs` now signs a seller up
       through the real dialog, walks every screen with data actually being
-      fetched, and runs six journeys (see the rows above): the theme surviving
-      a reload; a log-out that survives one; a store that could not be read; a
-      settings screen whose defaults could not be read; an account deletion
-      that warns, takes a password, and is refused by the SERVER on a wrong
-      one; and a big store whose older listings can actually be reached.
-      **Two of them found a live bug and a third found an assertion that could
-      not fail**, which is the argument for the remaining ones. Still missing:
-      eBay Sandbox contract tests, impossible from this environment (see the
-      release posture below), and journeys for unknown publish outcome,
-      conflict resolution and reconnect.
+      fetched, and runs seven journeys (see the rows above): the theme
+      surviving a reload; a log-out that survives one; a store that could not
+      be read; a settings screen whose defaults could not be read; an account
+      deletion that warns, takes a password, and is refused by the SERVER on a
+      wrong one; a big store whose older listings can actually be reached; and
+      a held-back edit raised as a question the seller can answer.
+      **Three of them found a live bug and a fourth found an assertion that
+      could not fail**, which is the argument for the remaining ones. Still
+      missing: eBay Sandbox contract tests, impossible from this environment
+      (see the release posture below), and journeys for unknown publish
+      outcome and reconnect.
 
-      What made the six writable is that none of them needed a marketplace.
-      Four needed only the server to misbehave, which the browser arranges
-      itself — `page.route()` breaks `/api/listings` or `/api/prefs` (or
-      serves two pages of a store that does not exist) and the app cannot tell
-      the difference. The deletion one needed nothing faked at all: a wrong
+      What made the seven writable is that none of them needed a marketplace,
+      and the list of what does has been wrong twice now — conflict resolution
+      was filed behind a connection and needs none, because resolving one is a
+      write to this app's own record. Four needed only the server to misbehave,
+      which the browser arranges itself: `page.route()` breaks `/api/listings`
+      or `/api/prefs` (or serves two pages of a store that does not exist, or
+      one listing with a conflict on it) and the app cannot tell the
+      difference. The deletion one needed nothing faked at all — a wrong
       password is the point, and the account is still standing afterwards. The
-      three left DO sit behind a CONNECTED marketplace — the policies panel
-      does not render until `ebay.connected`, and a publish needs an account
-      to publish to — so each would first have to fake the connection, the
-      status, the policies and the publish response, at which point the test
-      is largely checking the fake. What they actually need is a sandbox
-      account, the same blocker as the contract tests.
+      two left DO sit behind a CONNECTED marketplace: a publish needs an
+      account to publish to, and the reconnect flow needs one to reconnect. So
+      each would first have to fake the connection, the status, the policies
+      and the publish response, at which point the test is largely checking
+      the fake — which is the line worth applying to each remaining journey
+      individually rather than to the group, since that is what was wrong
+      about this one.
 
       One method note, learned the hard way and worth keeping: scope a
       journey's assertions to the element under test. The deletion journey's
