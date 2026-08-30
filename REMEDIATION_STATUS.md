@@ -122,6 +122,16 @@ encoded wrong behaviour were corrected in place, each saying why.
    transaction has to be set-wise too. Pinned by a statement-count test
    (not a timing one, which would pass on a laptop and prove nothing).
 
+9. **Leaving the sync's own bookkeeping out of SERVER_OWNED_FIELDS.**
+   `remote_shadow` and `conflicts` were not protected, so `POST /api/save`
+   took whatever the client sent. Today's editor happens to echo them back,
+   which is exactly the assumption `_restore_server_state` exists to refuse
+   — a tab opened before the first sync holds a shadow-less copy, and
+   saving from it erased the base the three-way merge reconciles against.
+   The next sync would then reconcile nothing and silently ignore a title
+   fixed in Seller Hub, which is the whole bug P0-08 was about. Anything
+   the server maintains and a client merely carries belongs in that list.
+
 ## Two operational consequences of the CI change — read before merging
 
 1. **The required-check NAMES change.** A called workflow prefixes its job

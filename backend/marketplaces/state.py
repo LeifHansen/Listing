@@ -95,7 +95,23 @@ def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, st
 #
 # `ebay_listing_id` is deliberately NOT here: owned_state_from fills it only
 # when the client didn't carry one, and both callers keep that.
-SERVER_OWNED_FIELDS = ("source", "view_url", "ebay_account")
+# Fields no client may overwrite on a save. Each is written by the server on a
+# publish, an end, or a sync, and a client's copy of one can only ever be as
+# fresh as the moment it loaded — which is the assumption restore_server_fields
+# exists to refuse.
+#
+# `remote_shadow` and `conflicts` are the sync's own bookkeeping and were the
+# ones missing. The shadow is what eBay last told us a listing said: the BASE
+# the three-way merge reconciles against, and with no shadow the merge
+# deliberately does nothing and the local copy stands. So a tab opened before
+# the first sync, saving its shadow-less copy, would erase the base — and the
+# next sync would silently ignore a title the seller had fixed in Seller Hub,
+# which is exactly the bug the shadow was added to fix. Clearing `conflicts`
+# does the matching damage on the other side: the field becomes sendable
+# again, resolving a both-sides edit in the local copy's favour without
+# asking.
+SERVER_OWNED_FIELDS = ("source", "view_url", "ebay_account",
+                       "remote_shadow", "conflicts")
 
 
 def restore_server_fields(listing, stored: dict) -> list[str]:
