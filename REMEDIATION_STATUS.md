@@ -231,6 +231,15 @@ account, which is the same cost as one restart used to be — and the last one.
       thing a deploy runs. It is a no-op until the first real migration.
       Rehearsed on SQLite (see the row in the table above); the boot path is
       untouched until this is done, so nothing breaks if it is not.
+
+      **Do not put `alembic upgrade head` in `deploy.yml` or `deploy.sh`
+      before the stamp.** The live database already has every table, and an
+      unstamped `upgrade head` starts at the initial revision and fails on the
+      first `CREATE TABLE` — mid-deploy, on a database that was fine. The
+      stamp is what tells alembic the schema is already at head; it is a
+      single row in `alembic_version` and changes nothing else. Once it is
+      done, wiring `upgrade head` into the deploy is safe and is the point of
+      having any of this.
 - [ ] **Set `ADMIN_TOKEN`** in production, or `/api/admin/diagnostics` stays
       closed (deliberately — it fails closed). Documented in `.env.example`.
 - [ ] Decide whether the Promoted Listings default flip (P1-06) is wanted.
