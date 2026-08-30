@@ -481,9 +481,15 @@ def _item_to_listing(item: ET.Element) -> dict:
         "auction_start_price": round(auction_start, 2) if auction_start else None,
         "package_weight_lb": float(weight_major or 0),
         "package_weight_oz": round(weight_minor or 0.0, 1),
-        "package_length_in": float(_int(dims, "PackageLength") if dims is not None else 0),
-        "package_width_in": float(_int(dims, "PackageWidth") if dims is not None else 0),
-        "package_height_in": float(_int(dims, "PackageDepth") if dims is not None else 0),
+        # `_float`, not `float(_int(...))`. These are eBay MeasureType
+        # (decimal) fields, and `_int` runs them through int() first -- so a
+        # package eBay reported as 10.5 inches was read back as 10 and, on the
+        # seller's next edit, sent back to eBay a shrunken box. Read what eBay
+        # said; the ROUNDING belongs at the emit, where eBay's "whole number of
+        # inches" rule applies (see _whole_inches).
+        "package_length_in": _float(dims, "PackageLength") or 0.0,
+        "package_width_in": _float(dims, "PackageWidth") or 0.0,
+        "package_height_in": _float(dims, "PackageDepth") or 0.0,
         "item_specifics": specifics,
         "images": [],           # no local files — this listing came from eBay
         "image_urls": pictures,  # eBay-hosted photos, shown as-is
@@ -819,8 +825,12 @@ def _whole_inches(value) -> int:
     not fit in a 10-inch box — on calculated postage that under-declaration
     is money the seller pays out of the sale, on every sale. Rounding up
     costs the buyer pennies and is the side to be wrong on.
+
+    Floored at 0 so a nonsense value cannot reach eBay: the caller only emits
+    the dimensions when all three are truthy, so a negative one becomes 0 and
+    takes the whole container out of the request rather than being sent.
     """
-    return int(math.ceil(float(value or 0)))
+    return max(0, int(math.ceil(float(value or 0))))
 
 
 def _package_details(listing: Listing) -> str:
@@ -829,14 +839,19 @@ def _package_details(listing: Listing) -> str:
     oz = float(listing.package_weight_oz or 0)
     if not (lb or oz):
         return ""
+    # Rounded FIRST, then gated on the rounded values. Gating on the raw ones
+    # let a nonsense entry through as a zero dimension: -5 is truthy, so the
+    # container was emitted and the floor turned it into
+    # <PackageLength>0</PackageLength>, which is a claim about the box rather
+    # than the absence of one.
+    length = _whole_inches(listing.package_length_in)
+    width = _whole_inches(listing.package_width_in)
+    depth = _whole_inches(listing.package_height_in)
     dims = ""
-    if listing.package_length_in and listing.package_width_in and listing.package_height_in:
-        dims = (f"<PackageLength>{_whole_inches(listing.package_length_in)}"
-                "</PackageLength>"
-                f"<PackageWidth>{_whole_inches(listing.package_width_in)}"
-                "</PackageWidth>"
-                f"<PackageDepth>{_whole_inches(listing.package_height_in)}"
-                "</PackageDepth>")
+    if length and width and depth:
+        dims = (f"<PackageLength>{length}</PackageLength>"
+                f"<PackageWidth>{width}</PackageWidth>"
+                f"<PackageDepth>{depth}</PackageDepth>")
     return ("<ShippingPackageDetails>"
             f"<WeightMajor unit=\"lbs\">{lb}</WeightMajor>"
             f"<WeightMinor unit=\"oz\">{oz:g}</WeightMinor>"

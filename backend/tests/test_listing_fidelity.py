@@ -126,3 +126,46 @@ def test_a_whole_number_dimension_is_unchanged():
 def test_dimensions_are_omitted_when_the_seller_gave_none():
     xml = _xml(package_weight_lb=2)
     assert "PackageLength" not in xml
+
+
+# ------------------------------------------- and the same on the way back IN
+
+def test_a_decimal_dimension_from_ebay_is_not_truncated_on_import():
+    """`float(_int(...))` ran eBay's value through int() first, so a package
+    eBay reported as 10.5 inches was read back as 10 — and the seller's next
+    edit sent that shrunken box back to eBay. These are MeasureType (decimal)
+    fields; the whole-inch rounding belongs at the emit, not at the read."""
+    from xml.etree import ElementTree as ET
+
+    xml = ('<Item xmlns="urn:ebay:apis:eBLBaseComponents">'
+           "<ItemID>1</ItemID><Title>Lamp</Title>"
+           "<ShippingPackageDetails><WeightMajor>2</WeightMajor>"
+           "<PackageLength>10.5</PackageLength>"
+           "<PackageWidth>4.2</PackageWidth>"
+           "<PackageDepth>3.1</PackageDepth>"
+           "</ShippingPackageDetails></Item>")
+    got = ebay_trading._item_to_listing(ET.fromstring(xml))
+
+    assert got["package_length_in"] == 10.5
+    assert got["package_width_in"] == 4.2
+    assert got["package_height_in"] == 3.1
+
+
+def test_a_listing_with_no_package_details_reads_as_zero():
+    from xml.etree import ElementTree as ET
+
+    xml = ('<Item xmlns="urn:ebay:apis:eBLBaseComponents">'
+           "<ItemID>1</ItemID><Title>Lamp</Title></Item>")
+    got = ebay_trading._item_to_listing(ET.fromstring(xml))
+
+    assert got["package_length_in"] == 0.0
+
+
+def test_a_nonsense_dimension_takes_the_whole_container_out():
+    """A negative length is not something to send eBay. Floored at 0, which
+    the all-three-truthy guard then reads as "no dimensions given"."""
+    xml = _xml(package_weight_lb=2, package_length_in=-5,
+               package_width_in=4, package_height_in=3)
+    assert "PackageLength" not in xml
+    # ...and the weight, which the seller DID give, still goes.
+    assert "<WeightMajor unit=\"lbs\">2</WeightMajor>" in xml
