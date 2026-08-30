@@ -118,9 +118,9 @@ Where things stand, measured rather than remembered:
 
 | Suite | Result |
 | --- | --- |
-| Full backend (`pytest backend/tests`) | **1782 passed, 0 failed** |
+| Full backend (`pytest backend/tests`) | **1797 passed, 0 failed** |
 | A CI-`checks`-equivalent env (no image/AI stack) | **1183 passed, 49 skipped** |
-| The smoke job's API-tests step | **393 passed, 0 skipped** (it fails on a skip) |
+| The smoke job's API-tests step | **394 passed, 0 skipped** (it fails on a skip) |
 | Frontend Vitest | **26 files, 238 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
