@@ -29,7 +29,7 @@ from ..config import log
 from ..models import Listing
 from . import (ebay_account, ebay_trading, notifications, sync_merge,
                taxonomy)
-from .ebay_trading import AlreadyListedError, TradingError
+from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
 # live/market facts from eBay but keep everything else the record already has,
@@ -849,6 +849,33 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                 "publishing again — publishing now could create a duplicate."
             ) from exc
         log.info("trading publish: adopted already-created item %s (key=%s)",
+                 item_id, idempotency_key)
+        res = {"published": True, "listing_id": item_id, "already_listed": True,
+               "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    except UnknownOutcome as exc:
+        # The request was on the wire and the answer never came back. eBay may
+        # be holding a live listing for it, and the app is about to tell the
+        # seller their publish failed -- after which nobody retries, the record
+        # stays a draft, and the next store sync imports this app's own listing
+        # as a SECOND card.
+        #
+        # So ask. The create travels under a deterministic SKU (see
+        # publish_guard.idempotency_key), which is exactly what makes "did that
+        # listing actually go up, and what is it?" answerable without guessing
+        # from titles -- and is what item_id_for_sku was written for, though
+        # until now it was only ever reached from eBay's explicit "you already
+        # sent this" rejection, the one case where eBay does answer.
+        item_id = ebay_trading.item_id_for_sku(token, idempotency_key)
+        if not item_id:
+            # Still unknown, and deliberately not downgraded to a failure:
+            # item_id_for_sku answers "" both when eBay has no such listing and
+            # when the lookup ITSELF failed, which during the outage that lost
+            # the publish is the likely one. The seller keeps the message that
+            # tells them to check before retrying.
+            log.warning("trading publish: outcome unknown and unresolved "
+                        "(key=%s, call=%s)", idempotency_key, exc.call)
+            raise
+        log.info("trading publish: lost response resolved to item %s (key=%s)",
                  item_id, idempotency_key)
         res = {"published": True, "listing_id": item_id, "already_listed": True,
                "view_url": f"https://www.ebay.com/itm/{item_id}"}

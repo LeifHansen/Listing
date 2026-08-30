@@ -47,6 +47,9 @@ _TIMEOUT = 45
 class TradingError(ValueError):
     """A Trading API call failed — carries a user-facing reason.
 
+    `outcome_unknown` is False here and True on UnknownOutcome below: eBay
+    answered, or never received the request, so this IS the outcome.
+
     `code` is eBay's own ErrorCode when the failure came back as a rejection
     rather than a transport problem, so callers can branch on a specific
     condition (see AlreadyListedError) instead of matching on message text.
@@ -70,6 +73,8 @@ class TradingError(ValueError):
     contains one — which is how a diagnosis that turns on that question ends
     up abandoning a listing eBay had already explained.
     """
+
+    outcome_unknown = False
 
     def __init__(self, message: str, code: str = "", detail: str = "",
                  said: str = "", codes: Optional[list[str]] = None):
@@ -129,6 +134,78 @@ class RateLimited(TradingError):
                  retry_after: Optional[int] = None):
         super().__init__(message, code=code, detail=detail)
         self.retry_after = retry_after
+
+
+class UnknownOutcome(TradingError):
+    """The request went out and we never learned what eBay did with it.
+
+    Distinct from every other TradingError because it is not a failure --
+    it is an absence of an answer, and the two lead somewhere different.
+    "eBay rejected this" means fix the listing and try again; "we don't know"
+    means find out FIRST, because trying again could mean a second live
+    listing, a second ended one, or a revise applied twice.
+
+    Only ever raised for a WRITE. A read that times out changed nothing, and
+    sending a seller to check eBay after a failed GetItem is a false alarm on
+    a call the sync makes thousands of times.
+
+    `call` is the Trading call whose outcome is unknown, so a caller can say
+    which operation is in doubt rather than "something went wrong".
+
+    `outcome_unknown` is how the consumer-facing layer recognises this without
+    importing the Trading client -- a flag rather than a class check, because
+    a rejection and an unanswered request need DIFFERENT WORDS and the module
+    that writes those words (backend/ebay_errors) has no business depending on
+    the transport. TradingError carries it as False for the same reason: a
+    caller should be able to ask any eBay error this question.
+    """
+
+    outcome_unknown = True
+
+    def __init__(self, message: str, call: str = "", code: str = "",
+                 detail: str = ""):
+        super().__init__(message, code=code, detail=detail)
+        self.call = call
+
+
+# The calls that CHANGE something on eBay. A failure with no answer means
+# something different for each side of this line, which is why the line is
+# drawn explicitly rather than inferred from the call name -- "Verify..." and
+# "Get..." both happen to start with a safe-looking word, and one wrong guess
+# here either raises false alarms on every timed-out read or stays silent on
+# a publish that may have landed.
+#
+# VerifyAddItem / VerifyAddFixedPriceItem are deliberately NOT here: they are
+# eBay's dry run and create nothing, which is the entire reason this client
+# calls them.
+_WRITE_CALLS = frozenset({
+    "AddItem", "AddFixedPriceItem", "ReviseItem", "ReviseFixedPriceItem",
+    "ReviseInventoryStatus", "EndItem", "EndFixedPriceItem", "RelistItem",
+    "RelistFixedPriceItem", "AddItems", "ReviseItems",
+})
+
+# Transport failures that prove the request never reached eBay: no connection
+# was ever established, so no bytes were delivered and nothing there could
+# have acted on it. Everything NOT in this list is treated as unknown --
+# including exception types nobody here anticipated. That default is the
+# whole point: being wrong in the "nothing happened" direction is how a live
+# listing ends up with no record of itself, while being wrong the other way
+# costs one unnecessary look at the seller's eBay listings.
+_NEVER_SENT = (
+    httpx.ConnectError,        # DNS failure, connection refused, TLS refused
+    httpx.ConnectTimeout,      # gave up before the connection was made
+    httpx.PoolTimeout,         # never even got a connection out of the pool
+    httpx.UnsupportedProtocol,
+    httpx.InvalidURL,
+)
+
+# What the seller is told when a write's outcome is unknown. Deliberately does
+# NOT say "nothing was changed" -- that is the one sentence that cannot be
+# justified here, and it is the sentence that produces a duplicate when they
+# act on it.
+_UNKNOWN_MESSAGE = (
+    "We lost contact with eBay while sending this, so we can't tell whether "
+    "it went through. Check your eBay listings before trying again.")
 
 
 def _retry_after_seconds(value: str) -> Optional[int]:
@@ -223,25 +300,56 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         f"{body}"
         f"</{call}Request>"
     )
+    # Whether an unanswered request may have changed something over there.
+    # Only a write can be in doubt; see _WRITE_CALLS.
+    writes = call in _WRITE_CALLS
+
+    def _lost(reason: str, exc: Optional[Exception] = None) -> TradingError:
+        """The error for a call that produced no usable answer.
+
+        For a read this is an ordinary failure: nothing on eBay moved, and the
+        caller retries or reports it. For a write it is an UNKNOWN OUTCOME,
+        which is a different thing entirely -- the request was in eBay's hands
+        and the answer is what went missing.
+        """
+        if writes:
+            return UnknownOutcome(_UNKNOWN_MESSAGE, call=call, detail=reason)
+        return TradingError(f"Couldn't reach eBay: {reason}"
+                            if exc is not None else reason)
+
     try:
         resp = httpx.post(_endpoint(), headers=_headers(call, token),
                           content=xml.encode("utf-8"), timeout=_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001 - network/timeout
+    except _NEVER_SENT as exc:
+        # No connection was made, so eBay never saw this. Safe to call a
+        # failure even for a write.
         raise TradingError(f"Couldn't reach eBay: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+        raise _lost(str(exc), exc) from exc
     if resp.status_code == 429:
         # The transport refusing before eBay's XML is ever produced. Same
-        # condition, different layer.
+        # condition, different layer. Checked BEFORE the unknown-outcome rule:
+        # a 429 is eBay declining to process the request, not a lost answer.
         raise RateLimited(
             "eBay is limiting how often we can talk to your account right "
             "now. Nothing was changed — this will pick up again shortly.",
             retry_after=_retry_after_seconds(
                 resp.headers.get("Retry-After", "")))
+    if resp.status_code >= 500:
+        # Something that already had the request in hand failed to answer for
+        # it. eBay's own gateways sit in front of the API, so a 5xx on a write
+        # is exactly the case that cannot be called a rejection.
+        raise _lost(f"eBay returned {resp.status_code} for {call}.")
     if resp.status_code != 200:
+        # 4xx: refused at the gate (auth, a malformed request) before eBay
+        # processed it. A definite no.
         raise TradingError(f"eBay returned {resp.status_code} for {call}.")
     try:
         root = ET.fromstring(resp.content)
     except ET.ParseError as exc:
-        raise TradingError(f"eBay sent an unreadable response for {call}.") from exc
+        # eBay answered and we could not read it. That is our failure to
+        # establish the outcome, not evidence there wasn't one.
+        raise _lost(f"eBay sent an unreadable response for {call}.") from exc
     graded = [((_text(e, "SeverityCode") or "").lower(), e)
               for e in _findall(root, "Errors")]
     errors = [e for sev, e in graded if sev == "error"]
