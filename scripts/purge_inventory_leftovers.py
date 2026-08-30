@@ -98,10 +98,15 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="actually delete (default: dry run)")
     args = ap.parse_args()
 
-    # db.get_ebay_account swallows every failure and answers None, so without
-    # this a DB that is unreachable, unconfigured, or refusing the connection
-    # is reported as "no connected eBay account" — a sentence that sends you
-    # looking in entirely the wrong place.
+    # "No connected eBay account" must mean exactly that. A database that is
+    # unreachable, unconfigured or refusing the connection reported the same
+    # sentence, which sends the operator looking in entirely the wrong place —
+    # and this is a script whose next step deletes things on a live account.
+    #
+    # db.get_ebay_account raises StorageUnavailable on a failed read now
+    # (it used to swallow it and answer None), so the distinction is made for
+    # us; the checks below still come first because they name the cause
+    # precisely, and the except covers a connection that dies between them.
     if not config.DATABASE_URL:
         print("DATABASE_URL is not set, so there are no stored accounts to "
               "read. Run this with the app's environment.")
@@ -112,7 +117,12 @@ def main() -> int:
         print(f"Could not reach the database: {exc}")
         return 1
 
-    account = db.get_ebay_account(args.user)
+    try:
+        account = db.get_ebay_account(args.user)
+    except db.StorageUnavailable as exc:
+        print(f"Could not read the stored eBay account: {exc}")
+        print("Nothing was deleted. Fix the connection and run this again.")
+        return 2
     if not account or not account.get("refresh_token"):
         print(f"No connected eBay account for user {args.user}. "
               "(Pass the app user id, not the eBay username.)")
