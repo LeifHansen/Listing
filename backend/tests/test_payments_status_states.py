@@ -130,12 +130,32 @@ def test_the_deployment_environment_is_not_published(api, answer):
     assert "env" not in text.lower()
 
 
-def test_ebays_response_body_does_not_reach_the_browser(api):
-    resp = api(_http_error(500)).get("/api/ebay/payments-status")
+@pytest.mark.parametrize("status", [500, 502, 503, 429, 404])
+def test_ebays_response_body_does_not_reach_the_browser(api, status):
+    """Checked against what the seller is SHOWN, not against the whole
+    serialized body.
 
-    assert "errorId" not in resp.text, "eBay's raw response body was returned"
-    assert "20403" not in resp.text
-    assert "500" not in resp.text, "a raw HTTP status was returned"
+    The body also carries `reference`, which is `secrets.token_hex(4)` -- an
+    opaque random token that can be any eight hex characters, including ones
+    that spell the status. `"500" not in resp.text` therefore failed roughly
+    once in seven hundred runs on nothing at all, and it did: CI produced
+    reference `500cab77` and reported that a raw HTTP status had leaked.
+
+    A safety test that fails at random is worse than no test, because the
+    thing everyone learns is to re-run it. Asserting on `state` and `message`
+    says what this test actually means -- eBay's status must not be shown to
+    the seller -- and says it for every status rather than only 500.
+    """
+    body = api(_http_error(status)).get("/api/ebay/payments-status").json()
+    # The reference is removed BEFORE the scan, not excluded from it: on
+    # `contact_support` it is deliberately part of the sentence ("quote ... to
+    # support"), so leaving it in reintroduces exactly the coin flip -- a
+    # random hex token inside the very text being searched for digits.
+    shown = f"{body['state']} {body['message']}".replace(body["reference"], "")
+
+    assert "errorId" not in shown, "eBay's raw response body was returned"
+    assert "20403" not in shown
+    assert str(status) not in shown, "a raw HTTP status was returned"
 
 
 def test_the_reference_is_short_enough_to_read_out(api):
