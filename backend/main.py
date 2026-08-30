@@ -50,6 +50,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        orient, preflight, pricing, promotions, recommender,
                        sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
+from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
 from .services.background import run_in_background
 
@@ -71,6 +72,12 @@ async def _lifespan(_app: FastAPI):
     """
     _warm_models()
     _adopt_job_mirrors()
+    # Erasures an earlier process promised and did not finish. Started here
+    # rather than run inline: a backlog is a pass over object storage, and it
+    # must not hold up serving. It is a thread rather than a durable worker
+    # (that is still open), but the OBLIGATION is durable now, so a process
+    # that dies mid-pass leaves the remaining rows for the next one.
+    _in_background(_finish_pending_deletions, what="deletion backlog")
     yield
 
 
@@ -462,6 +469,11 @@ def _reclaim_loop() -> None:
                 log.warning(
                     "reclaim: volume low (%d MB free) and nothing left to "
                     "reclaim - the volume needs more room", round(free / 1e6))
+            # Retried here as well as at startup: an R2 outage during an
+            # account deletion would otherwise leave the photos in the bucket
+            # until someone happened to redeploy. It also genuinely frees
+            # space, which is what this loop is for.
+            _finish_pending_deletions()
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
         time.sleep(delay)
@@ -616,6 +628,12 @@ def _diagnostics() -> dict:
         # visibly deployed. [] means nothing adjacent was found.
         "config_warnings": config.config_warnings(),
         "db": db.db_status(),
+        # Erasures this deployment still owes: photos whose account is already
+        # deleted, and eBay account-deletion notices acknowledged but not yet
+        # carried out. Both are promises already made to somebody, so a number
+        # here that does not come back down is the alert. Counts only — the
+        # ids belong to people who asked to be forgotten.
+        "deletion_backlog": deletion_queue.backlog(),
     }
 
 
@@ -1109,6 +1127,17 @@ def _purge_session_images(session_id: str) -> None:
         log.warning("archive: image purge failed for %s: %s", session_id, exc)
 
 
+def _finish_pending_deletions() -> dict:
+    """Carry out erasures an earlier run promised and did not finish.
+
+    Both halves — a seller's deleted photos and an acknowledged eBay
+    account-deletion notice — record what is owed BEFORE doing the work, so
+    that a crash in between is recoverable. Nothing was reading those records
+    back. This is what reads them.
+    """
+    return deletion_queue.run_pending(purge_media=_purge_session_images)
+
+
 # --- auth ------------------------------------------------------------------
 
 @app.post("/api/auth/signup")
@@ -1320,11 +1349,15 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     # sweep for the whole account (a thread per listing would spawn thousands
     # on a synced store and exhaust the 1GB machine), so a slow R2 delete never
     # holds the response or fails a deletion that already happened.
-    def _purge_all() -> None:
-        for lid in listing_ids:
-            _purge_session_images(lid)
-
-    _in_background(_purge_all, what="account-delete cleanup")
+    #
+    # It drains the whole queue rather than just this account's listings, and
+    # that is deliberate. delete_user recorded these listings as owed inside
+    # its own transaction, so they are in the queue either way; running the
+    # queue is what CLEARS them, and picking up anything an earlier run left
+    # behind costs nothing here. If this thread dies part-way, the rows it did
+    # not reach are still owed and the next pass finds them — which is the
+    # whole difference from what this used to be.
+    _in_background(_finish_pending_deletions, what="account-delete cleanup")
 
     auth.clear_session_cookie(response)
     log.info("account deleted: user=%s listings=%d", uid, len(listing_ids))

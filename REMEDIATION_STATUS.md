@@ -129,6 +129,12 @@ encoded wrong behaviour were corrected in place, each saying why.
 
 ### 1. Deploy-time work for what has already landed
 
+The `media_purges` table arrives through the same guarded `create_all`
+as `ebay_deletion_notices`; nothing else is needed for it. Watch
+`deletion_backlog` in `/api/admin/diagnostics` after the first deploy —
+it should be 0, and a number that does not come back down is an
+erasure this app promised somebody and has not managed to do.
+
 - [ ] **Run `scripts/migrate_session_ids.py`** (dry run first, then `--apply`).
       Until it runs, imported listings' photos are filed under the old
       stripped names and will not be found. This is a **required deploy step**,
@@ -161,6 +167,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | P1-07 Settings sections save and load independently | `326a0c3` | One Save wrote local preferences AND the seller's eBay account inside one `try`, and reported one verdict: when the eBay half failed, a seller whose listing defaults had just committed was told "Couldn't save" — and the obvious response is to type it all again. The two now save independently and the message names which committed. Loading had the mirror-image bug: a failed `/api/prefs` did `setPrefs({})` and a failed policies fetch left the dropdowns empty, so the app rendered its own fallbacks as the seller's saved settings and told them their eBay account had no business policies — on the strength of having failed to ask. Both are now loading / couldn't-ask / answered, and only the last says anything about the account. Two panels that shimmered forever after a failed load now say so and offer a retry. |
 | P1-08 script-src no longer allows arbitrary inline script | `b3c0764` | The CSP shipped with `script-src 'self' 'unsafe-inline'`, which is the one allowance that matters: with it an injected `<script>` runs, and most of the header was decorative. It was there because index.html carries one inline script (the pre-paint theme snippet) and a policy that blanks the app is worse than a partial one — the note on `_CSP` said so and said the fix wanted its own change. `build_csp()` now derives per-script `sha256-` sources from the built index.html **at startup**, so the policy cannot drift from the file it describes; a hardcoded hash would go stale on the first edit of that snippet and ship a white screen after a green deploy. No readable build falls back to the old policy — there is no frontend to protect and no hash that could be right. Verified in Chromium: the app loads with zero CSP violations, React mounts, and an injected inline script is refused. style-src keeps `'unsafe-inline'` deliberately (React and Tailwind set element styles, so there is nothing to hash) and that is now stated rather than implied. |
 | P1-11 actions pinned to reviewed commits | `cbae67d` | Every third-party action ran from a mutable tag — `actions/checkout@v4`, `@v5`, `@v1.5` — and `fly-logs.yml` ran `superfly/flyctl-actions/setup-flyctl@master`, an unversioned branch, in a job holding `FLY_API_TOKEN`. A tag is a pointer the action's owner can move, so each of those meant "whatever that account publishes next". All five workflows now pin a commit SHA with the release in the comment beside it, each SHA verified by cloning the tag and confirming it resolves to that commit. Paired with `.github/dependabot.yml`, because the next failure mode is a pin nobody refreshes: it reads those comments and opens one grouped pull request per month, so the pin buys review rather than staleness. |
+| P1-05 the promised erasure now survives a restart | *this commit* | Deleting an account dropped the rows and handed the photos -- a local directory and an R2 prefix per listing -- to an untracked background thread. Nothing recorded that the pass was owed and nothing checked that it finished, so a deploy, restart, OOM or crash part-way left the rest of the seller's photos in the bucket indefinitely, with the rows that named them already gone: nothing would ever look for them again, and the app had already said they were deleted. A `media_purges` row is now written **inside `delete_user`'s transaction** -- either the rows go and the debt is recorded or neither happens; a failure to record fails the whole delete, which is the right way round. `services/deletion_queue.run_pending` retries what is outstanding at startup and from the housekeeping loop, one stuck object never blocks the rest, and there is deliberately no give-up count. The same pass finally calls `pending_deletion_notices`, which was written for P0-03 and never wired up -- eBay stops resending once acknowledged, so a notice interrupted between 'recorded' and 'erased' was never going to be finished by anyone. `/api/admin/diagnostics` reports the backlog as counts. This makes the WORK durable, not the runner; the runner is still a thread (P1-02). |
 | P2-03 unknown-outcome copy | `8df583b` | Every timed-out request said "Nothing was lost — try again", including a publish or a delete that may already have reached eBay. Writes now say the outcome is unknown and to check first, which is the difference between a retry and a duplicate live listing. |
 | P1-05 privacy policy accuracy (partial) | `8a41647` | The policy made three claims the code contradicted: that deletion "immediately" removes photos (the media purge runs after the response returns), that it "hands your marketplace authorizations back" (nothing revokes the OAuth grants), and that eBay deletion notices are merely "recorded for audit" keyed on nothing (they are now verified and acted on, keyed on eBay's immutable id). Stripe was also absent from the service-provider list despite processing token purchases. Copy now matches the implementation. **Not legal review** — the audit's ask for counsel review, retention schedule, legal identity and a company-domain contact is untouched. |
 | P1-11 deploy gate (partial) | `1521558` | `deploy` gated production on the lightweight lint+unit job ALONE — cutout safety, the frontend build and the smoke test never gated a deploy, and `ci.yml` runs only on `pull_request` so a push to `main` ran none of them. Both now call one shared `gates.yml`. `superfly/flyctl-actions/setup-flyctl` was pinned off `@master` (it runs in the job holding `FLY_API_TOKEN`). **See the two operational consequences below.** |
@@ -172,13 +179,12 @@ Still open:
 - [ ] P1-01, MINUS the per-session auto-import (done, see above): still N+1, automatic per browser session, and
       quota-unsafe (2,500 GetItem calls against a 5,000/day allowance).
 - [ ] P1-02 jobs/locks/cooldowns are process-local and non-resumable.
-- [ ] P1-05, MINUS the policy corrections (done, see above): user-initiated
-      deletion is still not durable — the media purge is an untracked
-      background thread with no completion state — and nothing revokes the
-      marketplace OAuth grants. The policy now says so rather than promising
-      otherwise, which is the honest interim state, not the fix. Still needs:
-      counsel review, a retention schedule, legal identity/address, and a
-      company-domain support contact (it is currently a personal Gmail).
+- [ ] P1-05, MINUS the policy corrections and the durable purge (both done,
+      see above): nothing revokes the marketplace OAuth grants — the policy
+      says so rather than promising otherwise, which is the honest interim
+      state, not the fix. Still needs: counsel review, a retention schedule,
+      legal identity/address, and a company-domain support contact (it is
+      currently a personal Gmail).
 - [x] **P1-07 is closed.** create-on-unknown, the unshown policy terms, and
       the shared save/load are all done (see the rows above).
 - [ ] P1-08 auth baseline, MINUS the headers (`46b89d3`) and the script-src

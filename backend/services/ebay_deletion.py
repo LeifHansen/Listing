@@ -88,10 +88,16 @@ def purge(ebay_user_id: str,
                 try:
                     purge_media(lid)
                 except Exception as exc:  # noqa: BLE001 - rows are already gone
-                    # The durable record is deleted; a stuck object is a
-                    # cleanup problem, not a reason to redo the erasure.
-                    log.warning("ebay deletion: media purge failed for %s: %s",
-                                lid, exc)
+                    # The user rows are gone, so this is not a reason to redo
+                    # the erasure — but it is also not something to shrug at.
+                    # delete_user queued this listing's photos as owed inside
+                    # its own transaction, so leaving the row alone is what
+                    # hands the object to the next resume pass.
+                    db.note_media_purge_failure(lid, str(exc))
+                    log.warning("ebay deletion: media purge failed for %s, "
+                                "queued for retry: %s", lid, exc)
+                else:
+                    db.finish_media_purge(lid)
     if failures:
         return {"users": len(matched) - len(failures), "listings": listings,
                 "state": "failed",

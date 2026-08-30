@@ -135,6 +135,39 @@ class DeletionNotice(Base):
         DateTime(timezone=True), nullable=True)
 
 
+class MediaPurge(Base):
+    """Photos a deleted account still owns in storage, until they don't.
+
+    Deleting an account drops the rows and then erases the photos — the local
+    directory and the R2 prefix — in a background pass. Nothing recorded that
+    the pass was owed, so a deploy, a restart or a crash part-way through left
+    the rest of the seller's photos in the bucket indefinitely, with the rows
+    that named them already gone. Nothing would ever look for them again, and
+    the app had already said they were deleted.
+
+    The row is written inside delete_user's own transaction. That is the whole
+    point: either the rows go and the debt is recorded, or neither happens.
+    Recording afterwards leaves a window where the listings are gone and the
+    obligation is not written down, which is precisely the state that cannot
+    be detected later.
+
+    Rows are deleted on success, so the table is a work queue and its size is
+    the backlog. A row that keeps failing keeps its place — there is no
+    give-up count, because nothing else remembers these objects exist.
+    """
+
+    __tablename__ = "media_purges"
+
+    # The listing id, which is also the session id the photos live under.
+    listing_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Kept only for operator triage ("whose deletion is stuck?"). The user row
+    # is already gone; this is an opaque id, not personal data.
+    user_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    last_error: Mapped[str] = mapped_column(String(255), default="")
+    requested_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ListingRecord(Base):
     __tablename__ = "listings"
 
@@ -672,11 +705,85 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(Notification).where(Notification.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
+            # In THIS transaction, before the commit: the rows that name these
+            # photos are about to stop existing, so the obligation to erase
+            # them has to become durable at the same instant. Queued after the
+            # commit there is a window — small, but the state it produces
+            # (rows gone, debt unrecorded) is undetectable afterwards.
+            _queue_media_purges(s, user_id, listing_ids)
             s.commit()
             return listing_ids
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         log.warning(f"db: delete_user failed: {exc}")
         return None
+
+
+def _queue_media_purges(session, user_id: str, listing_ids: list[str]) -> None:
+    """Record, in the caller's open transaction, that these listings' photos
+    are still in storage. Raising here fails the whole delete, which is the
+    intended behaviour: better to tell the seller the deletion did not happen
+    than to delete the rows and lose track of the photos."""
+    now = _now()
+    for lid in listing_ids:
+        session.merge(MediaPurge(listing_id=lid, user_id=user_id or "",
+                                 attempts=0, last_error="", requested_at=now))
+
+
+def pending_media_purges(limit: int = 500) -> list[dict]:
+    """Photos still owed an erasure, oldest first. `[]` on a read failure --
+    the pass simply runs again later, and inventing work is worse than
+    skipping a round."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(MediaPurge).order_by(MediaPurge.requested_at.asc())
+                .limit(limit)).scalars().all()
+            return [{"listing_id": r.listing_id, "user_id": r.user_id or "",
+                     "attempts": r.attempts or 0,
+                     "last_error": r.last_error or ""} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: pending_media_purges failed: {exc}")
+        return []
+
+
+def finish_media_purge(listing_id: str) -> None:
+    """The photos are gone; drop the debt. Only ever called after a purge
+    that raised nothing."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            s.execute(delete(MediaPurge)
+                      .where(MediaPurge.listing_id == listing_id))
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        # The row survives, so the next pass tries again. Purging twice is
+        # harmless -- both deletes are by prefix and idempotent -- while
+        # dropping the row on a failed write would lose the obligation.
+        log.warning(f"db: finish_media_purge failed: {exc}")
+
+
+def note_media_purge_failure(listing_id: str, error: str) -> None:
+    """Count an attempt and keep the row. There is deliberately no give-up
+    threshold: nothing else remembers these objects exist, so a purge that
+    stops being retried is a purge that never happens."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return
+        with Session(eng) as s:
+            row = s.get(MediaPurge, listing_id)
+            if row is None:
+                return
+            row.attempts = (row.attempts or 0) + 1
+            row.last_error = (error or "")[:255]
+            s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: note_media_purge_failure failed: {exc}")
 
 
 # --- eBay accounts ---------------------------------------------------------
