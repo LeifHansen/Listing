@@ -256,6 +256,38 @@ async def _storage_unavailable(request: Request, exc: errors.StorageUnavailable)
     )
 
 
+# The errnos that mean "the volume would not take the write". Everything else
+# an OSError can carry is a bug or a genuine I/O fault and keeps its 500.
+_OUT_OF_SPACE = {errno.ENOSPC, errno.EDQUOT, errno.EROFS}
+
+
+@app.exception_handler(OSError)
+async def _out_of_space(request: Request, exc: OSError):
+    """A full volume answers 507 with a next step, everywhere, automatically.
+
+    Five upload paths already recognised ENOSPC and said so. Every other write
+    — the editor's save, both PATCH routes, anything else that reaches
+    storage.save_listing — let the OSError out as "Internal Server Error".
+    That is wrong the same two ways the invalid-session-id handler above
+    documents: the seller is shown a fault with no next step, and a real 500
+    gets buried under a condition that is merely operational. It is also the
+    failure this deployment is most likely to hit, since one small Fly volume
+    holds every seller's photos.
+
+    The message is the one the upload paths already use, and it deliberately
+    does not carry `str(exc)` — that names the server's own filesystem.
+    """
+    if getattr(exc, "errno", None) not in _OUT_OF_SPACE:
+        raise exc
+    log.error("out of storage on %s %s (errno=%s)",
+              request.method, request.url.path, getattr(exc, "errno", None))
+    return JSONResponse(
+        status_code=507,
+        content={"detail": "The server is out of storage space — try again "
+                           "shortly."},
+    )
+
+
 class _DropDeletionAcks(logging.Filter):
     """Drop the access-log lines for successfully acked eBay account-deletion
     notifications. eBay sends them 1-2 times a MINUTE, around the clock, and

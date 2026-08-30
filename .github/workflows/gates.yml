@@ -183,6 +183,7 @@ jobs:
                  backend/tests/test_a_merge_never_deletes_what_it_did_not_save.py \
                  backend/tests/test_adobe_poll_stays_on_adobe.py \
                  backend/tests/test_a_save_that_did_not_land_is_not_saved.py \
+                 backend/tests/test_a_full_disk_is_not_an_internal_error.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
             echo "::error::API tests skipped in the only job that can run them"
