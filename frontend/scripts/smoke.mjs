@@ -255,6 +255,68 @@ if (signedIn) {
   problems.push(['an outage is not an empty store', outage]);
 }
 
+// --- a setting we could not read is not a setting ---------------------------
+//
+// The same question the dashboard one asks, on the screen where the answer is
+// editable. Settings shows the seller's saved defaults; if the read fails and
+// the panels render anyway, the app's own fallbacks appear as the seller's
+// choices -- and Save then posts them, so a failed READ becomes an edit
+// nobody made. Every panel here has a tri-state (loading / couldn't ask /
+// answered) covered directly in lib/settingsSections.test.js; this is the
+// part that unit test cannot see, which is whether the SCREEN is wired to it.
+const prefsOut = [];
+if (signedIn) {
+  expected = /503|api\/prefs/;
+  try {
+    await page.route('**/api/prefs', r => r.fulfill({
+      status: 503, contentType: 'application/json',
+      body: JSON.stringify({ detail: "We couldn't read your saved settings." }),
+    }));
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    await visit(page, 'Settings', prefsOut);
+    await page.waitForTimeout(1500);
+
+    const body = (await page.textContent('body')) || '';
+    if (!/couldn.t load your saved defaults/i.test(body)) {
+      prefsOut.push('the defaults could not be read and the panels did not say so');
+    }
+    // The fallbacks, verbatim from the controls those panels render. Any of
+    // them on screen means a value the seller never chose is being shown as
+    // one they did -- and it is one Save away from being stored as such.
+    for (const fallback of ['Off — only when I toggle Promote on a listing',
+                            'Median Pricing', 'Package weight — lb']) {
+      if (body.includes(fallback)) {
+        prefsOut.push(`a default is shown as saved after a failed read: "${fallback}"`);
+      }
+    }
+    // A panel that never leaves its shimmer is the other failure: the seller
+    // waits on an answer that already came back and was an error.
+    if (!await page.getByRole('button', { name: 'Try again' }).count()) {
+      prefsOut.push('no way to retry the read that failed');
+    }
+
+    // And the Save button, which is the reason any of this matters. With the
+    // defaults unread and eBay unconnected there is nothing safe to send, so
+    // the honest answer is that nothing was saved. It used to say "Defaults
+    // saved" -- a green tick, on a screen saying it could not read them.
+    await page.getByRole('button', { name: 'Save defaults' }).first().click();
+    await page.waitForTimeout(1500);
+    const after = (await page.textContent('body')) || '';
+    if (/defaults saved/i.test(after)) {
+      prefsOut.push('Save reported "Defaults saved" having sent nothing');
+    }
+    if (!/nothing was saved/i.test(after)) {
+      prefsOut.push('Save sent nothing and did not say so');
+    }
+  } catch (e) {
+    prefsOut.push(`settings outage: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute('**/api/prefs').catch(() => {});
+  prefsOut.push(...drain());
+  expected = null;
+  problems.push(['an unread setting is not a saved one', prefsOut]);
+}
+
 // --- signing out has to end the session ------------------------------------
 //
 // Not just clear the greeting. The reload is the half that matters: without
