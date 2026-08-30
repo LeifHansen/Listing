@@ -77,8 +77,8 @@ Where things stand, measured rather than remembered:
 
 | Suite | Result |
 | --- | --- |
-| Full backend (`pytest backend/tests`) | **1717 passed, 0 failed** |
-| A CI-`checks`-equivalent env (no image/AI stack) | **1170 passed, 48 skipped** |
+| Full backend (`pytest backend/tests`) | **1723 passed, 0 failed** |
+| A CI-`checks`-equivalent env (no image/AI stack) | **1178 passed, 49 skipped** |
 | The smoke job's API-tests step | **339 passed, 0 skipped** (it fails on a skip) |
 | Frontend Vitest | **20 files, 203 tests** |
 | Ruff · ESLint · `npm run build` | clean |
@@ -223,6 +223,14 @@ account, which is the same cost as one restart used to be — and the last one.
       `no_match`.
 - [ ] Add `EBAY_VERIFICATION_TOKEN` checks to the deploy gate — the deletion
       endpoint's GET challenge 503s without it.
+- [ ] **Adopt the migrations, once.** On the machine, in this order:
+      `alembic check` (read-only; it fails if the live schema has drifted from
+      the models in a way SQLite here cannot show), then
+      `alembic stamp head` — the schema already exists, so this records that
+      without re-running it — and from then on `alembic upgrade head` is the
+      thing a deploy runs. It is a no-op until the first real migration.
+      Rehearsed on SQLite (see the row in the table above); the boot path is
+      untouched until this is done, so nothing breaks if it is not.
 - [ ] **Set `ADMIN_TOKEN`** in production, or `/api/admin/diagnostics` stays
       closed (deliberately — it fails closed). Documented in `.env.example`.
 - [ ] Decide whether the Promoted Listings default flip (P1-06) is wanted.
@@ -318,6 +326,7 @@ account, which is the same cost as one restart used to be — and the last one.
 | Every storage failure in `db.py` now declares what it answers | `f7e9064` | The fifth inventory, and the one that closes the class rather than another instance of it. This branch fixed the same bug **seven times** -- a storage failure answered with the shape of a real, empty answer, presented by a screen as a fact about the seller's account: the session lookup returning `None` logged everyone out, `list_listings` returning `[]` made the import duplicate an entire store, `get_prefs` returning `{}` showed fallbacks as saved settings one Save away from overwriting the real ones, `token_history` returning `[]` said nothing had ever been charged, the pending-queue reads returning `[]` reported an erasure backlog of zero to the operator watching for exactly that number. Every one was found by reading. An AST pass now requires every public function in `db.py` with an `except` arm to be either one that RAISES or one whose blank answer is recorded with the reason it is safe -- 36 reasons, one line each, and the line is the deliverable, because the reasoning is the part nobody writes down. Neither answer is right in general: a worker that cannot read its queue has nothing to do this pass and should carry on; a screen that cannot read the store must not say it is empty. What must not happen is the choice being made by whichever `except` was easiest to type. Three guards: a new swallow fails until somebody records why; a listed function that starts raising fails, so the reasons cannot describe code that no longer exists; and sixteen named reads and writes must still refuse, each carrying the failure it caused when it did not. Plus: every `*_best_effort` must have a strict twin that raises -- alone it is just a swallow with a longer name. Verified both ways. Pure AST, so it runs in the fast CI job. **Extended in `4244eed` to `objstore.py` and `storage.py`** — the other two modules standing between the app and something that can be unreachable, and where the eighth instance turned up. Sixteen more reasons: the bucket stays best-effort by design with one recorded exception (the prefix delete that erasure depends on), and the volume came back clean because everything there costs space rather than truth. |
 | An erasure that never happened stopped being recorded as finished | `320560f` | Found by running the `db.py` sweep's question against the object store. **Two swallows stacked up and dropped a deletion obligation.** The durable purge exists because the photos and the row that names them go at different times: `delete_user` records what is owed inside its own transaction, and a later pass reads it back. The queue's contract is exact and `db.finish_media_purge`'s docstring states it — *"only ever called after a purge that raised nothing"* — but nothing raised. `objstore.delete_prefix` catches every failure and returns `0`, and `_purge_session_images` wrapped the lot in `except Exception` because it is ALSO the cleanup after a merge, a delete and a sale, where a failed tidy-up must not fail the seller's request. With R2 unreachable the queue saw a purge that "succeeded", dropped the debt, and **the photos stayed in the bucket for ever with the account that owned them already gone** — the exact outcome the durable queue was built to prevent, reached from one layer down. `ebay_deletion.purge` depends on the same raise and says so in its own comment (*"leaving the row alone is what hands the object to the next resume pass"*); it was leaving nothing alone. One function was serving two callers with opposite needs, so it is two: the strict one raises (over `objstore.delete_prefix_strict`, which reports a bucket that would not answer instead of counting zero) and is what the two erasure paths use; the best-effort twin keeps the old behaviour for cleanup after a merge, delete, bulk delete or sale, none of which is a promise — the row is going or gone, the photos are reclaimable storage, and the orphan sweep reaches them later. `rmtree(ignore_errors=True)` stays and is not the same swallow: the bucket is the authority on what is stored, so a local copy that will not unlink is disk to reclaim, not an obligation. Eight tests, verified both ways the bug returns — pointing the purge at the counting delete, and re-wiring the queue to the tolerant twin, the second caught by reading the call sites out of the source because that rewiring is otherwise silent. |
 | The half of the migration list nothing was reading | `79e6563` | `test_every_added_column_matches_the_type_create_all_would_emit` exists because trap #2 -- `sessions_valid_from` added to the guarded ALTER list as a bare `TIMESTAMP` against a model declaring `DateTime(timezone=True)`, a difference SQLite cannot see. It reads the `ADD COLUMN` statements and skips the rest with a comment saying so. Those are: two that **widen a column already holding an encrypted refresh token**, where the note beside them says the ciphertext is roughly 1.5x its plaintext and *"a silently truncated one disconnects a seller with no error"* -- a model declaring `String(2048)` against a migration widening to 4096 gives a FRESH Postgres database the narrow column and truncates every token written to it, while an old deployment gets the wide one, and the symptom is sellers signed out of a marketplace at random; and one `CREATE INDEX`, where renaming a column out from under it does not fail the boot (the guard swallows it) but leaves the unread-badge poll scanning every notification the seller has ever received -- slow rather than wrong, which is why nothing would report it. They all agree today; now something says so. Verified by planting both kinds of drift. |
+| P1-11 (partial) the migration framework, proved against the models | `4983ad5` | The guarded ALTER list is a migration framework the way a shell script is a build system, and trap #2 on this branch is the receipt. There is an alembic revision set now, generated from the models; `env.py` targets `db.Base.metadata` (the same object `create_all` uses) and takes the URL from `backend.config` rather than `alembic.ini`, because the app already normalizes Neon's `postgres://` and a URL in a tracked ini file is a second source of truth and a credential in the repo. **The boot path is unchanged on purpose** -- swapping a live Neon database onto `alembic upgrade head` is a deploy step with a one-time `stamp head` in front of it and cannot be proved from here. What can be proved is that the two descriptions agree, and that is the test: after `upgrade head` from nothing autogenerate finds no diff against the models; the migrated and `create_all` databases build the same tables, columns and indexes; every column the ALTER list adds exists in the revision set, so the old population and the new one run the same code against the same tables; and there is exactly one head. Generating it surfaced a real divergence: **`ix_notifications_user_unread`** -- the composite index the unread badge polls every minute -- existed only in `_MIGRATIONS`. That list runs on every boot so a fresh database did get it; what was missing was any way to know it existed by reading the models, which is how two schema sources drift. Declared on the model now. The revision set also ships in the image (it did not before), so the cutover runs against the machine rather than needing a redeploy to carry a script that is not there. Rehearsed end to end -- a database built the way the app boots today, stamped, then `upgrade head` as a clean no-op with the data intact -- **on SQLite**; the same sequence against Neon should be preceded by `alembic check`, which is read-only and fails if the real schema has drifted in a way this environment cannot see. |
 
 Still open:
 
@@ -406,11 +415,17 @@ Still open:
 
 ### 3. Structural work the prompt asks for, not started
 
-- [ ] Alembic. Schema changes so far ride the existing guarded
-      `ALTER TABLE` list in `db.py` (`ebay_user_id`, plus the new
-      `ebay_deletion_notices` table via `create_all`). That is consistent with
-      the codebase as it stands, but the prompt requires a real migration
-      framework before beta.
+- [x] **Alembic is in, and the cutover is the remaining step.** The revision
+      set is generated from the models and checked against them on every CI
+      run (see the row above). What is NOT done is switching the boot path:
+      the app still calls `create_all` plus the guarded ALTERs, because
+      pointing a live Neon database at `alembic upgrade head` needs a one-time
+      `alembic stamp head` first and cannot be rehearsed against Postgres from
+      here. Deploy sequence, once: `alembic check` (read-only — it fails if
+      the real schema has drifted from the models), then `alembic stamp head`,
+      then `alembic upgrade head` is a no-op until the first real migration.
+      Both the ini and the versions now ship in the image, so all three run on
+      the machine.
 - [ ] Normalized `ExternalListing` / `MarketplaceOperation` /
       `NotificationInbox` / `SyncCursor` / `DurableJob` tables. Partial
       progress: `ebay_deletion_notices` is the inbox for deletion notices, and
@@ -515,8 +530,11 @@ What still blocks it:
    a publish whose answer went missing is recovered rather than duplicated —
    but the runner itself is still a thread, and an interrupted store import
    is reported rather than resumed.
-4. **No Alembic, and the container still runs as root** — the latter needs one
-   local `docker build && docker run`, which this environment cannot do.
+4. **The container still runs as root**, which needs one local
+   `docker build && docker run` this environment cannot do. Alembic is in and
+   proved consistent with the models; what is left there is the one-time
+   cutover on the machine (`alembic check`, `stamp head`, `upgrade head`), not
+   any code.
 5. **P1-05's legal half is outstanding**: counsel review, a retention
    schedule, a legal identity and address, and a support address on a company
    domain rather than a personal Gmail. None of that is a code change.
