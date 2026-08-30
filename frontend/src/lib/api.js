@@ -85,6 +85,18 @@ export function batchModelTimeoutMs(count, removeBg) {
 
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.
+// Methods that are safe to repeat. A timeout on one of these tells the seller
+// nothing was lost, because repeating it cannot do the work twice. Anything
+// else may already have changed something on a marketplace.
+//
+// A missing method is a GET (fetch's own default), which is why the default
+// is the safe side rather than the cautious one.
+const REPEATABLE = new Set(["GET", "HEAD", "OPTIONS"]);
+
+export function isRepeatable(method) {
+  return REPEATABLE.has(String(method || "GET").toUpperCase());
+}
+
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
@@ -117,9 +129,25 @@ export async function api(path, opts = {}) {
     res = await fetch(apiUrl(path), abort ? { ...opts, signal: abort.signal } : opts);
   } catch (e) {
     if (e?.name === "AbortError") {
+      // What a timeout MEANS depends on the method, and saying the wrong
+      // thing here is worse than saying nothing.
+      //
+      // Giving up on a request is not the same as the server giving up on
+      // it. A read can be repeated freely, so "nothing was lost" is true. A
+      // publish, a promotion, a policy creation or a delete may already have
+      // reached eBay and succeeded — the response is what got lost, not the
+      // work. Telling that seller "nothing was lost, try again" invites them
+      // to create a second live listing, and this message used to be sent on
+      // every timeout regardless of method.
+      const seconds = Math.round(timeoutMs / 1000);
       throw new Error(
-        `That took longer than ${Math.round(timeoutMs / 1000)}s and was given up on. `
-        + "Nothing was lost — try again.", { cause: e });
+        isRepeatable(opts.method)
+          ? `That took longer than ${seconds}s and was given up on. `
+            + "Nothing was lost — try again."
+          : `That took longer than ${seconds}s, so we stopped waiting — but it `
+            + "may still have gone through. Check before trying again, so you "
+            + "don't end up doing it twice.",
+        { cause: e });
     }
     throw new Error(
       "Network error — the server may be starting up. Try again in a few seconds.",
