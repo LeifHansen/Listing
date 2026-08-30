@@ -1,4 +1,4 @@
-# QuickFlip
+# Thryft Shop
 
 **Snap it · AI writes it · list it everywhere.**
 
@@ -391,7 +391,7 @@ errors on a DB problem. Tables are auto-created on first use.
 1. **Persistence** ✅ — Neon-backed listing history + My listings.
 2. **Reliability & UX** ✅ — HEIC uploads, clear errors, nav.
 3. **Accounts & auth** ✅ — email/password login; listings scoped per user.
-4. **Brand & UX design** ✅ — QuickFlip identity: eBay palette, retro-modern,
+4. **Brand & UX design** ✅ — Thryft Shop identity: eBay palette, retro-modern,
    90s Jordan/Nike energy, cursive wordmark. (Ongoing design pass each phase.)
 5. **eBay OAuth** ✅ — "Sign in with eBay" (Authorization Code flow) with
    per-user tokens + auto-fetched business policies/location. Set

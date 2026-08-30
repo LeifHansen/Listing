@@ -9,6 +9,7 @@ import {
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { api, postJson } from "@/lib/api";
+import { readLocal, writeLocal } from "@/lib/localPrefs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -342,11 +343,11 @@ function MirrorStatus() {
 // months shouldn't have to re-pick every morning. Rendered as a plain select:
 // it lives in the tile's corner as a sibling of the tile button (see
 // StatCard's `action`), so it has to be a real control, not a nested one.
-const SOLD_RANGE_KEY = "quickflip-sold-range";
+const SOLD_RANGE_KEY = "sold-range";   // see lib/localPrefs
 
 function readSoldRange() {
   try {
-    const saved = localStorage.getItem(SOLD_RANGE_KEY);
+    const saved = readLocal(SOLD_RANGE_KEY);
     if (SOLD_RANGES.some((r) => r.id === saved)) return saved;
   } catch (e) { /* private mode — the default is fine */ }
   return DEFAULT_SOLD_RANGE;
@@ -537,7 +538,7 @@ export function Dashboard() {
   const sales = salesSummary(items, soldRangeId);
   const pickSoldRange = (id) => {
     setSoldRangeId(id);
-    try { localStorage.setItem(SOLD_RANGE_KEY, id); } catch (e) { /* private mode */ }
+    writeLocal(SOLD_RANGE_KEY, id);
   };
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
   const watcherTotal = live.reduce((sum, i) => {

@@ -59,8 +59,18 @@ describe("whose mirror it is", () => {
 
 describe("when the record cannot be trusted", () => {
   it("treats a corrupt timestamp as due", () => {
-    localStorage.setItem(`quickflip-last-store-sync:${USER}`, "not-a-number");
+    localStorage.setItem(`thryft-last-store-sync:${USER}`, "not-a-number");
     expect(autoSyncDue(USER)).toBe(true);
+  });
+
+  it("honours a record written under the pre-rename key", () => {
+    // The storage keys were renamed from `quickflip-*` to `thryft-*`. If the
+    // read did not fall back, every existing seller would look like a first
+    // load on the release -- and a first load is the one case that spends a
+    // full store rebuild, up to 2,500 GetItem calls, unasked, on every
+    // account at once.
+    localStorage.setItem(`quickflip-last-store-sync:${USER}`, String(Date.now()));
+    expect(autoSyncDue(USER)).toBe(false);
   });
 
   it("treats a future timestamp as due", () => {

@@ -36,7 +36,7 @@
    crs:HasSettings="True">
    <crs:Name>
     <rdf:Alt>
-     <rdf:li xml:lang="x-default">QuickFlip Studio</rdf:li>
+     <rdf:li xml:lang="x-default">Thryft Studio</rdf:li>
     </rdf:Alt>
    </crs:Name>
    <crs:ShortName>
@@ -46,7 +46,7 @@
    </crs:ShortName>
    <crs:Group>
     <rdf:Alt>
-     <rdf:li xml:lang="x-default">QuickFlip</rdf:li>
+     <rdf:li xml:lang="x-default">Thryft Shop</rdf:li>
     </rdf:Alt>
    </crs:Group>
    <crs:Description>

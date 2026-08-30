@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Convenience launcher for QuickFlip.
+# Convenience launcher for Thryft Shop.
 set -e
 
 cd "$(dirname "$0")"

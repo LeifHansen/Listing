@@ -89,6 +89,12 @@ def idempotency_key(session_id: str, replacing_item_id: str = "") -> str:
     session_id = (session_id or "").strip()
     if not session_id:
         return ""
+    # The `qf-` prefix is the app's old name and stays that way: this string
+    # is stamped on live eBay listings as Item.SKU, and eBay is holding the
+    # ones already published. Renaming it matches none of them, so every such
+    # listing imports as a stranger's on the next sync -- a duplicate card for
+    # an item the seller already has, which is the exact failure this module
+    # exists to prevent. Pinned by tests/test_the_rename_stops_at_stored_data.py.
     key = f"qf-{session_id}"
     if replacing_item_id:
         key += f"-r{str(replacing_item_id).strip()}"

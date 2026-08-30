@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { postJson } from "@/lib/api";
+import { readLocal, writeLocal } from "@/lib/localPrefs";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 
@@ -14,7 +15,7 @@ import { useApp } from "@/store";
    eBay". Every screen that gates a publish asks it, so a draft can't be
    publishable from its card and blocked in the editor. */
 
-const STORAGE_KEY = "quickflip-publish-marketplaces";
+const STORAGE_KEY = "publish-marketplaces";   // see lib/localPrefs
 
 // Which marketplaces publishes go to. Remembered across listings; the
 // selector only matters once a non-eBay marketplace is connected — until
@@ -24,7 +25,7 @@ export function usePublishTargets() {
   const { connectedMarketplaces } = useApp();
   const [selected, setSelected] = useState(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = readLocal(STORAGE_KEY);
       const arr = raw ? JSON.parse(raw) : null;
       return Array.isArray(arr) && arr.length ? arr : ["ebay"];
     } catch (e) { return ["ebay"]; }
@@ -33,7 +34,7 @@ export function usePublishTargets() {
     setSelected((cur) => {
       const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
       if (!next.length) return cur; // always at least one target
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch (e) {}
+      writeLocal(STORAGE_KEY, JSON.stringify(next));
       return next;
     });
   }, []);

@@ -2,6 +2,7 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
 import { api, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -54,7 +55,7 @@ const NO_LISTINGS = {
 // ordinary use costs a handful of rebuilds instead of one per visit, while a
 // seller who wants it now presses "Sync with eBay".
 const AUTO_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const AUTO_SYNC_KEY = "quickflip-last-store-sync";
+const AUTO_SYNC_KEY = "last-store-sync";   // see lib/localPrefs
 
 // Per user, so connecting a different eBay account (or a different person on
 // a shared device) still gets the first-run import rather than inheriting
@@ -66,7 +67,7 @@ function autoSyncKey(userId) {
 /** Is an AUTOMATIC mirror rebuild worth its eBay quota right now? */
 export function autoSyncDue(userId, now = Date.now()) {
   try {
-    const last = Number(localStorage.getItem(autoSyncKey(userId)) || 0);
+    const last = Number(readLocal(autoSyncKey(userId)) || 0);
     // No record at all is the first load after connecting: without this run
     // the seller sees an empty app, so it is the one automatic rebuild that
     // earns its cost. A corrupt or future value reads as due for the same
@@ -81,7 +82,7 @@ export function autoSyncDue(userId, now = Date.now()) {
 }
 
 export function markAutoSynced(userId, now = Date.now()) {
-  try { localStorage.setItem(autoSyncKey(userId), String(now)); } catch (e) {}
+  writeLocal(autoSyncKey(userId), String(now));
 }
 
 const EBAY_CONNECT_ERRORS = {
@@ -101,7 +102,7 @@ export function AppProvider({ children }) {
     setDark((d) => {
       const next = !d;
       document.documentElement.classList.toggle("dark", next);
-      try { localStorage.setItem("quickflip-theme", next ? "dark" : "light"); } catch (e) {}
+      writeLocal("theme", next ? "dark" : "light");
       return next;
     });
   }, []);
@@ -119,14 +120,14 @@ export function AppProvider({ children }) {
   // localStorage next to the theme rather than the server.
   const [listingsLayout, setLayout] = useState(() => {
     try {
-      return localStorage.getItem("quickflip-listings-layout") === "list"
+      return readLocal("listings-layout") === "list"
         ? "list" : "grid";
     } catch (e) { return "grid"; }
   });
   const setListingsLayout = useCallback((next) => {
     const mode = next === "list" ? "list" : "grid";
     setLayout(mode);
-    try { localStorage.setItem("quickflip-listings-layout", mode); } catch (e) {}
+    writeLocal("listings-layout", mode);
   }, []);
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
@@ -641,14 +642,14 @@ export function AppProvider({ children }) {
   // never strands a running batch. Completed items also auto-save to Drafts.
   const [activeBulk, setActiveBulk] = useState(() => {
     try {
-      const raw = localStorage.getItem("quickflip-bulk");
+      const raw = readLocal("bulk");
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   });
   const startBulk = useCallback((jobId) => {
     const b = { jobId };
     setActiveBulk(b);
-    try { localStorage.setItem("quickflip-bulk", JSON.stringify(b)); } catch (e) {}
+    writeLocal("bulk", JSON.stringify(b));
     setView("new");
   }, []);
   // A batch begins when the seller hits the button, not when the server hands
@@ -676,11 +677,11 @@ export function AppProvider({ children }) {
   // seller reopened the queue and exited it.
   const bulkSettled = useCallback(() => {
     setActiveBulk((b) => (b && !b.done ? { ...b, done: true } : b));
-    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    clearLocal("bulk");
   }, []);
   const clearBulk = useCallback(() => {
     setActiveBulk(null);
-    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    clearLocal("bulk");
   }, []);
   // A running batch is watched from the SHELL, not only from the queue screen.
   // The queue polls the full status while it's open, but a seller who walks
@@ -802,7 +803,7 @@ export function AppProvider({ children }) {
     setShipping(null);
     setBulkRetry(null);
     setActiveBulk(null);
-    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    clearLocal("bulk");
     setListingsTab("active");
     listingsJumpRef.current = null;
 
