@@ -7,12 +7,14 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import base64
 import errno
 import hashlib
 import json
 import logging
 import os
 import random
+import re
 import secrets
 import shutil
 import threading
@@ -88,38 +90,87 @@ app.add_middleware(
 )
 
 
+FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
+
+# An inline <script>…</script>. The lookahead excludes anything with a src=,
+# which is an EXTERNAL script covered by 'self' — hashing its empty body would
+# add a meaningless entry to the policy.
+_INLINE_SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+                               re.S | re.I)
+
+
+def _inline_script_hashes(html: str) -> list[str]:
+    """A CSP sha256 source for every inline script in `html`.
+
+    The bytes hashed are exactly what sits between the tags — leading
+    newline, indentation and all — because that is what a browser hashes. A
+    stripped or re-indented body yields a hash that simply never matches, and
+    nothing but a browser will say so.
+    """
+    out = []
+    for match in _INLINE_SCRIPT_RE.finditer(html):
+        body = match.group(1)
+        if not body:
+            continue
+        digest = hashlib.sha256(body.encode("utf-8")).digest()
+        out.append(f"'sha256-{base64.b64encode(digest).decode()}'")
+    return out
+
+
+def build_csp(index_html: Path) -> str:
+    """The Content-Security-Policy, with script-src derived from what the app
+    actually serves.
+
+    script-src used to carry 'unsafe-inline', which is the allowance that
+    matters: with it, an injected `<script>` runs. It was there for one honest
+    reason — index.html applies the saved theme before first paint to avoid a
+    light-mode flash, and a policy that blanks the app is worse than a partial
+    one.
+
+    So the hashes are read from the built index.html AT STARTUP rather than
+    written into this file. A hardcoded hash goes stale the first time anyone
+    edits that snippet, and the symptom is a white screen in production, for
+    everyone, after a green deploy. Reading the served file cannot drift from
+    it.
+
+    With no readable index.html there is no frontend to protect and no hash
+    that could be right — a dev checkout, or a container where the build has
+    not run — so script-src falls back to what it was.
+
+    style-src still allows inline: React sets element styles directly and
+    Tailwind emits them, so there is nothing to hash. CSS injection is a real
+    but far narrower problem than script execution, and leaving it open
+    knowingly beats leaving script-src open to avoid saying so.
+
+    img-src allows https: because listings legitimately show eBay-hosted
+    photos (i.ebayimg.com), and data:/blob: because the photo editor works on
+    canvas output before anything is uploaded.
+    """
+    try:
+        hashes = _inline_script_hashes(index_html.read_text(encoding="utf-8"))
+        script_src = " ".join(["script-src 'self'", *hashes])
+    except OSError:
+        script_src = "script-src 'self' 'unsafe-inline'"
+    return "; ".join((
+        "default-src 'self'",
+        script_src,
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com data:",
+        "img-src 'self' https: data: blob:",
+        "connect-src 'self' https:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        # Clickjacking: the app has publish and delete buttons, so being framed
+        # by another site is never legitimate. X-Frame-Options below says the
+        # same thing for browsers that predate frame-ancestors.
+        "frame-ancestors 'none'",
+    ))
+
+
 # The response headers a browser needs in order to defend the seller, none of
 # which were being sent. Assembled once — they are the same on every response.
-#
-# CSP is the load-bearing one and it is deliberately not maximal. 'unsafe-
-# inline' stays in script-src because index.html carries an inline script (it
-# applies the saved theme before first paint to avoid a light-mode flash) and
-# Vite inlines a small module preload shim; a hash would have to be recomputed
-# on every build, and a policy that breaks the app on deploy is worse than a
-# partial one. Even so, `default-src 'self'` and this script-src stop a
-# reflected payload from LOADING a remote script or calling eval, which is the
-# usual next step after an injection. Tightening to a nonce is worth doing and
-# wants its own change.
-#
-# style-src allows inline because Tailwind and React set element styles
-# directly. img-src allows https: because listings legitimately show
-# eBay-hosted photos (i.ebayimg.com), and data:/blob: because the photo editor
-# works on canvas output before anything is uploaded.
-_CSP = "; ".join((
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com data:",
-    "img-src 'self' https: data: blob:",
-    "connect-src 'self' https:",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    # Clickjacking: the app has publish and delete buttons, so being framed
-    # by another site is never legitimate. X-Frame-Options below says the
-    # same thing for browsers that predate frame-ancestors.
-    "frame-ancestors 'none'",
-))
+_CSP = build_csp(FRONTEND_DIR / "index.html")
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": _CSP,
@@ -215,9 +266,6 @@ logging.getLogger("uvicorn.access").addFilter(_DropDeletionAcks())
 
 # The frontend is a Vite/React app; serve its build output. (The Dockerfile
 # builds it in a node stage; run.sh builds it for local dev.)
-FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
-
-
 @app.middleware("http")
 async def _cache_headers(request: Request, call_next):
     """Cache policy: index.html must always revalidate so a deploy is visible

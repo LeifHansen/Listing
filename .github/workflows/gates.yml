@@ -164,6 +164,7 @@ jobs:
                  backend/tests/test_no_create_on_unknown.py \
                  backend/tests/test_sweep_scope.py \
                  backend/tests/test_policy_terms_consent.py \
+                 backend/tests/test_csp_script_hashes.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
             echo "::error::API tests skipped in the only job that can run them"

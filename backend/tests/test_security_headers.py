@@ -12,10 +12,11 @@ None of these were being sent. Each closes a different door:
     Referer header (they are already in every /media URL);
   - Permissions-Policy turns off capabilities the app does not use.
 
-The CSP is deliberately not maximal — see the comment on _CSP. What these
-tests pin is that it exists, that it forbids the things it must, and that it
-still permits what the app genuinely loads, so a future tightening cannot
-quietly break the fonts or the eBay-hosted photos.
+What these tests pin is that the CSP exists, that it forbids the things it
+must, and that it still permits what the app genuinely loads, so a future
+tightening cannot quietly break the fonts or the eBay-hosted photos. The
+script-src half — hashes for the app's own inline scripts instead of
+'unsafe-inline' — has its own file, test_csp_script_hashes.py.
 """
 from __future__ import annotations
 
@@ -56,8 +57,13 @@ def test_the_csp_forbids_the_things_it_must(api):
     assert "frame-ancestors 'none'" in csp
     assert "object-src 'none'" in csp
     assert "base-uri 'self'" in csp
-    # A wide-open script-src would make the whole header decorative.
-    assert "script-src 'self' 'unsafe-inline'" in csp
+    # A wide-open script-src would make the whole header decorative. This
+    # pinned `script-src 'self' 'unsafe-inline'` while that was the interim
+    # policy; script-src now carries per-script hashes instead, so it asserts
+    # the property rather than the string. See test_csp_script_hashes.py.
+    script_src = next(p for p in csp.split("; ") if p.startswith("script-src"))
+    assert "'self'" in script_src
+    assert "'unsafe-inline'" not in script_src, script_src
     assert "script-src *" not in csp
 
 
