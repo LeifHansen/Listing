@@ -178,3 +178,26 @@ def test_the_delete_is_scoped_in_the_query_itself():
     # And the route still hands it a uid rather than defaulting to None.
     route = ast.unparse(FUNCS["delete_listing"])
     assert "db.delete_listing(listing_id, _uid(request))" in route
+
+
+def test_the_job_readers_actually_use_the_uid_they_are_given():
+    """The three bulk/import routes are seen as guarded because they thread
+    the caller's uid into jobstore's lookup. That is only a check if jobstore
+    honours it — the far end of the same trust the delete rests on.
+
+    A job with no owner stays readable by id: the app supports logged-out
+    bulk uploads, and that matches `_assert_session_owner`'s rule for an
+    anonymous session. What must never happen is an OWNED job answering
+    someone else.
+    """
+    js = ast.parse((MAIN.parent / "services" / "jobstore.py").read_text())
+    readers = {n.name: n for n in js.body
+               if isinstance(n, ast.FunctionDef)
+               and n.name in ("snapshot", "snapshot_json", "brief_json")}
+    assert set(readers) == {"snapshot", "snapshot_json", "brief_json"}, \
+        f"a job reader was renamed or removed: {sorted(readers)}"
+    for name, fn in readers.items():
+        assert "uid" in {a.arg for a in fn.args.args}, \
+            f"jobstore.{name} no longer takes the caller's uid"
+        assert "if owner and owner != uid:" in ast.unparse(fn), \
+            f"jobstore.{name} no longer refuses a job owned by someone else"
