@@ -27,8 +27,8 @@ from typing import Callable, Optional
 from .. import db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from . import (ebay_account, ebay_trading, notifications, sync_merge,
-               taxonomy)
+from . import (ebay_account, ebay_trading, notifications, publish_guard,
+               sync_merge, taxonomy)
 from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
@@ -316,6 +316,49 @@ def _is_mirror(record: dict) -> bool:
     return str(record.get("id") or "").startswith("ebay-")
 
 
+def _index_by_publish_key(records) -> dict[str, dict]:
+    """The SKU a publish travelled under -> the record that sent it.
+
+    This is how a listing the app CREATED but never learned the item id for
+    finds its way home. Every fixed-price create stamps `Item.SKU` with
+    publish_guard's deterministic key and sets InventoryTrackingMethod=SKU, so
+    eBay keeps it and hands it back on GetItem -- which the sync already
+    reads. Without this, a publish whose response was lost imports as
+    `ebay-<item>`, and the seller has their draft AND a copy of the very
+    listing it became.
+
+    The keys are built by calling publish_guard.idempotency_key rather than
+    by formatting a string here, so the two cannot drift: the day that format
+    changes (or its 50-character SKU truncation moves), a hand-rolled copy
+    stops matching and this quietly does nothing.
+
+    Two rules keep it from claiming a listing that isn't ours:
+
+      * the plain key is indexed only for a record with NO item id. A record
+        that already names a live listing is matched by that id, and letting a
+        stale key match too would point one card at two eBay listings and
+        abandon the one it was actually publishing.
+      * the relist key is indexed for the item the record currently holds,
+        because that is the only thing a relist of THIS record could have
+        sent. It is specific to that item, so it cannot collide with anything
+        else.
+
+    Mirrors are skipped: a record this sync created never published anything.
+    """
+    out: dict[str, dict] = {}
+    for rec in records:
+        rid = str(rec.get("id") or "").strip()
+        if not rid or _is_mirror(rec):
+            continue
+        item = _item_id_of(rec.get("listing") or {})
+        keys = ([publish_guard.idempotency_key(rid, replacing_item_id=item)]
+                if item else [publish_guard.idempotency_key(rid)])
+        for key in keys:
+            if key:
+                out.setdefault(key, rec)
+    return out
+
+
 def _drop_stale_mirrors(known: dict, owned: dict, user_id: str) -> int:
     """Delete mirror rows for items the app already has its own record of.
 
@@ -509,6 +552,13 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # "ebay-<item>" alone imported it again as a separate card on every sync —
     # the duplicate pairs (one Thryft, one eBay) sellers were seeing.
     owned = _index_by_item(known.values())
+    # And by the SKU a publish went out under, so a listing this app created
+    # but never got an answer for is reclaimed instead of imported as a
+    # second card. See _index_by_publish_key.
+    by_key = _index_by_publish_key(known.values())
+    # Records already written by an earlier listing in this run. See the
+    # first-claim-wins guard in the save loop.
+    claimed: set[str] = set()
     imported = updated = failed = 0
     # eBay's call limits are per seller and windowed. Once one is hit, every
     # further call is refused AND keeps the window open, so carrying on makes
@@ -561,8 +611,31 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             failed += 1
             continue
         mirror_id = record_id(item_id)
-        prior = owned.get(item_id) or known.get(mirror_id)
+        # Item id first: it is eBay's own identity for the listing and the
+        # strongest match there is. The publish key only ever answers for a
+        # record that has no item id to match on -- which is exactly the
+        # record a lost publish leaves behind.
+        prior = (owned.get(item_id)
+                 or by_key.get(str(fresh.get("sku") or "").strip())
+                 or known.get(mirror_id))
+        # One record, one listing per run. A reclaimed relist is matched by
+        # TWO eBay items at once -- the new live one (by publish key) and the
+        # ended one it replaced, which the record still names (by item id) --
+        # and eBay's ended list is walked after the active one, so without
+        # this the predecessor is written over the relist: the card goes back
+        # to Inactive and the live listing ends up with no row anywhere.
+        #
+        # Active listings come first, so first-claim-wins keeps the current
+        # truth and sends the loser to its own `ebay-<item>` mirror. That is
+        # not a special case: it is exactly what a relist whose response DID
+        # arrive already produces for its predecessor.
+        if prior is not None and prior["id"] in claimed:
+            log.info("sync: item %s also matched record %s, already taken by "
+                     "another listing this run — importing it separately",
+                     item_id, prior["id"])
+            prior = None
         rid = prior["id"] if prior else mirror_id
+        claimed.add(rid)
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
         # Reconcile against what eBay last said, so a change made in Seller
