@@ -481,6 +481,22 @@ EBAY_LOGISTICS_ENABLED = (os.getenv("EBAY_LOGISTICS_ENABLED", "").strip().lower(
 if EBAY_LOGISTICS_ENABLED:
     EBAY_OAUTH_SCOPES.append("https://api.ebay.com/oauth/api_scope/sell.logistics")
 
+# Buyer messages (Message API). Same limited-release shape as the Logistics
+# scope above, and the same hazard: a keyset that eBay hasn't approved for
+# commerce.message fails the WHOLE consent screen, so nobody could connect
+# eBay at all and publishing would stop with it. Hence opt-in — set
+# EBAY_MESSAGING_ENABLED once eBay has approved the app.
+#
+# Flipping it on can't disturb sellers who are already connected:
+# refresh_access_token() deliberately omits `scope` (see ebay_auth.py), so
+# their tokens keep exactly the scopes they originally granted. Only the
+# connect/reconnect flow changes, which makes rollback an env change rather
+# than a deploy — existing sellers reconnect once to see their messages.
+EBAY_MESSAGING_ENABLED = (os.getenv("EBAY_MESSAGING_ENABLED", "").strip().lower()
+                          in ("1", "true", "yes", "on"))
+if EBAY_MESSAGING_ENABLED:
+    EBAY_OAUTH_SCOPES.append("https://api.ebay.com/oauth/api_scope/commerce.message")
+
 
 # Whether the pre-publish checklist BLOCKS a revise of an already-live listing,
 # or only reports what it would have blocked. A relist is always blocked on —

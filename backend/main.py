@@ -42,9 +42,9 @@ from .models import (ImageOrderRequest, ItemSpecific, Listing,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
                        ebay_orders, ebay_trading, image_import, images, jobstore,
-                       listing_merge, listing_sync, metrics, notifications,
-                       orient, preflight, pricing, promotions, recommender,
-                       sync_guard, taxonomy, tokens)
+                       listing_merge, listing_sync, messages as messages_service,
+                       metrics, notifications, orient, preflight, pricing,
+                       promotions, recommender, sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services.background import run_in_background
 
@@ -1345,6 +1345,10 @@ def ebay_status(request: Request) -> dict:
         # eBay label purchasing (Logistics API) is limited-release; the
         # shipping dialog leads with Pirate Ship until it's enabled.
         "labels_enabled": config.EBAY_LOGISTICS_ENABLED,
+        # Buyer messages (Message API) is limited-release too. The inbox icon
+        # keys its visibility off THIS, not off /api/messages, because status
+        # loads at boot — so the icon never flashes in and back out.
+        "messaging_enabled": config.EBAY_MESSAGING_ENABLED,
         # Which eBay account is linked (empty for connections made before the
         # identity scope was added — reconnecting fills it in).
         "username": (acct.get("ebay_username") or "") if connected else "",
@@ -4549,6 +4553,115 @@ def notifications_mark_read(request: Request, payload: dict) -> dict:
         return {"marked": db.mark_notifications_read(uid)}
     ids = [str(i) for i in (payload.get("ids") or []) if i]
     return {"marked": db.mark_notifications_read(uid, ids)}
+
+
+# --- buyer messages (the unified P2P inbox) ---------------------------------
+#
+# One inbox across every marketplace that can carry a buyer conversation.
+# Person-to-person only: each marketplace adapter excludes its own automated
+# mail at the source (eBay asks for conversation_type=FROM_MEMBERS), because
+# the whole point of this surface is that it is NOT the notifications bell.
+#
+# Conversation ids are namespaced "<marketplace>:<id>", which is how one merged
+# list routes a click back to the provider that owns the thread.
+
+@app.get("/api/messages")
+def messages_list(request: Request, marketplace: str = "",
+                  limit: int = 25) -> dict:
+    """The merged inbox: {conversations, unread, sources, available, reason}.
+
+    ALWAYS 200, never raises. A header icon polls this every minute, and the
+    smoke test fails the build on any failed request — so an eBay outage has
+    to read as an empty inbox that explains itself, not as a 502 storm.
+    `sources` drives the marketplace toggle and is populated even when a
+    source has nothing to give.
+    """
+    uid = _uid(request)
+    if not uid:
+        return {"conversations": [], "unread": 0, "sources": [],
+                "available": False, "reason": "signed_out", "message": ""}
+    try:
+        out = messages_service.list_conversations(
+            uid, marketplace=marketplace, limit=max(1, min(limit, 100)))
+    except Exception as exc:  # noqa: BLE001 - a poll must never 500
+        log.info("messages: inbox read failed: %s", exc)
+        return {"conversations": [], "unread": 0, "sources": [],
+                "available": False, "reason": "error", "message": str(exc)}
+    live = [s for s in out["sources"] if s.get("available")]
+    # The worst reason among supported sources is the one worth showing: with
+    # nothing live, "reconnect eBay" is actionable where "no messages" isn't.
+    reason = ""
+    message = ""
+    if not live:
+        for s in out["sources"]:
+            if s.get("supported") and s.get("reason") not in ("", "disabled"):
+                reason, message = s["reason"], s.get("message", "")
+                break
+        else:
+            reason = "disabled"
+    out.update({"available": bool(live), "reason": reason, "message": message})
+    return out
+
+
+@app.get("/api/messages/{conversation_id}")
+def messages_thread(conversation_id: str, request: Request,
+                    limit: int = 50) -> dict:
+    """One conversation: {conversation, messages} oldest-first.
+
+    User-initiated, so this one fails honestly rather than soft-emptying.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    try:
+        return messages_service.get_conversation(
+            uid, conversation_id, limit=max(1, min(limit, 200)))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - adapter errors carry the reason
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/messages/send")
+def messages_send(request: Request, payload: dict) -> dict:
+    """Reply into a conversation: {"conversation_id": ..., "text": ...}.
+
+    Returns the refreshed thread, so the client renders what the marketplace
+    actually stored rather than the optimistic bubble it drew.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    text = str(payload.get("text") or "").strip()
+    cid = str(payload.get("conversation_id") or "").strip()
+    if not text:
+        raise HTTPException(400, "Write a message first.")
+    if not cid:
+        raise HTTPException(400, "No conversation was named.")
+    # Chattier than an auth endpoint by design, but still bounded: a runaway
+    # client must not burn the seller's marketplace API quota, because that
+    # quota is shared with publishing.
+    if not ratelimit.check(f"msg-send:{uid}", max_attempts=60):
+        raise HTTPException(429, "Too many messages just now — give it a minute.")
+    try:
+        return messages_service.send(uid, cid, text)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/messages/read")
+def messages_mark_read(request: Request, payload: dict) -> dict:
+    """Mark one conversation read. Best-effort: the badge re-syncs on the next
+    poll, so a marketplace that refuses this never becomes an error the seller
+    has to look at."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    cid = str(payload.get("conversation_id") or "").strip()
+    return {"ok": bool(cid) and messages_service.mark_read(uid, cid)}
+
 
 
 # --- sold orders + shipping labels ------------------------------------------
