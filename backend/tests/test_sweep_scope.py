@@ -49,9 +49,16 @@ def sweep(monkeypatch):
                     for i in range(drafts_first)] + _live(store_size))
         monkeypatch.setattr(auth, "current_user",
                             lambda _r: {"id": "u1", "email": "a@b.c"})
-        monkeypatch.setattr(
-            db, "list_listings",
-            lambda limit=50, **_k: records[:limit])
+        def _list(limit=50, user_id=None, statuses=None):
+            # Honours `statuses`, because the real one does: the route asks
+            # for live listings, and a double that ignored the filter would
+            # keep testing the world where a page of drafts pushes a seller's
+            # live listings out of the sweep. That world is the bug.
+            rows = records if statuses is None else [
+                r for r in records if r["status"] in statuses]
+            return rows[:limit]
+
+        monkeypatch.setattr(db, "list_listings", _list)
         monkeypatch.setattr(main, "_ebay_creds_for",
                             lambda _r: {"access_token": "tok", "_uid": "u1",
                                         "ebay_username": ""})
@@ -117,27 +124,44 @@ def test_an_empty_store_is_not_partial(sweep):
 # --------------------------------------------- and the read cap counts too
 #
 # `partial` was computed from the SAMPLE alone. The list it samples is itself
-# a capped read (LISTING_LIST_CAP, most-recent-first), so a store bigger than
-# the cap has live listings that never reach the sweep at all -- and nothing
-# said so.
+# a capped read (LISTING_LIST_CAP), so a store bigger than the cap has live
+# listings that never reach the sweep at all -- and nothing said so.
+#
+# The cap is now measured in LIVE listings rather than records of any kind,
+# because the read asks for live ones. Both halves of that are asserted below:
+# a genuinely capped sweep still says `partial`, and drafts no longer displace
+# anybody's live listings, which was the state a real store sits in.
 
 def test_a_store_bigger_than_the_read_cap_is_partial(sweep):
     from backend import main
 
-    body = sweep(5, drafts_first=main.LIST_CAP)
+    body = sweep(main.LIST_CAP + 5)
 
-    # The five live listings are past the cap, so the sweep never saw them.
+    # Past the cap of LIVE listings, so some never reached the sweep at all.
     # Reporting a complete sync here says every listing's status was confirmed
-    # when not one of them was looked at.
+    # when hundreds were never looked at.
     assert body["partial"] is True, \
         "a sweep that could not even READ the whole store called itself complete"
+
+
+def test_drafts_no_longer_push_live_listings_out_of_the_sweep(sweep):
+    """The fix, stated as a test. `list_listings` is most-recent-first, so a
+    store whose newest LIST_CAP records are drafts used to hide EVERY live
+    listing from every sweep, for as long as it stayed that shape: a sale or
+    an ending on eBay was never noticed here. The read asks for live listings
+    now, so the drafts are irrelevant to it."""
+    from backend import main
+
+    body = sweep(5, drafts_first=main.LIST_CAP)
+    assert body["eligible"] == 5, "the drafts ahead of them hid the live ones"
+    assert body["partial"] is False
 
 
 def test_the_cap_and_the_sample_are_both_honoured(sweep):
     """Past the cap AND sampled. Still one flag, still true."""
     from backend import main
 
-    body = sweep(400, drafts_first=main.LIST_CAP)
+    body = sweep(main.LIST_CAP + 400)
     assert body["partial"] is True
 
 

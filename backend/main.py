@@ -4549,8 +4549,11 @@ def duplicate_listings(request: Request) -> dict:
     if not user:
         return {"groups": [], "total": 0}
     try:
+        # duplicates.find skips anything not live on its first line, so ask
+        # for live ones: on a big store the unfiltered page is the wrong rows.
         groups = duplicates.find(
-            db.list_listings(limit=LIST_CAP, user_id=user["id"]))
+            db.list_listings(limit=LIST_CAP, user_id=user["id"],
+                             statuses=duplicates.LIVE_STATUSES))
     except Exception as exc:  # noqa: BLE001 - advisory feature, never fatal
         log.warning("duplicate scan failed for user=%s: %s", user["id"], exc)
         return {"groups": [], "total": 0}
@@ -4624,9 +4627,9 @@ def promote_all(request: Request) -> dict:
     creds = _ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
-    items = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-             if i.get("status") in ("published", "live")
-             and not (i.get("listing") or {}).get("promote")]
+    items = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"],
+                                        statuses=("published", "live"))
+             if not (i.get("listing") or {}).get("promote")]
     rates = _rates_by_record_id(creds, items)
     promoted = 0
     needs_reconnect = False
@@ -5420,18 +5423,23 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # eBay's immutable account id where the record carries one, and falls back
     # to the name only for records too old to have it (listing_sync.owns).
     account = creds or {}
+    # Live listings, asked for as live listings. This used to read the newest
+    # LIST_CAP records of ANY kind and drop the rest here -- so on a store
+    # whose recent records are mostly drafts, the older live listings fell off
+    # the end and never reached the sweep at all, for as long as the store
+    # stayed that shape. A sale or an ending on eBay went unnoticed here
+    # indefinitely. The filter moves the boundary from "the newest 3,000
+    # records" to "the first 3,000 LIVE ones", which for any real store is all
+    # of them -- and `capped` now says the truer thing.
+    #
     # One row past the cap, so the answer can tell a sweep that covered the
-    # whole store from one that could not even READ it. `list_listings` comes
-    # back most-recent-first, so on a store bigger than the cap the OLDER live
-    # listings fall off the end and never reach the sweep at all -- and
-    # `partial` was computed from the sample alone, so that sync reported
-    # itself complete. On a store whose recent records are mostly drafts, it
-    # could report a complete sync having looked at nothing.
-    rows = db.list_listings(limit=LIST_CAP + 1, user_id=user["id"])
+    # whole store from one that could not even READ it: `partial` was computed
+    # from the sample alone, so a capped sync reported itself complete.
+    rows = db.list_listings(limit=LIST_CAP + 1, user_id=user["id"],
+                            statuses=("published", "live"))
     capped = len(rows) > LIST_CAP
     live = [i for i in rows[:LIST_CAP]
-            if i.get("status") in ("published", "live")
-            and listing_sync.owns(i.get("listing") or {}, account)]
+            if listing_sync.owns(i.get("listing") or {}, account)]
     changed = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
     # lists name every item that finished recently, so a listing that ended

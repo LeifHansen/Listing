@@ -117,8 +117,13 @@ def sync_client(monkeypatch):
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda request: {"access_token": "tok",
                                          "ebay_username": "seller"})
-    monkeypatch.setattr(main.db, "list_listings",
-                        lambda limit=50, user_id=None: list(store))
+    # Honours `statuses` because the real read does: the sweep asks for live
+    # listings, and every record here is one.
+    monkeypatch.setattr(
+        main.db, "list_listings",
+        lambda limit=50, user_id=None, statuses=None: [
+            r for r in store
+            if statuses is None or r["status"] in statuses][:limit])
     # The cheap pass claims everything, so nothing reaches the sweeps.
     monkeypatch.setattr(main.listing_sync, "reconcile_recent",
                         lambda token, uid, records, account="": (0, set(handled)))

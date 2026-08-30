@@ -525,8 +525,17 @@ def mutate_listing_data(
         return None
 
 
-def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+def list_listings(limit: int = 50, user_id: Optional[str] = None,
+                  statuses: Optional[tuple[str, ...]] = None) -> list[dict]:
     """The user's listings, newest first. RAISES on a read failure.
+
+    `statuses` narrows the read in SQL. Several callers throw away everything
+    that is not live the moment the rows arrive -- the store sweep, the
+    duplicate advisory, the promote-all pass -- and on a store bigger than
+    `limit` that page is the wrong rows: a seller whose newest records are
+    mostly drafts has their OLDER live listings fall off the end, and those
+    are exactly the ones a sweep is for. Filtering here moves the boundary
+    from "the newest N records" to "the first N matching ones".
 
     Not `[]`, which is what this used to answer and what every other read in
     this module still answers. "The seller's store" is the input to decisions
@@ -556,6 +565,8 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
             q = select(ListingRecord)
             if user_id is not None:
                 q = q.where(ListingRecord.user_id == user_id)
+            if statuses is not None:
+                q = q.where(ListingRecord.status.in_(statuses))
             q = q.order_by(ListingRecord.updated_at.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
             return [_record_to_dict(r) for r in rows]
@@ -567,7 +578,9 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
 
 
 def list_listings_best_effort(limit: int = 50,
-                              user_id: Optional[str] = None) -> list[dict]:
+                              user_id: Optional[str] = None,
+                              statuses: Optional[tuple[str, ...]] = None
+                              ) -> list[dict]:
     """list_listings, but an unreadable store answers `[]`.
 
     Only for callers where an empty result degrades the answer rather than
@@ -576,7 +589,7 @@ def list_listings_best_effort(limit: int = 50,
     what to create, release, or end.
     """
     try:
-        return list_listings(limit=limit, user_id=user_id)
+        return list_listings(limit=limit, user_id=user_id, statuses=statuses)
     except StorageUnavailable:
         return []
 
