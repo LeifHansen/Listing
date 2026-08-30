@@ -94,6 +94,14 @@ class Listing(BaseModel):
     title: str = Field(default="",
                        description=f"eBay title, max {TITLE_MAX_CHARS} chars")
     subtitle: str = ""
+    # This eBay listing carries VARIATIONS (a shirt in S/M/L, each with its own
+    # SKU, price and stock). This app has no variation model, so such a listing
+    # imports as one flat record with a single price and quantity — which is
+    # not what it is. The flag exists so nothing pretends otherwise: the record
+    # stays visible and end-able, and the revise refuses rather than sending an
+    # item-level Quantity into a structure eBay says ReviseItem cannot revise,
+    # where a variation reaching 0 is removed from the listing.
+    has_variations: bool = False
     brand: str = ""
     condition: str = "USED_EXCELLENT"  # eBay condition enum
     condition_description: str = ""

@@ -39,7 +39,12 @@ from .dirty_fields import TRACKED, _comparable
 # Fields eBay owns outright: live counters and sale facts it reports and we
 # never push back. They are taken from the remote copy without ceremony.
 REMOTE_OWNED = ("watch_count", "sold_quantity", "view_url", "sold_price",
-                "sold_at", "ebay_start_time")
+                "sold_at", "ebay_start_time",
+                # Whether the listing carries variations is eBay's fact about
+                # its shape, never a local edit — and it has to be able to go
+                # back to False when the seller removes them, or the
+                # quarantine never lifts.
+                "has_variations")
 
 
 @dataclass

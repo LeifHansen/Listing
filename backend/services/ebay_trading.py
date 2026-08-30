@@ -488,6 +488,13 @@ def _item_to_listing(item: ET.Element) -> dict:
         "images": [],           # no local files — this listing came from eBay
         "image_urls": pictures,  # eBay-hosted photos, shown as-is
         "ebay_listing_id": _text(item, "ItemID"),
+        # eBay's Variations container. Nothing here ever looked for it, so a
+        # multi-variation listing imported as ONE flat record -- a single
+        # price (eBay reports the lowest variation's), a single item-level
+        # quantity, and no sign the other sizes exist. Knowing is the whole
+        # point: it is what stops the revise below rewriting a structure this
+        # app cannot see.
+        "has_variations": _find(item, "Variations") is not None,
         "sku": _text(item, "SKU"),
         "source": "ebay",
         "watch_count": _int(item, "WatchCount"),
@@ -1082,6 +1089,21 @@ def build_revise_item(listing: Listing, item_id: str,
     """
     if not item_id:
         raise TradingError("This listing has no eBay item id to update.")
+    if listing.has_variations:
+        # eBay's own documentation: ReviseItem does not support revisions of
+        # multiple-variation listings, and a variation whose quantity reaches
+        # 0 is REMOVED from the listing (error 21916620), with the listing
+        # ending once none are left. This used to build an item-level Quantity
+        # and StartPrice revise regardless — one "update stock" away from
+        # editing a structure it could not see.
+        #
+        # Refused here rather than at the route, because every path to a
+        # revise goes through this builder.
+        raise TradingError(
+            "This listing has size or colour variations, and Thryft Shop "
+            "can't edit those yet — changing it here could remove them. "
+            "Edit it on eBay in Seller Hub; everything else about it still "
+            "works here.")
     # Only what the seller actually changed. Everything else this app holds is
     # a snapshot of eBay taken at the last sync, and sending a snapshot is not
     # a no-op — it overwrites whatever eBay has now, which may be newer

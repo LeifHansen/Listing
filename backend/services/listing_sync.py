@@ -35,7 +35,14 @@ from .ebay_trading import AlreadyListedError, TradingError
 # live/market facts from eBay but keep everything else the record already has,
 # so a local edit isn't silently reverted by a background sync.
 _LIVE_FIELDS = ("price", "quantity", "watch_count", "sold_quantity",
-                "view_url", "image_urls")
+                "view_url", "image_urls",
+                # eBay's own answer about the listing's SHAPE, and it can
+                # change both ways: a seller who adds variations must have
+                # the record quarantined, and one who removes them must get
+                # it back. Left out of this list it would only ever latch on,
+                # so a listing fixed on eBay would stay read-only here for
+                # good.
+                "has_variations")
 # Detail fetches run a few at a time: each listing is its own GetItem round
 # trip, so a 300-item store takes minutes when they run one after another —
 # long enough for the browser to give up on the request. Small pool, because

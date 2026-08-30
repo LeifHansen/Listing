@@ -133,6 +133,25 @@ def validate(listing: Listing, mode: str, *,
                        "field": field or FIELD_LABELS.get(target, ""),
                        "title": title, "fix": fix})
 
+    # A listing with eBay variations, and nothing else. This app has no
+    # variation model: the listing imported as one flat record with a single
+    # price and quantity, and a revise would send an item-level Quantity into
+    # a structure eBay says ReviseItem cannot revise, where a variation
+    # reaching zero is REMOVED from the listing.
+    #
+    # Returned alone because it is not a field to go and fix, and listing the
+    # usual checklist beside it would read as "correct these and it will
+    # publish" -- which is not true and never will be until variations are
+    # modelled. The browser makes the same call in views/listing/blockers.js;
+    # this is the authority.
+    if listing.has_variations and mode != "draft":
+        add("variations",
+            "This listing has size or colour variations",
+            "Thryft Shop can't edit those yet — changing it here could remove "
+            "them. Edit it on eBay in Seller Hub instead.",
+            field="Variations")
+        return issues
+
     # --- inventory item ---
     # An imported eBay listing has no local files — its photos are the
     # eBay-hosted image_urls, which satisfy the requirement just the same.

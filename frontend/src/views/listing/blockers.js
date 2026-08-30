@@ -73,6 +73,20 @@ export function ebayBlockers(l = {}, { targets = null, aspects = null } = {}) {
   const add = (key, target, label, why) => out.push({ key, target, label, why });
   const ebay = wantsEbay(targets);
 
+  // A listing with size/colour variations. This app has no variation model,
+  // so it imported as one flat record with a single price and quantity — and
+  // a revise would have sent an item-level Quantity into a structure eBay
+  // says ReviseItem cannot revise, where a variation reaching zero is removed
+  // from the listing. Flagged first and on its own: it is not a field to go
+  // and fix, and letting the seller fill in the whole form before the server
+  // refuses is the wrong order to find out.
+  if (ebay && l.has_variations) {
+    add("variations", null, "Variations",
+      "This listing has size or colour variations. Thryft Shop can't edit "
+      + "those yet — change it on eBay in Seller Hub instead.");
+    return out;
+  }
+
   const photos = (l.images || []).length || (l.image_urls || []).length;
   if (!photos) {
     add("photos", "photos", "Photos", "A listing needs at least one photo.");
