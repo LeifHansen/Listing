@@ -48,6 +48,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        orient, preflight, pricing, promotions, recommender,
                        sync_guard, taxonomy, tokens)
 from .services import etsy as etsy_service
+from .services import policy_terms as ebay_policy_terms
 from .services.background import run_in_background
 
 
@@ -1622,6 +1623,45 @@ def shipping_services() -> dict:
     return {"services": ebay_auth.SHIPPING_SERVICES}
 
 
+_UNREVIEWED = (
+    "Review the policy terms before we create them on your eBay account. "
+    "They are shown to buyers and eBay holds you to them.")
+
+
+def _accepted(payload: Optional[dict]) -> bool:
+    """Did the seller actually say yes to the terms?
+
+    Strictly `True`, not truthiness: a stale client sending `"no"`, a
+    half-filled form sending `0`, or a request with the key missing entirely
+    are all the ABSENCE of an answer, and absence is not consent — least of
+    all to a 30-day return window and a dispatch deadline eBay scores.
+    """
+    return (payload or {}).get("accept_terms") is True
+
+
+@app.get("/api/ebay/policy-preview")
+def ebay_policy_preview(service_code: str = "",
+                        return_days: Optional[int] = None,
+                        return_payer: str = "",
+                        immediate_pay: bool = True) -> dict:
+    """Exactly what "Create my policies" would commit the seller to.
+
+    A business policy is a public promise -- dispatch time, return window, who
+    pays return postage -- attached to every listing that references it, and
+    eBay scores the seller against it. The app chose all of it behind one
+    button and the seller learned the terms by reading them back off eBay.
+
+    Static and side-effect free by construction: it builds the request bodies
+    and describes them, without an access token, a network call or any part of
+    the account's daily quota. That is deliberate. A preview that needed eBay
+    to be reachable would be unavailable exactly when the seller is retrying,
+    and the retry is where the unconsidered "yes" gets clicked.
+    """
+    return ebay_policy_terms.describe(
+        service_code=service_code, return_days=return_days,
+        return_payer=return_payer, immediate_pay=bool(immediate_pay))
+
+
 @app.post("/api/ebay/ensure-policy")
 def ensure_policy(request: Request, payload: dict) -> dict:
     """Find — or create — a fulfillment policy for any catalog shipping
@@ -1632,6 +1672,11 @@ def ensure_policy(request: Request, payload: dict) -> dict:
     svc = ebay_auth.service_by_code(str(payload.get("service_code", "")))
     if not svc:
         raise HTTPException(400, "Unknown shipping service.")
+    # Same commitment as the three-at-once button -- a dispatch deadline eBay
+    # scores the seller on -- so it is gated the same way. Leaving one door
+    # open would just move where the unreviewed policy gets made.
+    if not _accepted(payload):
+        raise HTTPException(400, _UNREVIEWED)
     try:
         pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
     except ebay_auth.PolicyLookupUnavailable as exc:
@@ -1670,6 +1715,10 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     creds = _ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
+    # Before the account is read and before anything is saved: an unreviewed
+    # request must not be able to leave a half-written trail either.
+    if not _accepted(payload):
+        raise HTTPException(400, _UNREVIEWED)
     token, opts = creds["access_token"], (payload or {})
     svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
            or ebay_auth.service_by_code("USPSGroundAdvantage"))

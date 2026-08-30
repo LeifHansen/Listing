@@ -646,6 +646,39 @@ def find_policy_for_service(access_token: str,
     return None, True
 
 
+# How long the seller promises to take getting a sold item into the post.
+# eBay measures this and holds the seller to it -- late dispatch costs seller
+# standing and can cost Top Rated status -- so it is a real commitment made on
+# the seller's behalf, and services.policy_terms shows it before it is made.
+DEFAULT_HANDLING_DAYS = 2
+
+
+def fulfillment_body(svc: dict) -> dict:
+    """The exact JSON a fulfillment policy would be created with.
+
+    Split out of ensure_service_policy so the terms the seller is shown come
+    from the request itself rather than a second description of it. A preview
+    that is written twice is a preview that eventually lies.
+    """
+    name = (f"{svc['label']} (Thryft Shop)"
+            if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
+    return {
+        "name": name,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "handlingTime": {"value": DEFAULT_HANDLING_DAYS, "unit": "DAY"},
+        "shippingOptions": [{
+            "costType": "CALCULATED",
+            "optionType": "DOMESTIC",
+            "shippingServices": [{
+                "sortOrder": 1,
+                "shippingCarrierCode": svc["carrier"],
+                "shippingServiceCode": svc["code"],
+            }],
+        }],
+    }
+
+
 def ensure_service_policy(access_token: str, svc: dict) -> dict:
     """Find — or create — a fulfillment policy that ships `svc` (an entry from
     SHIPPING_SERVICES): calculated cost, domestic, 2-day handling. Returns
@@ -657,23 +690,8 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
         raise PolicyLookupUnavailable(
             "We couldn't check your existing eBay shipping policies just now, "
             "so nothing was created. Try again in a moment.")
-    name = (f"{svc['label']} (Thryft Shop)"
-            if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
-    body = {
-        "name": name,
-        "marketplaceId": config.EBAY_MARKETPLACE_ID,
-        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
-        "handlingTime": {"value": 2, "unit": "DAY"},
-        "shippingOptions": [{
-            "costType": "CALCULATED",
-            "optionType": "DOMESTIC",
-            "shippingServices": [{
-                "sortOrder": 1,
-                "shippingCarrierCode": svc["carrier"],
-                "shippingServiceCode": svc["code"],
-            }],
-        }],
-    }
+    body = fulfillment_body(svc)
+    name = body["name"]
     resp = httpx.post(
         f"{config.EBAY_API_BASE}/sell/account/v1/fulfillment_policy",
         headers={
@@ -707,7 +725,15 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
 DEFAULT_RETURN_DAYS = 30
 DEFAULT_RETURN_PAYER = "BUYER"
 PAYMENT_POLICY_NAME = "Immediate payment (Thryft Shop)"
-RETURN_POLICY_NAME = "30-day returns (Thryft Shop)"
+def return_policy_name(days: int = DEFAULT_RETURN_DAYS) -> str:
+    """The policy's name in Seller Hub. It has to carry the window it was
+    actually created with: a seller who chose 14 days and found a policy
+    called "30-day returns" on their account has been told the wrong thing by
+    the app, in the one place they would go to check it."""
+    return f"{int(days)}-day returns (Thryft Shop)"
+
+
+RETURN_POLICY_NAME = return_policy_name()
 
 
 def _create_policy(kind: str, access_token: str, body: dict) -> dict:
@@ -765,6 +791,31 @@ def _first_existing_policy(kind: str,
     return {"id": items[0].get(id_field, ""), "name": items[0].get("name", "")}, True
 
 
+def payment_body(immediate_pay: bool = True) -> dict:
+    """The exact JSON a payment policy would be created with. See
+    fulfillment_body for why this is a function rather than an inline dict."""
+    return {
+        "name": PAYMENT_POLICY_NAME,
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "immediatePay": immediate_pay,
+    }
+
+
+def return_body(days: int = DEFAULT_RETURN_DAYS,
+                payer: str = DEFAULT_RETURN_PAYER) -> dict:
+    """The exact JSON a return policy would be created with."""
+    return {
+        "name": return_policy_name(days),
+        "marketplaceId": config.EBAY_MARKETPLACE_ID,
+        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
+        "returnsAccepted": True,
+        "returnPeriod": {"value": int(days), "unit": "DAY"},
+        "returnShippingCostPayer": payer,
+        "refundMethod": "MONEY_BACK",
+    }
+
+
 def ensure_payment_policy(access_token: str,
                           immediate_pay: bool = True) -> dict:
     """Find — or create — a payment policy. Returns {id, name, created}.
@@ -782,13 +833,8 @@ def ensure_payment_policy(access_token: str,
         raise PolicyLookupUnavailable(
             "We couldn't check your existing eBay payment policies just now, "
             "so nothing was created. Try again in a moment.")
-    body = {
-        "name": PAYMENT_POLICY_NAME,
-        "marketplaceId": config.EBAY_MARKETPLACE_ID,
-        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
-        "immediatePay": immediate_pay,
-    }
-    return {**_create_policy("payment", access_token, body), "created": True}
+    return {**_create_policy("payment", access_token,
+                             payment_body(immediate_pay)), "created": True}
 
 
 def ensure_return_policy(access_token: str,
@@ -807,16 +853,8 @@ def ensure_return_policy(access_token: str,
         raise PolicyLookupUnavailable(
             "We couldn't check your existing eBay return policies just now, "
             "so nothing was created. Try again in a moment.")
-    body = {
-        "name": RETURN_POLICY_NAME,
-        "marketplaceId": config.EBAY_MARKETPLACE_ID,
-        "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
-        "returnsAccepted": True,
-        "returnPeriod": {"value": int(days), "unit": "DAY"},
-        "returnShippingCostPayer": payer,
-        "refundMethod": "MONEY_BACK",
-    }
-    return {**_create_policy("return", access_token, body), "created": True}
+    return {**_create_policy("return", access_token,
+                             return_body(days, payer)), "created": True}
 
 
 def fulfillment_policy_lookup(access_token: str,

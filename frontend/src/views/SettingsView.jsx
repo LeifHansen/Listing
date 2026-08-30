@@ -16,6 +16,7 @@ import { Field, Input, Select } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
+import { PolicyTermsDialog } from "@/components/PolicyTermsDialog";
 import { useToast } from "@/components/ui/Toaster";
 
 // eBay's three business policies. "Shipping policy" is the one that also
@@ -49,6 +50,7 @@ export function SettingsView() {
   const [loadedHere, setLoadedHere] = useState(false);
   const [optingIn, setOptingIn] = useState(false);
   const [creatingPolicies, setCreatingPolicies] = useState(false);
+  const [reviewingTerms, setReviewingTerms] = useState(false);
   const [postal, setPostal] = useState("");
   const [selected, setSelected] = useState({});
   const [prefs, setPrefs] = useState(null); // new-listing defaults (null = loading)
@@ -68,6 +70,36 @@ export function SettingsView() {
       setLoading(false);
     }
   }, [setPoliciesData, toast]);
+
+  // Runs only from the terms dialog's confirm. `options` are the ones the
+  // preview described, echoed back so the policies created are the policies
+  // shown -- not the server's defaults as they stand a moment later.
+  const createPolicies = useCallback(async (options) => {
+    setCreatingPolicies(true);
+    try {
+      const r = await postJson("/api/ebay/ensure-all-policies",
+                               { ...options, accept_terms: true });
+      const made = r.created || [];
+      const failed = Object.keys(r.errors || {});
+      if (failed.length) {
+        toast(
+          `Couldn't create your ${failed.join(" and ")} policy. `
+          + `eBay said: ${r.errors[failed[0]]}`,
+          { kind: "error" });
+      } else {
+        toast(made.length
+          ? `Created your ${made.join(", ")} policy — you can publish now.`
+          : "You already had all three policies, so nothing was changed.",
+          { kind: "success" });
+      }
+      setReviewingTerms(false);
+      load();
+    } catch (e) {
+      toast(e.message, { kind: "error" });
+    } finally {
+      setCreatingPolicies(false);
+    }
+  }, [load, toast]);
 
   // Policies are fetched once both external systems are ready: an authenticated
   // session and a live eBay link. `load()` flips `loading` synchronously and
@@ -424,34 +456,17 @@ export function SettingsView() {
                         after opting in this one will legitimately fail — and
                         saying which is missing beats one button that hides
                         which half went wrong. */}
+                    {/* Opens the terms first. These policies commit the
+                        seller to a dispatch deadline eBay scores them on, a
+                        30-day return window and who pays return postage —
+                        all of it published to buyers. Creating them from a
+                        button whose whole label is "Create my policies" is
+                        deciding that on their behalf. */}
                     <Button
                       size="sm" variant="soft" disabled={creatingPolicies}
-                      onClick={async () => {
-                        setCreatingPolicies(true);
-                        try {
-                          const r = await postJson("/api/ebay/ensure-all-policies", {});
-                          const made = (r.created || []).length;
-                          const failed = Object.keys(r.errors || {});
-                          if (failed.length) {
-                            toast(
-                              `Couldn't create your ${failed.join(" and ")} policy. `
-                              + `eBay said: ${r.errors[failed[0]]}`,
-                              { kind: "error" });
-                          } else {
-                            toast(made
-                              ? `Created your ${(r.created || []).join(", ")} policy — you can publish now.`
-                              : "You already had all three policies.",
-                              { kind: "success" });
-                          }
-                          load();
-                        } catch (e) {
-                          toast(e.message, { kind: "error" });
-                        } finally {
-                          setCreatingPolicies(false);
-                        }
-                      }}
+                      onClick={() => setReviewingTerms(true)}
                     >
-                      {creatingPolicies ? "Creating…" : "Create my policies"}
+                      {creatingPolicies ? "Creating…" : "Create my policies…"}
                     </Button>
                     <a
                       href={data.manage_url} target="_blank" rel="noopener noreferrer"
@@ -460,6 +475,12 @@ export function SettingsView() {
                       Manage them on eBay <ExternalLink size={13} aria-hidden />
                     </a>
                   </div>
+                  <PolicyTermsDialog
+                    open={reviewingTerms}
+                    busy={creatingPolicies}
+                    onClose={() => setReviewingTerms(false)}
+                    onConfirm={createPolicies}
+                  />
                 </div>
               )}
             </div>

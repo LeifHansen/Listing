@@ -165,6 +165,9 @@ def test_the_route_answers_retry_not_a_server_error(monkeypatch):
     monkeypatch.setattr(main.ebay_auth, "ensure_service_policy", _unavailable)
 
     resp = TestClient(main.app).post(
-        "/api/ebay/ensure-policy", json={"service_code": "USPSGroundAdvantage"})
+        "/api/ebay/ensure-policy",
+        # Accepted terms: this asserts what happens when the LOOKUP is
+        # unavailable, which is only reachable past the consent gate.
+        json={"service_code": "USPSGroundAdvantage", "accept_terms": True})
 
     assert resp.status_code == 503, resp.text
