@@ -47,8 +47,8 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
                        ebay_trading, image_import, images, jobstore,
                        listing_merge, listing_sync, metrics, notifications,
-                       orient, preflight, pricing, promotions, recommender,
-                       sync_guard, sync_merge, taxonomy, tokens)
+                       orient, owed_refunds, preflight, pricing, promotions,
+                       recommender, sync_guard, sync_merge, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -78,6 +78,10 @@ async def _lifespan(_app: FastAPI):
     # (that is still open), but the OBLIGATION is durable now, so a process
     # that dies mid-pass leaves the remaining rows for the next one.
     _in_background(_finish_pending_deletions, what="deletion backlog")
+    # Money a seller is owed for AI that did not work. Same shape as the
+    # deletion backlog above: the obligation outlived the process, so the next
+    # one settles it.
+    _in_background(_settle_owed_refunds, what="owed refunds")
     yield
 
 
@@ -474,6 +478,9 @@ def _reclaim_loop() -> None:
             # until someone happened to redeploy. It also genuinely frees
             # space, which is what this loop is for.
             _finish_pending_deletions()
+            # Not about space, but it is the only recurring pass there is and
+            # a refund the seller is owed should not wait for a redeploy.
+            _settle_owed_refunds()
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
         time.sleep(delay)
@@ -634,6 +641,10 @@ def _diagnostics() -> dict:
         # here that does not come back down is the alert. Counts only — the
         # ids belong to people who asked to be forgotten.
         "deletion_backlog": deletion_queue.backlog(),
+        # Refunds that did not commit and are still owed. Like the deletion
+        # backlog, a number here that does not come back down is a promise
+        # already made to somebody — in this case, their money.
+        "owed_refunds": owed_refunds.backlog(),
     }
 
 
@@ -1136,6 +1147,17 @@ def _finish_pending_deletions() -> dict:
     back. This is what reads them.
     """
     return deletion_queue.run_pending(purge_media=_purge_session_images)
+
+
+def _settle_owed_refunds() -> int:
+    """Pay back refunds an earlier attempt could not commit.
+
+    A refund that failed because the database was unreachable used to vanish:
+    the seller was charged, the AI failed, and nothing recorded the debt. The
+    record lives on the volume (see services/owed_refunds for why not the
+    database), and this is what drains it.
+    """
+    return owed_refunds.settle()
 
 
 # --- auth ------------------------------------------------------------------
