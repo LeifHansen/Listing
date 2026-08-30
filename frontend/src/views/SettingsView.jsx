@@ -17,6 +17,7 @@ import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
 import { PolicyTermsDialog } from "@/components/PolicyTermsDialog";
+import { deleteAccountNotice } from "@/lib/deleteAccount";
 import { policyView, saveSections } from "@/lib/settingsSections";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -855,6 +856,7 @@ function DeleteAccountCard() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [summary, setSummary] = useState(null);
+  const notice = deleteAccountNotice(summary);
   const [password, setPassword] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
@@ -867,7 +869,10 @@ function DeleteAccountCard() {
     try {
       setSummary(await api("/api/account/summary"));
     } catch {
-      setSummary({}); // the dialog still works; it just can't show the counts
+      // `counted: false`, not `{}`. The dialog's warning keys on that flag,
+      // and an empty object satisfied neither of its branches -- so a failed
+      // summary call silently dropped the one thing this dialog has to say.
+      setSummary({ counted: false });
     }
   };
 
@@ -922,35 +927,36 @@ function DeleteAccountCard() {
         <div className="flex flex-col gap-4">
           <p className="text-sm text-ink-secondary">
             This permanently erases <strong className="text-ink">{user?.email}</strong>
-            {summary?.counted && summary.listings ? (
+            {notice.listings ? (
               <>, <strong className="text-ink">
-                {summary.listings} listing{summary.listings === 1 ? "" : "s"}
+                {notice.listings} listing{notice.listings === 1 ? "" : "s"}
               </strong> and every photo on them</>
             ) : (
               <> and everything saved to it</>
             )}
-            {summary?.ebay_connected ? ", and disconnects your eBay account." : "."}
+            {notice.ebayConnected ? ", and disconnects your eBay account." : "."}
             {" "}It can&rsquo;t be undone.
           </p>
 
-          {/* Never let a DB hiccup hide this: if the counts couldn't be read,
-              warn generically rather than silently implying nothing is live. */}
-          {summary && (summary.counted === false || !!summary.live_listings) && (
+          {/* Never let a DB hiccup — or a summary call that never landed —
+              hide this. See lib/deleteAccount: only a count that was actually
+              read may be named, and everything else warns. */}
+          {notice.warning && (
             <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink">
               <AlertTriangle size={15} className="inline mr-1.5 -mt-0.5" aria-hidden />
-              {summary.counted === false ? (
+              {notice.warning.kind === "unknown" ? (
                 <>Any listing you already published stays live on eBay under your
                   own seller account and keeps selling — deleting here only removes
                   Thryft Shop&rsquo;s copy. End them in eBay first if you want them
                   taken down.</>
               ) : (
-                <>{summary.live_listings} of your listings
-                  {" "}{summary.live_listings === 1 ? "is" : "are"} live on eBay.
-                  {" "}{summary.live_listings === 1 ? "It stays" : "They stay"} up
-                  and {summary.live_listings === 1 ? "keeps" : "keep"} selling — deleting
+                <>{notice.warning.count} of your listings
+                  {" "}{notice.warning.count === 1 ? "is" : "are"} live on eBay.
+                  {" "}{notice.warning.count === 1 ? "It stays" : "They stay"} up
+                  and {notice.warning.count === 1 ? "keeps" : "keep"} selling — deleting
                   here only removes Thryft Shop&rsquo;s copy. End
-                  {" "}{summary.live_listings === 1 ? "it" : "them"} in eBay first if
-                  you want {summary.live_listings === 1 ? "it" : "them"} taken down.</>
+                  {" "}{notice.warning.count === 1 ? "it" : "them"} in eBay first if
+                  you want {notice.warning.count === 1 ? "it" : "them"} taken down.</>
               )}
             </p>
           )}
