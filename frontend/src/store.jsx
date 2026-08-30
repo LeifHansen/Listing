@@ -557,7 +557,12 @@ export function AppProvider({ children }) {
       }
       // status rides along so the workflow knows a live listing is being
       // REVISED (Update Live Listing / End listing) rather than published.
-      setSession({ sessionId: rec.id, listing: rec.listing, confidence: null, status: rec.status });
+      // `conflicts` is the described form: fields the seller and eBay both
+      // changed, which the sync deliberately sends NEITHER way. Carried into
+      // the session because an unanswered one is an edit that will never
+      // reach eBay, and the editor is where the question gets asked.
+      setSession({ sessionId: rec.id, listing: rec.listing, confidence: null,
+                   status: rec.status, conflicts: rec.conflicts || [] });
       setView("new");
     } catch (e) {
       toast(`Couldn't open listing: ${e.message}`, { kind: "error" });

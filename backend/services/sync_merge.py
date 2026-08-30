@@ -126,3 +126,109 @@ def shadow_from(remote: dict) -> dict:
     every watch-count tick look like an edit.
     """
     return {name: remote[name] for name in TRACKED if name in remote}
+
+
+# Field names as a seller would say them. `package_weight_lb` is a column
+# name; putting it in a sentence asks somebody to work out what the app meant.
+_LABELS = {
+    "title": "title",
+    "subtitle": "subtitle",
+    "description": "description",
+    "brand": "brand",
+    "condition": "condition",
+    "condition_description": "condition notes",
+    "category_id": "category",
+    "price": "price",
+    "quantity": "quantity",
+    "currency": "currency",
+    "listing_format": "listing format",
+    "auction_start_price": "auction start price",
+    "auction_duration": "auction duration",
+    "package_weight_lb": "package weight",
+    "package_weight_oz": "package weight",
+    "package_length_in": "package length",
+    "package_width_in": "package width",
+    "package_height_in": "package height",
+    "fulfillment_policy_id": "shipping policy",
+    "item_specifics": "item specifics",
+    "images": "photos",
+    "image_urls": "photos",
+}
+
+# Long enough to recognise a value, short enough for a banner. A description
+# conflict is two multi-kilobyte blobs; those belong in the editor.
+_PREVIEW = 200
+
+
+def _preview(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        text = ", ".join(str(v) for v in value)
+    elif isinstance(value, dict):
+        text = ", ".join(f"{k}: {v}" for k, v in value.items())
+    else:
+        text = str(value)
+    text = " ".join(text.split())
+    return text if len(text) <= _PREVIEW else text[:_PREVIEW - 1] + "…"
+
+
+def describe_conflicts(conflicts: Optional[dict]) -> list[dict]:
+    """A conflict map as something that can be shown to a seller.
+
+    The merge is right to send neither value, but refusing to choose is only
+    half an answer: nothing said so, and the seller found their edit missing
+    from eBay with no reason given. This is the other half — what was held
+    back, and what the two sides say.
+    """
+    out = []
+    # `name`, not `field`: dataclasses.field is imported at the top of this
+    # module and a loop variable would shadow it.
+    for name, pair in sorted((conflicts or {}).items()):
+        out.append({
+            "field": name,
+            "label": _LABELS.get(name, name.replace("_", " ")),
+            "mine": _preview((pair or {}).get("local")),
+            "ebay": _preview((pair or {}).get("remote")),
+        })
+    return out
+
+
+def resolve(listing, field: str, choice: str) -> None:
+    """Settle one conflicted field on `listing`, in place.
+
+    `choice` is "mine" or "ebay". Only a field that is actually in conflict
+    can be settled: without that check this is a general "set any field to
+    this value" endpoint reached from a stale tab, on a screen the seller
+    opened to answer a different question.
+
+    The shadow moves to eBay's value either way, and that is the part worth
+    reading twice. The shadow records what eBay LAST TOLD US, not what we
+    would like it to say. Keeping the local value does not change what eBay
+    currently holds, so leaving the old base behind would make eBay look like
+    it had changed the field again on the next sync — re-raising a conflict
+    the seller has already answered, every time, forever.
+    """
+    conflicts = dict(getattr(listing, "conflicts", None) or {})
+    pair = conflicts.get(field)
+    if not pair:
+        raise ValueError(f"{field!r} is not waiting on an answer.")
+    if choice not in ("mine", "ebay"):
+        raise ValueError("Choose 'mine' or 'ebay'.")
+
+    if choice == "ebay":
+        setattr(listing, field, pair.get("remote"))
+        listing.clear_dirty(field)
+    else:
+        setattr(listing, field, pair.get("local"))
+        # Queued for the next revise. Without this, "keep mine" would settle
+        # the record and still never send the seller's value to eBay, which is
+        # the exact silence this whole change is about.
+        listing.mark_dirty(field)
+
+    shadow = dict(getattr(listing, "remote_shadow", None) or {})
+    if shadow:
+        shadow[field] = pair.get("remote")
+        listing.remote_shadow = shadow
+    conflicts.pop(field, None)
+    listing.conflicts = conflicts

@@ -48,7 +48,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_trading, image_import, images, jobstore,
                        listing_merge, listing_sync, metrics, notifications,
                        orient, preflight, pricing, promotions, recommender,
-                       sync_guard, taxonomy, tokens)
+                       sync_guard, sync_merge, taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -4279,7 +4279,13 @@ def get_listing(listing_id: str, request: Request) -> dict:
     # each started that work, two opens raced over one directory, and a GET
     # could fail or bill storage for something the seller never asked for.
     # storage.py states the rule. Adoption is now POST prepare-for-editing.
-    return rec
+    #
+    # `conflicts` is the raw map on the record turned into something the
+    # editor can render: what was held back from eBay and what the two sides
+    # say. Pure formatting of data already in `rec`, so this stays a read.
+    return {**rec,
+            "conflicts": sync_merge.describe_conflicts(
+                (rec.get("listing") or {}).get("conflicts"))}
 
 
 @app.post("/api/listings/{listing_id}/prepare-for-editing")
@@ -4303,6 +4309,56 @@ def prepare_for_editing(listing_id: str, request: Request) -> dict:
     names = _adopt_imported_images(listing_id, rec)
     return {"ok": True, "images": names,
             "listing": (rec.get("listing") or {})}
+
+
+@app.post("/api/listings/{listing_id}/resolve-conflict")
+def resolve_conflict(listing_id: str, payload: dict, request: Request) -> dict:
+    """Settle one field the seller and eBay both changed.
+
+    The sync records these and sends neither value, which is right — picking
+    one silently is how a Seller Hub fix gets overwritten. What was missing is
+    the way to answer. Until this exists, a conflicted field is an edit that
+    never reaches eBay and never explains itself.
+
+    `choice` is "mine" or "ebay". Keeping the local value queues it for the
+    next revise, so answering actually pushes it; taking eBay's writes it in
+    and asks for nothing. Either way the base moves to eBay's current value —
+    see services/sync_merge.resolve for why that is true even for "mine".
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+    listing = Listing(**(rec.get("listing") or {}))
+    try:
+        sync_merge.resolve(listing, str(payload.get("field", "")),
+                           str(payload.get("choice", "")))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    data = listing.model_dump()
+    storage.save_listing(listing_id, listing)
+    # Strict, unlike the ordinary save: an answer the seller gave that did not
+    # commit must not be reported as settled. They would move on believing the
+    # question closed and find the same one waiting after the next sync -- and
+    # a "keep mine" that never persisted means their value is still not going
+    # to eBay, which is the silence this whole route exists to end.
+    #
+    # Only when a database is configured at all: without one, disk above IS
+    # the record, and the row this could not write does not exist to want.
+    if db.enabled() and not db.upsert_listing(
+            listing_id, data, status=rec.get("status"),
+            user_id=rec.get("user_id")):
+        raise errors.StorageUnavailable(
+            "Couldn't save that choice just now. Try again in a moment.")
+    return {"ok": True, "listing": data,
+            "conflicts": sync_merge.describe_conflicts(listing.conflicts),
+            "message": ("Saved. It'll go to eBay the next time you update "
+                        "this listing."
+                        if payload.get("choice") == "mine"
+                        else "Saved — this listing now matches eBay.")}
 
 
 def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:

@@ -23,7 +23,7 @@ from ..config import log
 from ..models import Listing
 from ..services import (ebay, ebay_account, ebay_trading, image_import,
                         listing_sync, preflight, promotions, publish_guard,
-                        taxonomy)
+                        sync_merge, taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
@@ -464,6 +464,34 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
     return issues
 
 
+def revise_message(conflicts: Optional[dict], relist: bool) -> str:
+    """What to tell the seller after eBay accepted the change.
+
+    A revise deliberately omits every field the seller and eBay have BOTH
+    changed since the last agreed state — sending either value would silently
+    overwrite somebody's work, which is what the three-way merge exists to
+    stop. But this said "Your eBay listing has been updated" regardless, so a
+    seller who had edited the title got a success message, an unchanged
+    listing on eBay, and no reason. An error would have been kinder; at least
+    an error prompts.
+    """
+    if relist:
+        return ("Relisted! It's live on eBay as a fresh listing with a new "
+                "item number.")
+    held = [d["label"] for d in sync_merge.describe_conflicts(conflicts)]
+    if not held:
+        return "Your eBay listing has been updated."
+    seen, names = set(), []
+    for label in held:  # the label map folds several fields onto one word
+        if label not in seen:
+            seen.add(label)
+            names.append(label)
+    listed = names[0] if len(names) == 1 else (
+        ", ".join(names[:-1]) + " and " + names[-1])
+    return (f"Your eBay listing has been updated — except the {listed}, which "
+            f"you and eBay both changed. Choose which version to keep.")
+
+
 def _view_url(listing: Listing, listing_id: str) -> str:
     """Public 'View on eBay' URL: the imported listing's own URL when eBay
     told us one, else the standard /itm/ form for the current environment."""
@@ -755,20 +783,21 @@ class EbayProvider:
                      session_id, res.get("listing_id"),
                      "local-updated" if pushed_local else "unchanged")
             listing_id = str(res.get("listing_id") or "")
+            message = revise_message(listing.conflicts, relist)
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),
-                message=("Relisted! It's live on eBay as a fresh listing "
-                         "with a new item number."
-                         if relist else "Your eBay listing has been updated."),
+                message=message,
                 raw={"published": True, "revised": not relist,
                      "relisted": relist, "mode": "live",
                      "listing_id": res.get("listing_id"),
+                     # What eBay was NOT told, and why. Without this the
+                     # editor has no way to render the question, and the
+                     # seller's held-back edit stays invisible.
+                     "held_back": sync_merge.describe_conflicts(
+                         listing.conflicts),
                      **({} if recorded else {"record_warning": RECORD_WARNING}),
-                     "message": ("Relisted! It's live on eBay as a fresh "
-                                 "listing with a new item number."
-                                 if relist else
-                                 "Your eBay listing has been updated.")})
+                     "message": message})
 
         # A listing that's already live must NEVER lose its 'published' status
         # in our records just because a revise attempt was blocked or errored —
