@@ -10,6 +10,44 @@ Source documents: `Listing_Enterprise_Beta_Audit_20260829.md` and
 `Listing_Coding_Agent_Remediation_Prompt.md` (supplied by the owner; not in
 the repo).
 
+## Resuming? Start here
+
+The agenda below is complete and in priority order, but it is long. Sorted by
+what actually unblocks each thing:
+
+**Needs nobody but you — pick these up first.**
+The largest remaining code items, all deliberately not started and each with
+its reasoning recorded where it sits: P1-02's job **runner** (the work is
+durable and a restart is reported; the runner is still a process-local
+thread), P1-10's **cursor pagination and normalization** (the route is honest
+about its cap and no longer ships the sync ledger, but the model is still one
+JSON document per listing), and P2-02 / P2-04 (URL routing, splitting
+`main.py` — large refactors of the files every other change here also touches,
+and P2-04's own condition is characterisation tests before anything moves).
+
+**Needs a deploy, not a commit.**
+Section 1 below — five one-time steps. One of them has an ordering hazard that
+will take production down if it is done in the wrong order: read *Adopt the
+migrations, once* before putting `alembic upgrade head` anywhere near
+`deploy.yml` or `deploy.sh`.
+
+**Needs two decisions from the owner**, neither fixable from a commit: the
+required-check rename (branch protection on `main` may still name the old
+checks and will block merges until it is updated) — in *Two operational
+consequences of the CI change*, above the agenda — and P1-06's reversal of the
+Promoted Listings default, the last item in section 1.
+
+**Needs access this environment does not have.** Do not spend time trying:
+an eBay **Sandbox account** would settle three separate items at once — the
+contract tests P2-08 asks for, the four journeys that sit behind a connected
+marketplace, and the one unanswered question blocking P1-01's N+1 fix (what
+`GetMyeBaySelling`/`ActiveList` returns inside each `<Item>`; `developer.ebay.com`
+is blocked by this environment's egress proxy). A **docker daemon** would
+settle the non-root container. **Counsel** would settle P1-05's legal half.
+
+How to verify anything you change is in *Ground truth about the baseline*
+immediately below, including the exact four suites and what each one is for.
+
 ## Ground truth about the baseline
 
 The audit was written at `bb9990a`. **That is only 2 commits behind where this
