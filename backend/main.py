@@ -3351,8 +3351,18 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     _assert_session_owner(session_id, request)
     prev = _restore_server_state(session_id, listing)
     storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(prev), user_id=_uid(request))
+    # Checked, like the PATCH route directly below: `db.upsert_listing`
+    # swallows its failures, and "saved" is the one word this route says. A
+    # seller told their work is saved closes the tab. Called unconditionally
+    # and only ENFORCED when there is a database — `db.enabled() and not
+    # db.upsert_listing(...)` short-circuits, so without one the write would
+    # never run at all.
+    landed = db.upsert_listing(session_id, listing.model_dump(),
+                               status=_sticky_status(prev), user_id=_uid(request))
+    if db.enabled() and not landed:
+        raise errors.StorageUnavailable(
+            "Couldn't save your changes just now. They're still on screen — "
+            "try again in a moment.")
     return {"saved": True}
 
 
@@ -4889,12 +4899,23 @@ def merge_listings(payload: dict, request: Request) -> dict:
             "Couldn't save the merged listing just now, so nothing was "
             "merged or removed. Try again in a moment.")
     # Sources are consumed: remove their records and reclaim their storage.
+    #
+    # `removed` is a list the client ACTS on — it drops those cards — so it
+    # reports the deletes that actually happened rather than the ones that
+    # were attempted. A source whose delete failed is still a real listing;
+    # saying it is gone hides a duplicate the seller was told had been
+    # consumed. Its photos stay too: they are the only copy left of it.
+    removed: list[str] = []
     for sid in source_ids:
-        db.delete_listing(sid, uid)
+        if not db.delete_listing(sid, uid):
+            log.warning("merge: couldn't remove source %s — leaving it and "
+                        "its photos alone", sid)
+            continue
+        removed.append(sid)
         _purge_session_images(sid)
-    log.info("merged %d listing(s) into %s (+%d photos, %d field(s) carried over) user=%s",
-             len(source_ids), target_id, len(added), len(applied), uid)
-    return {"ok": True, "added": len(added), "removed": source_ids,
+    log.info("merged %d/%d listing(s) into %s (+%d photos, %d field(s) carried over) user=%s",
+             len(removed), len(source_ids), target_id, len(added), len(applied), uid)
+    return {"ok": True, "added": len(added), "removed": removed,
             "applied": applied, "listing": listing.model_dump()}
 
 
@@ -5863,8 +5884,16 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
         new_status = prev_status if still_live else "ended"
     else:
         new_status = prev_status or "draft"
-    db.upsert_listing(req.session_id, data, status=new_status,
-                      user_id=uid or rec.get("user_id"))
+    # The marketplace really did end the listing, so `ok` is not the lie —
+    # the lost write is. The record would still say `published`, and the app
+    # would go on offering to revise and repromote something that is gone.
+    # Same check the eBay end route already makes.
+    landed = db.upsert_listing(req.session_id, data, status=new_status,
+                               user_id=uid or rec.get("user_id"))
+    if db.enabled() and not landed:
+        raise errors.StorageUnavailable(
+            f"{provider.label} ended the listing, but we couldn't record it "
+            "just now — refresh in a moment to see the right state.")
     return {"ok": True, **res}
 
 
