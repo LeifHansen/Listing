@@ -22,19 +22,25 @@ from __future__ import annotations
 
 import pytest
 
+import threading
+
 from backend.services import ebay_trading, listing_sync
 
 ITEMS = [f"1234567890{i:02d}" for i in range(4)]
 DETAIL = {"title": "A thing", "price": 20.0, "quantity": 1, "source": "ebay",
           "view_url": "https://www.ebay.com/itm/x"}
+# Only ever waited out by the FAILING case, so it costs the passing run
+# nothing and is generous enough not to become a second flake.
+GATE_TIMEOUT = 10
 
 
 class RecordingDb:
-    """A store that writes down WHEN each save happened relative to a fetch."""
+    """A store that opens a gate the moment it has written anything down."""
 
-    def __init__(self, log):
+    def __init__(self, log, first_save=None):
         self.records: dict[str, dict] = {}
         self.log = log
+        self.first_save = first_save or threading.Event()
 
     def list_listings(self, limit=50, user_id=None, statuses=None, before=None):
         return list(self.records.values())
@@ -44,6 +50,7 @@ class RecordingDb:
         self.log.append(("save", listing_id))
         self.records[listing_id] = {"id": listing_id, "user_id": user_id,
                                     "listing": listing, "status": status}
+        self.first_save.set()
         return True
 
     def delete_listing(self, listing_id, user_id=None):
@@ -51,11 +58,30 @@ class RecordingDb:
 
 
 class RecordingTrading:
+    """eBay, with the SECOND fetch waiting on the first save.
+
+    The interleaving cannot be asserted by comparing positions in a log: the
+    pool runs ahead of the consumer by design, and with instant doubles it can
+    drain the whole queue before the main thread records anything, which is a
+    property of how fast the runner is rather than of the code. (It passed
+    locally and failed in CI, once, which is the worst of both.)
+
+    Waiting for the gate turns it into a fact about the code. Under the
+    one-pass import the first save lands as soon as the first fetch returns,
+    so this wait ends immediately. Under the old two-pass one no save can
+    happen until every fetch has returned, so it waits out the timeout and
+    records that it did.
+    """
+
     RateLimited = ebay_trading.RateLimited
 
-    def __init__(self, item_ids, log):
+    def __init__(self, item_ids, log, first_save=None, gate_on=None,
+                 waits=None):
         self.item_ids = list(item_ids)
         self.log = log
+        self.first_save = first_save or threading.Event()
+        self.gate_on = gate_on
+        self.waits = waits if waits is not None else []
 
     def active_listing_ids(self, token, limit=0):
         return list(self.item_ids)
@@ -67,6 +93,8 @@ class RecordingTrading:
         return []
 
     def get_listing(self, token, item_id):
+        if self.gate_on is not None and item_id == self.gate_on:
+            self.waits.append(self.first_save.wait(timeout=GATE_TIMEOUT))
         self.log.append(("fetch", item_id))
         return dict(DETAIL, ebay_listing_id=item_id)
 
@@ -81,29 +109,34 @@ def run(monkeypatch):
     """
     def _go():
         log: list[tuple[str, str]] = []
+        gate = threading.Event()
+        waits: list[bool] = []
         monkeypatch.setattr(listing_sync, "_FETCH_WORKERS", 1)
-        monkeypatch.setattr(listing_sync, "db", RecordingDb(log))
+        monkeypatch.setattr(listing_sync, "db", RecordingDb(log, gate))
         monkeypatch.setattr(listing_sync, "ebay_trading",
-                            RecordingTrading(ITEMS, log))
+                            RecordingTrading(ITEMS, log, gate,
+                                             gate_on=ITEMS[1], waits=waits))
         ticks: list[tuple[str, int, int]] = []
         result = listing_sync.import_active(
             "token", "u1", on_progress=lambda *a: ticks.append(a))
-        return log, ticks, result
+        return log, ticks, result, waits
     return _go
 
 
 def test_saving_starts_before_the_fetching_finishes(run):
-    """Not a strict alternation: the pool runs ahead of the consumer by
-    design, which is the point of keeping it. What must be true is that the
-    writing has BEGUN before the last eBay call returns -- under the old
-    two-pass import the first save came after every fetch, which is what made
-    an interruption cost the whole run."""
-    log, _ticks, result = run()
+    """The second eBay call waits for the first listing to be written down.
+
+    Not a comparison of positions in a log: the pool runs ahead of the
+    consumer by design, so with instant doubles it can drain the queue before
+    the main thread records anything — a fact about the runner, not the code.
+    The gate makes it a fact about the code. Under the one-pass import the
+    first save lands as soon as the first fetch returns; under the old
+    two-pass one no save can happen until every fetch has, so the wait times
+    out.
+    """
+    _log, _ticks, result, waits = run()
     assert result["imported"] == len(ITEMS)
-    kinds = [k for k, _ in log]
-    first_save = kinds.index("save")
-    last_fetch = len(kinds) - 1 - kinds[::-1].index("fetch")
-    assert first_save < last_fetch, (
+    assert waits == [True], (
         "the import fetched the whole store before writing any of it down, so "
         "an interruption loses every call it paid for")
 
@@ -134,7 +167,7 @@ def test_the_work_already_done_survives_the_next_call_failing(run, monkeypatch):
 
 
 def test_the_count_is_one_running_total_not_two_passes(run):
-    _log, ticks, _result = run()
+    _log, ticks, _result, _waits = run()
     phases = [t[0] for t in ticks]
     assert "fetching" not in phases and "saving" not in phases, (
         "a two-pass count describes a two-pass import, which this no longer is")
@@ -146,5 +179,5 @@ def test_the_count_is_one_running_total_not_two_passes(run):
 
 def test_the_listing_stage_still_reports_itself(run):
     """Listing the ids is its own stage and happens before any count exists."""
-    _log, ticks, _result = run()
+    _log, ticks, _result, _waits = run()
     assert ticks[0] == ("listing", 0, 0)
