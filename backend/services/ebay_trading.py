@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import math
 import re
 from typing import Any, Optional
 from xml.etree import ElementTree as ET
@@ -31,7 +32,8 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..models import TITLE_MAX_CHARS, ItemSpecific, Listing
+from ..models import (SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS, ItemSpecific,
+                      Listing)
 from . import taxonomy
 
 # Trading API's XML namespace — every element in a response carries it.
@@ -711,6 +713,17 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
     parts: list[str] = []
     if listing.title and wanted("title"):
         parts.append(f"<Title>{_esc(listing.title[:TITLE_MAX_CHARS])}</Title>")
+    # The editor has had a Subtitle field all along and this never emitted one,
+    # so a seller who typed a subtitle got no subtitle and no explanation. It
+    # is a paid eBay listing upgrade (SubtitleFee), which is why it is sent
+    # only when the seller actually filled the field in -- and why the editor
+    # now says so where they type it.
+    #
+    # Only when non-empty: an empty <SubTitle/> is not "no subtitle". On a
+    # revise it is a request to REMOVE one, which is a different thing to say.
+    if listing.subtitle and wanted("subtitle"):
+        parts.append(f"<SubTitle>{_esc(listing.subtitle[:SUBTITLE_MAX_CHARS])}"
+                     "</SubTitle>")
     if listing.description and wanted("description"):
         parts.append(f"<Description>{_cdata(listing.description)}</Description>")
     if listing.category_id and wanted("category_id"):
@@ -765,6 +778,44 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
     return parts
 
 
+# eBay's ListingDuration tokens for a Chinese auction. The model stores the
+# editor's own spelling (DAYS_10); eBay wants Days_10, and its own spelling is
+# the only one it accepts.
+_AUCTION_DURATIONS = {
+    "DAYS_1": "Days_1", "DAYS_3": "Days_3", "DAYS_5": "Days_5",
+    "DAYS_7": "Days_7", "DAYS_10": "Days_10",
+}
+_DEFAULT_AUCTION_DURATION = "Days_7"
+
+
+def _auction_duration(listing: Listing) -> str:
+    """The duration the seller chose, in eBay's spelling.
+
+    This was hard-coded to Days_7 while the editor offered 1/3/5/7/10 days —
+    so a seller who picked ten days got a seven-day auction, and nothing said
+    so. An unrecognised value falls back rather than being passed through: a
+    stale client or a hand-edited record must not produce a listing eBay
+    rejects outright, and seven days is both eBay's default and what this
+    always sent.
+
+    Days_10 carries eBay's AuctionLengthFee, which is why the editor now says
+    so next to the choice.
+    """
+    chosen = str(listing.auction_duration or "").strip().upper()
+    return _AUCTION_DURATIONS.get(chosen, _DEFAULT_AUCTION_DURATION)
+
+
+def _whole_inches(value) -> int:
+    """A package dimension as eBay wants it: a whole number of inches.
+
+    Rounded UP, not truncated. `int(10.5)` is 10, and a 10.5-inch item does
+    not fit in a 10-inch box — on calculated postage that under-declaration
+    is money the seller pays out of the sale, on every sale. Rounding up
+    costs the buyer pennies and is the side to be wrong on.
+    """
+    return int(math.ceil(float(value or 0)))
+
+
 def _package_details(listing: Listing) -> str:
     """ShippingPackageDetails — eBay needs a weight for calculated shipping."""
     lb = int(listing.package_weight_lb or 0)
@@ -773,9 +824,12 @@ def _package_details(listing: Listing) -> str:
         return ""
     dims = ""
     if listing.package_length_in and listing.package_width_in and listing.package_height_in:
-        dims = (f"<PackageLength>{int(listing.package_length_in)}</PackageLength>"
-                f"<PackageWidth>{int(listing.package_width_in)}</PackageWidth>"
-                f"<PackageDepth>{int(listing.package_height_in)}</PackageDepth>")
+        dims = (f"<PackageLength>{_whole_inches(listing.package_length_in)}"
+                "</PackageLength>"
+                f"<PackageWidth>{_whole_inches(listing.package_width_in)}"
+                "</PackageWidth>"
+                f"<PackageDepth>{_whole_inches(listing.package_height_in)}"
+                "</PackageDepth>")
     return ("<ShippingPackageDetails>"
             f"<WeightMajor unit=\"lbs\">{lb}</WeightMajor>"
             f"<WeightMinor unit=\"oz\">{oz:g}</WeightMinor>"
@@ -873,7 +927,8 @@ def build_add_item(listing: Listing, image_urls: list[str],
         if fmt == "AUCTION_BIN" and listing.price:
             parts.append(f"<BuyItNowPrice>{float(listing.price):.2f}</BuyItNowPrice>")
         parts.append("<ListingType>Chinese</ListingType>"
-                     "<ListingDuration>Days_7</ListingDuration>"
+                     f"<ListingDuration>{_auction_duration(listing)}"
+                     "</ListingDuration>"
                      "<Quantity>1</Quantity>")
     else:
         parts.append(f"<StartPrice>{float(listing.price or 0):.2f}</StartPrice>")

@@ -230,8 +230,19 @@ export function TitleCard({ w }) {
           />
         </Field>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Subtitle" hint="(optional)">
+          {/* Until now this was collected and thrown away — the Trading
+              request never emitted a SubTitle, so a seller who typed one got
+              no subtitle and no explanation. It goes to eBay now, and a
+              subtitle is a paid listing upgrade there (eBay's SubtitleFee),
+              so the field says so rather than a charge turning up on their
+              eBay invoice for something they were never told about. */}
+          <Field label="Subtitle"
+            hint="(optional · eBay charges a small fee for this)"
+            help="Shown under your title in search results. eBay bills its
+                  subtitle fee when the listing goes live; leave it empty to
+                  avoid the charge.">
             <Input
+              maxLength={55}
               value={w.form.subtitle}
               onChange={(e) => w.set("subtitle", e.target.value)}
             />
@@ -780,7 +791,7 @@ const LISTING_FORMATS = [
 ];
 const AUCTION_DURATIONS = [
   ["DAYS_1", "1 day"], ["DAYS_3", "3 days"], ["DAYS_5", "5 days"],
-  ["DAYS_7", "7 days"], ["DAYS_10", "10 days"],
+  ["DAYS_7", "7 days"], ["DAYS_10", "10 days (eBay charges extra)"],
 ];
 
 export function PricingCard({ w }) {
@@ -847,8 +858,15 @@ export function PricingCard({ w }) {
               />
             </Field>
           )}
+          {/* The chosen duration used to be discarded: every auction went out
+              as Days_7 whatever this said. It is sent now — and eBay charges
+              an auction-length fee for the 10-day option, so the one choice
+              that costs money says so. */}
           {isAuction ? (
-            <Field label="Duration">
+            <Field label="Duration"
+              help={w.form.auction_duration === "DAYS_10"
+                ? "eBay charges an extra fee for a 10-day auction."
+                : undefined}>
               <Select value={w.form.auction_duration}
                 onChange={(e) => w.set("auction_duration", e.target.value)}>
                 {AUCTION_DURATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}

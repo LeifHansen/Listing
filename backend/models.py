@@ -14,6 +14,12 @@ from pydantic import BaseModel, Field, field_validator
 # limit worth holding in the model rather than at the API boundary.
 TITLE_MAX_CHARS = 80
 
+# eBay's ceiling on a Subtitle. Held here for the same reason as the title:
+# one character over and eBay rejects the whole publish, after the photos have
+# already uploaded. (Subtitle is a paid listing upgrade -- see the SubtitleFee
+# note where the Trading request emits it.)
+SUBTITLE_MAX_CHARS = 55
+
 # eBay's own ceiling on a listing description. Nothing this app writes comes
 # near it -- the point is that the field had NO bound at all, and every write
 # path lands on the volume: `POST /api/publish` needs no login, and each new
