@@ -577,9 +577,124 @@ if (signedIn) {
   }
   await page.unroute('**/api/ebay/release-foreign-listings').catch(() => {});
   await page.unroute('**/api/ebay/status').catch(() => {});
+  // Same reason as the journey above: drop the faked connection from the
+  // store's cache before the next one runs.
+  await page.reload({ waitUntil: 'networkidle', timeout: 30000 })
+    .catch(() => {});
+  await page.waitForTimeout(1000);
   foreign.push(...drain());
   expected = null;
   problems.push(['another account\'s listings are explained', foreign]);
+}
+
+// --- a publish we could not hear the end of is not a failure ---------------
+//
+// The last of the audit's journeys, and the one with the sharpest consumer
+// consequence. When a write to eBay goes out and no answer comes back, the
+// listing may or may not exist over there. "It failed, try again" produces a
+// duplicate live listing the seller pays fees on; "it worked" leaves them
+// looking for a listing that may not be there. The only honest answer names
+// the doubt and sends them to check.
+//
+// The backend already settles this (P0-07, P2-03) and its own tests cover the
+// wording. What no test covers is whether the EDITOR says it: the screen has
+// its own success path, its own toast and its own published-screen swap, and
+// any of the three could quietly turn "we do not know" into one or the other.
+const unknown = [];
+if (signedIn) {
+  const LID = 'live-1';
+  const listing = { title: 'Copper kettle', price: 30, quantity: 1,
+                    ebay_listing_id: '110000000001' };
+  const LOST = "We lost contact with eBay while sending this, so we can't "
+             + "tell whether it went through. Check your eBay listings before "
+             + "trying again.";
+  let published = 0;
+  try {
+    expected = /400 \(Bad Request\)/;
+    await page.route('**/api/ebay/status', (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ connected: true, username: 'current-seller',
+                             foreign_listings: 0, unowned_listings: 0,
+                             oauth_missing: [] }),
+    }));
+    await page.route('**/api/listings*', (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        listings: [{ id: LID, user_id: 'u', status: 'published', listing }],
+        authed: true, db: { configured: true, connected: true },
+        truncated: false, total: 1, next_cursor: null }),
+    }));
+    await page.route('**/api/listings/*', (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ id: LID, user_id: 'u', status: 'published',
+                             listing, conflicts: [] }),
+    }));
+    await page.route(`**/api/save/${LID}`, (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ ok: true, listing }),
+    }));
+    await page.route('**/api/publish', (r) => {
+      published += 1;
+      // The shape the server sends when a write's outcome is unknown: not
+      // published, and NOT reported as a refusal either.
+      return r.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: false, published: false,
+                               outcome_unknown: true, message: LOST,
+                               issues: [] }) });
+    });
+
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    await page.getByRole('button', { name: 'Sell' }).first().click();
+    await page.waitForTimeout(1500);
+    await page.getByText('Copper kettle').first().click();
+    await page.waitForTimeout(2000);
+
+    const update = page.getByRole('button', { name: /Update Live Listing/ });
+    if (!await update.count()) {
+      unknown.push('a live listing did not offer to update itself');
+    } else {
+      await update.first().click();
+      // It asks before spending a revise; the confirm is part of the flow.
+      const go = page.getByRole('button', { name: /Update|Publish|Yes/ });
+      if (await go.count() > 1) await go.last().click();
+      await page.waitForTimeout(2500);
+
+      const after = (await page.textContent('body')) || '';
+      if (published < 1) {
+        unknown.push('the update never reached the server');
+      }
+      // The three things that must not happen.
+      // The success screen's own words, not a paraphrase, and deliberately
+      // not "Live on eBay" -- the listing CARD carries that badge
+      // permanently, so matching it would be a tripwire that cannot trip.
+      if (/Listing published!|Listing updated!/.test(after)) {
+        unknown.push('an unknown outcome was reported as a live listing');
+      }
+      if (!/can.t tell whether it went through|lost contact with ebay/i.test(after)) {
+        unknown.push('the seller was not told the outcome is unknown');
+      }
+      if (!/check your ebay listings/i.test(after)) {
+        unknown.push('nothing told the seller what to do about it');
+      }
+    }
+  } catch (e) {
+    unknown.push(`unknown outcome: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute('**/api/publish').catch(() => {});
+  await page.unroute(`**/api/save/${LID}`).catch(() => {});
+  await page.unroute('**/api/listings/*').catch(() => {});
+  await page.unroute('**/api/listings*').catch(() => {});
+  await page.unroute('**/api/ebay/status').catch(() => {});
+  // Back to the real server before the next journey. The store caches the
+  // eBay connection state, and leaving a faked "connected" behind makes the
+  // panels below ask eBay for things the real backend refuses -- 400s that
+  // land under whichever journey runs next, blaming it for this one's fake.
+  await page.reload({ waitUntil: 'networkidle', timeout: 30000 })
+    .catch(() => {});
+  await page.waitForTimeout(1000);
+  unknown.push(...drain());
+  expected = null;
+  problems.push(['an unknown publish outcome says so', unknown]);
 }
 
 // --- deleting an account asks, warns, and takes a password ------------------
