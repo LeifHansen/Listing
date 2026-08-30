@@ -4210,15 +4210,21 @@ def _rates_by_record_id(creds: Optional[dict], items: list) -> dict:
     return {id_by_ebay[eid]: r for eid, r in raw.items() if eid in id_by_ebay}
 
 
-def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
-    """Record ids whose live listing currently has an ACTIVE eBay ad — ours OR
-    one created directly in Seller Hub — so we never suggest promoting an item
-    that's already promoted. Best-effort; empty when the scope isn't granted."""
+def _promoted_record_ids(creds: Optional[dict], items: list) -> tuple[set, bool]:
+    """(record ids with an ACTIVE eBay ad, did eBay actually answer).
+
+    Ours OR ads created directly in Seller Hub, so we never suggest promoting
+    an item that is already promoted. The flag matters because promoting costs
+    the seller a percentage of the sale: an empty set from a failed lookup is
+    not evidence that nothing is promoted, and recommending a purchase on that
+    basis is how a seller who promotes in Seller Hub gets invited to pay for a
+    second ad during an eBay outage.
+    """
     if not creds:
-        return set()
-    ads = promotions.active_ads(creds)
+        return set(), False
+    ads, known = promotions.active_ads_status(creds)
     if not ads:
-        return set()
+        return set(), known
     promoted = set()
     for it in items:
         if it.get("status") not in ("published", "live"):
@@ -4228,7 +4234,7 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
         sku = ebay.sku_for(it["id"])
         if (eid and eid in ads) or (sku and sku in ads):
             promoted.add(it["id"])
-    return promoted
+    return promoted, known
 
 
 @app.get("/api/ebay/listing-metrics")
@@ -4286,12 +4292,13 @@ def insights(request: Request) -> dict:
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         rates_by_id = _rates_by_record_id(creds, items)
-        promoted_ids = _promoted_record_ids(creds, items)
+        promoted_ids, promotion_known = _promoted_record_ids(creds, items)
         # limit=50: the dashboard groups these by category now, so each group
         # should show its full membership — the old flat list capped at 8.
         return {"recommendations": recommender.recommendations(
             items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
-            promoted_ids=promoted_ids, limit=50)}
+            promoted_ids=promoted_ids, promotion_known=promotion_known,
+            limit=50)}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": []}
