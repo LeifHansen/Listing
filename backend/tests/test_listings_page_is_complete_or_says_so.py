@@ -23,7 +23,12 @@ from __future__ import annotations
 
 import pytest
 
-fastapi = pytest.importorskip("fastapi")
+# backend.main pulls in the AI and image stacks at import, so this skips in
+# the light `checks` job and runs in `smoke` — which is why the file is in
+# gates.yml's API-tests list, where a skip fails the job.
+pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
 
 
 @pytest.fixture()
