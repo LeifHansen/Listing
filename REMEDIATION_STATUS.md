@@ -77,9 +77,9 @@ Where things stand, measured rather than remembered:
 
 | Suite | Result |
 | --- | --- |
-| Full backend (`pytest backend/tests`) | **1670 passed, 0 failed** |
+| Full backend (`pytest backend/tests`) | **1679 passed, 0 failed** |
 | A CI-`checks`-equivalent env (no image/AI stack) | **1164 passed, 45 skipped** |
-| The smoke job's API-tests step | **300 passed, 0 skipped** (it fails on a skip) |
+| The smoke job's API-tests step | **309 passed, 0 skipped** (it fails on a skip) |
 | Frontend Vitest | **18 files, 187 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
@@ -309,6 +309,7 @@ account, which is the same cost as one restart used to be — and the last one.
 | P1-08 security headers (partial) | `46b89d3` | None of CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or Permissions-Policy were sent. Now all present, verified against the booted app. The CSP keeps `'unsafe-inline'` in script-src because index.html has an inline theme script — tightening to a nonce is worth its own change. The REST of P1-08 (revocable sessions, password reset/verify/MFA, distributed rate limiting, fail-closed keys) is untouched. |
 | P1-12 side-effect-free GET | `a8d8f0e` | A plain read downloaded up to 24 photos, wrote up to 48 files, started an R2 upload and wrote the DB row. Now `POST /api/listings/{id}/prepare-for-editing`, called by the frontend when the seller opens the editor. |
 | P2-01 the rename stops where the data starts | `d852f58` | The product is Thryft Shop and the code was written as QuickFlip, so the audit asks for the rename "with a compatibility migration for stored client keys and cryptographic context; do not break existing encrypted tokens." Three groups. **Renamed outright**, because nothing but people reads them: the frontend package name (and its lockfile, so `npm ci` still matches), the README heading and brand line, run.sh's comment, the two display strings in the bundled Lightroom preset. **Migrated**, because a browser is holding them: the seven localStorage keys. Renaming those alone resets a seller's theme, list/grid choice, remove-background default and publish targets on the first load after the release, and `bulk` holds the id of a RUNNING batch -- losing it strands a job the server is still processing with nothing on screen to watch it. `lib/localPrefs.js` reads the new key, falls back to the old, writes the value forward when the old one answered, and wraps every call, because localStorage THROWS rather than returning null in Safari with site data blocked. **Left alone, with the reason written beside them**, because they are values already recorded outside this code: `crypto._INFO` is the HKDF info string the token-encryption key derives from -- a different string is a different key, every stored refresh token stops decrypting, and `decrypt` returns "" by design, so the symptom is every connected seller silently signed out of eBay, Etsy and Depop at once with nothing logged as an error; and publish_guard's `qf-` prefix is stamped on live listings as `Item.SKU`, which is how a publish whose response was lost is recognised as ours on the next sync -- eBay holds the old value on everything already up, so a renamed prefix matches none of them and each imports again as a second card for an item the seller already has. Both break only for accounts that predate the change and pass every test written after it, so `test_the_rename_stops_at_stored_data.py` pins them against a ciphertext encrypted before the rename and a SKU in the form eBay is holding; verified by planting the rename (4 of its 5 tests fail). Also fixes the half already broken: index.html's pre-paint theme script cannot import localPrefs -- nothing has loaded yet -- and was still reading `quickflip-theme` while the toggle wrote `thryft-theme`. Since the store seeds its React state from the class that script sets rather than from storage, it is the only reader there is, so dark mode was simply off: every seller in light mode on every load, toggle agreeing, nothing failing. `theme-before-paint.test.js` asserts the two copies of that contract against the real files, reading the prefixes out of localPrefs rather than hardcoding them. |
+| P1-10 (partial) the list stopped shipping the sync ledger | `91019df` | The audit's other half of P1-10: `GET /api/listings` "can return up to 3,000 full JSON records". Measured rather than assumed -- a realistic record (description, twelve photos, eighteen item specifics, a synced shadow) serialises to **6,233 bytes**, so a seller at `LISTING_LIST_CAP` downloads **17.8 MiB**, on the busiest route in the app, on the Capacitor build this ships as, on every open. **3,020 of those bytes are `remote_shadow`**: a complete second copy of the listing recording what eBay last said it contained, read only by the server, never rendered. `dirty_fields` is the same. The list omits both -- 6,233 -> 3,261 bytes, 17.8 -> 9.3 MiB. An omission list, not an allowlist, deliberately: an allowlist fails by dropping a field the UI needs, silently, looking like missing data; this fails by being bigger than it had to be. `GET /api/listings/{id}` is untouched and still answers with everything. Three tests hold it: one reads the frontend source and fails if either name is referenced there at all; one saves a record shaped like the one the list handed out and proves the shadow survives (the real risk -- a round trip that erases what it omitted would silently revert the seller's own fix in Seller Hub; it does not, because the shadow is server-owned and the dirty ledger accumulates from stored marks, both already true and now depended on); and a sweep over every GET that fails if the shadow appears in any other answer, naming the single-listing route as the one exemption. `description`, `images` and `item_specifics` were candidates and stay -- the drafts strip and the listings search read the description off list items and the sold archive renders it. **Still open in P1-10:** cursor pagination and SQL aggregates, plus the whole normalization half. 9.3 MiB is better than 17.8, not good. |
 
 Still open:
 
@@ -452,12 +453,16 @@ What still blocks it:
    in this environment — and is not the same as a real call. The contract
    tests are the readiness step the audit asks for and they have not been run.
 2. **The session-id migration has not been run** (see the deploy-time list).
-3. **P1-10 is untouched and P1-02 is half done**: the data model is still one
-   JSON document per listing with unbounded list responses, and jobs still run
-   from process-local threads. The rationing that protects eBay's shared daily
-   quota now survives a restart, and a publish whose answer went missing is
-   recovered rather than duplicated — but the runner itself is still a thread,
-   and an interrupted store import is reported rather than resumed.
+3. **P1-10 is barely started and P1-02 is half done**: the data model is
+   still one JSON document per listing, and there is no cursor pagination —
+   the list is capped and honest about the cap, and it no longer ships the
+   sync ledger (17.8 MiB at the cap became 9.3), but 9.3 MiB is an
+   improvement, not a fix, and no part of the normalization the audit asks
+   for has been done. Jobs still run from process-local threads: the
+   rationing that protects eBay's shared daily quota survives a restart, and
+   a publish whose answer went missing is recovered rather than duplicated —
+   but the runner itself is still a thread, and an interrupted store import
+   is reported rather than resumed.
 4. **No Alembic, and the container still runs as root** — the latter needs one
    local `docker build && docker run`, which this environment cannot do.
 5. **P1-05's legal half is outstanding**: counsel review, a retention
