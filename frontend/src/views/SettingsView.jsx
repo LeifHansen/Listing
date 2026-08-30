@@ -856,10 +856,12 @@ function DeleteAccountCard() {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [summary, setSummary] = useState(null);
-  const notice = deleteAccountNotice(summary);
   const [password, setPassword] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
+  // Below the hooks, not between them: a plain call sitting in the middle of
+  // a useState run reads like a conditional hook even though it is not.
+  const notice = deleteAccountNotice(summary);
 
   const start = async () => {
     setPassword("");
