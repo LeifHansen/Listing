@@ -13,6 +13,7 @@ import { ShippingDialog } from "@/components/ShippingDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
+import { MessagesView } from "@/views/MessagesView";
 import { SettingsView } from "@/views/SettingsView";
 
 function Main() {
@@ -59,6 +60,7 @@ function Main() {
                 listings manager live on one screen (openListings lands here). */}
             {view === "new" && <NewListing search={search} />}
             {view === "shop" && <ShopMode />}
+            {view === "messages" && <MessagesView />}
             {/* "ebay" was a separate account mirror; it's part of Settings now,
                 so old links/bookmarks land there instead of a blank page. */}
             {(view === "settings" || view === "ebay") && <SettingsView />}

@@ -288,6 +288,10 @@ Without them, you can still type a category ID manually in the preview.
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
 | `GET`  | `/api/insights` | Ranked "what to do next" actions across the user's listings |
+| `GET`  | `/api/messages` | Unified buyer inbox: conversations merged across marketplaces, plus `sources` for the marketplace filter. Person-to-person only |
+| `GET`  | `/api/messages/{id}` | One conversation's messages, oldest first |
+| `POST` | `/api/messages/send` | Reply into a conversation |
+| `POST` | `/api/messages/read` | Mark one conversation read |
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
@@ -423,6 +427,8 @@ backend/
     ebay_trading.py  Trading API (XML) client — sees listings we didn't create
     listing_sync.py  bi-directional sync: import the store, push edits back
     claude_ai.py     vision identify + prompt refine
+    ebay_messages.py buyer messages (Message API), P2P only
+    messages.py      the unified inbox: fan out + merge across marketplaces
     taxonomy.py      Taxonomy API -> numeric category IDs
     ebay.py          photo URLs for eBay + the legacy ad SKU
     ebay_trading.py  Trading API: publish, revise, end, read
@@ -744,6 +750,49 @@ listing, and offers two label workflows:
 Reading orders and posting tracking needs the `sell.fulfillment` OAuth scope;
 sellers who connected eBay before it was added reconnect once to grant it
 (same as every scope addition).
+
+## Buyer messages (the unified inbox)
+
+The inbox icon in the top bar is for **messages from people** — a buyer asking
+whether the lens fits their camera. It is deliberately not the bell next to it,
+which carries the app's own "your item sold" alerts. Mixing the two is how a
+seller learns to ignore both, so they stay separate surfaces with separate
+badges (blue for a conversation, red for something needing action).
+
+**Marketplace system mail never appears here.** eBay's Message API splits a
+seller's mail into `FROM_EBAY` (order notices, policy mail, marketing) and
+`FROM_MEMBERS`, so every read asks for `FROM_MEMBERS` and the exclusion happens
+at the source rather than by guessing at senders. The service filters the
+result on the same field a second time, because the promise shouldn't depend on
+eBay honouring a query parameter forever.
+
+One inbox, many marketplaces. `backend/marketplaces/messaging.py` holds the
+contract — five methods a provider implements, all or nothing — and the
+namespaced conversation id (`ebay:1234`) that routes a click back to the
+marketplace that owns the thread. `backend/services/messages.py` fans out,
+merges by recency and reports each marketplace in `sources`, so one being down
+never blanks the others and the UI's filter can say "Etsy · soon" honestly.
+Adding a marketplace is five methods on its provider; nothing else changes.
+
+Clicking a conversation opens the full **Messages** screen: conversations on
+the left, the thread on the right, one column on mobile. Replies send through
+the marketplace, with the sent bubble appearing immediately and the server's
+version replacing it — a failed send marks the bubble rather than discarding
+what was typed.
+
+Nothing is stored locally. The marketplace owns these messages, they change in
+its own app constantly, and mirroring them would put buyer PII into this app's
+delete-my-account obligations for what is only a cache. A 60-second per-user
+TTL means several open tabs cost one upstream call.
+
+**Turning it on.** The Message API needs the `commerce.message` OAuth scope,
+which is limited-release: eBay approves it per keyset, and requesting it
+unapproved fails the *whole* consent screen — nobody could connect eBay, and
+publishing would stop with it. So it is opt-in, exactly like `sell.logistics`:
+set `EBAY_MESSAGING_ENABLED=1` once eBay has approved the app, and connected
+sellers reconnect once to grant it. Until then the icon simply isn't there.
+Flipping the flag can't disturb existing connections — the refresh grant
+deliberately omits `scope` — so rolling back is an env change, not a deploy.
 
 ## Notes & limitations
 

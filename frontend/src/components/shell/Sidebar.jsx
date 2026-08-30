@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Settings,
+  LayoutDashboard, PlusCircle, Store, Settings, MessageCircle,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,7 @@ const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
   { id: "shop", label: "Shop", icon: Store },
+  { id: "messages", label: "Messages", icon: MessageCircle },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -87,7 +88,8 @@ function NavItem({ item, active, collapsed, badge, onClick }) {
 // Sidebar — rounded, floating, detached from the screen edges. Hidden on
 // mobile (BottomNav takes over there).
 export function Sidebar() {
-  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout, listingsState } = useApp();
+  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout,
+    listingsState, ebay, messages } = useApp();
   const [collapsed, setCollapsed] = useState(false);
 
   // Drafts live at the top of the Sell screen, so its badge is the
@@ -95,7 +97,13 @@ export function Sidebar() {
   const counts = {
     new: listingsState.items.filter(
       (i) => i.status === "draft" || i.status === "dry_run").length,
+    messages: messages.unread,
   };
+
+  // Messaging is a limited-release integration: with it off there is nothing
+  // behind the entry, so don't offer one.
+  const items = NAV.filter(
+    (n) => n.id !== "messages" || ebay.messaging_enabled);
 
   return (
     <motion.aside
@@ -110,7 +118,7 @@ export function Sidebar() {
       <Brand collapsed={collapsed} />
 
       <nav className="flex flex-col gap-1 mt-4 flex-1 overflow-y-auto" aria-label="Main">
-        {NAV.map((item) => (
+        {items.map((item) => (
           <NavItem
             key={item.id}
             item={item}

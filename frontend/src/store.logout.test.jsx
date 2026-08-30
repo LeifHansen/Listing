@@ -29,7 +29,7 @@ const SIGNED_IN = {
   "/api/health": { anthropic_configured: true, ebay_configured: false },
   "/api/ebay/status": {
     connected: true, env: "production", username: "mr._lahey",
-    oauth_ready: true, foreign_listings: 3,
+    oauth_ready: true, foreign_listings: 3, messaging_enabled: true,
   },
   "/api/listings": {
     authed: true,
@@ -38,6 +38,14 @@ const SIGNED_IN = {
   },
   "/api/notifications": {
     notifications: [{ id: "n1", read: false, kind: "sold" }], unread: 1,
+  },
+  "/api/messages": {
+    conversations: [{ id: "ebay:c1", raw_id: "c1", marketplace: "ebay",
+                      counterparty: "sarah_m", snippet: "Still available?",
+                      last_at: "2026-08-30T09:00:00Z", unread: 2 }],
+    unread: 2, available: true, reason: "",
+    sources: [{ key: "ebay", label: "eBay", available: true, unread: 2,
+                supported: true, reason: "", message: "" }],
   },
   "/api/marketplaces": { marketplaces: [{ key: "ebay", connected: true }] },
   "/api/tokens": { enabled: true, total: 250, packs: [], costs: {} },
@@ -100,6 +108,7 @@ describe("logout", () => {
     expect(get().listingsState.items).toHaveLength(1);
     expect(get().ebay.username).toBe("mr._lahey");
     expect(get().notifications.unread).toBe(1);
+    expect(get().messages.unread).toBe(2);
     expect(get().tokens.total).toBe(250);
     await act(async () => { root.unmount(); });
   });
@@ -141,6 +150,10 @@ describe("logout", () => {
     expect(app.user).toBe(null);
     expect(app.listingsState.items).toEqual([]);
     expect(app.notifications).toEqual({ items: [], unread: 0 });
+    expect(app.messages.conversations).toEqual([]);
+    expect(app.messages.unread).toBe(0);
+    expect(app.threads).toEqual({});
+    expect(app.activeConversationId).toBe(null);
     expect(app.ebay.connected).toBe(false);
     expect(app.ebay.username).toBe("");
     expect(app.ebay.foreign_listings).toBe(0);
