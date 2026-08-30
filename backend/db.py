@@ -625,26 +625,68 @@ EMAIL_TAKEN = object()
 
 
 def get_prefs(user_id: str) -> dict:
-    """The user's new-listing defaults ({} when unset). Never raises."""
+    """The user's new-listing defaults. RAISES on a read failure.
+
+    `{}` used to mean both "this seller has saved nothing" and "the read
+    threw", and Settings is the one screen whose entire job is to say what is
+    saved. With the failure swallowed, the panel rendered the app's fallback
+    weight, dimensions, quantity, condition and pricing strategy as the
+    seller's own -- and the browser's prepared error state ("this isn't what
+    you have saved", with a retry) could never fire, because the server never
+    let it.
+
+    It does not stop there: saving MERGES, so a seller looking at those
+    fallbacks who changes one field and presses Save writes the whole set
+    over their real defaults -- the weight they measured, the ship-from
+    address, the pricing strategy -- because a read failed a minute earlier.
+
+    Callers that genuinely tolerate a blank answer call get_prefs_best_effort,
+    so the decision sits at the call site where someone can see what it costs.
+    """
+    eng = _get_engine()
+    # No database configured is a configuration, not a failure: nothing is
+    # persisted, so there really are no saved defaults.
+    if eng is None:
+        return {}
     try:
-        eng = _get_engine()
-        if eng is None:
-            return {}
         with Session(eng) as s:
             u = s.get(User, user_id)
             return dict(u.prefs) if u and isinstance(u.prefs, dict) else {}
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_prefs failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t load your saved defaults just now. Try again in a "
+            "moment.") from exc
+
+
+def get_prefs_best_effort(user_id: str) -> dict:
+    """get_prefs, but an unreadable row answers `{}`.
+
+    Only for callers where missing defaults degrade the answer rather than
+    making a claim: pre-filling a draft, choosing a pricing strategy, filling
+    the gaps in a ship-from address the caller also supplies. Never for
+    anything that reports to the seller what they have saved.
+    """
+    try:
+        return get_prefs(user_id)
+    except StorageUnavailable:
         return {}
 
 
 def save_prefs(user_id: str, prefs: dict) -> dict:
     """Merge new values into the user's defaults; returns the merged dict.
-    Returns {} if there's no DB / no such user (the caller surfaces that)."""
+
+    RAISES on a write failure. `{}` still means "no database configured" or
+    "no such user", which the caller surfaces -- but it used to mean a failed
+    write as well, and the route only refused when there was no database at
+    all. A database that was configured but broken took the other branch, so
+    a write that never landed came back `{"ok": true}` and the seller closed
+    Settings believing their defaults were saved.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return {}
     try:
-        eng = _get_engine()
-        if eng is None:
-            return {}
         with Session(eng) as s:
             u = s.get(User, user_id)
             if u is None:
@@ -656,7 +698,9 @@ def save_prefs(user_id: str, prefs: dict) -> dict:
             return merged
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: save_prefs failed: {exc}")
-        return {}
+        raise StorageUnavailable(
+            "We couldn’t save your defaults just now — nothing was changed. "
+            "Try again in a moment.") from exc
 
 
 def create_user(user_id: str, email: str, password_hash: str):

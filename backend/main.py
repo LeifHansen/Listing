@@ -2324,8 +2324,19 @@ def save_prefs(request: Request, payload: dict) -> dict:
     if not clean:
         raise HTTPException(400, "No settings provided.")
     merged = db.save_prefs(uid, clean)
-    if not merged and not db.enabled():
-        raise HTTPException(503, "No database configured — defaults need DATABASE_URL set.")
+    # `clean` is non-empty by the check above, so a merge that landed always
+    # comes back non-empty: `{}` here means the write did not happen. It used
+    # to be reported as `{"ok": true}` unless there was no database AT ALL,
+    # which left one case answering success -- the row gone between the
+    # session check and this write. A failed write now raises from db.py; this
+    # covers the rest.
+    if not merged:
+        raise HTTPException(
+            503,
+            "No database configured — defaults need DATABASE_URL set."
+            if not db.enabled()
+            else "We couldn’t save your defaults just now — nothing was "
+                 "changed. Try again in a moment.")
     return {"ok": True, "prefs": merged}
 
 
@@ -2338,13 +2349,17 @@ _promote = ebay_provider.promote
 def _load_prefs(uid: Optional[str]) -> dict:
     """The user's saved prefs, or {} — fetched once per logical operation and
     passed into the helpers below, so one identify doesn't pay the same
-    Postgres round trip twice (and a bulk batch doesn't pay it per item)."""
+    Postgres round trip twice (and a bulk batch doesn't pay it per item).
+
+    Best-effort deliberately, and the one place it is right to be: these
+    values PRE-FILL a draft the seller is about to edit. Missing them costs
+    them a typed weight, where refusing would fail the identify they are
+    waiting on. `GET /api/prefs` — the screen that REPORTS what is saved —
+    takes the strict read instead.
+    """
     if not uid:
         return {}
-    try:
-        return db.get_prefs(uid) or {}
-    except Exception:  # noqa: BLE001 - prefs are optional
-        return {}
+    return db.get_prefs_best_effort(uid) or {}
 
 
 def _pricing_strategy(uid: Optional[str], prefs: Optional[dict] = None) -> str:
@@ -5651,12 +5666,24 @@ def ebay_shipping_quote(request: Request, payload: dict) -> dict:
     if not order_id:
         raise HTTPException(400, "No order id given.")
     ship_from = dict(payload.get("ship_from") or {})
-    saved = db.get_prefs(creds["_uid"]).get("ship_from") or {}
+    # Best-effort: the remembered address only FILLS GAPS in the one the
+    # caller sent, so an unreadable row costs a re-typed address rather than
+    # a refused quote. What it must not do is silently quote from a
+    # half-filled address, which is why the caller's own fields win and the
+    # postal code falls back to the account's.
+    saved = db.get_prefs_best_effort(creds["_uid"]).get("ship_from") or {}
     for key, val in saved.items():  # payload wins; saved fills the gaps
         ship_from.setdefault(key, val)
     ship_from.setdefault("postal_code", creds.get("ship_from_postal") or "")
     if payload.get("ship_from"):
-        db.save_prefs(creds["_uid"], {"ship_from": ship_from})
+        # Remembering it is a convenience on the way to the quote the seller
+        # actually asked for; failing to remember must not lose them the
+        # quote. They re-type it next time, which is the old behaviour.
+        try:
+            db.save_prefs(creds["_uid"], {"ship_from": ship_from})
+        except errors.StorageUnavailable as exc:
+            log.info("shipping quote: couldn't remember the ship-from "
+                     "address: %s", exc)
     try:
         order = ebay_orders.get_order(creds["access_token"], order_id)
         quote = ebay_orders.create_shipping_quote(
