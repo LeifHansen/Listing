@@ -31,11 +31,11 @@ will take production down if it is done in the wrong order: read *Adopt the
 migrations, once* before putting `alembic upgrade head` anywhere near
 `deploy.yml` or `deploy.sh`.
 
-**Needs two decisions from the owner**, neither fixable from a commit: the
+**Needs one decision from the owner**, not fixable from a commit: the
 required-check rename (branch protection on `main` may still name the old
 checks and will block merges until it is updated) — in *Two operational
-consequences of the CI change*, above the agenda — and P1-06's reversal of the
-Promoted Listings default, the last item in section 1.
+consequences of the CI change*, above the agenda. P1-06's reversal of the
+Promoted Listings default was the other one and is **decided: it stays off**.
 
 **Needs access this environment does not have.** Do not spend time trying:
 an eBay **Sandbox account** would settle two items — the contract tests P2-08
@@ -276,8 +276,13 @@ account, which is the same cost as one restart used to be — and the last one.
       a seller reconnects. Until a row has it, that account's records fall back
       to username matching. Deletion notices for un-backfilled accounts record
       `no_match`.
-- [ ] Add `EBAY_VERIFICATION_TOKEN` checks to the deploy gate — the deletion
-      endpoint's GET challenge 503s without it.
+- [x] **Done.** `deploy.yml` refuses to deploy when `EBAY_VERIFICATION_TOKEN`
+      is not set on the Fly app, before shipping rather than after: the
+      deletion endpoint's GET challenge 503s without it, and eBay disables a
+      Production keyset's notification subscription when that endpoint keeps
+      failing. `flyctl secrets list` prints names and never values. An unset
+      `ADMIN_TOKEN` is a warning rather than a failure — closed diagnostics
+      are its deliberate fail-closed default, not a broken deploy.
 - [ ] **Adopt the migrations, once.** On the machine, in this order:
       `alembic check` (read-only; it fails if the live schema has drifted from
       the models in a way SQLite here cannot show), then
@@ -297,9 +302,10 @@ account, which is the same cost as one restart used to be — and the last one.
       having any of this.
 - [ ] **Set `ADMIN_TOKEN`** in production, or `/api/admin/diagnostics` stays
       closed (deliberately — it fails closed). Documented in `.env.example`.
-- [ ] Decide whether the Promoted Listings default flip (P1-06) is wanted.
-      It follows the audit and the remediation prompt, but reverses a
-      product choice made in response to seller complaints.
+- [x] **Decided: keep it off.** The owner confirmed the Promoted Listings
+      default flip (P1-06) on 2026-08-30. It follows the audit and the
+      remediation prompt, and reverses a product choice made in response to
+      seller complaints — so it was theirs to make, and it is made.
 
 ### 2. P1 and P2 items — what has landed, and what has not
 

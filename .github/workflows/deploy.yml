@@ -55,6 +55,46 @@ jobs:
       # emitted a new bundle hash) and the app went on answering with a build
       # from days earlier. A slower deploy is worth far less than a deploy you
       # cannot trust.
+      # Before shipping, not after. The account-deletion endpoint answers
+      # eBay's validation challenge with a hash of EBAY_VERIFICATION_TOKEN and
+      # 503s without it -- and eBay disables a Production keyset's
+      # notification subscription when that endpoint keeps failing. A deploy
+      # that silently ships it unset is how the subscription goes away
+      # quietly, so this refuses to deploy instead.
+      #
+      # `secrets list` prints NAMES, never values, so nothing sensitive
+      # reaches the log. Tolerant about the key's casing because flyctl has
+      # used both, and a check that crashes on an output change would block
+      # every deploy for the wrong reason. ADMIN_TOKEN is only a warning:
+      # unset means /api/admin/diagnostics stays closed, which is its
+      # deliberate fail-closed default rather than a broken deploy.
+      - name: Required secrets are set
+        run: |
+          flyctl secrets list --json > /tmp/secrets.json
+          python3 - <<'CHECK'
+          import json, sys
+          rows = json.load(open("/tmp/secrets.json"))
+          names = {str(r.get("Name") or r.get("name") or "") for r in rows}
+          print("secrets present:", " ".join(sorted(n for n in names if n)))
+          if "EBAY_VERIFICATION_TOKEN" not in names:
+              print("::error::EBAY_VERIFICATION_TOKEN is not set on this app. "
+                    "eBay's account-deletion challenge answers 503 without it, and "
+                    "eBay disables the subscription when that keeps failing. Set it "
+                    "with `flyctl secrets set EBAY_VERIFICATION_TOKEN=...`, using the "
+                    "SAME value registered on developer.ebay.com under Alerts & "
+                    "Notifications.")
+              sys.exit(1)
+          print("OK: EBAY_VERIFICATION_TOKEN is set")
+          if "ADMIN_TOKEN" not in names:
+              print("::warning::ADMIN_TOKEN is not set, so /api/admin/diagnostics "
+                    "stays closed (by design). The deletion backlog and "
+                    "owed-refunds counters cannot be read until it is.")
+          else:
+              print("OK: ADMIN_TOKEN is set")
+          CHECK
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
       - name: Deploy to Fly
         run: |
           flyctl deploy --remote-only --no-cache \
