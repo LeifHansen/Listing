@@ -389,7 +389,8 @@ Still open:
       a new failure in place of the old one. Etsy has no sandbox, so neither
       change could be tested before shipping. Closing it properly means an
       Etsy read (getListing) to build a shadow from, and per-marketplace
-      dirty tracking.
+      dirty tracking. **Depop's revise has the same shape and the same
+      reasoning**, with a pointer at its call site.
 
 ## Release posture
 

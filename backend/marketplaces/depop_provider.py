@@ -201,6 +201,13 @@ class DepopProvider:
 
         try:
             if existing_id:
+                # Same known gap as the Etsy revise, for the same reasons —
+                # see the comment at etsy_provider's `patch = dict(payload)`.
+                # This sends the whole payload, so an edit made on Depop
+                # itself is replaced by this app's copy. Closing it needs a
+                # Depop read to build a shadow from and per-marketplace dirty
+                # tracking; neither exists, and Depop has no sandbox to prove
+                # a change against.
                 res = depop.update_product(creds["access_token"], existing_id,
                                            payload)
                 message = "Your Depop listing has been updated."
