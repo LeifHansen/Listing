@@ -988,6 +988,52 @@ def pending_media_purges(limit: int = 500) -> list[dict]:
         return []
 
 
+def count_pending_media_purges() -> int:
+    """How many photo erasures are still owed. RAISES on a read failure.
+
+    Separate from `pending_media_purges` above on purpose. That one feeds the
+    drain loop, where `[]` on a failure is the right answer and is documented
+    as such: a worker that cannot read the queue has nothing to do this pass,
+    which is the same action as an empty queue, and the next pass looks again.
+
+    This one feeds a REPORT — `/api/admin/diagnostics`, where the operator is
+    told to watch the number because one that does not come back down is a
+    promise already made to somebody. Zero there means "nothing is owed", and
+    a failed read must not be able to say it. A COUNT rather than len() of a
+    page, so the answer is the whole queue rather than the first thousand.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            return int(s.execute(
+                select(func.count()).select_from(MediaPurge)).scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_pending_media_purges failed: {exc}")
+        raise StorageUnavailable("couldn’t count the media purge backlog") from exc
+
+
+def count_pending_deletion_notices() -> int:
+    """How many eBay deletion notices are still unresolved. RAISES on a read
+    failure, for the same reason as the count above."""
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            # Same filter as pending_deletion_notices: a "failed" notice is
+            # still owed -- it stopped being retried, which is precisely when
+            # somebody has to look at it.
+            return int(s.execute(
+                select(func.count()).select_from(DeletionNotice)
+                .where(DeletionNotice.state.in_(("pending", "failed")))
+            ).scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_pending_deletion_notices failed: {exc}")
+        raise StorageUnavailable("couldn’t count the deletion-notice backlog") from exc
+
+
 def finish_media_purge(listing_id: str) -> None:
     """The photos are gone; drop the debt. Only ever called after a purge
     that raised nothing."""
@@ -1810,11 +1856,23 @@ def token_reverse_purchase(ref: str, reason: str = "") -> Optional[dict]:
 
 
 def token_history(user_id: str, limit: int = 50) -> list[dict]:
-    """Recent ledger entries, newest first. Never raises."""
+    """Recent ledger entries, newest first. RAISES on a read failure.
+
+    `[]` meant both "nothing has been spent" and "the read threw", and the
+    tokens dialog renders the first as "Nothing yet — your AI activity will
+    show up here." That is the screen someone opens to find out whether they
+    were charged for the identify that just failed, so a failure answering it
+    with `[]` told them they were not. The dialog already has the other branch
+    ("Couldn't load your activity"); it just never got the chance to show it.
+
+    Unlike the balance functions below, this is a read for DISPLAY and takes
+    no part in the billing invariant, so it follows this module's read policy
+    rather than their deliberate return-None-and-let-the-caller-choose one.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return []
     try:
-        eng = _get_engine()
-        if eng is None:
-            return []
         with Session(eng) as s:
             rows = s.execute(
                 select(TokenLedger).where(TokenLedger.user_id == user_id)
@@ -1826,7 +1884,9 @@ def token_history(user_id: str, limit: int = 50) -> list[dict]:
                     for r in rows]
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: token_history failed: {exc}")
-        return []
+        raise StorageUnavailable(
+            "We couldn’t load your activity just now. Try again in a moment."
+        ) from exc
 
 
 # --- notifications ---------------------------------------------------------

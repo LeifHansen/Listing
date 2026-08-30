@@ -104,6 +104,27 @@ def run_pending(purge_media: PurgeMedia, limit: int = 500) -> dict:
 
 def backlog() -> dict:
     """What is still owed, for the operator diagnostics. Counts only —
-    listing ids belong to people who asked to be forgotten."""
-    return {"media_purges": len(db.pending_media_purges(limit=1000)),
-            "deletion_notices": len(db.pending_deletion_notices(limit=1000))}
+    listing ids belong to people who asked to be forgotten.
+
+    `None` for a count that could not be taken, and never a zero standing in
+    for one. The operator is told to watch these numbers because one that
+    does not come back down is a promise already made to somebody; a read
+    that failed answering "nothing owed" is the worst possible time to be
+    wrong, since it is exactly during an outage that they are looking.
+
+    It does not raise, deliberately. Refusing the whole diagnostics page
+    because one table is unreadable takes away the thing being used to
+    diagnose the outage. Each count fails on its own.
+    """
+    def count(fn, what: str):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - unknown is the answer here
+            log.warning("deletion: couldn't count the %s backlog: %s", what, exc)
+            return None
+
+    return {
+        "media_purges": count(db.count_pending_media_purges, "media purge"),
+        "deletion_notices": count(db.count_pending_deletion_notices,
+                                  "deletion notice"),
+    }
