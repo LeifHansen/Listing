@@ -388,6 +388,17 @@ def _get_engine():
                 pool_pre_ping=True, pool_size=10, max_overflow=20,
                 pool_timeout=5, pool_recycle=300,
                 connect_args=connect_args,
+                # Keep the VALUES out of the exception string. Every `except`
+                # in this module logs `{exc}`, and SQLAlchemy's default is to
+                # append `[parameters: (...)]` to it — so one Postgres hiccup
+                # during signup writes a seller's email address and the bcrypt
+                # hash of their password to the log, a marketplace token blob
+                # on a connect, the whole listing document on an upsert. The
+                # statement text is still there, which is what an operator
+                # actually needs: it names columns, not data. Set here rather
+                # than at the 44 call sites because that is the version the
+                # next `except` block inherits without having to know.
+                hide_parameters=True,
             )
         if not _initialized:
             Base.metadata.create_all(_engine)  # may raise if DB unreachable
