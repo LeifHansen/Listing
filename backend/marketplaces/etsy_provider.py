@@ -256,6 +256,23 @@ class EtsyProvider:
             if existing_id:
                 # Revise in place. Photos aren't re-synced on revises (Etsy
                 # keeps its copies); new photos ship with new listings.
+                #
+                # KNOWN GAP, recorded rather than half-fixed: this sends the
+                # WHOLE payload, so it is P0-08's problem for Etsy — a seller
+                # who fixed a title on etsy.com and then changed only the
+                # price here has the title replaced by this app's copy, and is
+                # told the update succeeded. eBay's answer to that is a
+                # three-way merge against a remote shadow plus a revise
+                # carrying only the dirty fields.
+                #
+                # Neither half is available here. There is no Etsy store sync,
+                # so there is no shadow to reconcile against and no way to see
+                # that etsy.com moved. And `dirty_fields.TRACKED` is
+                # eBay-shaped: it does not cover `listing.etsy` (taxonomy,
+                # who/when made, tags, materials), so filtering this patch by
+                # it would silently stop sending everything on the Etsy card —
+                # a new failure in place of the old one. Etsy has no sandbox
+                # either, so neither change could be tested before shipping.
                 patch = dict(payload)
                 if mode == "live" and prev_state.get("status") != "published":
                     patch["state"] = "active"

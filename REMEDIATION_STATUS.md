@@ -375,6 +375,21 @@ Still open:
       so honestly instead of claiming a second server-side guard.
 - [ ] eBay Sandbox contract tests and Playwright journeys. (The
       conflict-resolution UI is done — see the row above.)
+- [ ] **P0-08's problem exists for Etsy and is not fixed.** The Etsy revise
+      sends the WHOLE payload, so a seller who fixed a title on etsy.com and
+      then changed only the price here has the title replaced by this app's
+      copy — and is told the update succeeded. Examined and deliberately left,
+      with the reasoning in a comment at the call site: eBay's answer is a
+      three-way merge against a remote shadow plus a revise carrying only the
+      dirty fields, and **neither half is available**. There is no Etsy store
+      sync, so there is no shadow and no way to see that etsy.com moved; and
+      `dirty_fields.TRACKED` is eBay-shaped — it does not cover
+      `listing.etsy` (taxonomy, who/when made, tags, materials), so filtering
+      the patch by it would silently stop sending everything on the Etsy card,
+      a new failure in place of the old one. Etsy has no sandbox, so neither
+      change could be tested before shipping. Closing it properly means an
+      Etsy read (getListing) to build a shadow from, and per-marketplace
+      dirty tracking.
 
 ## Release posture
 
