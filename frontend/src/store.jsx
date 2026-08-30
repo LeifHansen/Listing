@@ -359,6 +359,11 @@ export function AppProvider({ children }) {
         // for a page that WAS cut, and null when the count itself failed --
         // `listingsView` names it only if it arrived. See lib/listingsView.
         total: Number.isFinite(res.total) ? res.total : null,
+        // Where the next page starts. Keyset, so it names the last row rather
+        // than counting rows -- see db.list_listings. Absent on a complete
+        // page, which is what stops `loadMoreListings` looping.
+        nextCursor: res.next_cursor || null,
+        loadingMore: false,
       });
     } catch (e) {
       // Recorded, not just toasted: the toast is gone in seconds, the view
@@ -571,6 +576,52 @@ export function AppProvider({ children }) {
       return next;
     });
   }, []);
+
+  // The rest of the store, a page at a time. Appending rather than replacing:
+  // everything on that screen -- the tab counts, the search box, the bulk
+  // checkboxes -- reads `items`, so loading more only ever makes the view more
+  // complete, and no other code has to learn that paging exists.
+  //
+  // Without this a seller past the cap could not reach their older listings at
+  // all: the page stops, the search filters only what was loaded, so those
+  // records were not on the page, not in the tabs, not findable and not
+  // openable. The notice was honest about it and offered no way through.
+  const loadMoreListings = useCallback(async () => {
+    let cursor = null;
+    setListingsState((s) => {
+      // Guarded here, where the current state is: two clicks (or a click
+      // during the fetch) would otherwise ask for the same page twice and
+      // append it twice.
+      if (s.loadingMore || !s.nextCursor) return s;
+      cursor = s.nextCursor;
+      return { ...s, loadingMore: true };
+    });
+    if (!cursor) return;
+    try {
+      const res = await api(`/api/listings?before=${encodeURIComponent(cursor)}`);
+      setListingsState((s) => {
+        // Belt and braces against a double append: a page that arrives twice
+        // would put every id on screen twice, and the checkboxes a bulk
+        // reprice runs over are keyed by id.
+        const have = new Set(s.items.map((i) => i.id));
+        const fresh = (res.listings || []).filter((i) => !have.has(i.id));
+        return {
+          ...s,
+          items: [...s.items, ...fresh],
+          truncated: !!res.truncated,
+          total: Number.isFinite(res.total) ? res.total : s.total,
+          nextCursor: res.next_cursor || null,
+          loadingMore: false,
+        };
+      });
+    } catch (e) {
+      // Not recorded as `error`: that field means "there is nothing on
+      // screen", and here there is a whole page of listings the seller can
+      // still work with. The toast says what failed; the button stays.
+      setListingsState((s) => ({ ...s, loadingMore: false }));
+      toast(`Couldn't load more listings: ${e.message}`, { kind: "error" });
+    }
+  }, [toast]);
 
   const startNew = useCallback(() => {
     setSession(null);
@@ -958,7 +1009,8 @@ export function AppProvider({ children }) {
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
-    listingsState, loadListings, patchListing, metricsById, metricsStatus,
+    listingsState, loadListings, loadMoreListings, patchListing,
+    metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
@@ -972,7 +1024,8 @@ export function AppProvider({ children }) {
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
-    listingsState, loadListings, patchListing, metricsById, metricsStatus,
+    listingsState, loadListings, loadMoreListings, patchListing,
+    metricsById, metricsStatus,
     storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,

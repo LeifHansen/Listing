@@ -21,6 +21,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -4418,8 +4419,48 @@ def _projected_for_list(rec: dict) -> dict:
     return {**rec, "listing": trimmed}
 
 
+def _cursor_for(rec: dict) -> str:
+    """The opaque token naming one row, for the page that follows it.
+
+    Base64url of "<updated_at>|<id>" — encoded so the timestamp's colons and
+    offset sign survive a query string untouched, and opaque so nobody starts
+    hand-assembling one. It is the server's own words handed back; the read it
+    feeds is scoped by `user_id` exactly like every other, so a cursor says
+    WHERE to start and never whose store to start in.
+    """
+    raw = f"{rec.get('updated_at') or ''}|{rec.get('id') or ''}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _cursor_from(token: str) -> tuple[datetime, str]:
+    """Parse one, or raise 400.
+
+    Refused rather than ignored. An ignored cursor answers with page one,
+    which the client reads as the listings that FOLLOW the ones it has — so
+    the store looks like it ends where it began, which is the bug paging
+    exists to fix, arriving through the fix.
+    """
+    try:
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(token + pad).decode()
+        stamp, sep, last_id = raw.partition("|")
+        if not sep or not last_id:
+            raise ValueError("no separator")
+        when = datetime.fromisoformat(stamp)
+        # Same rule as everywhere else a stored timestamp is read: a naive one
+        # is UTC, not local, or the comparison silently moves the page edge.
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when, last_id
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            400, "That listing page link is no longer valid — reload the page "
+                 "to start from the top.") from exc
+
+
 @app.get("/api/listings")
-def listings(request: Request, limit: int = LIST_CAP) -> dict:
+def listings(request: Request, limit: int = LIST_CAP,
+             before: str = "") -> dict:
     """History of the current user's saved listings (most recent first)."""
     user = auth.current_user(request)
     # Clamped like /api/notifications does, and for both of its reasons: a
@@ -4441,7 +4482,12 @@ def listings(request: Request, limit: int = LIST_CAP) -> dict:
     # question the seller has is "is this all of them?" -- `truncated` answers
     # that honestly, where a total this endpoint does not have would have to be
     # invented.
-    rows = db.list_listings(limit=limit + 1, user_id=user["id"]) if user else []
+    # The last row of the previous page, when the client is walking older
+    # ones. Empty means "from the top", which is what a client sends on first
+    # load and is not a malformed cursor.
+    cursor = _cursor_from(before) if before else None
+    rows = (db.list_listings(limit=limit + 1, user_id=user["id"], before=cursor)
+            if user else [])
     items, truncated = rows[:limit], len(rows) > limit
     # And, only for the seller who is actually past the cap, how many there
     # are. The probe row above still decides -- free, on every load -- so
@@ -4462,7 +4508,11 @@ def listings(request: Request, limit: int = LIST_CAP) -> dict:
                      user["id"], exc)
     return {"listings": [_projected_for_list(r) for r in items],
             "db": db.db_status(), "authed": bool(user),
-            "truncated": truncated, "total": total}
+            "truncated": truncated, "total": total,
+            # Only when there IS a next page. A cursor on the last page is how
+            # a client loops for ever.
+            "next_cursor": _cursor_for(items[-1]) if truncated and items
+                           else None}
 
 
 def _live_ebay_id_map(items: list) -> dict:

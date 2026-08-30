@@ -526,8 +526,16 @@ def mutate_listing_data(
 
 
 def list_listings(limit: int = 50, user_id: Optional[str] = None,
-                  statuses: Optional[tuple[str, ...]] = None) -> list[dict]:
+                  statuses: Optional[tuple[str, ...]] = None,
+                  before: Optional[tuple[_dt.datetime, str]] = None
+                  ) -> list[dict]:
     """The user's listings, newest first. RAISES on a read failure.
+
+    `before` is the last row of the previous page — `(updated_at, id)` — and
+    what comes back is what follows THAT ROW. Keyset, not OFFSET: a save
+    between two page loads shifts every row an OFFSET would count past, so the
+    seller skips one listing and sees another twice. On a screen whose
+    checkboxes drive a bulk reprice, that is worse than not paging at all.
 
     `statuses` narrows the read in SQL. Several callers throw away everything
     that is not live the moment the rows arrive -- the store sweep, the
@@ -567,7 +575,18 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
                 q = q.where(ListingRecord.user_id == user_id)
             if statuses is not None:
                 q = q.where(ListingRecord.status.in_(statuses))
-            q = q.order_by(ListingRecord.updated_at.desc()).limit(limit)
+            if before is not None:
+                # Spelled out rather than as a row-value comparison, which
+                # older SQLite builds do not accept. `id` breaks the ties:
+                # timestamps collide readily (an import writes a whole store
+                # in one pass), and a cursor that cannot separate two rows
+                # with the same instant either repeats them or skips them.
+                ts, last_id = before
+                q = q.where(or_(ListingRecord.updated_at < ts,
+                                and_(ListingRecord.updated_at == ts,
+                                     ListingRecord.id < last_id)))
+            q = q.order_by(ListingRecord.updated_at.desc(),
+                           ListingRecord.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
             return [_record_to_dict(r) for r in rows]
     except Exception as exc:  # noqa: BLE001

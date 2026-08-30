@@ -85,7 +85,8 @@ const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
 export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
-    ebay, loadListings, metricsById, skippedDraftIds, storeSync, syncStore,
+    ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
+    storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
   } = useApp();
   const { confirm, toast } = useToast();
@@ -404,9 +405,20 @@ export function ListingsView({ search = "" }) {
         );
       })()}
       {view.notice && (
-        <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink flex gap-2">
+        <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink flex flex-wrap items-center gap-2">
           <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
           <span>{view.notice}</span>
+          {/* The way through. Without it the notice is honest and useless:
+              the older listings are not on the page, not in the tab counts,
+              and not findable by the search box, which filters what is
+              loaded. Appending, so everything above keeps working and only
+              ever sees more. */}
+          {listingsState.nextCursor && (
+            <Button size="sm" variant="soft" loading={listingsState.loadingMore}
+                    onClick={loadMoreListings}>
+              Load older listings
+            </Button>
+          )}
         </p>
       )}
       {body}

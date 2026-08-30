@@ -320,6 +320,84 @@ if (signedIn) {
   problems.push(['an unread setting is not a saved one', prefsOut]);
 }
 
+// --- the rest of a big store can actually be reached ------------------------
+//
+// The server caps the listings page and says so. Saying so is honest and, on
+// its own, useless: the older listings are not on the page, not in the tab
+// counts, and not findable by the search box, which filters what is already
+// loaded. For a seller past the cap those records do not exist in this app.
+//
+// The two pages are served by page.route() rather than by making four
+// thousand listings -- the server half is proved against a real database in
+// test_the_older_listings_can_be_reached.py. What only a browser can answer
+// is whether the button appears, whether clicking it APPENDS rather than
+// replaces, and whether it stops.
+const paging = [];
+if (signedIn) {
+  const card = (id) => ({ id, user_id: 'u', status: 'draft',
+                          listing: { title: `Paged item ${id}` } });
+  try {
+    await page.route('**/api/listings*', (r) => {
+      const second = r.request().url().includes('before=');
+      r.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify(second
+          ? { listings: [card('p3'), card('p4')], authed: true,
+              db: { configured: true, connected: true }, truncated: false,
+              total: 4, next_cursor: null }
+          : { listings: [card('p1'), card('p2')], authed: true,
+              db: { configured: true, connected: true }, truncated: true,
+              total: 4, next_cursor: 'Y3Vyc29y' }),
+      });
+    });
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    // Not `visit()`: the nav button carries a draft-count badge, so with
+    // listings on screen its accessible name is no longer just "Sell" and the
+    // exact match that walk uses stops finding it.
+    await page.getByRole('button', { name: 'Sell' }).first().click();
+    await page.waitForTimeout(1500);
+
+    const first = (await page.textContent('body')) || '';
+    if (!first.includes('2 of 4')) {
+      paging.push('a cut page did not say what it was cut from');
+    }
+    if (first.includes('Paged item p3')) {
+      paging.push('page two was on screen before it was asked for');
+    }
+    const more = page.getByRole('button', { name: /Load older listings/ });
+    if (!await more.count()) {
+      paging.push('a cut page offered no way to reach the rest of the store');
+    } else {
+      await more.first().click();
+      await page.waitForTimeout(1500);
+      const after = (await page.textContent('body')) || '';
+      // Appended, not replaced: everything on this screen -- the tab counts,
+      // the search, the bulk checkboxes -- reads the loaded list, so a page
+      // that REPLACED would hide the first two all over again.
+      for (const id of ['p1', 'p2', 'p3', 'p4']) {
+        if (!after.includes(`Paged item ${id}`)) {
+          paging.push(`loading more lost ${id}`);
+        }
+      }
+      // And it has to stop. The button lives inside the was-cut notice, so
+      // what this actually checks is that a fully loaded store stops saying
+      // it was cut -- which is the same claim from the other end, and the one
+      // a seller reads. Both are gone or neither is.
+      if (/more than we can show/i.test(after)) {
+        paging.push('the whole store is loaded and the page still says it was cut');
+      }
+      if (await page.getByRole('button', { name: /Load older listings/ }).count()) {
+        paging.push('the last page still offered more');
+      }
+    }
+  } catch (e) {
+    paging.push(`paging: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute('**/api/listings*').catch(() => {});
+  paging.push(...drain());
+  problems.push(['the rest of the store can be reached', paging]);
+}
+
 // --- deleting an account asks, warns, and takes a password ------------------
 //
 // The most irreversible button in the app, and the two things that guard it

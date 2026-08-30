@@ -42,8 +42,12 @@ def client(monkeypatch):
     def _serve(rows, user={"id": "u1"}):
         asked = {}
 
-        def _list(limit=50, user_id=None):
+        def _list(limit=50, user_id=None, statuses=None, before=None):
+            # `before` is recorded, not honoured: these tests are about the
+            # probe row and the cap, and the walk itself is covered against a
+            # real database in test_the_older_listings_can_be_reached.
             asked["limit"] = limit
+            asked["before"] = before
             return rows[:limit]
 
         monkeypatch.setattr(main.auth, "current_user", lambda _r: user)
