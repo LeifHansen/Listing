@@ -207,7 +207,28 @@ class EtsyProvider:
         payload = mapping_etsy.build_listing_payload(listing, settings)
 
         if not creds:
-            # Dry-run: Etsy has no sandbox, so the exact payload IS the test.
+            if mode == "live":
+                # P1-09's rule. "Published" is a claim about the listing being
+                # live on Etsy, and nothing was created — so ok is False, the
+                # way the eBay provider already answers this. eBay keys its
+                # guard on EBAY_ENV because eBay HAS a sandbox and a dry run
+                # is a real tool there; Etsy has none (see the comment below),
+                # so there is no environment where a live dry run succeeded.
+                # The payload still rides along in `raw` for whoever is
+                # developing against it; what changes is the answer to "did
+                # you list it".
+                message = ("Connect your Etsy shop in Settings to publish. "
+                           "Nothing was listed.")
+                return PublishOutcome(
+                    ok=False, message=message,
+                    issues=[{"target": "account", "level": "error",
+                             "title": "Etsy isn't connected",
+                             "fix": "Connect Etsy in Settings, then publish "
+                                    "again."}],
+                    raw={"dry_run": False, "error": True, "mode": mode,
+                         "message": message, "etsy_payload": payload})
+            # Draft: nothing is claimed to be live, and Etsy has no sandbox —
+            # so the exact payload IS the test.
             return PublishOutcome(
                 ok=True, dry_run=True,
                 message="Etsy dry run — connect Etsy in Settings to post for real.",
