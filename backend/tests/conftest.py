@@ -14,7 +14,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -110,7 +109,15 @@ def dbmod(monkeypatch, tmp_path):
 # wrong layer: with HTTPS_PROXY set every request connects to 127.0.0.1, so a
 # socket guard sees nothing. Starlette's TestClient uses its own ASGI transport
 # and never reaches this one, so in-process API tests are unaffected.
-_REAL_TRANSPORT = httpx.HTTPTransport.handle_request
+#
+# Imported here rather than at the top of the file because the `cutout` CI job
+# installs Pillow/NumPy/SciPy and nothing else: a hard import would break the
+# image suite at COLLECTION, which is a worse failure than the one this
+# prevents. Without httpx there is nothing that could make a request anyway.
+try:
+    import httpx
+except ImportError:  # pragma: no cover - the image-only CI job
+    httpx = None
 
 
 def _refuse_outbound(self, request):
@@ -123,7 +130,7 @@ def _refuse_outbound(self, request):
 
 @pytest.fixture(autouse=True)
 def _no_network(request, monkeypatch):
-    if request.node.get_closest_marker("allow_network"):
+    if httpx is None or request.node.get_closest_marker("allow_network"):
         return
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _refuse_outbound)
 
