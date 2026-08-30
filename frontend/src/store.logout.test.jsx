@@ -140,7 +140,11 @@ describe("logout", () => {
     const app = get();
     expect(app.user).toBe(null);
     expect(app.listingsState.items).toEqual([]);
-    expect(app.notifications).toEqual({ items: [], unread: 0 });
+    // Everything the previous account's bell held is gone. `checked` rides
+    // along on this state now (it says whether the last read landed); a
+    // signed-out bell has nothing to report and is not an outage, so it
+    // resets to true with the rest.
+    expect(app.notifications).toEqual({ items: [], unread: 0, checked: true });
     expect(app.ebay.connected).toBe(false);
     expect(app.ebay.username).toBe("");
     expect(app.ebay.foreign_listings).toBe(0);

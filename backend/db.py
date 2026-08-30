@@ -1802,9 +1802,17 @@ def list_notifications(user_id: str, limit: int = 50,
                 q = q.where(Notification.read_at.is_(None))
             q = q.order_by(Notification.created_at.desc()).limit(limit)
             return [_notification_to_dict(n) for n in s.execute(q).scalars().all()]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Not []. The bell's empty state says "Nothing yet — when an item
+        # sells, it lands here so you can ship it fast", which is a claim
+        # about the seller's SALES; answering it from a failed read turns one
+        # Neon blip into "nothing has sold" on the surface someone checks to
+        # find out whether they owe a buyer a parcel. Same rule as
+        # list_listings. No database configured is still [] — a
+        # configuration, not a failure.
         log.warning(f"db: list_notifications failed: {exc}")
-        return []
+        raise StorageUnavailable(
+            "We couldn't load your notifications just now.") from exc
 
 
 def unread_notification_count(user_id: str) -> int:
@@ -1824,9 +1832,11 @@ def unread_notification_count(user_id: str) -> int:
                 .where(Notification.user_id == user_id,
                        Notification.read_at.is_(None))
             ).scalar() or 0)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # A badge of zero is the same claim as the empty list above.
         log.warning(f"db: unread_notification_count failed: {exc}")
-        return 0
+        raise StorageUnavailable(
+            "We couldn't count your notifications just now.") from exc
 
 
 def mark_notifications_read(user_id: str,

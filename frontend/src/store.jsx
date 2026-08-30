@@ -26,7 +26,7 @@ const NO_EBAY = {
   oauth_missing: [], labels_enabled: false, foreign_listings: 0,
   unowned_listings: 0,
 };
-const NO_NOTIFICATIONS = { items: [], unread: 0 };
+const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_STORE_SYNC = {
   syncing: false, lastSynced: null, error: null, progress: null,
   // Whether the last sweep actually covered the store — it SAMPLES on a
@@ -237,7 +237,12 @@ export function AppProvider({ children }) {
     if (!user) { setNotifications(NO_NOTIFICATIONS); return; }
     try {
       const res = await api("/api/notifications");
-      setNotifications({ items: res.notifications || [], unread: res.unread || 0 });
+      // `checked` distinguishes "nothing has sold" from "we couldn't read
+      // the notifications" — the bell states the first as fact.
+      setNotifications({
+        items: res.notifications || [], unread: res.unread || 0,
+        checked: res.checked !== false,
+      });
     } catch (e) { /* keep previous */ }
   }, [user]);
   useEffect(() => {
@@ -256,6 +261,7 @@ export function AppProvider({ children }) {
   const markNotificationsRead = useCallback(async (ids) => {
     // Optimistic: the badge clears instantly, the server catches up.
     setNotifications((n) => ({
+      ...n,
       items: n.items.map((i) => (
         !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
       unread: ids ? Math.max(0, n.unread - ids.length) : 0,

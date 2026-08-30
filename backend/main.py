@@ -5356,15 +5356,27 @@ def import_status(job_id: str, request: Request) -> Response:
 def notifications_list(request: Request, limit: int = 50,
                        unread_only: bool = False) -> dict:
     """The signed-in user's notifications (newest first) + unread count.
-    Empty for logged-out users — the bell just stays quiet."""
+    Empty for logged-out users — the bell just stays quiet.
+
+    `checked` says whether the read actually happened. A 503 would be wrong
+    here: the shell polls this every 60 seconds from every screen, so a blip
+    would turn the whole app noisy. But an empty list is not a neutral answer
+    either — the bell renders it as "Nothing yet", which is a claim about the
+    seller's sales on the surface they check to find out whether they owe a
+    buyer a parcel. So it answers 200 and says which of the two it is.
+    """
     uid = _uid(request)
     if not uid:
-        return {"notifications": [], "unread": 0}
-    return {
-        "notifications": db.list_notifications(
-            uid, limit=max(1, min(limit, 200)), unread_only=unread_only),
-        "unread": db.unread_notification_count(uid),
-    }
+        return {"notifications": [], "unread": 0, "checked": True}
+    try:
+        return {
+            "notifications": db.list_notifications(
+                uid, limit=max(1, min(limit, 200)), unread_only=unread_only),
+            "unread": db.unread_notification_count(uid),
+            "checked": True,
+        }
+    except errors.StorageUnavailable:
+        return {"notifications": [], "unread": 0, "checked": False}
 
 
 @app.post("/api/notifications/read")
