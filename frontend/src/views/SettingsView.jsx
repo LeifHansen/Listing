@@ -3,7 +3,7 @@ import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
   PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck,
-  Trash2, Clock,
+  Trash2, Clock, LogOut,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/utils";
@@ -1319,8 +1319,9 @@ function ForeignListingsNotice() {
 
 // Profile: display name (shown in greetings) + one-tap sync from eBay.
 function ProfileCard() {
-  const { user, setUser, ebay } = useApp();
-  const { toast } = useToast();
+  const { user, setUser, ebay, logout } = useApp();
+  const [signingOutAll, setSigningOutAll] = useState(false);
+  const { toast, confirm } = useToast();
   const displayName = user?.display_name || "";
   const [name, setName] = useState(displayName);
   const [saving, setSaving] = useState(false);
@@ -1387,6 +1388,46 @@ function ProfileCard() {
               <RefreshCw aria-hidden /> Sync from eBay
             </Button>
           )}
+        </div>
+
+        {/* Signing out of a browser does not cancel the token it was using:
+            the session token is self-contained and good for 30 days, so a
+            borrowed phone, a machine left signed in, or a token out of a
+            backup keeps working. This is the control that ends them. */}
+        <div className="pt-4 border-t border-line">
+          <p className="text-sm text-ink-secondary">
+            Signed in somewhere you shouldn’t be — a shared computer, a phone you
+            no longer have? This ends every signed-in device, including this one.
+          </p>
+          <Button
+            variant="secondary" className="mt-2.5" loading={signingOutAll}
+            onClick={async () => {
+              if (!(await confirm({
+                title: "Sign out everywhere?",
+                message: "Every device signed in to this account is signed out, "
+                  + "including this one. Nothing else changes — your listings, "
+                  + "photos and eBay connection stay exactly as they are.",
+                confirmLabel: "Sign out everywhere",
+              }))) return;
+              setSigningOutAll(true);
+              try {
+                const r = await postJson("/api/auth/logout-everywhere", {});
+                toast(r.message, { kind: "success" });
+                // Locally too. The server has already cancelled this token, so
+                // leaving the app looking signed in would just fail the next
+                // request with no explanation.
+                logout();
+              } catch (e) {
+                // Never a shrug: if the revocation did not commit, the other
+                // sessions are still live and the seller has to know that.
+                toast(`Couldn't sign out everywhere: ${e.message}`, { kind: "error" });
+              } finally {
+                setSigningOutAll(false);
+              }
+            }}
+          >
+            <LogOut aria-hidden /> Sign out everywhere
+          </Button>
         </div>
       </div>
     </Card>

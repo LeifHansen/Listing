@@ -1182,8 +1182,38 @@ def auth_login(request: Request, response: Response, payload: dict) -> dict:
 
 @app.post("/api/auth/logout")
 def auth_logout(response: Response) -> dict:
+    """Sign out THIS browser. The token itself stays valid until it expires —
+    see /api/auth/logout-everywhere for the one that cancels it."""
     auth.clear_session_cookie(response)
     return {"ok": True}
+
+
+@app.post("/api/auth/logout-everywhere")
+def auth_logout_everywhere(request: Request, response: Response) -> dict:
+    """Cancel every session token this account has, including this one.
+
+    Clearing the cookie ends nothing for anyone else holding a copy of the
+    token: it is self-contained and good for 30 days. A shared or borrowed
+    device, a browser profile left signed in, a token out of a backup or a
+    log — all of them kept working, and the seller had no way to end it. This
+    is that way.
+
+    It raises rather than reporting a failure as success (db.revoke_sessions
+    is strict). Telling someone their other sessions are gone when the write
+    never landed is the worst outcome available: they stop looking, and
+    whoever holds the token keeps it.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    db.revoke_sessions(user["id"])
+    # This browser too. Anything else would leave the seller looking at a
+    # screen that says everything is signed out while it demonstrably is not.
+    auth.clear_session_cookie(response)
+    log.info("sessions revoked: user=%s", user["id"])
+    return {"ok": True,
+            "message": "Signed out everywhere. Sign in again to keep using "
+                       "Thryft Shop on this device."}
 
 
 @app.get("/api/auth/me")

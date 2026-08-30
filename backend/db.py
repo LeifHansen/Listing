@@ -52,6 +52,20 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(80), default="")
+    # Sessions issued before this instant are refused. It is how "log out
+    # everywhere" is possible at all: the session JWT is self-contained and
+    # lives 30 days, so without somewhere to record a cancellation, a token
+    # that leaks stays good for the rest of the month and clearing the cookie
+    # only affects the browser doing the clearing.
+    #
+    # A stamp on this row rather than a token blocklist, because this row is
+    # ALREADY read on every authenticated request (auth.current_user resolves
+    # the subject to a user dict). A revocation check that costs an extra
+    # round trip is one that gets skipped under load, and a blocklist has to
+    # be kept, expired, and consulted -- and fails open when its store is
+    # unreachable. NULL means nothing has ever been revoked.
+    sessions_valid_from: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     # New-listing defaults (package weight/dims, quantity, condition, …) that
     # pre-fill every AI draft so repeat sellers stop re-typing them.
     prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -337,6 +351,10 @@ def _get_engine():
                 "ALTER TABLE ebay_accounts ADD COLUMN ebay_user_id VARCHAR(64) DEFAULT ''",
                 "CREATE INDEX IF NOT EXISTS ix_ebay_accounts_ebay_user_id "
                 "ON ebay_accounts (ebay_user_id)",
+                # Session revocation. Nullable with no default: NULL means
+                # this account has never revoked, which is every account on
+                # the day this ships, and must keep every live session working.
+                "ALTER TABLE users ADD COLUMN sessions_valid_from TIMESTAMP",
             ):
                 try:
                     with _engine.begin() as conn:
@@ -528,6 +546,10 @@ def all_listing_ids() -> Optional[set[str]]:
 def _user_to_dict(u: User) -> dict:
     return {"id": u.id, "email": u.email,
             "display_name": getattr(u, "display_name", "") or "",
+            # auth.current_user compares this against the token's `iat`. It
+            # rides along here rather than being fetched separately because
+            # this dict is already the per-request read.
+            "sessions_valid_from": getattr(u, "sessions_valid_from", None),
             "created_at": u.created_at.isoformat()}
 
 
@@ -636,6 +658,41 @@ def get_user_by_id(user_id: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: get_user_by_id failed: {exc}")
         return None
+
+
+def revoke_sessions(user_id: str,
+                    at: Optional[_dt.datetime] = None) -> _dt.datetime:
+    """End every session issued before now. Returns the instant recorded.
+
+    RAISES rather than reporting a failure as success. Telling a seller their
+    other sessions are gone when the write never landed is the worst outcome
+    available here: they stop looking, and whoever holds the token keeps it.
+    An unknown user raises for the same reason -- there is no version of
+    "nothing to revoke" that is safe to report as "revoked".
+    """
+    stamp = (at or _dt.datetime.now(_dt.timezone.utc)).replace(microsecond=0)
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable(
+                "Couldn't sign out your other sessions just now. Try again "
+                "in a moment.")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                raise StorageUnavailable(
+                    "Couldn't sign out your other sessions just now. Try "
+                    "again in a moment.")
+            u.sessions_valid_from = stamp
+            s.commit()
+            return stamp
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: revoke_sessions failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't sign out your other sessions just now. Try again in a "
+            "moment.") from exc
 
 
 def get_password_hash(user_id: str) -> Optional[str]:

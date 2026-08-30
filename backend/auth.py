@@ -80,10 +80,42 @@ def current_user(request: Request) -> Optional[dict]:
         return None
     try:
         payload = jwt.decode(token, config.SECRET_KEY, algorithms=["HS256"])
-        request.state.auth_user = db.get_user_by_id(payload.get("sub", ""))
+        user = db.get_user_by_id(payload.get("sub", ""))
+        if user is not None and _revoked(payload, user):
+            return None
+        request.state.auth_user = user
         return request.state.auth_user
     except Exception:  # noqa: BLE001 - expired/invalid token -> treat as anonymous
         return None
+
+
+def _revoked(payload: dict, user: dict) -> bool:
+    """Was this token issued before the account cancelled its sessions?
+
+    The session JWT is self-contained and lives 30 days, so clearing the
+    cookie ends nothing for anyone else holding a copy. `sessions_valid_from`
+    is what "log out everywhere" writes down, and it is already on the user
+    dict this request just fetched — no second round trip.
+
+    Two deliberate refusals:
+
+      - `iat` and the stamp are whole seconds, so a token minted in the same
+        second as the revocation cannot be told from one minted just before
+        it. `<=` refuses it. The alternative leaves a one-second hole in the
+        control on the very request that follows the button;
+      - a token with no `iat` cannot be placed relative to the stamp at all.
+        Nothing this app mints lacks one, and "cannot tell" is not "allow".
+    """
+    cutoff = user.get("sessions_valid_from")
+    if not cutoff:
+        return False
+    issued = payload.get("iat")
+    if issued is None:
+        return True
+    if cutoff.tzinfo is None:
+        # SQLite hands back naive datetimes; the stamp is always written UTC.
+        cutoff = cutoff.replace(tzinfo=_dt.timezone.utc)
+    return int(issued) <= int(cutoff.timestamp())
 
 
 def make_ticket(user_id: str, purpose: str, ttl_seconds: int = 60) -> str:
