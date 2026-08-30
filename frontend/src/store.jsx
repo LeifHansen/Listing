@@ -417,6 +417,11 @@ export function AppProvider({ children }) {
           found: job.found || 0, imported: job.imported || 0,
           updated: job.updated || 0, deduped: job.deduped || 0,
           failed: job.failed || 0,
+          // eBay's per-seller call limits are windowed, so a big store can
+          // run into one part-way. Carried through because the counts alone
+          // read as a complete sync of a store that was only half read.
+          rateLimited: !!job.rate_limited,
+          retryAfter: job.retry_after ?? null,
         };
       }
     }
@@ -444,7 +449,10 @@ export function AppProvider({ children }) {
       // the counts already in it is a server that still imports inline.
       const res = started?.job_id ? await watchImport(started.job_id) : started;
       await loadListings({ quiet: true });
-      markAutoSynced(user.id);
+      // A pass eBay cut short has NOT rebuilt the mirror, so it must not
+      // latch "synced" for the next six hours — that would leave the rest of
+      // the store missing until the window expired twice over.
+      if (!res?.rateLimited) markAutoSynced(user.id);
       setStoreSync({
         syncing: false, lastSynced: Date.now(), error: null, progress: null,
       });

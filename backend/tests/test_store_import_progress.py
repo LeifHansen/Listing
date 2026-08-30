@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.services import jobstore, listing_sync
+from backend.services import ebay_trading, jobstore, listing_sync
 
 ITEMS = [f"1234567890{i:02d}" for i in range(5)]
 
@@ -45,6 +45,11 @@ class FakeDb:
 
 
 class FakeTrading:
+    # The real exception type, not a stand-in: listing_sync catches
+    # RateLimited by identity to decide whether to stop the pass, and a
+    # double that omitted it made that branch unreachable in these tests.
+    RateLimited = ebay_trading.RateLimited
+
     def __init__(self, item_ids, bad=()):
         self.item_ids = list(item_ids)
         self.bad = set(bad)

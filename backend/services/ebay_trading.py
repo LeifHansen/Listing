@@ -82,6 +82,80 @@ class TradingError(ValueError):
         return wanted in self.codes
 
 
+# eBay's seller-level call-limit error. Documented (developer.ebay.com KB
+# 2137): returned in the response body with Ack=Failure, NOT as an HTTP
+# status, when a seller's requests in the window reach the limit. The limits
+# are per SELLER and windowed -- 5000 Add-listing calls / 30s, 1200 Revise /
+# 30s -- so one busy store reaches them, not just a busy application.
+_RATE_LIMIT_CODES = {"21919144"}
+
+# The application-level daily quota is a separate refusal, and this repository
+# cannot cite its numeric code with confidence -- so it is matched on eBay's
+# published wording instead of a code invented to look authoritative. Narrow
+# on purpose: it must not swallow a listing eBay refused on its merits, which
+# is a seller-fixable problem and not something waiting will cure.
+_RATE_LIMIT_PHRASES = (
+    "exceeded usage limit",
+    "exceeded your maximum call limit",
+    "call limit exceeded",
+)
+
+# "…Try again after 5 seconds." — eBay answering the only question that
+# matters here, in the body rather than a header.
+_TRY_AGAIN_RE = re.compile(r"try again (?:in|after)\s+(\d+)\s*second",
+                           re.IGNORECASE)
+
+
+class RateLimited(TradingError):
+    """eBay is refusing because of a call limit, not because of the request.
+
+    Kept apart from every other TradingError because the right response is the
+    opposite one. An ordinary rejection means this listing needs fixing and
+    the next listing is fine; a rate limit means nothing was wrong with the
+    listing and the NEXT call is the problem. Counting these as per-listing
+    failures told sellers eBay had rejected listings it never looked at, and
+    carrying on fired hundreds more calls into a windowed limit -- which does
+    not merely fail, it holds the window open and lengthens the wait.
+
+    `retry_after` is eBay's own answer in seconds, from the Retry-After header
+    or from its message, and it is None when neither said. None rather than a
+    default: a number here is a promise about when eBay will answer, and this
+    client is not in a position to invent one.
+    """
+
+    def __init__(self, message: str, code: str = "", detail: str = "",
+                 retry_after: Optional[int] = None):
+        super().__init__(message, code=code, detail=detail)
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(value: str) -> Optional[int]:
+    """Seconds from a Retry-After header, or None.
+
+    HTTP allows an HTTP-date as well as a delta in seconds. A date is not
+    parsed into a wait here: it would need clock-skew handling to be worth
+    anything, and "we do not know" is an honest answer that the caller
+    already has to handle.
+    """
+    try:
+        seconds = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _rate_limit_wait(text: str) -> Optional[int]:
+    match = _TRY_AGAIN_RE.search(text or "")
+    return int(match.group(1)) if match else None
+
+
+def _is_rate_limit(codes: list[str], text: str) -> bool:
+    if any(code in _RATE_LIMIT_CODES for code in codes):
+        return True
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in _RATE_LIMIT_PHRASES)
+
+
 class AlreadyListedError(TradingError):
     """eBay refused a create because THIS publish already produced a listing.
 
@@ -152,6 +226,14 @@ def _call(call: str, token: str, body: str) -> ET.Element:
                           content=xml.encode("utf-8"), timeout=_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 - network/timeout
         raise TradingError(f"Couldn't reach eBay: {exc}") from exc
+    if resp.status_code == 429:
+        # The transport refusing before eBay's XML is ever produced. Same
+        # condition, different layer.
+        raise RateLimited(
+            "eBay is limiting how often we can talk to your account right "
+            "now. Nothing was changed — this will pick up again shortly.",
+            retry_after=_retry_after_seconds(
+                resp.headers.get("Retry-After", "")))
     if resp.status_code != 200:
         raise TradingError(f"eBay returned {resp.status_code} for {call}.")
     try:
@@ -219,6 +301,16 @@ def _failure(call: str, root: ET.Element, errors: list[ET.Element],
                 "msg=%s detail=%s", call, code or "?", len(errors),
                 len(warnings or []), headline[:200], detail[:300] or "(none)")
     all_codes = [c for c in (_text(e, "ErrorCode") or "" for e in errors) if c]
+    # Checked before the branches below, because a call limit is not a
+    # rejection of the request: nothing about the listing needs fixing, and
+    # the next call is the problem. Telling the seller to reconnect eBay or to
+    # correct a field would send them after something that is not there.
+    if _is_rate_limit(all_codes, f"{headline} {detail}"):
+        return RateLimited(
+            "eBay is limiting how often we can talk to your account right "
+            "now. Nothing was changed — this will pick up again shortly.",
+            code=code, detail=detail,
+            retry_after=_rate_limit_wait(f"{headline} {detail}"))
     if code in ("931", "932", "16110", "21917053"):  # auth/token codes
         return TradingError(
             "eBay didn't accept the account connection — reconnect eBay "

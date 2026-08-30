@@ -116,6 +116,21 @@ export function ListingsView({ search = "" }) {
       toast(`Couldn't sync with eBay: ${r.error}`, { kind: "error" });
       return;
     }
+    // eBay stopped the pass part-way, so the counts describe a fraction of
+    // the store. Saying "synced 400 listings" here — or worse, "everything's
+    // already in sync" when nothing got through — reports a store that was
+    // never read as one that was.
+    if (r.rateLimited) {
+      const wait = r.retryAfter
+        ? ` Try again in about ${r.retryAfter} second${r.retryAfter === 1 ? "" : "s"}.`
+        : " Try again shortly.";
+      toast(
+        `eBay limited how fast we could read your store, so this sync is `
+        + `incomplete — ${r.imported || 0} new and ${r.updated || 0} updated so `
+        + `far.${wait}`,
+        { kind: "warning" });
+      return;
+    }
     const fresh = r.imported || 0;
     // Duplicates from before the sync matched on eBay's item id: the sync
     // folds each pair back onto the listing this app created.

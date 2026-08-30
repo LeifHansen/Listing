@@ -503,12 +503,32 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # the duplicate pairs (one Thryft, one eBay) sellers were seeing.
     owned = _index_by_item(known.values())
     imported = updated = failed = 0
+    # eBay's call limits are per seller and windowed. Once one is hit, every
+    # further call is refused AND keeps the window open, so carrying on makes
+    # the wait longer rather than shorter. This is the flag that stops the
+    # pass; SKIPPED marks the listings eBay never looked at, so they can be
+    # kept out of the failure count.
+    SKIPPED = object()
+    limit_hit: dict = {}
 
     def _fetch(job: tuple[str, str]):
-        """(item_id, status, detail) — None detail when that listing failed."""
+        """(item_id, status, detail).
+
+        `None` detail means this listing failed. `SKIPPED` means the pass had
+        already stopped -- eBay never saw it, so it is not a failure of any
+        kind and must not be counted as one.
+        """
         item_id, status = job
+        if limit_hit:
+            return item_id, status, SKIPPED
         try:
             return item_id, status, ebay_trading.get_listing(token, item_id)
+        except ebay_trading.RateLimited as exc:
+            # First one wins: the wait eBay quoted when it started refusing.
+            limit_hit.setdefault("retry_after", exc.retry_after)
+            log.info("sync: user=%s hit eBay's call limit, stopping this pass "
+                     "(retry after %ss)", user_id, exc.retry_after)
+            return item_id, status, SKIPPED
         except Exception as exc:  # noqa: BLE001 - skip one bad listing
             log.info("sync: couldn't import eBay item %s: %s", item_id, exc)
             return item_id, status, None
@@ -528,6 +548,8 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     _tick("saving", 0, len(fetched))
     for done_n, (item_id, status, fresh) in enumerate(fetched, 1):
         _tick("saving", done_n, len(fetched))
+        if fresh is SKIPPED:
+            continue
         if fresh is None:
             failed += 1
             continue
@@ -574,7 +596,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     log.info("sync: user=%s found=%d imported=%d updated=%d deduped=%d failed=%d",
              user_id, len(jobs), imported, updated, deduped, failed)
     return {"found": len(jobs), "imported": imported, "updated": updated,
-            "deduped": deduped, "failed": failed}
+            "deduped": deduped, "failed": failed,
+            # So a caller can say "we got through 120 of your 400, eBay asked
+            # us to wait" instead of reporting a complete sync -- or, worse,
+            # 280 failures for listings eBay never looked at.
+            "rate_limited": bool(limit_hit),
+            "retry_after": limit_hit.get("retry_after")}
 
 
 def refresh_statuses(token: str, user_id: str, records: list[dict],
@@ -596,12 +623,23 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
     Status calls run in parallel (each is its own eBay round-trip; serially
     a 60-listing sweep pinned a request thread for a minute); DB writes stay
     on this thread, in order."""
+    # Same reason as the import above: once eBay's per-seller window is full,
+    # the remaining probes cannot succeed and each one holds the window open.
+    # A None status changes nothing either way, so stopping costs the sweep
+    # only the listings it was never going to be told about.
+    limited: list[int] = []
+
     def _probe(rec):
         item_id = str((rec.get("listing") or {}).get("ebay_listing_id") or "")
-        if not item_id:
+        if not item_id or limited:
             return rec, None
         try:
             return rec, ebay_trading.listing_status(token, item_id)
+        except ebay_trading.RateLimited as exc:
+            limited.append(1)
+            log.info("sync: user=%s hit eBay's call limit mid-sweep, stopping "
+                     "(retry after %ss)", user_id, exc.retry_after)
+            return rec, None
         except Exception as exc:  # noqa: BLE001 - one blip skips one record
             log.info("sync: status check failed for %s: %s", rec.get("id"), exc)
             return rec, None
