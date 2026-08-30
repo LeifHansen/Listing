@@ -133,6 +133,14 @@ encoded wrong behaviour were corrected in place, each saying why.
    `importorskip` AND be listed in the smoke job's "API tests" step, which
    fails on a skip. The guard alone would have left the session-alias
    authorization tests running nowhere.
+6. **`conftest.py` is imported by the image-only CI job too.** The
+   no-network guard added a top-level `import httpx`, and the `cutout` job
+   installs Pillow/NumPy/SciPy and nothing else — the whole image suite
+   failed at COLLECTION, which is worse than the failure the guard
+   prevents. Anything conftest imports must be available in EVERY job that
+   runs part of this directory: `checks` (no image stack), `cutout` (no
+   fastapi, no httpx, no boto3) and `smoke` (everything). Guard the import
+   and no-op the fixture, as the httpx one now does.
 
 ## Found during remediation, not in the audit
 
