@@ -830,8 +830,13 @@ export function AppProvider({ children }) {
   // stopped being checked for cascading setState. Keep it below the state it
   // resets; it is wired into the context at the bottom like everything else,
   // so its position in the file costs nothing.
-  const logout = useCallback(async () => {
-    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+  // The local half of signing out: every cache that belongs to one account.
+  //
+  // Split out because there are two ways a session ends and only one of them
+  // has a server to tell. `logout` below asks first; the session-expiry
+  // handler cannot, because the session it would be ending is the one that
+  // just refused a request.
+  const clearSignedInState = useCallback(() => {
     storeToken(null); // native shell's bearer token — no-op on the web
     setUser(null);
     afterLogin.current = null; // nothing to resume into a session that ended
@@ -873,6 +878,35 @@ export function AppProvider({ children }) {
 
     loadEbayStatus();
   }, [loadEbayStatus]);
+
+  const logout = useCallback(async () => {
+    // Best effort, and first: the cookie is the server's to clear, and once
+    // the state below is gone there is nothing left to send it with.
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+    clearSignedInState();
+  }, [clearSignedInState]);
+
+  // A request refused because the session is gone — expired, or cancelled
+  // from another device by "Sign out everywhere" (see lib/api.js, which
+  // dispatches this from the one place every request passes through).
+  //
+  // Without it the revocation worked and the app never noticed: the cached
+  // account stayed on screen above a store that would not load, with no
+  // prompt to sign in and nothing saying why. On a shared machine that is
+  // also someone else's data still rendered.
+  useEffect(() => {
+    const onExpired = () => {
+      // A dashboard fires half a dozen requests at once and every one of them
+      // 401s. Guarded on `user` so the clear runs once and the seller gets
+      // one sentence rather than six.
+      if (!user) return;
+      clearSignedInState();
+      toast("You’ve been signed out — sign in again to pick up where you "
+            + "left off.", { kind: "warning" });
+    };
+    window.addEventListener("auth:expired", onExpired);
+    return () => window.removeEventListener("auth:expired", onExpired);
+  }, [user, clearSignedInState, toast]);
 
   // ---------- OAuth redirect landing (eBay + generic marketplaces) ----------
   useEffect(() => {

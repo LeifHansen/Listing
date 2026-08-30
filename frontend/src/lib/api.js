@@ -25,6 +25,18 @@ export async function startConnect(path) {
 // covered automatically.
 const AI_PHOTO_RE = /^\/api\/(upload|upload-more|bulk\/upload|shelf-scan|identify)/;
 
+// Endpoints that CHECK A PASSWORD. Their 401 means "wrong password", not
+// "your session is gone", and the two must not be confused: signing the
+// seller out on a mistyped password would close the dialog they are in the
+// middle of, which is exactly what the delete-account journey caught when
+// this list held only the two auth routes.
+//
+// A password check is the only 401 in the app that is not about the session,
+// so the list is the set of routes that take one — sign-in, sign-up, and the
+// re-authentication that guards account deletion.
+const PASSWORD_CHECK_RE =
+  /^\/api\/(auth\/(login|signup)|account\/delete)/;
+
 // The answer itself lives in lib/aiConsent, so the "a browser that cannot
 // remember a yes has not given one" rule can be tested without standing up
 // this module's fetch, timeout and token machinery. Re-exported because
@@ -162,6 +174,23 @@ export async function api(path, opts = {}) {
     // open the buy-tokens dialog on top of whatever toast the caller shows.
     if (res.status === 402 && /token/i.test(String(detail))) {
       try { window.dispatchEvent(new CustomEvent("tokens:needed", { detail })); } catch (e) {}
+    }
+    // The session is gone: expired, or cancelled from another device by the
+    // "Sign out everywhere" this branch added. Nothing in the client used to
+    // read this, so the cached account stayed on screen above a store that
+    // would not load, with no prompt to sign in and nothing saying why. The
+    // revocation worked; the app never noticed.
+    //
+    // An event rather than a store import, for the reason the 402 above uses
+    // one: this is the choke point every request goes through and it must not
+    // depend on React. The caller's own error path still runs -- this only
+    // adds the one conclusion no single caller is in a position to draw.
+    //
+    // Password checks are exempt: their 401 is a mistyped password, which the
+    // form itself says better, and signing someone out over one would close
+    // the dialog they are in the middle of. See PASSWORD_CHECK_RE.
+    if (res.status === 401 && !PASSWORD_CHECK_RE.test(path)) {
+      try { window.dispatchEvent(new CustomEvent("auth:expired", { detail })); } catch (e) {}
     }
     // The sentence the server wrote IS the message. Prefixing the status was
     // right when `detail` was a raw exception string and the number was the
