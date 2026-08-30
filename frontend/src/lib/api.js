@@ -1,3 +1,6 @@
+import {
+  ensureAiConsent, grantAiConsent, hasAiConsent,
+} from "@/lib/aiConsent";
 import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
 
 // Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
@@ -22,34 +25,11 @@ export async function startConnect(path) {
 // covered automatically.
 const AI_PHOTO_RE = /^\/api\/(upload|upload-more|bulk\/upload|shelf-scan|identify)/;
 
-const AI_CONSENT_KEY = "thryft-ai-consent";
-
-export function hasAiConsent() {
-  try { return localStorage.getItem(AI_CONSENT_KEY) === "yes"; } catch (e) { return true; }
-}
-
-export function grantAiConsent() {
-  try { localStorage.setItem(AI_CONSENT_KEY, "yes"); } catch (e) {}
-}
-
-// Resolves once the user has agreed (now, or previously); rejects if they
-// decline. The dialog itself lives in the app shell — this just raises the
-// "ai-consent:needed" event and waits for its verdict.
-function ensureAiConsent() {
-  if (hasAiConsent()) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const detail = {
-      accept: () => { grantAiConsent(); resolve(); },
-      decline: () => reject(new Error(
-        "Photos aren't analyzed without your OK — you can agree any time.")),
-    };
-    try {
-      window.dispatchEvent(new CustomEvent("ai-consent:needed", { detail }));
-    } catch (e) {
-      resolve(); // no listener/some exotic browser — never brick the app
-    }
-  });
-}
+// The answer itself lives in lib/aiConsent, so the "a browser that cannot
+// remember a yes has not given one" rule can be tested without standing up
+// this module's fetch, timeout and token machinery. Re-exported because
+// callers already import it from here.
+export { grantAiConsent, hasAiConsent };
 
 // How long any one request may take before the client stops waiting. Photo
 // work on a shared machine is the slow case: an inference queued behind a
