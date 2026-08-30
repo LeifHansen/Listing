@@ -125,6 +125,31 @@ def test_a_working_conditions_lookup_says_it_checked(client, monkeypatch):
     assert res.json()["conditions"] == [{"id": "1000"}]
 
 
+def test_the_etsy_lookups_keep_the_shop_id_out_of_the_message(client, monkeypatch):
+    """Etsy's own httpx error carries the API base, the path AND the seller's
+    shop_id — the id is in the URL of every shop-scoped call."""
+    main, api = client
+    monkeypatch.setattr(main.config, "etsy_oauth_ready", lambda: True)
+    provider = main.marketplaces.get("etsy")
+    monkeypatch.setattr(type(provider), "creds_for",
+                        lambda self, uid: {"access_token": "tok",
+                                           "shop_id": "48211337",
+                                           "settings": {}})
+
+    def _boom(*a, **k):
+        raise httpx.HTTPStatusError(
+            "Client error '403 Forbidden' for url "
+            "'https://openapi.etsy.com/v3/application/shops/48211337/"
+            "shipping-profiles'", request=None, response=None)
+    monkeypatch.setattr(main.etsy_auth, "list_shipping_profiles", _boom)
+
+    res = api.get("/api/etsy/settings-options")
+    assert res.status_code == 502
+    shown = res.json()["detail"]
+    assert "48211337" not in shown and "openapi.etsy.com" not in shown, shown
+    assert re.search(r"[0-9a-f]{8}", shown)
+
+
 def test_a_working_lookup_is_untouched(client, monkeypatch):
     main, api = client
     monkeypatch.setattr(main.taxonomy, "suggest", lambda *a, **k: {

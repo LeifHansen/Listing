@@ -5807,7 +5807,10 @@ def etsy_settings_options(request: Request) -> dict:
         policies = etsy_auth.list_return_policies(
             creds["access_token"], creds["shop_id"])
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Etsy couldn't list your shop's options: {exc}") from exc
+        # `str(exc)` here is httpx's, so it carries the Etsy API base, the
+        # path and the seller's own shop_id. Same rule as the eBay lookups.
+        raise _lookup_failed("load your Etsy shop's shipping and return "
+                             "options", exc) from exc
     settings = creds.get("settings") or {}
     return {
         "shipping_profiles": profiles,
@@ -5852,7 +5855,8 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
     try:
         return etsy_service.suggest_taxonomy(listing)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Etsy category suggestion failed: {exc}") from exc
+        raise _lookup_failed("work out an Etsy category for this listing",
+                             exc) from exc
 
 
 def _flow_cookie(marketplace: str) -> str:
