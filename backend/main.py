@@ -87,6 +87,72 @@ app.add_middleware(
 )
 
 
+# The response headers a browser needs in order to defend the seller, none of
+# which were being sent. Assembled once — they are the same on every response.
+#
+# CSP is the load-bearing one and it is deliberately not maximal. 'unsafe-
+# inline' stays in script-src because index.html carries an inline script (it
+# applies the saved theme before first paint to avoid a light-mode flash) and
+# Vite inlines a small module preload shim; a hash would have to be recomputed
+# on every build, and a policy that breaks the app on deploy is worse than a
+# partial one. Even so, `default-src 'self'` and this script-src stop a
+# reflected payload from LOADING a remote script or calling eval, which is the
+# usual next step after an injection. Tightening to a nonce is worth doing and
+# wants its own change.
+#
+# style-src allows inline because Tailwind and React set element styles
+# directly. img-src allows https: because listings legitimately show
+# eBay-hosted photos (i.ebayimg.com), and data:/blob: because the photo editor
+# works on canvas output before anything is uploaded.
+_CSP = "; ".join((
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' https: data: blob:",
+    "connect-src 'self' https:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    # Clickjacking: the app has publish and delete buttons, so being framed
+    # by another site is never legitimate. X-Frame-Options below says the
+    # same thing for browsers that predate frame-ancestors.
+    "frame-ancestors 'none'",
+))
+
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": _CSP,
+    "X-Frame-Options": "DENY",
+    # Stops a browser guessing that an uploaded file is HTML and running it.
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    # Nothing here needs these. `camera=(self)` rather than `()` because the
+    # upload buttons use <input capture="environment">, which some browsers
+    # gate on the camera policy even though it is only a file picker.
+    "Permissions-Policy": ("camera=(self), microphone=(), geolocation=(), "
+                           "payment=(), usb=(), interest-cohort=()"),
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Attach the security headers to every response.
+
+    HSTS is added only when the request actually arrived over HTTPS: sending
+    it on a plain-HTTP local run would pin developers' browsers to https://
+    localhost, which nothing here serves.
+    """
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if request.url.scheme == "https" or forwarded == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains")
+    return response
+
+
 @app.exception_handler(errors.StorageUnavailable)
 async def _storage_unavailable(request: Request, exc: errors.StorageUnavailable):
     """A write that did not commit answers 503, everywhere, automatically.
