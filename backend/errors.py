@@ -23,3 +23,19 @@ class StorageUnavailable(Exception):
     connection that exists sends the seller to reconnect an account that is
     fine, which cannot help and re-arms the same failure on the next attempt.
     """
+
+
+class InvalidSessionId(ValueError):
+    """A session id outside the one accepted form (storage.safe_session_name).
+
+    Subclasses ValueError so every existing `pytest.raises(ValueError)` and
+    every caller that already treats a bad id as a value error keeps working;
+    the distinct type exists so the API can answer 400 without catching
+    ValueError broadly. That breadth matters here: services.ebay_trading's
+    TradingError is also a ValueError, and mapping every one of those to 400
+    would turn eBay's own refusals into "bad request".
+
+    It lives beside StorageUnavailable for the same reason -- a FastAPI
+    exception handler is registered against the class OBJECT, so a module
+    reload that minted a fresh class would silently unbind the handler.
+    """

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import config
 from .config import log
+from .errors import InvalidSessionId
 from .models import Listing
 
 
@@ -59,7 +60,10 @@ def safe_session_name(session_id: str) -> str:
     ValueError on anything outside the accepted form.
     """
     if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
-        raise ValueError("invalid session id")
+        # InvalidSessionId is a ValueError, so callers that already catch one
+        # are unchanged; the distinct type is what lets the API answer 400
+        # instead of letting this escape as a 500.
+        raise InvalidSessionId("invalid session id")
     return session_id
 
 

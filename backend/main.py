@@ -153,6 +153,26 @@ async def _security_headers(request: Request, call_next):
     return response
 
 
+@app.exception_handler(errors.InvalidSessionId)
+async def _invalid_session_id(request: Request, exc: errors.InvalidSessionId):
+    """A session id outside the accepted form answers 400, not 500.
+
+    Making safe_session_name REJECT rather than rewrite (the fix for the
+    ownership bypass) meant a malformed id raised out of whatever handler
+    touched storage, and every one of them returned "Internal Server Error".
+    Wrong on both counts: the caller sent something bad, which is a 400, and
+    dressing it as a server fault buries real 500s under scanner noise —
+    these routes need no login, so junk ids arrive constantly.
+
+    Handled centrally for the same reason as StorageUnavailable: a route
+    added later cannot forget to.
+    """
+    log.info("rejected an invalid session id on %s %s",
+             request.method, request.url.path)
+    return JSONResponse(status_code=400,
+                        content={"detail": "That listing id isn't valid."})
+
+
 @app.exception_handler(errors.StorageUnavailable)
 async def _storage_unavailable(request: Request, exc: errors.StorageUnavailable):
     """A write that did not commit answers 503, everywhere, automatically.

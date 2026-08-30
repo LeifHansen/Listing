@@ -102,3 +102,43 @@ def test_the_victims_own_id_still_404s_for_a_stranger(app_client):
                        json={"session_id": VICTIM, "name": "img_000.jpg"})
     assert resp.status_code == 404, resp.text
     assert photo.exists()
+
+
+# ------------------------------------------- a malformed id is a 400, not a 500
+
+MALFORMED = ["bad..id", "a b", "../../etc/passwd", "id%2e", ""]
+
+
+@pytest.mark.parametrize("bad", MALFORMED)
+def test_a_malformed_id_is_a_client_error(app_client, bad):
+    """Making safe_session_name REJECT rather than rewrite is what closed the
+    bypass above — but a rejection has to reach the caller as "you sent
+    something bad", not as "the server broke".
+
+    Both counts matter. It IS the caller's error, and dressing it as a server
+    fault buries real 500s under scanner noise: these routes need no login, so
+    junk ids arrive constantly.
+    """
+    client, photo = app_client
+
+    for resp in (
+        client.post("/api/delete-image",
+                    json={"session_id": bad, "name": "img_000.jpg"}),
+        client.post(f"/api/save/{bad}", json={"title": "x"}),
+        client.get(f"/media/{bad}/optimized/img_000.jpg"),
+    ):
+        assert resp.status_code != 500, f"{bad!r} -> 500: {resp.text[:120]}"
+        assert 400 <= resp.status_code < 500, f"{bad!r} -> {resp.status_code}"
+
+    assert photo.exists()
+
+
+def test_the_rejection_says_nothing_about_the_server(app_client):
+    """A 400 body that leaked a traceback or a path would hand back exactly
+    the detail the id rule exists to protect."""
+    client, _ = app_client
+    body = client.post("/api/delete-image",
+                       json={"session_id": "bad..id", "name": "x.jpg"}).text
+
+    for leak in ("Traceback", "/data/", "sessions/", "storage.py"):
+        assert leak not in body, leak
