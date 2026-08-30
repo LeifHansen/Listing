@@ -510,6 +510,78 @@ if (signedIn) {
   problems.push(['a held-back edit is a question, not silence', conflict]);
 }
 
+// --- a store from another eBay account is explained, and unlinked ----------
+//
+// P0-04's user-facing half. A seller who connects a SECOND eBay account has
+// records here that belong to the first one, and this app deliberately leaves
+// them alone -- it will not sync, edit or end a listing on a store the
+// current token does not own. Left unexplained that reads as the app losing
+// track of the seller's listings.
+//
+// The banner counts in SQL over the whole store; the button that answers it
+// releases at most one pass' worth. So the second thing this asks is whether
+// a partial unlink SAYS it was partial: without that, the banner simply
+// returns with a smaller number and no reason, which is how a seller learns
+// to distrust the button.
+const foreign = [];
+if (signedIn) {
+  let released = 0;
+  // This journey claims a connection the server does not have, so the panels
+  // that then ask eBay for policies and a ship-from location are answered
+  // 400 by the real backend. That is this test's doing, not the app's.
+  // Scoped here and cleared straight after; the assertions below are about
+  // what the screen SAYS, which those 400s do not touch.
+  expected = /400 \(Bad Request\)/;
+  try {
+    await page.route('**/api/ebay/status', (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ connected: true, username: 'current-seller',
+                             foreign_listings: released ? 0 : 4,
+                             unowned_listings: 0, oauth_missing: [] }),
+    }));
+    await page.route('**/api/ebay/release-foreign-listings', (r) => {
+      released += 1;
+      return r.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ released: 3, released_unowned: 0,
+                               remaining: 1 }) });
+    });
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    await visit(page, 'Settings', foreign);
+    await page.waitForTimeout(1500);
+
+    const before = (await page.textContent('body')) || '';
+    if (!/isn.t the one connected/i.test(before)) {
+      foreign.push('listings from another eBay account were not explained');
+    }
+    if (!/4 listings/i.test(before)) {
+      foreign.push('the banner did not say how many');
+    }
+    const unlink = page.getByRole('button', { name: /Unlink from the old account/ });
+    if (!await unlink.count()) {
+      foreign.push('nothing offered a way out of the old account');
+    } else {
+      await unlink.first().click();
+      // Its own confirm first: unlinking drops the eBay link on real records.
+      await page.getByRole('button', { name: 'Unlink them' }).first().click();
+      await page.waitForTimeout(1500);
+      const after = (await page.textContent('body')) || '';
+      if (!/still to go|press it again/i.test(after)) {
+        foreign.push('a partial unlink reported itself as a finished one');
+      }
+      if (released !== 1) {
+        foreign.push(`the unlink reached the server ${released} times, expected 1`);
+      }
+    }
+  } catch (e) {
+    foreign.push(`foreign account: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute('**/api/ebay/release-foreign-listings').catch(() => {});
+  await page.unroute('**/api/ebay/status').catch(() => {});
+  foreign.push(...drain());
+  expected = null;
+  problems.push(['another account\'s listings are explained', foreign]);
+}
+
 // --- deleting an account asks, warns, and takes a password ------------------
 //
 // The most irreversible button in the app, and the two things that guard it
