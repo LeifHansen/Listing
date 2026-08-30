@@ -66,9 +66,29 @@ describe("a page that is not the whole store", () => {
   it("claims no total it did not count", () => {
     const v = listingsView({ loaded: true, user: USER, count: 3000,
                              truncated: true });
-    // "3000 of 4127" would be an invented number: the endpoint asks for one
-    // row more than it returns, so it knows there are more and not how many.
+    // Unchanged in substance, narrowed in scope. The endpoint asks for one
+    // row more than it returns, so `truncated` costs nothing and arrives on
+    // every load; the COUNT only runs for the seller past the cap and can
+    // fail on its own. With no `total`, "3000 of 4127" would still be an
+    // invented number.
     expect(v.notice).not.toMatch(/of \d+/);
+  });
+
+  it("says what the page was cut from when the store was counted", () => {
+    const v = listingsView({ loaded: true, user: USER, count: 3000,
+                             truncated: true, total: 4127 });
+    expect(v.notice).toContain("3,000 of 4,127");
+    // Still the part that matters most: the checkboxes run over the page.
+    expect(v.notice.toLowerCase()).toContain("bulk actions");
+  });
+
+  it("ignores a total that cannot be true", () => {
+    // A total smaller than the page it is describing is not a total; the
+    // honest notice is the one that names no number at all.
+    const v = listingsView({ loaded: true, user: USER, count: 3000,
+                             truncated: true, total: 12 });
+    expect(v.notice).not.toMatch(/of \d+/);
+    expect(v.notice).toMatch(/more than we can show/i);
   });
 });
 

@@ -14,7 +14,7 @@
  */
 export function listingsView({
   loading = false, loaded = false, error = "", dbConfigured = true,
-  user = null, count = 0, truncated = false,
+  user = null, count = 0, truncated = false, total = null,
 } = {}) {
   if (loading && !loaded) return { kind: "loading" };
   if (!dbConfigured) return { kind: "no-db" };
@@ -46,18 +46,29 @@ export function listingsView({
   // tell it was cut. Same rule as the awaiting-shipment list and the sampled
   // status sweep -- say what could not be shown, and don't invent the rest.
   //
-  // No total, deliberately: the endpoint asks for one row more than it
-  // returns rather than paying for a COUNT(*) on the busiest screen in the
-  // app, so it knows there ARE more and not how many. Saying "some" honestly
-  // beats naming a number nobody counted.
+  // The total is named only when somebody counted one. The endpoint asks for
+  // one row more than it returns -- free, on every load -- so `truncated`
+  // always arrives; the COUNT(*) behind `total` runs only for the seller
+  // actually past the cap, and can fail on its own. Absent, or smaller than
+  // the page it claims to describe, it is left out entirely: "there are more"
+  // is honest, and a number nobody counted is not.
+  const named = Number.isFinite(total) && total > count;
   return {
     kind: "list",
     notice: truncated
-      ? "This is the most recent " + count + " of your listings — there are "
-        + "more than we can show on one page. Bulk actions here apply only to "
-        + "what's shown."
+      ? (named
+        ? "This is the most recent " + fmt(count) + " of " + fmt(total)
+          + " listings — more than we can show on one page."
+        : "This is the most recent " + count + " of your listings — there are "
+          + "more than we can show on one page.")
+        + " Bulk actions here apply only to what's shown."
       : "",
   };
+}
+
+/** Thousands separators, so "3,000 of 4,127" reads as two numbers. */
+function fmt(n) {
+  return Number(n).toLocaleString("en-US");
 }
 
 

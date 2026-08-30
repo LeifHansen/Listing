@@ -355,6 +355,10 @@ export function AppProvider({ children }) {
         // so this is what stops them reading as complete. See
         // lib/listingsView.
         truncated: !!res.truncated,
+        // How many there are, when the server was able to count. Only sent
+        // for a page that WAS cut, and null when the count itself failed --
+        // `listingsView` names it only if it arrived. See lib/listingsView.
+        total: Number.isFinite(res.total) ? res.total : null,
       });
     } catch (e) {
       // Recorded, not just toasted: the toast is gone in seconds, the view

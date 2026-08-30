@@ -4443,9 +4443,26 @@ def listings(request: Request, limit: int = LIST_CAP) -> dict:
     # invented.
     rows = db.list_listings(limit=limit + 1, user_id=user["id"]) if user else []
     items, truncated = rows[:limit], len(rows) > limit
+    # And, only for the seller who is actually past the cap, how many there
+    # are. The probe row above still decides -- free, on every load -- so
+    # nobody under the cap pays for this; the rare seller over it gets
+    # "3,000 of 4,812" instead of "there are more", which is the difference
+    # between a page that admits it was cut and one that says what from.
+    #
+    # Tolerant on purpose, and the only read on this route that is: the answer
+    # is already honest without a total, so a count that could not be taken
+    # costs the sentence a number rather than costing the seller a truth. A
+    # guessed one would do the opposite.
+    total = None
+    if truncated:
+        try:
+            total = db.count_listings(user["id"])
+        except errors.StorageUnavailable as exc:
+            log.info("listings: couldn't count the store for user=%s: %s",
+                     user["id"], exc)
     return {"listings": [_projected_for_list(r) for r in items],
             "db": db.db_status(), "authed": bool(user),
-            "truncated": truncated}
+            "truncated": truncated, "total": total}
 
 
 def _live_ebay_id_map(items: list) -> dict:
