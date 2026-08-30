@@ -398,6 +398,118 @@ if (signedIn) {
   problems.push(['the rest of the store can be reached', paging]);
 }
 
+// --- an edit held back from eBay is a question, not silence ----------------
+//
+// P0-08's user-facing half, and the only part of it a browser can answer. The
+// three-way merge is right to send NEITHER value when the seller and eBay
+// both changed a field -- picking one silently is how a fix made in Seller
+// Hub gets overwritten by a stale copy -- but refusing to choose is only half
+// an answer. The seller edited a title here, pressed Update, was told "Your
+// eBay listing has been updated", and their title never left the building.
+//
+// So: the question has to be ON SCREEN, above the fold, with both values and
+// a way to answer; the answer has to reach the server; and a refused answer
+// has to say so, because a "keep mine" that did not persist means the
+// seller's value is STILL not going to eBay, which is the silence this
+// exists to end.
+//
+// The listing is served by page.route(). Everything under test is real: the
+// editor, the banner, the click, the request it makes and what the screen
+// does with each reply.
+const conflict = [];
+if (signedIn) {
+  const LID = 'conflicted-1';
+  const listing = { title: 'Vintage denim jacket', price: 48, quantity: 1 };
+  const CONFLICTS = [{ field: 'title', label: 'Title',
+                       mine: 'Vintage denim jacket',
+                       ebay: 'Vintage Levis denim jacket 1980s' }];
+  let resolveCalls = 0;
+  try {
+    // Three patterns, most specific registered LAST: Playwright consults
+    // handlers newest-first, and `*` in a glob does not cross a `/` -- so
+    // `**/api/listings*` matches the list and its query string but never
+    // `/api/listings/<id>`, which is how the first version of this quietly
+    // talked to the real server instead.
+    await page.route('**/api/listings*', (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        listings: [{ id: LID, user_id: 'u', status: 'published', listing }],
+        authed: true, db: { configured: true, connected: true },
+        truncated: false, total: 1, next_cursor: null }),
+    }));
+    await page.route('**/api/listings/*', (r) => r.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ id: LID, user_id: 'u', status: 'published',
+                             listing, conflicts: CONFLICTS }),
+    }));
+    // The first answer is refused, because "it saved" is the easy half.
+    await page.route(`**/api/listings/${LID}/resolve-conflict`, (r) => {
+      resolveCalls += 1;
+      if (resolveCalls === 1) {
+        return r.fulfill({ status: 503, contentType: 'application/json',
+          body: JSON.stringify({ detail: "Couldn't save that choice just now. "
+                                         + "Try again in a moment." }) });
+      }
+      return r.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ok: true, listing, conflicts: [],
+          message: "Saved. It'll go to eBay the next time you update this "
+                   + "listing." }) });
+    });
+    expected = /503|resolve-conflict/;
+
+    await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    await page.getByRole('button', { name: 'Sell' }).first().click();
+    await page.waitForTimeout(1500);
+    await page.getByText('Vintage denim jacket').first().click();
+    await page.waitForTimeout(2000);
+
+    const editor = (await page.textContent('body')) || '';
+    if (!/changed in two places/i.test(editor)) {
+      conflict.push('an edit held back from eBay was not raised with the seller');
+    }
+    // Both values, because the choice is not answerable without them.
+    if (!editor.includes('Vintage Levis denim jacket 1980s')) {
+      conflict.push("the banner did not show what eBay's copy says");
+    }
+    const keepMine = page.getByRole('button', { name: /Keep your/ });
+    if (!await keepMine.count()) {
+      conflict.push('the question was raised with no way to answer it');
+    } else {
+      // A refused answer must not read as a settled one.
+      await keepMine.first().click();
+      await page.waitForTimeout(1500);
+      const afterFail = (await page.textContent('body')) || '';
+      if (!/couldn.t save that choice/i.test(afterFail)) {
+        conflict.push('an answer the server refused was not reported as refused');
+      }
+      if (!/changed in two places/i.test(afterFail)) {
+        conflict.push('a refused answer cleared the question anyway');
+      }
+      // And the retry settles it.
+      await page.getByRole('button', { name: /Keep your/ }).first().click();
+      await page.waitForTimeout(1500);
+      const afterOk = (await page.textContent('body')) || '';
+      if (/changed in two places/i.test(afterOk)) {
+        conflict.push('an answered conflict stayed on screen');
+      }
+      if (!/go to eBay the next time/i.test(afterOk)) {
+        conflict.push('nothing told the seller what happens to their answer');
+      }
+    }
+    if (resolveCalls !== 2) {
+      conflict.push(`the answer reached the server ${resolveCalls} times, expected 2`);
+    }
+  } catch (e) {
+    conflict.push(`conflict: ${e.message.slice(0, 200)}`);
+  }
+  await page.unroute(`**/api/listings/${LID}/resolve-conflict`).catch(() => {});
+  await page.unroute('**/api/listings/*').catch(() => {});
+  await page.unroute('**/api/listings*').catch(() => {});
+  conflict.push(...drain());
+  expected = null;
+  problems.push(['a held-back edit is a question, not silence', conflict]);
+}
+
 // --- deleting an account asks, warns, and takes a password ------------------
 //
 // The most irreversible button in the app, and the two things that guard it
