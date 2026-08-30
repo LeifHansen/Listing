@@ -73,3 +73,45 @@ describe("a timed-out request", () => {
     expect(err.message).toMatch(/check before trying again/i);
   });
 });
+
+/**
+ * The same question, one branch down.
+ *
+ * A timeout is not the only way a request ends without an answer. A dropped
+ * connection, a machine restarting mid-request, a phone changing networks —
+ * fetch rejects with a TypeError rather than an AbortError, and that branch
+ * said, for every method: "Network error — the server may be starting up. Try
+ * again in a few seconds."
+ *
+ * On a POST that publishes a listing or buys a shipping label, "try again" is
+ * the one instruction that can cost money. The browser cannot tell a request
+ * that never left from one whose reply was lost, so a write has to assume the
+ * second — the same asymmetry the Trading client applies on the server side.
+ */
+function failFetch() {
+  vi.stubGlobal("fetch", () => Promise.reject(
+    new TypeError("Failed to fetch")));
+}
+
+describe("what a dropped connection may tell the seller", () => {
+  it("does not tell a write to just try again", async () => {
+    failFetch();
+    const err = await api("/api/ebay/shipping-label", { method: "POST" })
+      .then(() => null, (e) => e);
+    expect(err).toBeTruthy();
+    expect(err.message.toLowerCase()).not.toMatch(/try again in a few seconds/);
+    expect(err.message.toLowerCase()).toMatch(/check/);
+  });
+
+  it("still tells a read to try again", async () => {
+    failFetch();
+    const err = await api("/api/listings").then(() => null, (e) => e);
+    expect(err.message.toLowerCase()).toMatch(/try again/);
+  });
+
+  it("treats a method-less call as the read it is", async () => {
+    failFetch();
+    const err = await api("/api/listings", {}).then(() => null, (e) => e);
+    expect(err.message.toLowerCase()).toMatch(/try again/);
+  });
+});

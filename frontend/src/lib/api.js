@@ -129,8 +129,19 @@ export async function api(path, opts = {}) {
             + "don't end up doing it twice.",
         { cause: e });
     }
+    // Not a timeout: the connection itself failed — dropped mid-request, a
+    // machine restarting, a phone changing networks. Same question as the
+    // branch above, and the same answer, because the browser cannot tell a
+    // request that never left from one whose reply was lost. Saying "try
+    // again in a few seconds" to someone whose label purchase or publish may
+    // already have gone through is how they pay twice.
     throw new Error(
-      "Network error — the server may be starting up. Try again in a few seconds.",
+      isRepeatable(opts.method)
+        ? "Network error — the server may be starting up. Try again in a "
+          + "few seconds."
+        : "The connection dropped before we heard back, so we can't tell "
+          + "whether it went through. Check before trying again, so you "
+          + "don't end up doing it twice.",
       { cause: e });
   } finally {
     if (timer) clearTimeout(timer);
