@@ -8,7 +8,10 @@ none at all, which is exactly why neither of these regressions was visible.
     read a lower cap than every other consumer of the list, so a seller with
     more listings than that cap was told they were about to lose fewer than
     they have — live ones included, which stay up on eBay afterwards and are
-    the thing the dialog exists to warn about.
+    the thing the dialog exists to warn about. Raising it to the shared cap
+    only moved the boundary; the numbers are counted in SQL now, so the store
+    below is deliberately LARGER than any page this app hands out — a size no
+    cap can answer correctly.
 
   * /api/ebay/sync-listings rations eBay's per-day Trading quota through a
     cooldown. It asked for the cooldown before knowing whether it had any
@@ -47,8 +50,15 @@ def _rows(n: int, live_every: int = 2, user_id: str = "u1") -> list[dict]:
 
 @pytest.fixture()
 def summary_client(monkeypatch):
-    """A signed-in user whose store is larger than the old 1000 cap."""
-    store = _rows(main.LIST_CAP - 1)
+    """A signed-in user whose store is bigger than the app's largest page.
+
+    `LIST_CAP + 500`, not `LIST_CAP - 1`: the endpoint counts in SQL now, so
+    the interesting store is one no page can hold. The doubles below are the
+    counters for the same reason -- and `list_listings` is left deliberately
+    un-doubled, so a future rewrite that goes back to measuring a page fails
+    here rather than passing with a short answer.
+    """
+    store = _rows(main.LIST_CAP + 500)
 
     monkeypatch.setattr(main.auth, "current_user",
                         lambda request: {"id": "u1", "email": "a@b.co"})
@@ -56,18 +66,21 @@ def summary_client(monkeypatch):
                                                        "connected": True})
     monkeypatch.setattr(main.db, "get_ebay_account", lambda uid: {"refresh_token": "t"})
 
-    def _list(limit=50, user_id=None):
-        return [r for r in store if r["user_id"] == user_id][:limit]
+    def _count(user_id, statuses=None):
+        return sum(1 for r in store if r["user_id"] == user_id
+                   and (statuses is None or r["status"] in statuses))
 
-    monkeypatch.setattr(main.db, "list_listings", _list)
+    monkeypatch.setattr(main.db, "count_listings", _count)
     c = TestClient(main.app)
     c.store = store
     return c
 
 
 def test_summary_counts_the_whole_store(summary_client):
-    """Every other read of the list uses LIST_CAP. A summary that stops
-    earlier under-reports precisely the sellers with the most to lose."""
+    """No page bounds this. A summary that stops at one under-reports
+    precisely the sellers with the most to lose."""
+    assert len(summary_client.store) > main.LIST_CAP, (
+        "the point of this store is that no page in the app can hold it")
     body = summary_client.get("/api/account/summary").json()
     assert body["counted"] is True
     assert body["listings"] == len(summary_client.store)

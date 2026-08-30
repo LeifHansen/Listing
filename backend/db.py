@@ -582,6 +582,41 @@ def list_listings_best_effort(limit: int = 50,
         return []
 
 
+def count_listings(user_id: str,
+                   statuses: Optional[tuple[str, ...]] = None) -> int:
+    """How many listings this user has, optionally only in `statuses`.
+
+    RAISES on a read failure, for the same reason `list_listings` does and
+    with more at stake: the caller is the delete-account dialog, and a zero it
+    invented suppresses the "anything already published stays live on eBay"
+    warning that is the whole reason that dialog exists.
+
+    Counted in the database, not by measuring a page. The two numbers used to
+    come from `len(list_listings(limit=LIST_CAP))`, which fetched every
+    listing's JSON blob over a cross-region link to produce two integers --
+    and, worse, told a seller with more records than the cap that they were
+    about to erase fewer than they have, live ones included. There is no cap
+    that fixes that: a count is either a count or a floor with no label.
+    """
+    eng = _get_engine()
+    # No database configured is a configuration, not a failure -- nothing is
+    # persisted, so the store really is empty. Same rule as list_listings.
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            q = (select(func.count()).select_from(ListingRecord)
+                 .where(ListingRecord.user_id == user_id))
+            if statuses is not None:
+                q = q.where(ListingRecord.status.in_(statuses))
+            return int(s.execute(q).scalar_one() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: count_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t count your listings just now — this doesn’t mean you "
+            "don’t have any. Try again in a moment.") from exc
+
+
 def all_listing_ids() -> Optional[set[str]]:
     """Every known listing id — lets the app tell real listing dirs from
     orphaned bulk staging / abandoned uploads on disk. Returns None (not an

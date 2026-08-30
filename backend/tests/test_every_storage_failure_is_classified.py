@@ -95,6 +95,9 @@ MUST_RAISE = {
     "get_marketplace_account": "same, for every non-eBay marketplace",
     "save_ebay_account": "OAuth redirected to 'connected' on a token that was never stored",
     "count_pending_media_purges": "zero owed is a clean bill on somebody's erasure",
+    "count_listings":
+        "zero live listings is what suppresses the 'these stay up on eBay' "
+        "warning on the delete-account dialog",
     "get_listing":
         "returning None answered ten routes with 'Listing not found', and told "
         "the publish path a live listing was a brand-new session",

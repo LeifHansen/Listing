@@ -1418,24 +1418,28 @@ def account_summary(request: Request) -> dict:
     if not user:
         raise HTTPException(401, "Log in first.")
     counted = db.db_status().get("connected", False)
-    # LIST_CAP, not a number of its own: every other read of the store uses it,
-    # and a lower cap here would quietly under-report the very seller this
-    # dialog exists to warn — someone with more listings than the cap is told
-    # they are about to delete fewer than they have, live ones included.
+    # Counted in SQL, not measured off a page. These used to be
+    # `len(db.list_listings(limit=LIST_CAP))` and a Python sum over the same
+    # rows, which fetched every listing's whole JSON blob across a
+    # cross-region link to produce two integers -- and told a seller with more
+    # records than the cap that they were about to erase fewer than they have,
+    # live ones included. No cap fixes that; a count either counts or it is a
+    # floor with nothing saying so.
+    total = live = 0
     try:
-        rows = db.list_listings(limit=LIST_CAP, user_id=user["id"]) if counted else []
+        if counted:
+            total = db.count_listings(user["id"])
+            live = db.count_listings(user["id"], statuses=("published", "live"))
     except errors.StorageUnavailable:
         # db_status said connected and the read still failed. The endpoint's
         # own contract answers that: unknown, not zero. Zero here would
         # suppress the "these stay live on eBay after you delete" warning the
         # dialog exists to give.
-        rows, counted = [], False
-    live = sum(1 for r in rows
-               if (r.get("status") or "") in ("published", "live"))
+        total, live, counted = 0, 0, False
     return {
         "email": user.get("email", ""),
         "counted": counted,
-        "listings": len(rows),
+        "listings": total,
         "live_listings": live,
         "ebay_connected": bool((db.get_ebay_account(user["id"]) or {}).get("refresh_token")),
     }
