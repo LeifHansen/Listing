@@ -77,10 +77,10 @@ Where things stand, measured rather than remembered:
 
 | Suite | Result |
 | --- | --- |
-| Full backend (`pytest backend/tests`) | **1485 passed, 0 failed** |
-| A CI-`checks`-equivalent env (no image/AI stack) | **1033 passed, 35 skipped** |
-| The smoke job's API-tests step | **243 passed, 0 skipped** (it fails on a skip) |
-| Frontend Vitest | **14 files, 165 tests** |
+| Full backend (`pytest backend/tests`) | **1670 passed, 0 failed** |
+| A CI-`checks`-equivalent env (no image/AI stack) | **1164 passed, 45 skipped** |
+| The smoke job's API-tests step | **300 passed, 0 skipped** (it fails on a skip) |
+| Frontend Vitest | **18 files, 187 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
 The skips in the middle row are deliberate: those files `importorskip` the
@@ -308,6 +308,7 @@ account, which is the same cost as one restart used to be — and the last one.
 | P1-11 deploy gate (partial) | `1521558` | `deploy` gated production on the lightweight lint+unit job ALONE — cutout safety, the frontend build and the smoke test never gated a deploy, and `ci.yml` runs only on `pull_request` so a push to `main` ran none of them. Both now call one shared `gates.yml`. `superfly/flyctl-actions/setup-flyctl` was pinned off `@master` (it runs in the job holding `FLY_API_TOKEN`). **See the two operational consequences below.** |
 | P1-08 security headers (partial) | `46b89d3` | None of CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or Permissions-Policy were sent. Now all present, verified against the booted app. The CSP keeps `'unsafe-inline'` in script-src because index.html has an inline theme script — tightening to a nonce is worth its own change. The REST of P1-08 (revocable sessions, password reset/verify/MFA, distributed rate limiting, fail-closed keys) is untouched. |
 | P1-12 side-effect-free GET | `a8d8f0e` | A plain read downloaded up to 24 photos, wrote up to 48 files, started an R2 upload and wrote the DB row. Now `POST /api/listings/{id}/prepare-for-editing`, called by the frontend when the seller opens the editor. |
+| P2-01 the rename stops where the data starts | `d852f58` | The product is Thryft Shop and the code was written as QuickFlip, so the audit asks for the rename "with a compatibility migration for stored client keys and cryptographic context; do not break existing encrypted tokens." Three groups. **Renamed outright**, because nothing but people reads them: the frontend package name (and its lockfile, so `npm ci` still matches), the README heading and brand line, run.sh's comment, the two display strings in the bundled Lightroom preset. **Migrated**, because a browser is holding them: the seven localStorage keys. Renaming those alone resets a seller's theme, list/grid choice, remove-background default and publish targets on the first load after the release, and `bulk` holds the id of a RUNNING batch -- losing it strands a job the server is still processing with nothing on screen to watch it. `lib/localPrefs.js` reads the new key, falls back to the old, writes the value forward when the old one answered, and wraps every call, because localStorage THROWS rather than returning null in Safari with site data blocked. **Left alone, with the reason written beside them**, because they are values already recorded outside this code: `crypto._INFO` is the HKDF info string the token-encryption key derives from -- a different string is a different key, every stored refresh token stops decrypting, and `decrypt` returns "" by design, so the symptom is every connected seller silently signed out of eBay, Etsy and Depop at once with nothing logged as an error; and publish_guard's `qf-` prefix is stamped on live listings as `Item.SKU`, which is how a publish whose response was lost is recognised as ours on the next sync -- eBay holds the old value on everything already up, so a renamed prefix matches none of them and each imports again as a second card for an item the seller already has. Both break only for accounts that predate the change and pass every test written after it, so `test_the_rename_stops_at_stored_data.py` pins them against a ciphertext encrypted before the rename and a SKU in the form eBay is holding; verified by planting the rename (4 of its 5 tests fail). Also fixes the half already broken: index.html's pre-paint theme script cannot import localPrefs -- nothing has loaded yet -- and was still reading `quickflip-theme` while the toggle wrote `thryft-theme`. Since the store seeds its React state from the class that script sets rather than from storage, it is the only reader there is, so dark mode was simply off: every seller in light mode on every load, toggle agreeing, nothing failing. `theme-before-paint.test.js` asserts the two copies of that contract against the real files, reading the prefixes out of localPrefs rather than hardcoding them. |
 
 Still open:
 
@@ -393,6 +394,46 @@ Still open:
       dirty tracking. **Depop's revise has the same shape and the same
       reasoning**, with a pointer at its call site.
 
+### 4. The remaining P2 items, and which are actually open
+
+P2-01, P2-03 and P2-07 are closed (rows above). Of the rest:
+
+- [x] **P2-06 needs no change, and this is the check.** The audit warns that
+      eBay's Inventory Mapping API "should not become the synchronization
+      backbone": its default allowance is 20 calls a DAY, it is EBAY_US-only,
+      and Motors/Parts & Accessories are out of scope. This app never adopted
+      it. An inventory of every eBay host and path the backend calls turns up
+      Trading (`/ws/api.dll`), Taxonomy, Sell Account, Sell Inventory
+      (location only), Marketing, Fulfillment, Logistics and OAuth — no
+      mapping endpoint, under that name or any other. The finding is a
+      warning about a road not taken, so the honest status is "verified not
+      applicable", not "done".
+- [ ] **P2-02 URL routing.** Navigation is state-only: no deep links, no
+      back/forward, no reload-safe page state. Real and not attempted — it is
+      a rewrite of how every screen is reached, and it touches the one thing
+      (`store.jsx`) every other change on this branch also touches. Doing it
+      under time pressure alongside correctness fixes is how both get worse.
+- [ ] **P2-04 module size.** `backend/main.py` still holds the routes;
+      `SettingsView` and `store.jsx` are still large. Same reasoning, plus
+      the audit's own condition — "preserve behavior with characterization
+      tests before moving code" — which is a body of work before the first
+      line moves.
+- [ ] **P2-05 is half closed.** The code half (accuracy of the privacy policy
+      and terms) is done, in the two rows above. The presentation half is not
+      code: counsel review, a retention schedule, a legal identity and
+      address, and a support contact on a company domain rather than a
+      personal Gmail.
+- [ ] **P2-08 release-grade experience tests.** The unit suite is kept and
+      much extended (1670 tests, from 961). What the audit asks for on top is
+      not here: eBay Sandbox contract tests — impossible from this
+      environment, see the release posture below — and Playwright journeys
+      for first-run, settings partial outage, unknown publish outcome,
+      conflict resolution, deletion and reconnect. `scripts/smoke.mjs` walks
+      every screen and fails on a page error, a failed same-origin request, a
+      blank render or horizontal overflow on a phone, which is a real gate
+      but is not a journey: it never signs in, so every screen it visits is
+      the signed-out one.
+
 ## Release posture
 
 **Still not approved for external beta**, and the reasons have narrowed rather
@@ -401,7 +442,7 @@ than gone away.
 What is now true: all 8 P0 blockers are closed in code with regression tests
 written before each fix; P1-06, P1-07, P1-09 and P1-12 are closed outright;
 P1-01, P1-02, P1-03, P1-04, P1-05, P1-08 and P1-11 are partly closed (see the
-table above for exactly which halves); P2-03 and P2-07 are closed.
+table above for exactly which halves); P2-01, P2-03 and P2-07 are closed.
 
 What still blocks it:
 
