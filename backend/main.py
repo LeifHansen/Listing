@@ -4626,6 +4626,13 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     return res
 
 
+# How many still-live listings one status sweep re-checks. Each is its own
+# eBay round trip, so this is the per-run share of the account's daily quota
+# the background sweep is allowed to spend; the rest of the store is covered
+# by later syncs, because the sample is random rather than the first N.
+SWEEP_SAMPLE = int(os.getenv("EBAY_SWEEP_SAMPLE", "100") or "100")
+
+
 @app.post("/api/ebay/sync-listings")
 def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     """Reconcile our 'live' listings with eBay: a sold item is auto-archived
@@ -4694,8 +4701,18 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
         log.debug("ebay sync: per-item sweeps skipped (cooldown) for user=%s",
                   user["id"])
         live = []
-    if len(live) > 100:
-        live = random.sample(live, 100)
+    # A sweep is one eBay call per listing, so a big store is deliberately
+    # only sampled. Randomly, so every listing gets its turn across successive
+    # syncs rather than the same first 100 being re-checked forever.
+    #
+    # The count is REPORTED rather than left implicit. This is the pass a
+    # "full sync" appears to run, and answering only `checked` let a caller
+    # read partial coverage as complete -- so the response now says how many
+    # were eligible and whether it covered all of them. Nothing may describe
+    # this as a full sync while `partial` is true.
+    eligible = len(live)
+    if eligible > SWEEP_SAMPLE:
+        live = random.sample(live, SWEEP_SAMPLE)
     if live and creds:
         try:
             changed += listing_sync.refresh_statuses(
@@ -4709,7 +4726,13 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # loop that no longer exists. refresh_statuses does the archiving now and
     # reports only a change count, and nothing read the field — the frontend
     # uses `changed` alone — so it is gone rather than reported as a constant 0.
-    return {"checked": len(live) + len(handled), "changed": changed}
+    return {"checked": len(live) + len(handled), "changed": changed,
+            # What the sweep COULD have covered, and whether it did. `checked`
+            # alone reads as "that is the whole store" on a store where it is
+            # a sample of it.
+            "eligible": eligible + len(handled),
+            "partial": eligible > len(live),
+            "sample_size": SWEEP_SAMPLE}
 
 
 # Bounds one import run. A store bigger than this imports across repeated
