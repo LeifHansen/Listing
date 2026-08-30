@@ -59,11 +59,24 @@ function watch(page, errs) {
   });
 }
 
+/** Let the app finish reacting: no in-flight requests, then one paint.
+ *
+ * Every fixed `waitForTimeout` after a click is a bet on how fast the runner
+ * is, and this branch has now been bitten by that three times (see the traps
+ * list in REMEDIATION_STATUS). `networkidle` waits for the fetches the click
+ * started; the short sleep after it covers the React render they feed. Kept
+ * generous rather than tight -- it costs nothing when things are fast.
+ */
+async function settle(page, ms = 400) {
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(ms);
+}
+
 async function visit(page, view, errs) {
   const nav = page.getByRole('button', { name: view, exact: true }).first();
   await nav.waitFor({ state: 'visible', timeout: 10000 });
   await nav.click();
-  await page.waitForTimeout(1500);
+  await settle(page);
   const bodyText = (await page.textContent('body')) || '';
   if (bodyText.trim().length < 20) errs.push('rendered an empty page');
   return bodyText;
@@ -216,7 +229,7 @@ if (signedIn) {
       body: JSON.stringify({ detail: "We couldn't load your listings just now." }),
     }));
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(2000);
+    await settle(page);
 
     const dash = (await page.textContent('body')) || '';
     if (!/couldn.t check/i.test(dash)) {
@@ -229,7 +242,7 @@ if (signedIn) {
 
     // And the listings area itself, one card down and one click away.
     await page.getByRole('button', { name: /Active on eBay/ }).first().click();
-    await page.waitForTimeout(1500);
+    await settle(page);
     const list = (await page.textContent('body')) || '';
     if (!/couldn.t load your listings/i.test(list)) {
       outage.push('the listings area did not say the read failed');
@@ -274,7 +287,7 @@ if (signedIn) {
     }));
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
     await visit(page, 'Settings', prefsOut);
-    await page.waitForTimeout(1500);
+    await settle(page);
 
     const body = (await page.textContent('body')) || '';
     // Three panels each render this, so it survives one of them regressing --
@@ -303,7 +316,7 @@ if (signedIn) {
     // the honest answer is that nothing was saved. It used to say "Defaults
     // saved" -- a green tick, on a screen saying it could not read them.
     await page.getByRole('button', { name: 'Save defaults' }).first().click();
-    await page.waitForTimeout(1500);
+    await settle(page);
     const after = (await page.textContent('body')) || '';
     if (/defaults saved/i.test(after)) {
       prefsOut.push('Save reported "Defaults saved" having sent nothing');
@@ -355,7 +368,7 @@ if (signedIn) {
     // listings on screen its accessible name is no longer just "Sell" and the
     // exact match that walk uses stops finding it.
     await page.getByRole('button', { name: 'Sell' }).first().click();
-    await page.waitForTimeout(1500);
+    await settle(page);
 
     const first = (await page.textContent('body')) || '';
     if (!first.includes('2 of 4')) {
@@ -369,7 +382,7 @@ if (signedIn) {
       paging.push('a cut page offered no way to reach the rest of the store');
     } else {
       await more.first().click();
-      await page.waitForTimeout(1500);
+      await settle(page);
       const after = (await page.textContent('body')) || '';
       // Appended, not replaced: everything on this screen -- the tab counts,
       // the search, the bulk checkboxes -- reads the loaded list, so a page
@@ -459,9 +472,9 @@ if (signedIn) {
 
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
     await page.getByRole('button', { name: 'Sell' }).first().click();
-    await page.waitForTimeout(1500);
+    await settle(page);
     await page.getByText('Vintage denim jacket').first().click();
-    await page.waitForTimeout(2000);
+    await settle(page);
 
     const editor = (await page.textContent('body')) || '';
     if (!/changed in two places/i.test(editor)) {
@@ -477,7 +490,7 @@ if (signedIn) {
     } else {
       // A refused answer must not read as a settled one.
       await keepMine.first().click();
-      await page.waitForTimeout(1500);
+      await settle(page);
       const afterFail = (await page.textContent('body')) || '';
       if (!/couldn.t save that choice/i.test(afterFail)) {
         conflict.push('an answer the server refused was not reported as refused');
@@ -487,7 +500,7 @@ if (signedIn) {
       }
       // And the retry settles it.
       await page.getByRole('button', { name: /Keep your/ }).first().click();
-      await page.waitForTimeout(1500);
+      await settle(page);
       const afterOk = (await page.textContent('body')) || '';
       if (/changed in two places/i.test(afterOk)) {
         conflict.push('an answered conflict stayed on screen');
@@ -547,7 +560,7 @@ if (signedIn) {
     });
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
     await visit(page, 'Settings', foreign);
-    await page.waitForTimeout(1500);
+    await settle(page);
 
     const before = (await page.textContent('body')) || '';
     if (!/isn.t the one connected/i.test(before)) {
@@ -563,7 +576,7 @@ if (signedIn) {
       await unlink.first().click();
       // Its own confirm first: unlinking drops the eBay link on real records.
       await page.getByRole('button', { name: 'Unlink them' }).first().click();
-      await page.waitForTimeout(1500);
+      await settle(page);
       const after = (await page.textContent('body')) || '';
       if (!/still to go|press it again/i.test(after)) {
         foreign.push('a partial unlink reported itself as a finished one');
@@ -645,9 +658,9 @@ if (signedIn) {
 
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
     await page.getByRole('button', { name: 'Sell' }).first().click();
-    await page.waitForTimeout(1500);
+    await settle(page);
     await page.getByText('Copper kettle').first().click();
-    await page.waitForTimeout(2000);
+    await settle(page);
 
     const update = page.getByRole('button', { name: /Update Live Listing/ });
     if (!await update.count()) {
@@ -657,7 +670,7 @@ if (signedIn) {
       // It asks before spending a revise; the confirm is part of the flow.
       const go = page.getByRole('button', { name: /Update|Publish|Yes/ });
       if (await go.count() > 1) await go.last().click();
-      await page.waitForTimeout(2500);
+      await settle(page);
 
       const after = (await page.textContent('body')) || '';
       if (published < 1) {
@@ -720,7 +733,7 @@ if (signedIn) {
     }));
     await visit(page, 'Settings', del);
     await page.getByRole('button', { name: /Delete my account/ }).first().click();
-    await page.waitForTimeout(1200);
+    await settle(page);
 
     // Scoped to the dialog, not the page. The card BEHIND it carries the same
     // sentence permanently, so a body-wide match would pass on a dialog that
@@ -746,7 +759,7 @@ if (signedIn) {
     expected = /40[0-9]|account\/delete|account\/summary|503/;
     await page.locator('input[type=password]').last().fill('not-the-password');
     await confirmBtn.click();
-    await page.waitForTimeout(2000);
+    await settle(page);
     if (!await page.getByRole('button', { name: 'Delete permanently' }).count()) {
       del.push('the wrong password closed the dialog');
     }
@@ -757,7 +770,7 @@ if (signedIn) {
     // signed-out landing page -- which is the failure this journey exists to
     // catch, and the reason it uses a wrong password rather than the real one.
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    await settle(page);
     if (!((await page.textContent('body')) || '').includes(email)) {
       del.push('a refused delete took the account anyway');
     }
@@ -787,7 +800,7 @@ if (signedIn) {
       out.push('logged out, but the previous account is still on screen');
     }
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    await settle(page);
     if (((await page.textContent('body')) || '').includes(email)) {
       out.push('logged out, but a reload brought the previous account back');
     }
