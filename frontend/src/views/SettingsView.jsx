@@ -1311,8 +1311,14 @@ function ForeignListingsNotice() {
     try {
       const res = await postJson("/api/ebay/release-foreign-listings",
         unowned ? { include_unowned: true } : {});
-      toast(`Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`,
-        { kind: "success" });
+      // Each unlink is its own write, so one pass is bounded. A bounded run
+      // that reads like a finished one is the thing to avoid: the banner
+      // above would simply come back with a smaller number and no reason.
+      const left = res.remaining || 0;
+      toast(
+        `Unlinked ${res.released} listing${res.released === 1 ? "" : "s"}.`
+        + (left ? ` ${left} still to go — press it again to carry on.` : ""),
+        { kind: left ? "warning" : "success" });
       await Promise.all([loadEbayStatus(), loadListings()]);
     } catch (e) {
       toast(`Couldn't unlink them: ${e.message}`, { kind: "error" });

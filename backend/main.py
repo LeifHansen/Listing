@@ -1803,10 +1803,28 @@ def release_foreign_listings(request: Request,
     include_unowned = bool((payload or {}).get("include_unowned"))
     acct = db.get_ebay_account(uid) or {}
     connected = (acct.get("ebay_username") or "").strip()
+    # Selected in SQL, OLDEST first, rather than filtered out of the newest
+    # LIST_CAP records. The banner that offers this button counts in SQL over
+    # the whole store (db.count_foreign_listings), and a record from a
+    # previous account is by definition old -- so the page read here was
+    # precisely the wrong end of the store: the seller was told twelve
+    # listings were linked to the old account, pressed the button, and was
+    # told seven were unlinked, every time. One row past the cap, so a run
+    # that did part of the job can say so.
+    candidates = db.list_releasable_listings(uid, connected, include_unowned,
+                                             limit=RELEASE_CAP + 1)
     released = unowned = 0
-    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+    remaining = 0
+    for rec in candidates:
         data = rec.get("listing") or {}
+        # The SQL is a superset; this is still where the decision is made.
         if not ebay_account.releasable(data, connected, include_unowned):
+            continue
+        if released >= RELEASE_CAP:
+            # Each release is a write, and a request that walks an entire
+            # store outlives the gateway. Bounded, and the remainder reported
+            # rather than left looking like a finished run.
+            remaining += 1
             continue
         legacy = not listing_sync.account_of(data)
 
@@ -1816,8 +1834,10 @@ def release_foreign_listings(request: Request,
             if legacy:
                 unowned += 1
     log.info("release-foreign-listings: uid=%s released=%d (unowned=%d, "
-             "connected=%s)", uid, released, unowned, connected or "?")
-    return {"released": released, "released_unowned": unowned}
+             "remaining=%d, connected=%s)", uid, released, unowned, remaining,
+             connected or "?")
+    return {"released": released, "released_unowned": unowned,
+            "remaining": remaining}
 
 
 @app.get("/api/ebay/policies")
@@ -4358,6 +4378,10 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
 # import capped at 300 + 100 sold + 100 ended — a seller with 616 active
 # listings lost the overflow twice over, once on import and again on read.
 LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
+# How many listings one unlink pass may release. Each one is its own
+# write, so an unbounded pass over a switched-account store outlives the
+# gateway; the remainder is reported so a second press finishes the job.
+RELEASE_CAP = int(os.getenv("EBAY_RELEASE_CAP", "500") or "500")
 
 # Fields dropped from each record's `listing` by GET /api/listings ONLY.
 #

@@ -17,9 +17,8 @@ import time as _time
 import uuid as _uuid
 from typing import Optional, Sequence
 
-from sqlalchemy import (DateTime, Index, JSON, String, create_engine, delete,
-                        func,
-                        or_, select, text)
+from sqlalchemy import (DateTime, Index, JSON, String, and_, create_engine,
+                        delete, func, or_, select, text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -617,6 +616,60 @@ def get_listings(listing_ids: Sequence[str], user_id: str) -> list[dict]:
         raise StorageUnavailable(
             "We couldn’t look those listings up just now — they haven’t gone "
             "anywhere. Try again in a moment.") from exc
+
+
+def list_releasable_listings(user_id: str, account: str,
+                             include_unowned: bool = False,
+                             limit: int = 1000) -> list[dict]:
+    """Records the unlink pass should consider — oldest first.
+
+    RAISES on a read failure, like every other read whose blank would be a
+    claim: an empty answer here is reported to the seller as an unlink that
+    ran and found nothing, leaving the banner up with no explanation.
+
+    A deliberate SUPERSET of `ebay_account.releasable`, which stays the single
+    place the decision is made — this only narrows what has to be read. The
+    caller filters, so widening this can never release something the predicate
+    would refuse.
+
+    Oldest first because that is where the previous account's listings are: a
+    record from a store the seller has since disconnected has not been touched
+    since. The old pass read the newest LIST_CAP records and filtered, so on a
+    store past that cap it looked at precisely the wrong end — the banner
+    counted twelve in SQL and the button unlinked seven, every time.
+    """
+    account = (account or "").strip()
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            account_col = _json_text(ListingRecord.data, "ebay_account")
+            # Stamped with somebody else's name. The sentinel a switch writes
+            # is just another name, so it lands here too.
+            foreign = and_(account_col.is_not(None), account_col != "",
+                           account_col != account)
+            where = foreign
+            if include_unowned:
+                # No owner recorded at all. Not narrowed to records carrying
+                # an eBay id: `releasable` also accepts a `marketplaces.ebay`
+                # entry, and this query only has to be wide enough to contain
+                # every record that predicate would say yes to.
+                where = or_(foreign, or_(account_col.is_(None),
+                                         account_col == ""))
+            rows = s.execute(
+                select(ListingRecord)
+                .where(ListingRecord.user_id == user_id)
+                .where(where)
+                .order_by(ListingRecord.updated_at.asc())
+                .limit(limit)
+            ).scalars().all()
+            return [_record_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: list_releasable_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t check which listings belong to the old account just "
+            "now. Try again in a moment.") from exc
 
 
 def count_listings(user_id: str,

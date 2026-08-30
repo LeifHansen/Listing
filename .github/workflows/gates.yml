@@ -197,6 +197,7 @@ jobs:
                  backend/tests/test_a_publish_that_cannot_check_does_not_create.py \
                  backend/tests/test_a_count_is_not_capped_by_a_page_size.py \
                  backend/tests/test_a_bulk_action_looks_up_what_it_was_given.py \
+                 backend/tests/test_the_unlink_reaches_what_the_banner_counted.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
             echo "::error::API tests skipped in the only job that can run them"
