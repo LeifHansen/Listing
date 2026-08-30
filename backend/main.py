@@ -1614,6 +1614,12 @@ def ensure_policy(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "Unknown shipping service.")
     try:
         pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
+    except ebay_auth.PolicyLookupUnavailable as exc:
+        # eBay could not be asked what the account already has. 503 and not
+        # 502: nothing is wrong with the request, and the seller should retry
+        # rather than be told eBay refused something. Creating anyway is what
+        # left duplicate policies on real accounts.
+        raise HTTPException(503, str(exc)) from exc
     except ebay_auth.AccountApiError as exc:
         raise HTTPException(
             502, f"eBay couldn't create the policy: {exc.description}") from exc
@@ -1661,10 +1667,17 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     for kind, run in steps.items():
         try:
             pol = run()
-        except (ebay_auth.AccountApiError, httpx.HTTPError) as exc:
+        except (ebay_auth.AccountApiError, ebay_auth.PolicyLookupUnavailable,
+                httpx.HTTPError) as exc:
             # One policy eBay won't make must not cost the other two. The most
             # common reason is the account not being opted in yet, which is a
             # different button on the same screen.
+            #
+            # PolicyLookupUnavailable belongs here rather than aborting the
+            # run: it means this ONE kind could not be checked, and the other
+            # two may still be answerable. It is reported per-kind like any
+            # other failure, so the seller is told to retry that one instead
+            # of silently getting a duplicate.
             detail = getattr(exc, "description", "") or str(exc)
             log.warning("ensure-all-policies: %s failed for uid=%s: %s",
                         kind, _uid(request), detail)

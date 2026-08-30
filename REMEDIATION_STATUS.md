@@ -147,6 +147,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | --- | --- | --- |
 | P1-06 promotion consent | `97122c7` | Promoted Listings (COST_PER_SALE, 10% default rate) was enabled when the preference was ABSENT and when the prefs read RAISED — so silence and a database outage both counted as agreeing to a fee. Now off unless explicitly on. **This reverses a deliberate product choice** (the old default was on because sellers reported publishes landing unpromoted); the commit message says so. The UI mirrored the old default independently and was changed with it. |
 | P1-09 public surface | `e2ca586` | Anonymous `/api/health` returned 26 operator keys including raw DB/R2 exception text (Neon host and role, R2 account id). Moved to `/api/admin/diagnostics` behind `ADMIN_TOKEN`, which **fails closed**. `build` deliberately stays public — deploy.yml, deploy.sh and health-watch.yml all poll it. Also: an unconnected production publish no longer answers `ok: true` with the Trading XML and a server path. |
+| P1-07 never create-on-unknown (partial) | *this commit* | "Create my policies" collapsed "eBay says you have none" and "eBay could not be reached" into the same `None`, and created a policy either way — so every timeout minted another "Thryft Shop" policy on the seller's real eBay account, visible in Seller Hub and never cleaned up. The lookups are now three-state and refuse on unknown (503, "try again"). The REST of P1-07 (splitting Settings into independently saved sections, tri-state loading, previewing policy terms before creating them) is untouched. |
 | P2-03 unknown-outcome copy | *this commit* | Every timed-out request said "Nothing was lost — try again", including a publish or a delete that may already have reached eBay. Writes now say the outcome is unknown and to check first, which is the difference between a retry and a duplicate live listing. |
 | P1-05 privacy policy accuracy (partial) | *this commit* | The policy made three claims the code contradicted: that deletion "immediately" removes photos (the media purge runs after the response returns), that it "hands your marketplace authorizations back" (nothing revokes the OAuth grants), and that eBay deletion notices are merely "recorded for audit" keyed on nothing (they are now verified and acted on, keyed on eBay's immutable id). Stripe was also absent from the service-provider list despite processing token purchases. Copy now matches the implementation. **Not legal review** — the audit's ask for counsel review, retention schedule, legal identity and a company-domain contact is untouched. |
 | P1-11 deploy gate (partial) | *this commit* | `deploy` gated production on the lightweight lint+unit job ALONE — cutout safety, the frontend build and the smoke test never gated a deploy, and `ci.yml` runs only on `pull_request` so a push to `main` ran none of them. Both now call one shared `gates.yml`. `superfly/flyctl-actions/setup-flyctl` was pinned off `@master` (it runs in the job holding `FLY_API_TOKEN`). **See the two operational consequences below.** |
@@ -165,7 +166,12 @@ Still open:
       otherwise, which is the honest interim state, not the fix. Still needs:
       counsel review, a retention schedule, legal identity/address, and a
       company-domain support contact (it is currently a personal Gmail).
-- [ ] P1-07 settings combine partial operations and hide remote uncertainty.
+- [ ] P1-07, MINUS create-on-unknown (done, see above): Settings still saves
+      local preferences and remote eBay state in one action where the first
+      can commit and the second fail; loads still collapse "unavailable" into
+      "empty"; and "Create my policies" still picks business terms (carrier,
+      handling time, return window, who pays return shipping) without showing
+      them for confirmation first.
 - [ ] P1-08 auth baseline, MINUS the headers (done, `46b89d3`): 30-day
       irrevocable JWTs, no reset/verify/MFA, process-local rate limiting, and
       a CSP still carrying `'unsafe-inline'` for scripts.

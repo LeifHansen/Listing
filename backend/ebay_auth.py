@@ -57,6 +57,17 @@ class AccountApiError(RuntimeError):
         self.status = status
 
 
+class PolicyLookupUnavailable(RuntimeError):
+    """eBay could not be asked which policies the account already has.
+
+    Deliberately NOT an AccountApiError: that one means eBay refused a write
+    and named a field to fix, which is a different sentence to the seller.
+    This one means the question went unanswered, and the only safe response is
+    to stop -- see _first_existing_policy for why creating anyway is not a
+    harmless guess.
+    """
+
+
 class OAuthError(RuntimeError):
     """A token request eBay refused, carrying the reason eBay gave.
 
@@ -617,28 +628,35 @@ def _is_ground_policy(p: dict) -> bool:
                for s in _policy_services(p))
 
 
-def find_policy_for_service(access_token: str, service_code: str) -> Optional[dict]:
-    """The seller's first fulfillment policy already shipping `service_code`."""
+def find_policy_for_service(access_token: str,
+                            service_code: str) -> tuple[Optional[dict], bool]:
+    """(the seller's first fulfillment policy shipping `service_code`, did
+    eBay answer). Same three-state contract as _first_existing_policy, and for
+    the same reason: it feeds a decision to CREATE one."""
     norm = (service_code or "").lower().replace("_", "")
     path, list_field, id_field = _POLICY_SPECS["fulfillment"]
     try:
         data = _account_get(path, access_token)
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception:  # noqa: BLE001 - reported via the flag, not raised
+        return None, False
     for p in data.get(list_field, []):
         if any(s["code"].lower().replace("_", "") == norm
                for s in _policy_services(p)):
-            return {"id": p.get(id_field, ""), "name": p.get("name", "")}
-    return None
+            return {"id": p.get(id_field, ""), "name": p.get("name", "")}, True
+    return None, True
 
 
 def ensure_service_policy(access_token: str, svc: dict) -> dict:
     """Find — or create — a fulfillment policy that ships `svc` (an entry from
     SHIPPING_SERVICES): calculated cost, domestic, 2-day handling. Returns
     {id, name, created}."""
-    existing = find_policy_for_service(access_token, svc["code"])
+    existing, known = find_policy_for_service(access_token, svc["code"])
     if existing and existing["id"]:
         return {**existing, "created": False}
+    if not known:
+        raise PolicyLookupUnavailable(
+            "We couldn't check your existing eBay shipping policies just now, "
+            "so nothing was created. Try again in a moment.")
     name = (f"{svc['label']} (Thryft Shop)"
             if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
     body = {
@@ -718,22 +736,33 @@ def _create_policy(kind: str, access_token: str, body: dict) -> dict:
             "name": created.get("name", body.get("name", ""))}
 
 
-def _first_existing_policy(kind: str, access_token: str) -> Optional[dict]:
-    """The account's first policy of this kind, or None.
+def _first_existing_policy(kind: str,
+                           access_token: str) -> tuple[Optional[dict], bool]:
+    """(the account's first policy of this kind or None, did eBay answer).
 
-    None covers both "none exist" and "couldn't ask" on purpose here: the only
-    caller creates one either way, and creating a second policy is recoverable
-    while publishing with none is not.
+    The two halves of None are kept apart, which they were not. "eBay says you
+    have none" and "eBay could not be reached" both used to come back as None,
+    and the callers created a policy either way -- so every timeout, 500 or
+    token blip minted another "Thryft Shop" policy on the seller's real eBay
+    account. They accumulate, they show up in Seller Hub, and nothing here
+    ever removes them.
+
+    The claim that justified it -- that a duplicate is recoverable while
+    publishing with none is not -- does not survive the seller having to go
+    and delete five identical return policies by hand. And this module already
+    states the opposite rule for the same kind of question, in
+    fulfillment_policy_lookup: "we couldn't ask" must never be reported as
+    "you don't have one".
     """
     path, list_field, id_field = _POLICY_SPECS[kind]
     try:
         items = _account_get(path, access_token).get(list_field) or []
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported via the flag, not raised
         log.info("ebay: couldn't list %s policies: %s", kind, exc)
-        return None
+        return None, False
     if not items:
-        return None
-    return {"id": items[0].get(id_field, ""), "name": items[0].get("name", "")}
+        return None, True
+    return {"id": items[0].get(id_field, ""), "name": items[0].get("name", "")}, True
 
 
 def ensure_payment_policy(access_token: str,
@@ -746,9 +775,13 @@ def ensure_payment_policy(access_token: str,
     default because an unpaid fixed-price sale is the small seller's most
     common headache.
     """
-    existing = _first_existing_policy("payment", access_token)
+    existing, known = _first_existing_policy("payment", access_token)
     if existing and existing["id"]:
         return {**existing, "created": False}
+    if not known:
+        raise PolicyLookupUnavailable(
+            "We couldn't check your existing eBay payment policies just now, "
+            "so nothing was created. Try again in a moment.")
     body = {
         "name": PAYMENT_POLICY_NAME,
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
@@ -767,9 +800,13 @@ def ensure_return_policy(access_token: str,
     is deprecated to MONEY_BACK (any other value is rejected), so it is sent
     as the only legal value rather than left out and defaulted server-side.
     """
-    existing = _first_existing_policy("return", access_token)
+    existing, known = _first_existing_policy("return", access_token)
     if existing and existing["id"]:
         return {**existing, "created": False}
+    if not known:
+        raise PolicyLookupUnavailable(
+            "We couldn't check your existing eBay return policies just now, "
+            "so nothing was created. Try again in a moment.")
     body = {
         "name": RETURN_POLICY_NAME,
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
