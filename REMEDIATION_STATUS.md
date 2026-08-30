@@ -115,9 +115,9 @@ Where things stand, measured rather than remembered:
 
 | Suite | Result |
 | --- | --- |
-| Full backend (`pytest backend/tests`) | **1775 passed, 0 failed** |
+| Full backend (`pytest backend/tests`) | **1779 passed, 0 failed** |
 | A CI-`checks`-equivalent env (no image/AI stack) | **1183 passed, 49 skipped** |
-| The smoke job's API-tests step | **386 passed, 0 skipped** (it fails on a skip) |
+| The smoke job's API-tests step | **390 passed, 0 skipped** (it fails on a skip) |
 | Frontend Vitest | **23 files, 225 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
@@ -387,6 +387,7 @@ account, which is the same cost as one restart used to be — and the last one.
 | The metrics panel was the fourth read that only wanted live listings | `9f91649` | Found by asking the row above's question of the routes it did not change. `/api/ebay/listing-metrics` reads the newest `LIST_CAP` records and hands them to `_metrics_by_record_id`, whose first act is `_live_ebay_id_map` — which drops everything not live. Same page, same throw-away, same consequence on a big store: the older live listings get no views or watchers at all, because the page they needed to be on was full of drafts. |
 | P1-10 a truncated page can say what it was cut from | `c71f8bb` | `242b914` made `/api/listings` admit when it is not the whole store and deliberately named no total — *"a probe row rather than a COUNT(*) because this is the busiest route in the app... a total this endpoint does not have would have to be invented."* Right with no counter to hand; `db.count_listings` exists now, so the trade goes both ways. The probe row still decides, free, on every load, and the COUNT runs **only for the seller actually past the cap** — rare, and the one for whom "3,000 of 4,127" beats "there are more". Nobody under the cap pays anything, which is what the original decision was protecting. It is the one tolerant read on that route and the reason sits at the call site: the page is honest without a total, so a count that could not be taken costs the sentence a number rather than costing the seller a truth. `listingsView` names it only when it arrived AND exceeds the page it describes — a total smaller than its own page is not a total. The old `claims no total it did not count` test is kept and narrowed rather than removed, because `truncated` still arrives on every load while the count can fail on its own. |
 | P1-10 the rest of a big store can be reached | `2642713` | The cursor pagination the audit asks for. `/api/listings` returned the newest `LIST_CAP` records and said so — honest, and on its own useless: the listings page's search filters the records already loaded, so **for a seller with 4,000 listings 1,000 of them do not exist in this app** — not on the page, not in the tab counts, not findable, not openable. The notice named the wall and offered no door. Keyset, not OFFSET: the list is ordered `updated_at DESC, id DESC` and a save between two page loads shifts every row an OFFSET would count past, so the seller skips one listing and sees another twice — worse than not paging at all on a screen whose checkboxes drive a bulk reprice. `id` breaks the ties because timestamps collide readily (an import writes a whole store in one pass). The cursor is the server's own words handed back, base64url so the timestamp survives a query string; it says WHERE to start and never whose store to start in, since the read it feeds is `user_id`-scoped like every other. A malformed one is **refused rather than ignored** — an ignored cursor answers with page one, which the client reads as the listings that FOLLOW the ones it has, so the store looks like it ends where it began: the same bug arriving through the fix. Client-side the pages APPEND, so the tab counts, the search and the bulk checkboxes all keep working and only ever see more; a double-click is guarded twice, on `loadingMore` and again by id when the page lands, because a page appended twice puts every id on screen twice and the checkboxes are keyed by id. A browser journey walks it, verified by planting both failures — a page that replaces, and a cursor that survives the last page. |
+| P1-02 a store import is written down as it goes | `51c5beb` | The import ran in two passes: every eBay `GetItem` first, then every save. A real store is minutes of the first one, so **a machine that went away at 95% left the seller with nothing** — four hundred calls spent, four hundred listings' worth of answers in a dead process's memory, and a job mirror reporting an interrupted sync. The two passes were never independent: the save loop reads only state built before the fetching started, plus the `claimed` set it builds itself in eBay's order, so consuming the futures IN ORDER and saving each as it lands is the same sequence of writes arriving earlier. In order rather than `as_completed` because that order is load-bearing — first claim wins, and eBay's active list is walked before its ended one; blocking on one future does not idle the pool. A generator holds the pool open across the saves so the loop body did not have to move. The progress phases collapse to one, honestly: "fetching 400 of 400" followed by a separate save pass no longer describes anything that happens, and one running count is what survives a restart in the job mirror. Verified by planting the two-pass import back and watching both new tests fail. **Still open:** re-running re-spends the calls already made — that needs a per-record sync timestamp, not a restructuring. |
 
 Still open:
 
@@ -433,12 +434,17 @@ Still open:
       Connection pooling is listed too and is deliberately last: the binding
       constraint the audit names is the **5,000-call daily quota**, and
       pooling 500 calls still spends 500 of it.
-- [ ] P1-02, MINUS the sweep cooldown (done, see above): the eBay sweep
-      cooldown is durable now, but the JOB RUNNER is not. Bulk photo batches
-      are picked back up after a restart and every job reports how it ended,
-      so nothing is silently lost — but a store import interrupted mid-run is
-      reported interrupted rather than resumed, and re-running it re-spends
-      every GetItem it already paid for. Locks are still process-local:
+- [ ] P1-02, MINUS the sweep cooldown and the import's durability (both
+      done, see above): the eBay sweep cooldown survives a restart, and a
+      store import now writes each listing down as it is fetched rather than
+      after the whole store is — so an interruption keeps what it paid for
+      instead of losing all of it. What is still not durable is the JOB
+      RUNNER itself. Bulk photo batches are picked back up after a restart and
+      every job reports how it ended, so nothing is silently lost — but an
+      interrupted import is reported interrupted rather than RESUMED, and
+      re-running it re-fetches the listings it already has. Closing that needs
+      a per-record sync timestamp (so a resume can skip what this run already
+      wrote) rather than another restructuring. Locks are still process-local:
       `publish_guard`'s docstring is honest that its lock is a cheap fast path
       and eBay's own UUID check is the real cross-process guard, which is
       correct as designed; `ratelimit` and the eBay caches are per-process and
