@@ -20,6 +20,7 @@ import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illus
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
 import { listingsView } from "@/lib/listingsView";
+import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
 // it during render is a no-op state write when it is already empty, instead of
@@ -284,8 +285,11 @@ const rise = {
 // in the hero so "is this my real store?" is answered before anything else.
 function MirrorStatus() {
   const { user, ebay, storeSync, setView } = useApp();
-  if (!user) return null;
-  if (!ebay.connected) {
+  const mirror = storeMirrorView({
+    user, connected: ebay.connected, ...storeSync,
+  });
+  if (mirror.kind === "hidden") return null;
+  if (mirror.kind === "not-connected") {
     return (
       <button
         type="button"
@@ -296,7 +300,7 @@ function MirrorStatus() {
       </button>
     );
   }
-  if (storeSync.syncing) {
+  if (mirror.kind === "syncing") {
     // A store of any size takes minutes (one eBay call per listing), so the
     // line carries the count the background job reports — a bare spinner with
     // no end in sight reads as broken.
@@ -313,17 +317,23 @@ function MirrorStatus() {
       </span>
     );
   }
-  if (storeSync.error) {
+  if (mirror.kind === "error") {
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warning">
         <RefreshCw size={14} aria-hidden /> Store sync hit a snag — retry from Listings
       </span>
     );
   }
+  // A partial pass is not a failure and must not read as one — the records
+  // below are real, they are just not all of them and not all freshly
+  // checked. Same icon in a quieter colour, and the certainty removed from
+  // both the line and its tooltip. See lib/storeMirror.
   return (
     <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary"
-      title="Everything below reflects your actual eBay store — created here or not.">
-      <CheckCircle2 size={14} className="text-success" aria-hidden /> Live mirror of your eBay store
+      title={mirror.title}>
+      <CheckCircle2 size={14}
+        className={mirror.kind === "partial" ? "text-ink-faint" : "text-success"}
+        aria-hidden /> {mirror.text}
     </span>
   );
 }

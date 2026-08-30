@@ -29,6 +29,11 @@ const NO_EBAY = {
 const NO_NOTIFICATIONS = { items: [], unread: 0 };
 const NO_STORE_SYNC = {
   syncing: false, lastSynced: null, error: null, progress: null,
+  // Whether the last sweep actually covered the store — it SAMPLES on a
+  // big one, and the list it samples is a capped read, so the oldest live
+  // listings may never reach it. The Dashboard's green tick is a
+  // completeness claim and needs this to be honest. See lib/storeMirror.
+  partial: false,
 };
 // `authed` starts true and only logout sets it false: on boot we have not
 // asked yet, and guessing "signed out" there would flash the logged-out empty
@@ -448,7 +453,10 @@ export function AppProvider({ children }) {
       // unattended app load could spend.
       lastReconcile.current = Date.now();
       postJson("/api/ebay/sync-listings", { force })
-        .then((r) => { if (r.changed) loadListings({ quiet: true }); })
+        .then((r) => {
+          setStoreSync((s) => ({ ...s, partial: !!r.partial }));
+          if (r.changed) loadListings({ quiet: true });
+        })
         .catch(() => {});
       // job_id: the import runs in the background and we watch it. A body with
       // the counts already in it is a server that still imports inline.
@@ -458,9 +466,13 @@ export function AppProvider({ children }) {
       // latch "synced" for the next six hours — that would leave the rest of
       // the store missing until the window expired twice over.
       if (!res?.rateLimited) markAutoSynced(user.id);
-      setStoreSync({
-        syncing: false, lastSynced: Date.now(), error: null, progress: null,
-      });
+      // `partial` is left alone: the sweep above answers asynchronously and
+      // may well land after this, and overwriting it here would reset an
+      // honest "we couldn't cover it all" back to a clean tick.
+      setStoreSync((s) => ({
+        ...s, syncing: false, lastSynced: Date.now(), error: null,
+        progress: null,
+      }));
       return res;
     } catch (e) {
       setStoreSync({
@@ -502,6 +514,7 @@ export function AppProvider({ children }) {
     lastReconcile.current = Date.now();
     try {
       const r = await postJson("/api/ebay/sync-listings", {});
+      setStoreSync((s) => ({ ...s, partial: !!r.partial }));
       if (r.changed) loadListings({ quiet: true });
     } catch (e) { /* best-effort — the next pass tries again */ }
   }, [user, ebay.connected, loadListings]);

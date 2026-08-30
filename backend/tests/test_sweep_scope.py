@@ -40,11 +40,18 @@ def sweep(monkeypatch):
     from backend import auth, db, main
     from backend.services import listing_sync, sync_guard
 
-    def _run(store_size: int) -> dict:
-        records = _live(store_size)
+    def _run(store_size: int, drafts_first: int = 0) -> dict:
+        """`drafts_first` puts that many DRAFT records ahead of the live ones,
+        which is how a real store fills the read cap: list_listings returns
+        most-recent-first, so on a big enough store the older live listings
+        fall off the end entirely."""
+        records = ([{"id": f"d{i}", "status": "draft", "listing": {}}
+                    for i in range(drafts_first)] + _live(store_size))
         monkeypatch.setattr(auth, "current_user",
                             lambda _r: {"id": "u1", "email": "a@b.c"})
-        monkeypatch.setattr(db, "list_listings", lambda **_k: records)
+        monkeypatch.setattr(
+            db, "list_listings",
+            lambda limit=50, **_k: records[:limit])
         monkeypatch.setattr(main, "_ebay_creds_for",
                             lambda _r: {"access_token": "tok", "_uid": "u1",
                                         "ebay_username": ""})
@@ -104,4 +111,40 @@ def test_a_store_exactly_at_the_limit_is_not_partial(sweep):
 def test_an_empty_store_is_not_partial(sweep):
     body = sweep(0)
     assert body["eligible"] == 0
+    assert body["partial"] is False
+
+
+# --------------------------------------------- and the read cap counts too
+#
+# `partial` was computed from the SAMPLE alone. The list it samples is itself
+# a capped read (LISTING_LIST_CAP, most-recent-first), so a store bigger than
+# the cap has live listings that never reach the sweep at all -- and nothing
+# said so.
+
+def test_a_store_bigger_than_the_read_cap_is_partial(sweep):
+    from backend import main
+
+    body = sweep(5, drafts_first=main.LIST_CAP)
+
+    # The five live listings are past the cap, so the sweep never saw them.
+    # Reporting a complete sync here says every listing's status was confirmed
+    # when not one of them was looked at.
+    assert body["partial"] is True, \
+        "a sweep that could not even READ the whole store called itself complete"
+
+
+def test_the_cap_and_the_sample_are_both_honoured(sweep):
+    """Past the cap AND sampled. Still one flag, still true."""
+    from backend import main
+
+    body = sweep(400, drafts_first=main.LIST_CAP)
+    assert body["partial"] is True
+
+
+def test_a_store_that_fits_is_still_reported_complete(sweep):
+    """The flag has to stay meaningful: a store the read covered entirely,
+    swept entirely, is not partial."""
+    body = sweep(12, drafts_first=5)
+
+    assert body["eligible"] == 12
     assert body["partial"] is False

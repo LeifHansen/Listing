@@ -5114,7 +5114,16 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # eBay's immutable account id where the record carries one, and falls back
     # to the name only for records too old to have it (listing_sync.owns).
     account = creds or {}
-    live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
+    # One row past the cap, so the answer can tell a sweep that covered the
+    # whole store from one that could not even READ it. `list_listings` comes
+    # back most-recent-first, so on a store bigger than the cap the OLDER live
+    # listings fall off the end and never reach the sweep at all -- and
+    # `partial` was computed from the sample alone, so that sync reported
+    # itself complete. On a store whose recent records are mostly drafts, it
+    # could report a complete sync having looked at nothing.
+    rows = db.list_listings(limit=LIST_CAP + 1, user_id=user["id"])
+    capped = len(rows) > LIST_CAP
+    live = [i for i in rows[:LIST_CAP]
             if i.get("status") in ("published", "live")
             and listing_sync.owns(i.get("listing") or {}, account)]
     changed = 0
@@ -5186,7 +5195,12 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
             # alone reads as "that is the whole store" on a store where it is
             # a sample of it.
             "eligible": eligible + len(handled),
-            "partial": eligible > len(live),
+            # True when the sweep did not cover everything, for EITHER reason:
+            # it sampled, or the store is bigger than one read of it. Nothing
+            # may describe this as a full sync while it is set, and `eligible`
+            # is what the read could see rather than what the seller has --
+            # a number this route cannot know without counting the store.
+            "partial": eligible > len(live) or capped,
             "sample_size": SWEEP_SAMPLE}
 
 
