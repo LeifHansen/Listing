@@ -1149,25 +1149,50 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
 
 
 def _purge_session_images(session_id: str) -> None:
-    """Delete a session's photos (local disk + R2) to reclaim storage once the
-    listing is archived (sold) or deleted. Keeps the DB record. Best-effort,
-    never raises; eBay still hosts the images on the sold listing itself.
+    """Delete a session's photos (local disk + R2). RAISES if it could not.
+
+    For ERASURE — the deletion queue and the eBay account-deletion purge. Both
+    decide whether an obligation is finished from whether this returns:
+    `db.finish_media_purge` drops the debt the moment a purge raises nothing,
+    and its docstring says so. This used to catch everything, and
+    `objstore.delete_prefix` under it answered `0` for an unreachable bucket,
+    so an erasure that never happened was recorded as done and the photos
+    stayed in R2 for ever with the account that owned them already gone.
+
+    One function was serving two callers with opposite needs. Cleanup after a
+    merge, a delete or a sale wants the tolerant twin below: there a failed
+    tidy-up must not fail the seller's request, and the sweep will find the
+    objects later anyway.
 
     The R2 side deletes by PREFIX, not by walking the local directory. The
     reclaim pass offloads photos to the bucket and unlinks the local copies
     (see _offload_to_r2), so for any listing older than the offload TTL the
-    local dir is empty and a name-by-name delete removed nothing at all —
-    leaving the photos in the bucket forever, including on account deletion,
-    which promises the opposite.
+    local dir is empty and a name-by-name delete removed nothing at all.
+    """
+    if objstore.enabled():
+        objstore.delete_prefix_strict(objstore.session_prefix(session_id))
+    d = storage.session_dir(session_id)
+    if d.exists():
+        # ignore_errors is deliberate and is NOT the swallow above: the
+        # bucket is the authority on what a session still has stored, and a
+        # local copy that will not unlink is disk to reclaim, not an erasure
+        # obligation -- the object it mirrors is already gone.
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _purge_session_images_best_effort(session_id: str) -> None:
+    """The same cleanup, for callers where failing it would cost more than
+    leaving the photos: after a merge, a delete, a bulk delete, or a sale.
+
+    None of those is an erasure promise. The listing's own row is going or
+    gone, the photos are reclaimable storage rather than something owed, and
+    the orphan sweep reaches them later. Failing the seller's merge over a
+    bucket that blinked would be the worse trade.
     """
     try:
-        if objstore.enabled():
-            objstore.delete_prefix(objstore.session_prefix(session_id))
-        d = storage.session_dir(session_id)
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001 - archiving must never fail on cleanup
-        log.warning("archive: image purge failed for %s: %s", session_id, exc)
+        _purge_session_images(session_id)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not fail the request
+        log.warning("cleanup: image purge failed for %s: %s", session_id, exc)
 
 
 def _finish_pending_deletions() -> dict:
@@ -4892,7 +4917,8 @@ def delete_listing(listing_id: str, request: Request) -> dict:
     the button doesn't hang on a cold database + file I/O."""
     if not db.delete_listing(listing_id, _uid(request)):
         raise HTTPException(404, "Listing not found")
-    _in_background(_purge_session_images, listing_id, what="delete cleanup")
+    _in_background(_purge_session_images_best_effort, listing_id,
+                       what="delete cleanup")
     log.info("listing deleted: id=%s user=%s", listing_id, _uid(request))
     return {"ok": True}
 
@@ -4910,7 +4936,8 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
     uid = _uid(request)
     deleted = [lid for lid in ids if db.delete_listing(lid, uid)]
     for lid in deleted:
-        _in_background(_purge_session_images, lid, what="bulk-delete cleanup")
+        _in_background(_purge_session_images_best_effort, lid,
+                           what="bulk-delete cleanup")
     log.info("bulk delete: %d/%d removed user=%s", len(deleted), len(ids), uid)
     return {"ok": True, "deleted": deleted,
             "skipped": [i for i in ids if i not in deleted]}
@@ -5070,7 +5097,7 @@ def merge_listings(payload: dict, request: Request) -> dict:
                         "its photos alone", sid)
             continue
         removed.append(sid)
-        _purge_session_images(sid)
+        _purge_session_images_best_effort(sid)
     log.info("merged %d/%d listing(s) into %s (+%d photos, %d field(s) carried over) user=%s",
              len(removed), len(source_ids), target_id, len(added), len(applied), uid)
     return {"ok": True, "added": len(added), "removed": removed,
@@ -5299,7 +5326,7 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
             notifications.notify_sold(
                 _uid(request) or rec.get("user_id"), req.session_id, data,
                 sold_quantity=data.get("sold_quantity") or 0)
-            _purge_session_images(req.session_id)
+            _purge_session_images_best_effort(req.session_id)
         res = {**res, "status": new_status}
     return res
 
