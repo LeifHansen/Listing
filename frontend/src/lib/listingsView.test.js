@@ -47,3 +47,27 @@ describe("what the listings area may claim", () => {
       .toBe("logged-out");
   });
 });
+
+describe("a page that is not the whole store", () => {
+  it("says so rather than reading as complete", () => {
+    const v = listingsView({ loaded: true, user: USER, count: 3000,
+                             truncated: true });
+    expect(v.kind).toBe("list");
+    expect(v.notice).toMatch(/more than we can show/i);
+    // The bulk checkboxes run over the page, not the store.
+    expect(v.notice.toLowerCase()).toContain("bulk actions");
+  });
+
+  it("stays quiet when the page IS the whole store", () => {
+    expect(listingsView({ loaded: true, user: USER, count: 12 }).notice)
+      .toBe("");
+  });
+
+  it("claims no total it did not count", () => {
+    const v = listingsView({ loaded: true, user: USER, count: 3000,
+                             truncated: true });
+    // "3000 of 4127" would be an invented number: the endpoint asks for one
+    // row more than it returns, so it knows there are more and not how many.
+    expect(v.notice).not.toMatch(/of \d+/);
+  });
+});

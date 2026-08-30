@@ -324,6 +324,11 @@ export function AppProvider({ children }) {
         dbConfigured: !!(res.db && res.db.configured),
         dbConnected: !!(res.db && res.db.connected),
         items: res.listings || [],
+        // The server says when the page is not the whole store. Every count,
+        // tab, dashboard group and bulk checkbox below is built on `items`,
+        // so this is what stops them reading as complete. See
+        // lib/listingsView.
+        truncated: !!res.truncated,
       });
     } catch (e) {
       // Recorded, not just toasted: the toast is gone in seconds, the view

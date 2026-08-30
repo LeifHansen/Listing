@@ -4200,8 +4200,23 @@ def listings(request: Request, limit: int = LIST_CAP) -> dict:
     # error, which db.list_listings used to swallow into [] -- an empty store
     # reported as a 200; it now raises, and the clamp keeps it from arising).
     limit = max(1, min(limit, LIST_CAP))
-    items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
-    return {"listings": items, "db": db.db_status(), "authed": bool(user)}
+    # One row more than will be returned, so the answer can say whether it is
+    # the WHOLE store. Without that, a seller past the cap gets a page
+    # indistinguishable from a complete one -- and the counts, the tabs, the
+    # dashboard groups, the duplicate advisory and the checkboxes a bulk
+    # reprice runs over are all built on it, none of them able to tell they
+    # are working from a partial view.
+    #
+    # Same rule as the awaiting-shipment list and the sampled status sweep: an
+    # answer that could not show everything says so. A probe row rather than a
+    # COUNT(*) because this is the busiest route in the app, and because the
+    # question the seller has is "is this all of them?" -- `truncated` answers
+    # that honestly, where a total this endpoint does not have would have to be
+    # invented.
+    rows = db.list_listings(limit=limit + 1, user_id=user["id"]) if user else []
+    items, truncated = rows[:limit], len(rows) > limit
+    return {"listings": items, "db": db.db_status(), "authed": bool(user),
+            "truncated": truncated}
 
 
 def _live_ebay_id_map(items: list) -> dict:

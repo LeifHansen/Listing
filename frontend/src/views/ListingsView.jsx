@@ -398,6 +398,12 @@ export function ListingsView({ search = "" }) {
           </div>
         );
       })()}
+      {view.notice && (
+        <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink flex gap-2">
+          <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+          <span>{view.notice}</span>
+        </p>
+      )}
       {body}
     </div>
   );

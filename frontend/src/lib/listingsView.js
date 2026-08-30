@@ -14,7 +14,7 @@
  */
 export function listingsView({
   loading = false, loaded = false, error = "", dbConfigured = true,
-  user = null, count = 0,
+  user = null, count = 0, truncated = false,
 } = {}) {
   if (loading && !loaded) return { kind: "loading" };
   if (!dbConfigured) return { kind: "no-db" };
@@ -29,5 +29,24 @@ export function listingsView({
         + `you don’t have any — try again in a moment.`,
     };
   }
-  return count ? { kind: "list" } : { kind: "empty" };
+  if (!count) return { kind: "empty" };
+  // A page that isn't the whole store. Everything above this line is about
+  // what the area may CLAIM, and "here are your listings" is a claim about all
+  // of them: the counts, the tabs, the dashboard groups and the checkboxes a
+  // bulk reprice runs over are all built on the page, none of them able to
+  // tell it was cut. Same rule as the awaiting-shipment list and the sampled
+  // status sweep -- say what could not be shown, and don't invent the rest.
+  //
+  // No total, deliberately: the endpoint asks for one row more than it
+  // returns rather than paying for a COUNT(*) on the busiest screen in the
+  // app, so it knows there ARE more and not how many. Saying "some" honestly
+  // beats naming a number nobody counted.
+  return {
+    kind: "list",
+    notice: truncated
+      ? "This is the most recent " + count + " of your listings — there are "
+        + "more than we can show on one page. Bulk actions here apply only to "
+        + "what's shown."
+      : "",
+  };
 }
