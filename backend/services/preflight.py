@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ..money import money
 from ..models import TITLE_MAX_CHARS, Listing
 
 # Per-service package weight caps, in ounces, matched case-insensitively as
@@ -38,7 +39,13 @@ SERVICE_WEIGHT_CAPS_OZ: list[tuple[str, float, str, str]] = [
     ("mediamail", 70.0 * 16, "USPS Media Mail", ""),
 ]
 
-EBAY_MIN_PRICE = 0.99  # EBAY_US fixed-price minimum
+# eBay's fixed-price minimum. The figure is EBAY_US's; the other sites this
+# app can be pointed at (EBAY_GB, EBAY_DE, EBAY_AU, EBAY_CA -- see
+# ebay_trading._site_id) are ASSUMED to use the same number in their own
+# currency, which is why the message quotes it in the listing's currency
+# rather than in dollars. The number is not site-verified; the currency label
+# at least stops it naming money the seller does not use.
+EBAY_MIN_PRICE = 0.99
 MAX_PHOTOS = 24
 
 # The short name of each thing an issue can point at, by target. This is
@@ -187,8 +194,9 @@ def validate(listing: Listing, mode: str, *,
         if listing.price is None or listing.price <= 0:
             add("price", "A price is required", "Set a price on the Pricing card.")
         elif listing.price < EBAY_MIN_PRICE:
-            add("price", f"eBay's minimum price is ${EBAY_MIN_PRICE:.2f}",
-                f"Raise the price to at least ${EBAY_MIN_PRICE:.2f}.")
+            floor = money(EBAY_MIN_PRICE, listing.currency)
+            add("price", f"eBay's minimum price is {floor}",
+                f"Raise the price to at least {floor}.")
         if (listing.quantity or 0) < 1:
             add("price", "Quantity must be at least 1", "Set the quantity to 1 or more.")
     cid = (listing.category_id or "").strip()

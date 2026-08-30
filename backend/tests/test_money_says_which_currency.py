@@ -105,3 +105,51 @@ def test_the_sold_price_beats_the_asking_price(sold):
 
     assert "$45.00" in row["body"]
     assert "60" not in row["body"]
+
+
+# ----------------------------------------- the floors the checklist quotes
+
+def _listing(**over):
+    from backend.models import Listing
+    base = {"title": "A thing", "price": 0.10, "quantity": 1,
+            "category_id": "1234", "condition": "USED_GOOD",
+            "description": "words"}
+    base.update(over)
+    return Listing(**base)
+
+
+def test_the_ebay_price_floor_is_quoted_in_the_listings_currency():
+    """A checklist that says "eBay's minimum price is $0.99" to a seller
+    listing in pounds is naming the wrong money on the one screen that exists
+    to tell them what to fix."""
+    from backend.services import preflight
+
+    issues = preflight.validate(
+        _listing(currency="GBP"), mode="live", has_fulfillment=True,
+        has_payment=True, has_return=True, has_location=True, connected=True)
+    price = [i for i in issues if i["target"] == "price"]
+    assert price, "the floor check should still fire"
+    said = price[0]["title"] + " " + price[0]["fix"]
+    assert "$" not in said
+    assert "GBP" in said
+
+
+def test_the_ebay_price_floor_still_reads_as_dollars_on_a_usd_listing():
+    from backend.services import preflight
+
+    issues = preflight.validate(
+        _listing(currency="USD"), mode="live", has_fulfillment=True,
+        has_payment=True, has_return=True, has_location=True, connected=True)
+    price = [i for i in issues if i["target"] == "price"]
+    assert "$0.99" in price[0]["title"]
+
+
+def test_the_etsy_price_floor_follows_the_same_rule():
+    from backend.marketplaces import mapping_etsy
+
+    issues = mapping_etsy.preflight(_listing(price=0.05, currency="GBP"), {})
+    price = [i for i in issues if i["target"] == "price"]
+    assert price, "the floor check should still fire"
+    said = price[0]["title"] + " " + price[0]["fix"]
+    assert "$" not in said
+    assert "cents" not in said.lower(), "cents is a currency claim too"
