@@ -157,3 +157,36 @@ def test_a_reclaimed_relist_does_not_lose_the_new_listing(a_sync):
     assert saved["sess-abc"]["status"] == "published"
     assert "ebay-998877" in saved, "the ended listing should keep its own row"
     assert saved["ebay-998877"]["status"] == "ended"
+
+
+def test_a_listing_that_never_saved_does_not_lock_the_record(a_sync,
+                                                             monkeypatch):
+    """A claim is a write, not a match.
+
+    An item that matches a record and then fails to validate writes nothing.
+    Marking the record claimed at the point of matching would lock out the
+    listing that follows -- which in the relist case is the one holding the
+    record's own item id -- leaving the record on its stale state with no
+    second chance in this run.
+    """
+    from backend.models import Listing
+
+    real = Listing.__init__
+
+    def _reject_the_relist(self, **kwargs):
+        # Only the newly relisted item, and every time it is built -- the
+        # validation this is aimed at is the last of several constructions,
+        # and failing just the first one lands in a try/except elsewhere.
+        if kwargs.get("ebay_listing_id") == "556677":
+            raise ValueError("eBay sent something we can't parse")
+        real(self, **kwargs)
+
+    monkeypatch.setattr(Listing, "__init__", _reject_the_relist)
+    saved = a_sync([_draft("sess-abc", ebay_listing_id="998877")],
+                   sku="qf-sess-abc-r998877", ended="998877")
+
+    # The live relist failed to validate and wrote nothing, so the ended
+    # predecessor -- which matches the same record by the item id it still
+    # holds -- must still be free to update it.
+    assert "sess-abc" in saved, "the record was locked by a write that never happened"
+    assert "ebay-998877" not in saved

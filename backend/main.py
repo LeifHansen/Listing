@@ -2234,7 +2234,12 @@ _PREF_FIELDS = {
     # sell fast), "median" (typical market), "long_sale" (high end, patient).
     "pricing_strategy": (str, None, None),
     # Promote every newly published listing at eBay's recommended ad rate.
-    # Missing = ON (see _auto_promote_enabled); 0 turns it off.
+    # OFF unless the seller explicitly saved it on: Promoted Listings Standard
+    # takes a percentage of the sale, and neither silence nor an unreadable
+    # preference is agreement to a fee (see ebay_provider.auto_promote_enabled,
+    # which is where that decision is actually made). This comment used to say
+    # "Missing = ON", which is what the code did before P1-06 — left here it is
+    # an invitation to restore it.
     "auto_promote": (int, 0, 1),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}

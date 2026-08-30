@@ -635,7 +635,6 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
                      item_id, prior["id"])
             prior = None
         rid = prior["id"] if prior else mirror_id
-        claimed.add(rid)
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
         # Reconcile against what eBay last said, so a change made in Seller
@@ -662,6 +661,12 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             continue
         db.upsert_listing(rid, data, status=status, user_id=user_id,
                           when=_started_at(data))
+        # Claimed only once the write has actually happened. Marking it at the
+        # point of MATCHING would let a listing that then failed validation
+        # (and wrote nothing) lock a record out for the rest of the run, so a
+        # second listing with a real claim on it would be diverted to a mirror
+        # while the record kept its stale state.
+        claimed.add(rid)
         # A listing we already knew flipping to sold IS the sale event. A
         # first-time import of an old sold listing stays silent — backfilling
         # a store must not fire a notification per historical sale.
