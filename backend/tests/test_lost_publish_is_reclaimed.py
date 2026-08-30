@@ -190,3 +190,46 @@ def test_a_listing_that_never_saved_does_not_lock_the_record(a_sync,
     # holds -- must still be free to update it.
     assert "sess-abc" in saved, "the record was locked by a write that never happened"
     assert "ebay-998877" not in saved
+
+
+# ------------------------------- and the duplicates already out there
+#
+# Everything above stops NEW duplicates. A store that has already synced once
+# since the lost publish has the pair on disk: the seller's draft, and an
+# `ebay-<item>` mirror of the listing it became. On the next sync the mirror
+# matches the item by id and wins, so the draft is never reclaimed and the
+# pair is permanent.
+
+def test_a_mirror_already_made_from_the_lost_listing_gives_way(a_sync):
+    """The app's own record beats a mirror of the same item — which is what
+    `_index_by_item` already does when both carry the id, applied to the case
+    where only one of them does.
+
+    The mirror is not deleted here; `_drop_stale_mirrors` removes it on the
+    next pass, once the draft's record actually names the item. The point is
+    that the draft stops being a stranded second card.
+    """
+    saved = a_sync(
+        [_draft("sess-abc"),
+         {"id": "ebay-556677", "status": "published",
+          "listing": {"ebay_listing_id": "556677", "source": "ebay"}}],
+        sku="qf-sess-abc")
+
+    assert saved["sess-abc"]["data"]["ebay_listing_id"] == "556677", \
+        "the draft stayed stranded beside a mirror of its own listing"
+    assert saved["sess-abc"]["status"] == "published"
+
+
+def test_the_apps_own_record_still_wins_when_it_holds_the_id(a_sync):
+    """A record that already NAMES the item is matched by that, and must not
+    be displaced by a key pointing at some other record."""
+    saved = a_sync(
+        [{"id": "sess-mine", "status": "published",
+          "listing": {"ebay_listing_id": "556677", "source": "ebay"}},
+         _draft("sess-abc")],
+        sku="qf-sess-abc")
+
+    # Both could claim it: sess-mine by id, sess-abc by key. The id wins.
+    assert "sess-mine" in saved
+    assert saved["sess-mine"]["data"]["ebay_listing_id"] == "556677"
+    assert "sess-abc" not in saved

@@ -615,9 +615,24 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         # strongest match there is. The publish key only ever answers for a
         # record that has no item id to match on -- which is exactly the
         # record a lost publish leaves behind.
-        prior = (owned.get(item_id)
-                 or by_key.get(str(fresh.get("sku") or "").strip())
-                 or known.get(mirror_id))
+        #
+        # The one exception is a MIRROR. `_index_by_item` already prefers the
+        # app's own record over a mirror when both carry the id, for the
+        # reason in its docstring: the app-created one owns the photos on disk
+        # and everything the AI wrote. The same preference applies when only
+        # the mirror carries the id -- which is the state a store is left in
+        # once it has synced since a lost publish, with the seller's draft
+        # stranded beside an `ebay-<item>` copy of the listing it became.
+        # Without this, that pair is permanent: the mirror wins the match
+        # every time and the draft is never reclaimed.
+        #
+        # The mirror is not deleted here. _drop_stale_mirrors removes it on
+        # the next pass, once the record actually names the item.
+        by_item = owned.get(item_id)
+        keyed = by_key.get(str(fresh.get("sku") or "").strip())
+        prior = (keyed if keyed is not None
+                 and (by_item is None or _is_mirror(by_item))
+                 else by_item or known.get(mirror_id))
         # One record, one listing per run. A reclaimed relist is matched by
         # TWO eBay items at once -- the new live one (by publish key) and the
         # ended one it replaced, which the record still names (by item id) --
