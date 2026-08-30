@@ -118,7 +118,7 @@ Where things stand, measured rather than remembered:
 | Full backend (`pytest backend/tests`) | **1739 passed, 0 failed** |
 | A CI-`checks`-equivalent env (no image/AI stack) | **1183 passed, 49 skipped** |
 | The smoke job's API-tests step | **350 passed, 0 skipped** (it fails on a skip) |
-| Frontend Vitest | **23 files, 221 tests** |
+| Frontend Vitest | **23 files, 223 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
 The skips in the middle row are deliberate: those files `importorskip` the
@@ -378,6 +378,7 @@ account, which is the same cost as one restart used to be — and the last one.
 | The dashboard shows the seller's own money | `744c083` | A currency sweep, prompted by the one already in the list above: *"a seller on eBay.co.uk was told their £45 item sold for $45.00"*. That fix went in at the sold notification. **The dashboard was still doing it**, and so was the Promoted Listings fee estimate on every listing card. `formatMoney(n)` defaults to USD and four call sites took the default -- and `salesSummary` made that unavoidable rather than careless, because it summed `proceeds` and returned a bare number, so there was nothing for the caller to pass. It reports `currency` now, from the sales it actually counted **inside the window** (last year's GBP sale must not relabel this week's dollars), with a record carrying no currency taking the app's default rather than counting as a second one and blanking the total. The quieter half: summing ACROSS currencies gives a number that is wrong next to any symbol, which is what a seller with one eBay.co.uk listing and one Etsy US listing got. Same rule as everywhere else on this branch -- say what you could not work out -- so a mixed total shows the dash this tile already uses for a figure it could not measure, with the sub-line saying why, and the profit clause drops out rather than printing a meaningless sum. Twelve tests: seven on `salesSummary` (including that an empty week still reads "$0.00", so the mixed dash does not swallow the ordinary case) and five that mount the real Dashboard, three of which fail against the old wiring. |
 | Logging out takes the credential with it on the native build too | `c0b302a` | Found by asking the currency sweep's question of another fix: this branch closed *"logout has to end the session, not just the greeting"* on the web, with a store-level test for every scrap of the previous account. The Capacitor shell keeps the session token in the **Keychain** instead, and that half was never checked. `storeToken(null)` asked the plugin to remove it fire-and-forget. The comment above that line explains the trade for a WRITE -- *"a Keychain write that fails costs this session's persistence, not the session"* -- and it is right; the same line also handled the REMOVE, where the trade runs the other way. The token is a self-contained JWT good for 30 days and `loadToken()` reads it back on the next cold start, so **a removal that quietly failed means the app reopens signed in as the person who just signed out**. On a shared phone that is somebody else's store, and the only symptom is that logging out did not work, found on the next launch rather than at the time. A failed removal now falls back to the operation already known to work -- overwrite the entry with an empty value, which `loadToken` already treats as "nothing stored", turning an unremovable credential into an unusable one. `storeToken` returns its promise so a caller CAN wait; the logout path deliberately does not, since the in-memory copy is gone before this is reached and signing out must not hang on the Keychain. Six tests, including one from the other end (what the next cold start reads out of a blanked entry), verified by removing the fallback. |
 | A listing we could not read stopped reading as one that does not exist | `3ca8dc9` | `db.get_listing` collapsed "the database would not answer" into `None`, and ten route handlers turn `None` into `404 Listing not found` — so during a blip a seller opening their own listing was told it did not exist. The same `None` reached further than the 404s: `_with_stored_identity` runs inside the publish lock and is the snapshot the create-vs-revise decision is made from, and an unreadable row read there as **a brand-new session** — a revise turned into a second live listing on the seller's account, which is the duplicate P0-07 exists to prevent, arriving by a different door. `get_listing` raises now, with `get_listing_best_effort` for the two callers that genuinely carry on (the sticky-status read and the stub-draft check, where a missed record costs a stale badge). Fixing it inside `db.py` rather than at the ten call sites meant no test double had to change. `delete_listing` was the same shape from the other end — a write that never reached the database returned `False`, which callers read as "no such row, nothing to do" and reported as a finished delete; it raises now, and the merge, bulk-delete and sync-dedupe callers catch it. The `db.py` sweep was extended to see a function that checks a sentinel and raises, not only one with a `raise` inside an `except` arm, and its best-effort twin check now reads every public function rather than only those with a `try`. |
+| A Save that sent nothing reported itself as saved | `2fe10f1`, `3f93619` | Settings saves two systems and reports on them separately, and each half is skipped when there is nothing safe to send — the listing defaults when their read failed (posting then would put the app's fallbacks where the seller's choices are), the eBay half when it is not connected or could not load either. When BOTH are skipped nothing was tried, so nothing failed, and `!failed` was the test for success: the seller pressed Save on a screen already saying "we couldn't load your saved defaults" and got a green **"Defaults saved"** back — and then believes those settings are stored. `saveSections` has three outcomes now rather than two — saved, tried-and-refused, and nothing-to-send — and the last is not green. **Found by writing the third P2-08 journey**, the same way the dashboard tile bug was: `page.route()` breaks `/api/prefs`, the seller walks to Settings, and the test asks what the screen says and what the Save button does. Every other success toast in the app was then read for the same shape (an aggregate whose zero case falls through to the success message) and they already handle it: promote-all has "No live listings to promote", the policy create has "You already had all three", the store sync's "Everything's already in sync" sits behind an explicit rate-limit arm that fires first. Both halves of the journey were verified by planting the old behaviour back — the Save message, and a panel that renders its fallbacks through a failed read. |
 
 Still open:
 
@@ -535,23 +536,24 @@ P2-01, P2-03 and P2-07 are closed (rows above). Of the rest:
       address, and a support contact on a company domain rather than a
       personal Gmail.
 - [ ] **P2-08, partly started.** The unit suite is kept and much extended
-      (1679 tests, from 961). `scripts/smoke.mjs` now signs a seller up
+      (1739 tests, from 961). `scripts/smoke.mjs` now signs a seller up
       through the real dialog, walks every screen with data actually being
-      fetched, and runs two journeys — the theme surviving a reload, and a
-      log-out that survives one (see the row above). Still missing: eBay
-      Sandbox contract tests, impossible from this environment (see the
-      release posture below), and journeys for settings partial outage,
+      fetched, and runs four journeys — the theme surviving a reload, a
+      log-out that survives one, a store that could not be read, and a
+      settings screen whose defaults could not be read (see the rows above).
+      **The last two each found a live bug**, which is the argument for the
+      remaining ones. Still missing: eBay Sandbox contract tests, impossible
+      from this environment (see the release posture below), and journeys for
       unknown publish outcome, conflict resolution, deletion and reconnect.
-      The store outage is done because it needed nothing faked: `page.route()`
-      breaks `/api/listings` and the app cannot tell the difference. The rest
-      all sit behind a CONNECTED marketplace — the policies panel does not
-      even render until `ebay.connected`, and a publish needs an account to
-      publish to — so each would first have to fake the connection, the
-      status, the policies and the publish response, at which point the test
-      is largely checking the fake. What they actually need is a sandbox
-      account, which is the same blocker as the contract tests. The tri-state
-      logic itself is covered directly in `lib/settingsSections.test.js`;
-      what is missing is proof that the screen is wired to it.
+      The two outage journeys are done because they needed nothing faked:
+      `page.route()` breaks `/api/listings` (or `/api/prefs`) and the app
+      cannot tell the difference. The rest all sit behind a CONNECTED
+      marketplace — the policies panel does not even render until
+      `ebay.connected`, and a publish needs an account to publish to — so each
+      would first have to fake the connection, the status, the policies and
+      the publish response, at which point the test is largely checking the
+      fake. What they actually need is a sandbox account, which is the same
+      blocker as the contract tests.
 
 ## Release posture
 
