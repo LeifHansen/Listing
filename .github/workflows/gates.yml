@@ -1,0 +1,183 @@
+name: Gates
+
+# The single definition of "has this commit been checked", called by BOTH
+# ci.yml (on a pull request) and deploy.yml (before shipping to Fly).
+#
+# It exists because those two were separate copies of the same intent and had
+# already drifted: deploy.yml gated production on the lightweight lint + unit
+# job ALONE. The cutout-safety suite (which decides whether the background
+# remover ate the seller's product), the frontend build (the only thing that
+# type-checks the JSX) and the smoke test (the only thing that catches a
+# screen a seller cannot open) never gated a deploy at all — and because
+# ci.yml triggers only on `pull_request`, a direct push to main or a manual
+# dispatch ran none of them either.
+#
+# deploy.yml's own comment already warned that its install list had to be kept
+# in sync with ci.yml's "by hand"; one workflow means there is nothing to keep
+# in sync.
+
+on:
+  workflow_call:
+
+jobs:
+  # Lint + the pure-unit suite. Deliberately does NOT install the heavy image
+  # stack; the tests that need it importorskip here and run in `smoke` below,
+  # which fails on a skip so they cannot quietly stop running.
+  #
+  # cryptography is not optional despite the name: backend/db.py imports
+  # backend/crypto.py at module scope, so without it every test that touches
+  # the DB fails at COLLECTION.
+  checks:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
+      - name: Ruff
+        run: ruff check backend
+      - name: Tests
+        run: pytest backend/tests -q
+
+  # The image gate. The fast job above skips the image stack, so the rules
+  # that decide whether a cutout deleted the product would run nowhere — and
+  # "the background remover ate my item" is the failure that actually reaches
+  # sellers. Pillow/NumPy/SciPy only: no rembg, no onnxruntime, no model
+  # download. The suite works on synthetic mattes with known ground truth,
+  # which is what makes that possible.
+  cutout:
+    name: Cutout safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install pytest pillow numpy scipy python-dotenv pydantic
+      - name: Mask-safety rules
+        run: pytest backend/tests/test_matte.py -q
+      - name: Cutout regression suite
+        run: pytest backend/tests/test_cutout_regression.py backend/tests/test_bg_border.py -q
+      # Failing on a SKIP is the point. Every test here importorskips, because
+      # the fast `checks` job collects the whole directory without the image
+      # stack. That is also how a suite quietly stops running: the deps drift,
+      # the file skips in the one job built for it, and green stops meaning
+      # anything. This job asserts it actually ran.
+      - name: Photo-pass resume rules
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest backend/tests/test_photo_resume.py -q -rs | tee /tmp/photo-resume.log
+          if grep -qE '[0-9]+ skipped' /tmp/photo-resume.log; then
+            echo "::error::test_photo_resume.py skipped in the job built to run it"
+            exit 1
+          fi
+      - name: Export contract
+        run: pytest backend/tests/test_export_pipeline.py backend/tests/test_orientation.py -q
+
+  # The Vite build is the only thing that type-checks the JSX. Without it a
+  # broken import or syntax error in the frontend only surfaced during the
+  # production Docker build, i.e. after merge.
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Lint
+        run: npm run lint
+        working-directory: frontend
+      - name: Unit tests
+        run: npm test
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+
+  # Boots the real app and clicks through every screen. The unit tests and the
+  # build both pass happily on a UI that throws on mount — this is the job that
+  # catches a screen a seller cannot open.
+  smoke:
+    name: App smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      - name: Browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      # Installed FROM requirements.txt, minus only the two packages the app
+      # imports lazily (rembg pulls onnxruntime and a ~176MB model). A
+      # hand-written second list is what put this job in a loop: it was missing
+      # anthropic, then python-multipart, each found one CI run at a time.
+      # Deriving it from the real file means a new dependency cannot drift out
+      # of sync with what the app actually needs to boot.
+      - name: Server deps
+        run: |
+          grep -vE '^(rembg|onnxruntime)' requirements.txt > /tmp/ci-reqs.txt
+          pip install -r /tmp/ci-reqs.txt pytest
+      # This is the only job with fastapi AND Pillow together, so it is the
+      # only place these can run at all. In `checks` they importorskip on the
+      # missing Pillow and in `cutout` there is no fastapi — which meant they
+      # were passing by never executing. The skip guard below is what stops
+      # that happening again.
+      - name: API tests
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
+                 backend/tests/test_bulk_resume.py backend/tests/test_aspect_checkboxes.py \
+                 backend/tests/test_sold_archive.py backend/tests/test_store_scale.py \
+                 backend/tests/test_ebay_reconnect_identity.py \
+                 backend/tests/test_ebay_save_path.py \
+                 backend/tests/test_ebay_optin_route.py \
+                 backend/tests/test_session_alias_authorization.py \
+                 backend/tests/test_ebay_deletion_notices.py \
+                 backend/tests/test_strict_persistence.py \
+                 backend/tests/test_get_is_side_effect_free.py \
+                 backend/tests/test_public_surface.py \
+                 backend/tests/test_security_headers.py \
+                 -q -rs | tee /tmp/api-tests.log
+          if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
+            echo "::error::API tests skipped in the only job that can run them"
+            exit 1
+          fi
+      - name: Boot
+        run: |
+          SECRET_KEY=ci-smoke nohup python -m uvicorn backend.main:app --port 8099 \
+            > /tmp/server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8099/api/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server never became healthy:" >&2; cat /tmp/server.log >&2; exit 1
+      - name: Smoke
+        run: npm run smoke
+        working-directory: frontend
+      - name: Server log on failure
+        if: failure()
+        run: cat /tmp/server.log || true

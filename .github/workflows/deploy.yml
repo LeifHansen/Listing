@@ -20,37 +20,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The same lint + unit tests CI runs on pull requests, repeated here as a
-  # deploy gate. ci.yml only triggers on `pull_request`, so a direct push to
-  # the deploy branch (or a manual dispatch) previously shipped to production
-  # with no check having run at all.
-  checks:
-    name: Lint + unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      # Keep in sync with ci.yml's `checks` job install list — these two gates
-      # run the same suite and drift apart silently. cryptography is not
-      # optional here despite the name: backend/db.py imports backend/crypto.py
-      # at module scope, so without it every test that touches the DB fails at
-      # COLLECTION, which is what took this job down.
-      - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
-      - name: Ruff
-        run: ruff check backend
-      - name: Tests
-        run: pytest backend/tests -q
+  # THE gate, and the same one ci.yml runs on a pull request. ci.yml triggers
+  # only on `pull_request`, so a direct push to the deploy branch (or a manual
+  # dispatch) previously shipped with no check having run at all.
+  #
+  # This used to be a local copy of the lint + unit job ALONE, which meant
+  # production was gated on the fast unit tests and nothing else: the
+  # cutout-safety suite (does the background remover eat the product), the
+  # frontend build (the only thing that type-checks the JSX) and the smoke
+  # test (the only thing that catches a screen a seller cannot open) never
+  # gated a deploy. Calling the shared workflow runs all four, on this exact
+  # commit, and removes the copy that this file's own comment already warned
+  # had to be kept in sync by hand.
+  gates:
+    name: Gates
+    uses: ./.github/workflows/gates.yml
 
   deploy:
     name: Deploy app
-    needs: checks
+    needs: gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # Pinned, not @master: this step runs in the job holding
+      # FLY_API_TOKEN, so following a moving branch means whatever
+      # superfly pushed most recently gets that token. v1.5 is the
+      # current release tag; a commit sha would be stronger still and is
+      # tracked in REMEDIATION_STATUS.md with the other actions.
+      - uses: superfly/flyctl-actions/setup-flyctl@v1.5
       # --no-cache and an immediate replace, because a deploy that reports
       # success while production keeps serving the previous image is the
       # failure this pipeline actually had: on 2026-08-26 six consecutive

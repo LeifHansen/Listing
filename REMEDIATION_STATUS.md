@@ -104,6 +104,21 @@ encoded wrong behaviour were corrected in place, each saying why.
    fails on a skip. The guard alone would have left the session-alias
    authorization tests running nowhere.
 
+## Two operational consequences of the CI change — read before merging
+
+1. **The required-check NAMES change.** A called workflow prefixes its job
+   names with the calling job, so "Lint + unit tests" becomes
+   "Gates / Lint + unit tests" (same for Cutout safety, Frontend build, App
+   smoke test). If branch protection on `main` requires the old names, merges
+   will block until the required checks are renamed in the repo settings.
+   Nothing in the repository encodes those names, so this cannot be fixed
+   from a commit.
+2. **Deploys get slower and can now fail for new reasons.** Production was
+   previously reachable after ~30s of unit tests; it now waits on the smoke
+   test (boots the app, drives Chromium) too. That is the point — those jobs
+   exist because they catch failures the unit tests do not — but a deploy
+   that used to go out will now sometimes stop.
+
 ## Not done — agenda, in priority order
 
 ### 1. Deploy-time work for what has already landed
@@ -132,6 +147,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | --- | --- | --- |
 | P1-06 promotion consent | `97122c7` | Promoted Listings (COST_PER_SALE, 10% default rate) was enabled when the preference was ABSENT and when the prefs read RAISED — so silence and a database outage both counted as agreeing to a fee. Now off unless explicitly on. **This reverses a deliberate product choice** (the old default was on because sellers reported publishes landing unpromoted); the commit message says so. The UI mirrored the old default independently and was changed with it. |
 | P1-09 public surface | `e2ca586` | Anonymous `/api/health` returned 26 operator keys including raw DB/R2 exception text (Neon host and role, R2 account id). Moved to `/api/admin/diagnostics` behind `ADMIN_TOKEN`, which **fails closed**. `build` deliberately stays public — deploy.yml, deploy.sh and health-watch.yml all poll it. Also: an unconnected production publish no longer answers `ok: true` with the Trading XML and a server path. |
+| P1-11 deploy gate (partial) | *this commit* | `deploy` gated production on the lightweight lint+unit job ALONE — cutout safety, the frontend build and the smoke test never gated a deploy, and `ci.yml` runs only on `pull_request` so a push to `main` ran none of them. Both now call one shared `gates.yml`. `superfly/flyctl-actions/setup-flyctl` was pinned off `@master` (it runs in the job holding `FLY_API_TOKEN`). **See the two operational consequences below.** |
 | P1-08 security headers (partial) | `46b89d3` | None of CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or Permissions-Policy were sent. Now all present, verified against the booted app. The CSP keeps `'unsafe-inline'` in script-src because index.html has an inline theme script — tightening to a nonce is worth its own change. The REST of P1-08 (revocable sessions, password reset/verify/MFA, distributed rate limiting, fail-closed keys) is untouched. |
 | P1-12 side-effect-free GET | `a8d8f0e` | A plain read downloaded up to 24 photos, wrote up to 48 files, started an R2 upload and wrote the DB row. Now `POST /api/listings/{id}/prepare-for-editing`, called by the frontend when the seller opens the editor. |
 
@@ -146,8 +162,22 @@ Still open:
 - [ ] P1-08 auth baseline, MINUS the headers (done, `46b89d3`): 30-day
       irrevocable JWTs, no reset/verify/MFA, process-local rate limiting, and
       a CSP still carrying `'unsafe-inline'` for scripts.
-- [ ] P1-11 deploy gates only on the lightweight backend job; actions are not
-      SHA-pinned; `create_all` instead of Alembic; container runs as root.
+- [ ] P1-11, MINUS the deploy gate (done, see above): actions are still pinned
+      to version TAGS rather than reviewed commit SHAs (`actions/checkout@v4`,
+      `actions/setup-python@v5`, `actions/setup-node@v4`,
+      `superfly/flyctl-actions/setup-flyctl@v1.5`); `create_all` instead of
+      Alembic; **the container still runs as root**.
+
+      The non-root container was deliberately NOT attempted. Fly mounts the
+      `data` volume at `/data` (fly.toml) owned by root, so a bare `USER`
+      directive makes every upload fail in production, and the fix — an
+      entrypoint that chowns `/data` and drops privileges with gosu/su-exec,
+      plus `U2NET_HOME` pointed at the baked rembg models, which currently
+      live in root's `$HOME` — cannot be verified here: this container has a
+      docker binary but no reachable daemon, so the image cannot be built or
+      run. Shipping an unverified change of that shape risks breaking uploads
+      for every seller. It needs one local `docker build && docker run` with a
+      volume mounted at `/data`.
 
 ### 3. Structural work the prompt asks for, not started
 
