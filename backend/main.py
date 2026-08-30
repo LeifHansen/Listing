@@ -3170,6 +3170,13 @@ def identify(session_id: str, request: Request) -> dict:
     try:
         result = claude_ai.identify(paths, names,
                                     strategy=_pricing_strategy(_uid(request)))
+    except errors.StorageUnavailable:
+        # Refund first, then let it keep its own name: an AI error message
+        # sends the seller to retry the model or re-shoot their photos, and
+        # neither is the problem. The central handler already says the right
+        # thing about storage.
+        tokens.refund(spent)
+        raise
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         tokens.refund(spent)
         code, message = claude_ai.ai_error_message(exc)
@@ -3296,6 +3303,11 @@ def price_suggestions(payload: dict, request: Request) -> dict:
             condition=str(payload.get("condition") or "").strip() or None,
             strategy=_pricing_strategy(_uid(request)),
         )
+    except errors.StorageUnavailable:
+        # eBay was fine. Relabelling this as an eBay failure sends the seller
+        # to look at the wrong thing, and wraps an internal sentence inside a
+        # sentence about eBay — the shape P2-07 exists to stop.
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
 
@@ -4068,6 +4080,13 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
+    except errors.StorageUnavailable as exc:
+        # Same as the synchronous route: refund, and report it as what it is
+        # rather than as an AI failure the seller could act on.
+        tokens.refund(spent)
+        log.warning("identify job %s: storage unavailable: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=str(exc))
+        return
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         tokens.refund(spent)
         log.warning("identify job %s failed: %s", job_id, exc)
