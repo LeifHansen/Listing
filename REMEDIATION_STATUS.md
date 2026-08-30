@@ -391,6 +391,7 @@ account, which is the same cost as one restart used to be — and the last one.
 | Two guards a re-read of the same day's diff turned up | `0ab2a39` | Both are consequences of moving reads from "fetch a page and filter" to "ask for what you want", and neither is hypothetical. **The ask itself needs a bound:** `/api/ebay/lower-prices` looks the seller's ids up BY id now, and under the old code a huge `listing_ids` body cost nothing extra — the store read was capped and the list was only a filter — so asking for the ids turns an unbounded body into an unbounded `IN (...)`, one request made expensive for everybody. Capped at `BULK_SELECT_CAP`, deliberately above `BULK_PRICE_CAP` so a selection bigger than one pass is still accepted and deferred rather than refused (the role the 200 on bulk-delete already plays), and ids are deduplicated so the same one twice cannot inflate the count. **A cursor needs both halves:** `_cursor_for` built its token from `updated_at`, and a row without one would mint `"|id"` — which the next request rejects as malformed, a 400 in the middle of a walk the seller started. Defensive (the column is non-nullable), and the honest degradation is no cursor at all. |
 | P0-08 (extended) the two answers to a conflict can be told apart | `09662e7`, `4851ea4` | The banner asks the most consequential question in the sync flow — the seller and eBay both changed a field, the merge sent NEITHER value, and whichever they pick is what eventually reaches their live listing. **Both buttons read "Keep this".** On screen that works, since each sits beside the value it keeps; to anything reading the page by its controls (a screen reader, voice control, a keyboard user tabbing past the surrounding text) it is "Keep this, Keep this" — four of them with two conflicted fields — on a choice where picking the wrong one overwrites a fix made in Seller Hub with a stale copy from here. The visible label stays short (two sit inside a card and a sentence each would crowd out the values being compared); the accessible name now names the side AND the field, and its test asserts they are distinct per field, not just per side. **Found by writing P0-08's browser journey** — the locator for the button had nothing to select on. That journey is the other half of this row: the question has to be on screen with both values and a way to answer, the answer has to reach the server, and a REFUSED answer has to say so and leave the question standing, because a "keep mine" that did not persist means the value is still not going to eBay — the silence the whole feature exists to end. The first resolve is answered with a 503 on purpose and the retry settles it; verified by planting a swallowed refusal. It also needed no marketplace, which the notes had wrongly assumed. |
 | P0-04 (extended) a second account's listings are explained, in a browser | `60a36d5` | P0-04's user-facing half. A seller who connects a SECOND eBay account has records here belonging to the first, and the app deliberately leaves them alone — it will not sync, edit or end a listing on a store the current token does not own. Unexplained, that reads as the app losing track of their listings. The journey checks the banner explains it, says how many, and offers the way out; then that unlinking asks first, reaches the server once, and — with no coverage until now — that a PARTIAL unlink says it was partial. The banner counts in SQL over the whole store while one pass releases at most `RELEASE_CAP`, so without that the banner returns with a smaller number and no reason, which is how a seller learns to distrust the button. Verified by planting that behaviour back. No marketplace needed: the connection state the screen reads is JSON from `/api/ebay/status`. |
+| P0-07 / P2-03 (extended) an unknown publish outcome says so, in a browser | `bbd26b3` | The last of the audit's journeys, and the one with the sharpest consumer consequence. When a write to eBay goes out and no answer comes back, the listing may or may not exist over there: *"it failed, try again"* produces a duplicate live listing the seller pays fees on, *"it worked"* leaves them looking for one that may not be there. The backend settles this already and its own tests cover the wording; what nothing covered is whether the EDITOR says it — that screen has its own success path, its own toast and its own published-screen swap, and any of the three could quietly turn "we do not know" into one or the other. The journey opens a live listing, presses Update Live Listing against a publish answering with the unknown-outcome shape, and asserts the success swap does not appear, the doubt is named, and the next step is given. **The first draft of the "reported as live" check could not fail** — it matched a paraphrase rather than the screen's own words, and now matches "Listing published!"/"Listing updated!" rather than "Live on eBay", which the listing card carries permanently. Third time this session a journey's first draft was untrippable. |
 | A vitest cache file was committed by mistake | `4851ea4`, `8ee30cd` | Running `npx vitest` from the repo root rather than from `frontend/` creates a top-level `node_modules/.vite` cache, which `.gitignore` did not cover — only `frontend/node_modules/` was listed. One result file went in with `2fe10f1` and churned on every test run after. Ignored and untracked; the file stays on disk. |
 
 Still open:
@@ -556,39 +557,47 @@ P2-01, P2-03 and P2-07 are closed (rows above). Of the rest:
 - [ ] **P2-08, partly started.** The unit suite is kept and much extended
       (1775 tests, from 961). `scripts/smoke.mjs` now signs a seller up
       through the real dialog, walks every screen with data actually being
-      fetched, and runs eight journeys (see the rows above): the theme
+      fetched, and runs nine journeys (see the rows above): the theme
       surviving a reload; a log-out that survives one; a store that could not
       be read; a settings screen whose defaults could not be read; an account
       deletion that warns, takes a password, and is refused by the SERVER on a
       wrong one; a big store whose older listings can actually be reached; a
-      held-back edit raised as a question the seller can answer; and a second
-      eBay account's listings explained and unlinked.
-      **Three of them found a live bug and a fourth found an assertion that
-      could not fail**, which is the argument for the remaining ones. Still
-      missing: eBay Sandbox contract tests, impossible from this environment
-      (see the release posture below), and a journey for an unknown publish
-      outcome.
+      held-back edit raised as a question the seller can answer; a second eBay
+      account's listings explained and unlinked; and a publish whose outcome
+      nobody knows, reported as unknown rather than as either answer.
+      **Three of them found a live bug and three more found assertions that
+      could not fail.** Every journey the audit asked for is now written; what
+      is still missing from P2-08 is the eBay Sandbox contract tests, which
+      are impossible from this environment (see the release posture below).
 
-      What made the eight writable is that none of them needed a
-      marketplace, and the list of what does was wrong three times — conflict
-      resolution was filed behind a connection and needs none (resolving one
-      is a write to this app's own record), and so was the second-account
-      banner (the connection state a screen reads is just JSON from
-      `/api/ebay/status`). Most needed only the server to misbehave or to say
-      something particular, which the browser arranges itself: `page.route()`
-      breaks `/api/listings` or `/api/prefs`, serves two pages of a store that
-      does not exist, one listing with a conflict on it, or a status claiming
-      four listings on an account that is not connected. The deletion one
+      **None of the nine needed a marketplace**, and this document said
+      four of them did. That is the finding worth keeping. Conflict resolution
+      was filed behind a connection and needs none (resolving one is a write
+      to this app's own record); so was the second-account banner and the
+      unknown publish outcome, because what those screens read is JSON from
+      `/api/ebay/status` and `/api/publish`, not a marketplace. `page.route()`
+      supplies it: a broken `/api/listings` or `/api/prefs`, two pages of a
+      store that does not exist, one listing with a conflict on it, a status
+      claiming four listings on an account that is not connected, a publish
+      that answers with the shape a lost connection produces. The deletion one
       needed nothing faked at all — a wrong password is the point, and the
       account is still standing afterwards.
 
-      Which leaves ONE: an unknown publish outcome. That really does need
-      somewhere to publish to, and faking the connection, the status, the
-      policies and the publish response would leave the test mostly checking
-      the fake. The lesson from getting this wrong three times is to apply
-      that judgement to each journey on its own rather than to the group — the
-      question is what the screen under test actually reads, and it is usually
-      less than it looks.
+      The question to ask of a journey is what the screen under test actually
+      READS, and the answer is reliably less than it looks. "It needs a
+      sandbox" was the wrong answer four times here; the sandbox is genuinely
+      needed for the CONTRACT tests, which assert what eBay really sends
+      back — a different question, and the one still open.
+
+      Two method notes, both learned by getting them wrong. Scope a journey's
+      assertions to the element under test: the deletion journey's first
+      version matched its warning against the whole page, and the card BEHIND
+      the dialog carries the same sentence permanently, so it passed with the
+      pre-fix code restored. And match the screen's own words rather than a
+      paraphrase: the unknown-outcome journey's "reported as live" check first
+      looked for wording the success screen never uses. **Every assertion in
+      all nine journeys was verified by planting the failure it names** —
+      three of them only started failing after that check.
 
       One method note, learned the hard way and worth keeping: scope a
       journey's assertions to the element under test. The deletion journey's
