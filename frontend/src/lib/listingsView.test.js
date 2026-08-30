@@ -105,3 +105,43 @@ describe("a store total on the dashboard", () => {
       .toBe("$412.00");
   });
 });
+
+describe("the sentence shown when the store could not be read", () => {
+  // Whatever `api()` throws is already a complete sentence written for the
+  // seller: it writes one for a timeout, one for a dropped connection, and
+  // since the P2-07 pass the server writes one too. Wrapping that in a second
+  // sentence produced the same words twice around a status code —
+  //
+  //   We couldn’t load your listings ((503) We couldn’t load your listings
+  //   just now.). This doesn’t mean you don’t have any — try again in a moment.
+  //
+  // — which is the shape P2-07 exists to remove, arrived at from the other
+  // end: the server's copy got better and the client kept dressing it up.
+  const SERVER = "We couldn’t load your listings just now — this doesn’t "
+    + "mean you don’t have any. Try again in a moment.";
+
+  it("shows what the seller was told, once", () => {
+    const v = listingsView({ loaded: true, user: USER, count: 0, error: SERVER });
+    expect(v.kind).toBe("unavailable");
+    expect(v.message).toBe(SERVER);
+  });
+
+  it("does not say the same thing twice", () => {
+    const v = listingsView({ loaded: true, user: USER, count: 0, error: SERVER });
+    expect(v.message.match(/couldn’t load your listings/gi)).toHaveLength(1);
+  });
+
+  it("still has something to say when the failure came with no words", () => {
+    const v = listingsView({ loaded: true, user: USER, count: 0, error: " " });
+    expect(v.kind).toBe("unavailable");
+    expect(v.message).toMatch(/doesn’t mean you don’t have any/);
+  });
+
+  it("leaves a store that is on screen alone", () => {
+    // Unchanged, and the reason this check is `error && !count`: a refresh
+    // that fails while the previous answer is still up should not replace a
+    // real store with an error card.
+    expect(listingsView({ loaded: true, user: USER, count: 4, error: SERVER }).kind)
+      .toBe("list");
+  });
+});

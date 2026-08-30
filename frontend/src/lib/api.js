@@ -147,9 +147,15 @@ export async function api(path, opts = {}) {
     if (timer) clearTimeout(timer);
   }
   if (!res.ok) {
+    // `served` stays false when the body carried no `detail` of its own — a
+    // proxy's HTML error page, a gateway timeout — and that is the only case
+    // where the status code goes in the message, because there it is the
+    // only information available.
     let detail = res.statusText;
+    let served = false;
     try {
-      detail = (await res.json()).detail || detail;
+      const sent = (await res.json()).detail;
+      if (sent) { detail = sent; served = true; }
     } catch (e) { /* non-JSON error body */ }
     // Out of AI tokens (402 mentioning tokens — distinct from the unrelated
     // 402 the server maps Anthropic-credit exhaustion to): let the app shell
@@ -157,7 +163,16 @@ export async function api(path, opts = {}) {
     if (res.status === 402 && /token/i.test(String(detail))) {
       try { window.dispatchEvent(new CustomEvent("tokens:needed", { detail })); } catch (e) {}
     }
-    const err = new Error(`(${res.status}) ${detail}`);
+    // The sentence the server wrote IS the message. Prefixing the status was
+    // right when `detail` was a raw exception string and the number was the
+    // only thing in it worth reading; P2-07 turned those into sentences
+    // written for the seller, and this went on dressing each one up. On the
+    // most ordinary failure there is, it produced: "We couldn’t load your
+    // listings ((503) We couldn’t load your listings just now.). This doesn’t
+    // mean you don’t have any" — the same sentence twice, wrapped around a
+    // number nobody can act on. The status stays on `err.status`, which is
+    // where the code that branches on it already looks.
+    const err = new Error(served ? detail : `(${res.status}) ${detail}`);
     err.status = res.status;
     throw err;
   }

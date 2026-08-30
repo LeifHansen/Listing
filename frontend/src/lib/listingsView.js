@@ -25,8 +25,17 @@ export function listingsView({
   if (error && !count) {
     return {
       kind: "unavailable",
-      message: `We couldn’t load your listings (${error}). This doesn’t mean `
-        + `you don’t have any — try again in a moment.`,
+      // Shown as it arrived. Whatever `api()` throws is already a complete
+      // sentence written for the seller -- it writes one for a timeout, one
+      // for a dropped connection, and since the P2-07 pass the server writes
+      // one too. Wrapping that in a second sentence put the same words on
+      // screen twice, around a status code: "We couldn’t load your listings
+      // ((503) We couldn’t load your listings just now.). This doesn’t mean
+      // you don’t have any". The reassurance now lives in db.list_listings’
+      // message, where the layer that knows the store read failed can say it.
+      message: error.trim()
+        || "We couldn’t load your listings just now — this doesn’t mean you "
+           + "don’t have any. Try again in a moment.",
     };
   }
   if (!count) return { kind: "empty" };

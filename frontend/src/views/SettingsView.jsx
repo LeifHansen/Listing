@@ -391,7 +391,7 @@ export function SettingsView() {
           />
           {prefsError ? (
             <PanelUnavailable
-              message={`We couldn’t load your saved defaults (${prefsError}), so nothing is shown here — this isn’t what you have saved.`}
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
               onRetry={loadPrefs}
             />
           ) : prefs === null ? (
@@ -414,7 +414,7 @@ export function SettingsView() {
           />
           {prefsError ? (
             <PanelUnavailable
-              message={`We couldn’t load your saved defaults (${prefsError}), so nothing is shown here — this isn’t what you have saved.`}
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
               onRetry={loadPrefs}
             />
           ) : prefs === null ? (
@@ -442,7 +442,7 @@ export function SettingsView() {
           />
           {prefsError ? (
             <PanelUnavailable
-              message={`We couldn’t load your saved defaults (${prefsError}), so nothing is shown here — this isn’t what you have saved.`}
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
               onRetry={loadPrefs}
             />
           ) : prefs === null ? (

@@ -553,8 +553,8 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: list_listings failed: {exc}")
         raise StorageUnavailable(
-            "We couldn't load your listings just now. Try again in a moment."
-        ) from exc
+            "We couldn’t load your listings just now — this doesn’t mean you "
+            "don’t have any. Try again in a moment.") from exc
 
 
 def list_listings_best_effort(limit: int = 50,
