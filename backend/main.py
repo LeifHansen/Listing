@@ -3195,9 +3195,30 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
 
 
+def _taxonomy_guard(request: Request) -> None:
+    """Shared brake on the eBay lookups that need no login.
+
+    Category suggestions, item aspects and price comps all call eBay with the
+    APPLICATION token — that is why they need no seller, and why an
+    unauthenticated flood spends an allowance shared by every seller. The
+    answers are cached, but the cache is bounded, so distinct queries evict it
+    and force a live call each.
+
+    ONE budget across all three: they draw on the same eBay allowance, so
+    metering them separately would let a caller spend it three times over.
+    """
+    ip = _client_ip(request)
+    if not ratelimit.check(f"taxonomy:{ip}",
+                           max_attempts=ratelimit.TAXONOMY_MAX_CALLS):
+        log.warning("taxonomy: rate limited %s", ip)
+        raise HTTPException(
+            429, "Too many lookups at once. Wait a moment and try again.")
+
+
 @app.post("/api/category-suggestions")
-def category_suggestions(payload: dict) -> dict:
+def category_suggestions(payload: dict, request: Request) -> dict:
     """Return ranked eBay category suggestions for a free-text query."""
+    _taxonomy_guard(request)
     if not config.taxonomy_ready():
         raise HTTPException(
             400,
@@ -3221,6 +3242,7 @@ def price_suggestions(payload: dict, request: Request) -> dict:
     Sources are pluggable — see services/pricing.py. The headline suggestion
     honors the account's pricing strategy (Quick Flip / Median / Long Sale).
     """
+    _taxonomy_guard(request)
     if not config.taxonomy_ready():
         raise HTTPException(
             400,
@@ -3443,8 +3465,9 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
 
 
 @app.post("/api/item-aspects")
-def item_aspects(payload: dict) -> dict:
+def item_aspects(payload: dict, request: Request) -> dict:
     """Required + recommended item specifics eBay defines for a category."""
+    _taxonomy_guard(request)
     if not config.taxonomy_ready():
         raise HTTPException(400, "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured.")
     cid = str(payload.get("category_id", "")).strip()
