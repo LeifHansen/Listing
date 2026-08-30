@@ -147,6 +147,7 @@ encoded wrong behaviour were corrected in place, each saying why.
 | --- | --- | --- |
 | P1-06 promotion consent | `97122c7` | Promoted Listings (COST_PER_SALE, 10% default rate) was enabled when the preference was ABSENT and when the prefs read RAISED — so silence and a database outage both counted as agreeing to a fee. Now off unless explicitly on. **This reverses a deliberate product choice** (the old default was on because sellers reported publishes landing unpromoted); the commit message says so. The UI mirrored the old default independently and was changed with it. |
 | P1-09 public surface | `e2ca586` | Anonymous `/api/health` returned 26 operator keys including raw DB/R2 exception text (Neon host and role, R2 account id). Moved to `/api/admin/diagnostics` behind `ADMIN_TOKEN`, which **fails closed**. `build` deliberately stays public — deploy.yml, deploy.sh and health-watch.yml all poll it. Also: an unconnected production publish no longer answers `ok: true` with the Trading XML and a server path. |
+| P1-05 privacy policy accuracy (partial) | *this commit* | The policy made three claims the code contradicted: that deletion "immediately" removes photos (the media purge runs after the response returns), that it "hands your marketplace authorizations back" (nothing revokes the OAuth grants), and that eBay deletion notices are merely "recorded for audit" keyed on nothing (they are now verified and acted on, keyed on eBay's immutable id). Stripe was also absent from the service-provider list despite processing token purchases. Copy now matches the implementation. **Not legal review** — the audit's ask for counsel review, retention schedule, legal identity and a company-domain contact is untouched. |
 | P1-11 deploy gate (partial) | *this commit* | `deploy` gated production on the lightweight lint+unit job ALONE — cutout safety, the frontend build and the smoke test never gated a deploy, and `ci.yml` runs only on `pull_request` so a push to `main` ran none of them. Both now call one shared `gates.yml`. `superfly/flyctl-actions/setup-flyctl` was pinned off `@master` (it runs in the job holding `FLY_API_TOKEN`). **See the two operational consequences below.** |
 | P1-08 security headers (partial) | `46b89d3` | None of CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy or Permissions-Policy were sent. Now all present, verified against the booted app. The CSP keeps `'unsafe-inline'` in script-src because index.html has an inline theme script — tightening to a nonce is worth its own change. The REST of P1-08 (revocable sessions, password reset/verify/MFA, distributed rate limiting, fail-closed keys) is untouched. |
 | P1-12 side-effect-free GET | `a8d8f0e` | A plain read downloaded up to 24 photos, wrote up to 48 files, started an R2 upload and wrote the DB row. Now `POST /api/listings/{id}/prepare-for-editing`, called by the frontend when the seller opens the editor. |
@@ -156,8 +157,13 @@ Still open:
 - [ ] P1-01 whole-store sync is N+1, automatic per browser session, and
       quota-unsafe (2,500 GetItem calls against a 5,000/day allowance).
 - [ ] P1-02 jobs/locks/cooldowns are process-local and non-resumable.
-- [ ] P1-05 user-initiated deletion is not durable and the privacy policy
-      overpromises (also: Stripe is undisclosed).
+- [ ] P1-05, MINUS the policy corrections (done, see above): user-initiated
+      deletion is still not durable — the media purge is an untracked
+      background thread with no completion state — and nothing revokes the
+      marketplace OAuth grants. The policy now says so rather than promising
+      otherwise, which is the honest interim state, not the fix. Still needs:
+      counsel review, a retention schedule, legal identity/address, and a
+      company-domain support contact (it is currently a personal Gmail).
 - [ ] P1-07 settings combine partial operations and hide remote uncertainty.
 - [ ] P1-08 auth baseline, MINUS the headers (done, `46b89d3`): 30-day
       irrevocable JWTs, no reset/verify/MFA, process-local rate limiting, and
