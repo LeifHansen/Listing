@@ -298,6 +298,17 @@ def from_trading_error(exc: Exception) -> list[dict]:
     # "eBay's reason: <a warning about something else>" on a rejection eBay
     # had in fact declined to explain, and hid the real diagnosis behind it.
     said = str(getattr(exc, "said", "") or "")
+    if getattr(exc, "unreachable", False):
+        # The request never left, so eBay neither acted nor refused. The
+        # generic branch would title this "eBay rejected the listing", which
+        # is what the short surfaces render — and it sends the seller hunting
+        # through fields when the problem is the network. Unlike the unknown
+        # case below, this one CAN say nothing was sent.
+        return [{"error_id": "", "ebay_message": str(exc),
+                 "target": "generic",
+                 "title": "Couldn't reach eBay",
+                 "fix": "We couldn't get a connection to eBay, so nothing was "
+                        "sent. Try again in a moment."}]
     if getattr(exc, "outcome_unknown", False):
         # Not a rejection, and it must not be titled as one. The fix panel and
         # the bulk cards render the TITLE, and the short surfaces render only

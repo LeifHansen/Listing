@@ -70,11 +70,21 @@ def _unknown(method: str, path: str) -> "UnknownOutcome":
     return UnknownOutcome(_UNKNOWN_ISSUE["fix"], [dict(_UNKNOWN_ISSUE)])
 
 
-def _unreachable(exc: Exception) -> DepopError:
-    message = f"Couldn't reach Depop: {exc}"
-    return DepopError(message, [{"target": "generic", "level": "error",
-                                 "title": "Couldn't reach Depop",
-                                 "fix": message}])
+def _unreachable(method: str, path: str, exc: Exception) -> DepopError:
+    """No connection, or a read that never answered. Depop did nothing.
+
+    Deliberately NOT titled "Depop rejected the listing" — that is a claim
+    about Depop, and the short surfaces render the title. The raw transport
+    error goes to the log rather than onto a card: it names hosts and errno
+    codes and helps nobody looking at their shop.
+    """
+    log.info("depop: %s %s could not reach Depop: %s", method, path, exc)
+    return DepopError(
+        "Couldn't reach Depop.",
+        [{"target": "generic", "level": "error",
+          "title": "Couldn't reach Depop",
+          "fix": "We couldn't get a connection to Depop, so nothing was sent. "
+                 "Try again in a moment."}])
 
 
 def _request(method: str, path: str, access_token: str, *,
@@ -89,11 +99,11 @@ def _request(method: str, path: str, access_token: str, *,
     except _NEVER_SENT as exc:
         # No connection, so Depop never saw this. A definite failure even for
         # a write.
-        raise _unreachable(exc) from exc
+        raise _unreachable(method, path, exc) from exc
     except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
         if changes:
             raise _unknown(method, path) from exc
-        raise _unreachable(exc) from exc
+        raise _unreachable(method, path, exc) from exc
     if changes and resp.status_code >= 500:
         # Something that already had the request in hand failed to answer for
         # it. Not a rejection.

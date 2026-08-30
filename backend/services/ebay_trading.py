@@ -75,6 +75,10 @@ class TradingError(ValueError):
     """
 
     outcome_unknown = False
+    # True only on Unreachable below: the request never left, so eBay did not
+    # act and did not refuse. Read by backend/ebay_errors, which must not
+    # title it as a rejection.
+    unreachable = False
 
     def __init__(self, message: str, code: str = "", detail: str = "",
                  said: str = "", codes: Optional[list[str]] = None):
@@ -166,6 +170,23 @@ class UnknownOutcome(TradingError):
                  detail: str = ""):
         super().__init__(message, code=code, detail=detail)
         self.call = call
+
+
+class Unreachable(TradingError):
+    """No connection was made, so eBay never saw the request.
+
+    The other half of the UnknownOutcome rule, and the same reason: the fix
+    panel and the short surfaces render an issue's TITLE, and the generic
+    branch's "eBay rejected the listing" is a claim about something eBay did.
+    On a refused connection it did nothing, and sending the seller hunting
+    through fields when the problem is their network wastes the one thing
+    that message is for.
+
+    Unlike UnknownOutcome this one CAN say nothing was sent, which is the most
+    useful sentence available here.
+    """
+
+    unreachable = True
 
 
 # The calls that CHANGE something on eBay. A failure with no answer means
@@ -314,8 +335,10 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         """
         if writes:
             return UnknownOutcome(_UNKNOWN_MESSAGE, call=call, detail=reason)
-        return TradingError(f"Couldn't reach eBay: {reason}"
-                            if exc is not None else reason)
+        # A read, or a call whose sent-ness is unproven but which changes
+        # nothing. Still not a rejection — see Unreachable.
+        return Unreachable(f"Couldn't reach eBay: {reason}"
+                           if exc is not None else reason)
 
     try:
         resp = httpx.post(_endpoint(), headers=_headers(call, token),
@@ -323,7 +346,7 @@ def _call(call: str, token: str, body: str) -> ET.Element:
     except _NEVER_SENT as exc:
         # No connection was made, so eBay never saw this. Safe to call a
         # failure even for a write.
-        raise TradingError(f"Couldn't reach eBay: {exc}") from exc
+        raise Unreachable(f"Couldn't reach eBay: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
         raise _lost(str(exc), exc) from exc
     if resp.status_code == 429:

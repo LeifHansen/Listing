@@ -287,3 +287,43 @@ def test_a_coded_rejection_still_reads_as_a_rejection():
     issue = ebay_errors.from_trading_error(
         ebay_trading.TradingError("Input data is invalid.", code="37"))[0]
     assert issue["title"] == "eBay rejected the listing"
+
+
+# ------------------------------------- and a request that never left, either
+#
+# The other half of the same rule. "eBay rejected the listing" is a claim
+# about something eBay did, and on a connection that was never made it did
+# nothing. That title is what the short surfaces render, so it sends the
+# seller hunting through fields when the problem is the network.
+
+def test_an_unreachable_failure_is_not_titled_a_rejection(transport):
+    from backend import ebay_errors
+
+    err = _end(transport, httpx.ConnectError("connection refused"))
+    assert not isinstance(err, ebay_trading.UnknownOutcome)
+
+    issue = ebay_errors.from_trading_error(err)[0]
+    assert "rejected" not in issue["title"].lower()
+    assert "reach" in issue["title"].lower()
+    # It may say the one thing the unknown case may not.
+    assert "nothing was sent" in issue["fix"].lower()
+
+
+def test_a_read_that_could_not_reach_ebay_says_the_same(transport):
+    """A read has no outcome to be unknown about, but "rejected" is just as
+    wrong for it."""
+    from backend import ebay_errors
+
+    transport(httpx.ConnectError("connection refused"))
+    with pytest.raises(ebay_trading.TradingError) as caught:
+        ebay_trading.get_listing("tok", "110")
+    issue = ebay_errors.from_trading_error(caught.value)[0]
+    assert "rejected" not in issue["title"].lower()
+
+
+def test_ebays_coded_rejection_is_untouched_by_that(transport):
+    from backend import ebay_errors
+
+    issue = ebay_errors.from_trading_error(
+        ebay_trading.TradingError("Input data is invalid.", code="37"))[0]
+    assert issue["title"] == "eBay rejected the listing"

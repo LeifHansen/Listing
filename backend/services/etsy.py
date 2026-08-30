@@ -132,6 +132,22 @@ def _raise_for_status(resp: httpx.Response, doing: str,
     raise EtsyError(issues[0]["fix"], issues)
 
 
+def _unreachable(doing: str, exc: Exception) -> EtsyError:
+    """Etsy never saw the request, or never answered a read.
+
+    NOT titled as a rejection: `etsy_error_issues` says "Etsy rejected the
+    listing", which is a claim about something Etsy did, and here it did
+    nothing -- the connection was never made. The fix panel and the bulk cards
+    render the title, so getting this wrong sends the seller looking for a
+    problem with their listing when the problem is the network.
+    """
+    message = f"Couldn't reach Etsy while {doing}."
+    return EtsyError(message, [{"target": "generic", "level": "error",
+                                "title": "Couldn't reach Etsy",
+                                "fix": f"{message} Nothing was sent — try "
+                                       "again in a moment."}])
+
+
 def _send(doing: str, changes: bool, call, *args, **kwargs) -> httpx.Response:
     """Run one Etsy request, classifying a failure to get an answer.
 
@@ -141,13 +157,11 @@ def _send(doing: str, changes: bool, call, *args, **kwargs) -> httpx.Response:
     try:
         return call(*args, **kwargs)
     except _NEVER_SENT as exc:
-        raise EtsyError(f"Couldn't reach Etsy: {exc}", etsy_error_issues(
-            None, f"Couldn't reach Etsy while {doing}.")) from exc
+        raise _unreachable(doing, exc) from exc
     except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
         if changes:
             raise _unknown(doing) from exc
-        raise EtsyError(f"Couldn't reach Etsy: {exc}", etsy_error_issues(
-            None, f"Couldn't reach Etsy while {doing}.")) from exc
+        raise _unreachable(doing, exc) from exc
 
 
 def create_draft_listing(access_token: str, shop_id: str, payload: dict) -> dict:

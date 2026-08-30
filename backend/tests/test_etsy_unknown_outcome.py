@@ -111,3 +111,17 @@ def test_a_lost_read_is_not_an_unknown_outcome(transport):
     with pytest.raises(etsy.EtsyError) as caught:
         etsy.get_listing("tok", "123")
     assert not isinstance(caught.value, etsy.UnknownOutcome)
+
+
+def test_a_request_that_never_left_is_not_titled_a_rejection(transport):
+    """Etsy did nothing here — the connection was never made. Titling it "Etsy
+    rejected the listing" (which is what etsy_error_issues says by default)
+    sends the seller looking for a problem with their listing when the problem
+    is the network, and that title is what the short surfaces render."""
+    err = _create(transport, httpx.ConnectError("connection refused"))
+
+    assert not isinstance(err, etsy.UnknownOutcome)
+    assert "rejected" not in err.issues[0]["title"].lower()
+    assert "reach" in err.issues[0]["title"].lower()
+    # And it may say the one thing the unknown case may not.
+    assert "nothing was sent" in err.issues[0]["fix"].lower()

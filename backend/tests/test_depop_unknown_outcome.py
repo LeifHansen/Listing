@@ -98,3 +98,22 @@ def test_a_delete_is_a_write_too(transport):
     with pytest.raises(depop.DepopError) as caught:
         depop.delete_product("tok", "p-1")
     assert isinstance(caught.value, depop.UnknownOutcome)
+
+
+def test_a_request_that_never_left_is_not_titled_a_rejection(transport):
+    """Depop did nothing — the connection was never made. "Depop rejected the
+    listing" is a claim about Depop, and it is what the short surfaces
+    render."""
+    err = _create(transport, httpx.ConnectError("connection refused"))
+
+    assert not isinstance(err, depop.UnknownOutcome)
+    assert "rejected" not in err.issues[0]["title"].lower()
+    assert "reach" in err.issues[0]["title"].lower()
+    assert "nothing was sent" in err.issues[0]["fix"].lower()
+
+
+def test_the_raw_transport_error_stays_out_of_the_sellers_message(transport):
+    """The exception text names hosts and errno codes and helps nobody on a
+    card. It belongs in the log, which is where it now goes."""
+    err = _create(transport, httpx.ConnectError("connection refused to 10.0.0.1"))
+    assert "10.0.0.1" not in err.issues[0]["fix"]
