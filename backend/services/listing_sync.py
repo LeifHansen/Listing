@@ -411,9 +411,18 @@ def _started_at(data: dict) -> Optional[datetime]:
     if not raw:
         return None
     try:  # eBay sends "2026-07-30T18:04:11.000Z"
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # "Aware" was the contract and the Z was the only thing enforcing it. The
+    # value goes into a DateTime(timezone=True) column, and Postgres reads a
+    # NAIVE datetime written there as being in the session's timezone -- the
+    # same silent offset as the sessions_valid_from trap, arriving from the
+    # value side instead of the column side. eBay's times are UTC; anything
+    # that reaches here without a zone came through this app's own storage,
+    # where they are UTC too. duplicates._listed_at and recommender._age_days
+    # already do exactly this with the same values.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def recent_sales(token: str) -> dict[str, dict]:
