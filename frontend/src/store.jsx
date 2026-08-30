@@ -268,8 +268,14 @@ export function AppProvider({ children }) {
   const closeShipping = useCallback(() => setShipping(null), []);
 
   // ---------- saved listings cache ----------
+  // `error` separates a store with nothing in it from a store we could not
+  // read: without it a failed load rendered as "No listings yet", the app
+  // stating something about the seller's account on the strength of having
+  // failed to find out. See lib/listingsView.js; it is the same distinction
+  // metricsStatus makes below for eBay's traffic numbers.
   const [listingsState, setListingsState] = useState({
-    loaded: false, loading: false, authed: true, dbConfigured: true, items: [],
+    loaded: false, loading: false, authed: true, dbConfigured: true,
+    error: "", items: [],
   });
   // eBay views/watchers per live listing, keyed by our listing record id.
   const [metricsById, setMetricsById] = useState(NO_METRICS);
@@ -313,13 +319,22 @@ export function AppProvider({ children }) {
       setListingsState({
         loaded: true,
         loading: false,
+        error: "",
         authed: !!res.authed,
         dbConfigured: !!(res.db && res.db.configured),
         dbConnected: !!(res.db && res.db.connected),
         items: res.listings || [],
       });
     } catch (e) {
-      setListingsState((s) => ({ ...s, loading: false, loaded: true }));
+      // Recorded, not just toasted: the toast is gone in seconds, the view
+      // stays, and without this it goes on saying the store is empty.
+      // Read off `e` here rather than inside the updater — capturing the
+      // caught binding in the callback makes the React compiler give up on
+      // this component, which quietly retires every set-state-in-effect
+      // suppression in the file.
+      const failure = e.message || "we couldn’t reach the server";
+      setListingsState((s) => ({ ...s, loading: false, loaded: true,
+                                 error: failure }));
       if (!quiet) toast(`Couldn't load listings: ${e.message}`, { kind: "error" });
     }
   }, [toast]);

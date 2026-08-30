@@ -4,7 +4,7 @@ import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, Megaphone, TrendingDown, RotateCcw,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign,
+  ChevronDown, DollarSign, AlertTriangle,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -19,6 +19,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
+import { listingsView } from "@/lib/listingsView";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
 // it during render is a no-op state write when it is already empty, instead of
@@ -396,6 +397,9 @@ export function Dashboard() {
   const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
+  const storeView = listingsView({
+    ...listingsState, user, count: items.length,
+  });
 
   // "What to do next" — ranked actions across the user's listings.
   const [insights, setInsights] = useState(NO_INSIGHTS);
@@ -773,6 +777,19 @@ export function Dashboard() {
                 metrics={metricsById[item.id]} />
             ))}
           </div>
+        ) : storeView.kind === "unavailable" ? (
+          // Not the empty state: a read that failed is not evidence that the
+          // seller has no listings, and this panel is the first thing they see.
+          <Card>
+            <p className="text-sm text-ink flex gap-2">
+              <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>{storeView.message}</span>
+            </p>
+            <Button variant="soft" size="sm" className="mt-3"
+              onClick={() => loadListings()}>
+              Try again
+            </Button>
+          </Card>
         ) : (
           <Card className="p-0">
             <EmptyState

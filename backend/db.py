@@ -419,10 +419,32 @@ def mutate_listing_data(
 
 
 def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
+    """The user's listings, newest first. RAISES on a read failure.
+
+    Not `[]`, which is what this used to answer and what every other read in
+    this module still answers. "The seller's store" is the input to decisions
+    that write, and an invented empty answer is indistinguishable from a
+    seller who genuinely has nothing:
+
+      - the eBay import matches incoming items against what it finds here and
+        imports whatever it does not find. One failed read during a sync
+        therefore imported a SECOND copy of the seller's entire eBay store,
+        reported as a successful sync, leaving real duplicate listings to be
+        merged by hand;
+      - a release pass reports "released 0" as success;
+      - a status sweep reports checking a store it never read;
+      - the session-id migration reports nothing to migrate.
+
+    Callers that genuinely tolerate an empty answer call
+    list_listings_best_effort, so the decision sits at the call site where
+    someone can see what it costs.
+    """
+    eng = _get_engine()
+    # No database configured is a configuration, not a failure: nothing is
+    # persisted, so the store really is empty and /api/health says why.
+    if eng is None:
+        return []
     try:
-        eng = _get_engine()
-        if eng is None:
-            return []
         with Session(eng) as s:
             q = select(ListingRecord)
             if user_id is not None:
@@ -432,6 +454,23 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None) -> list[dict]:
             return [_record_to_dict(r) for r in rows]
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: list_listings failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn't load your listings just now. Try again in a moment."
+        ) from exc
+
+
+def list_listings_best_effort(limit: int = 50,
+                              user_id: Optional[str] = None) -> list[dict]:
+    """list_listings, but an unreadable store answers `[]`.
+
+    Only for callers where an empty result degrades the answer rather than
+    changing what gets written — a metrics panel with no numbers in it, a
+    weight lookup that falls back to asking. Never for anything that decides
+    what to create, release, or end.
+    """
+    try:
+        return list_listings(limit=limit, user_id=user_id)
+    except StorageUnavailable:
         return []
 
 

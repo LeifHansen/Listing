@@ -1197,10 +1197,10 @@ def account_summary(request: Request) -> dict:
     stay up on eBay after deletion, and a seller must know that before they
     lose the tools to manage them.
 
-    `counted` says whether the numbers can be trusted. list_listings() returns
-    [] on a DB error like every read in db.py, and silently showing "0 live
-    listings" would suppress exactly the warning this endpoint exists to give
-    — so an unreachable DB is reported as unknown, not as zero.
+    `counted` says whether the numbers can be trusted. Silently showing "0
+    live listings" would suppress exactly the warning this endpoint exists to
+    give, so an unreachable database is reported as unknown, not as zero --
+    both when db_status says it is down and when the read itself fails.
     """
     user = auth.current_user(request)
     if not user:
@@ -1210,7 +1210,14 @@ def account_summary(request: Request) -> dict:
     # and a lower cap here would quietly under-report the very seller this
     # dialog exists to warn — someone with more listings than the cap is told
     # they are about to delete fewer than they have, live ones included.
-    rows = db.list_listings(limit=LIST_CAP, user_id=user["id"]) if counted else []
+    try:
+        rows = db.list_listings(limit=LIST_CAP, user_id=user["id"]) if counted else []
+    except errors.StorageUnavailable:
+        # db_status said connected and the read still failed. The endpoint's
+        # own contract answers that: unknown, not zero. Zero here would
+        # suppress the "these stay live on eBay after you delete" warning the
+        # dialog exists to give.
+        rows, counted = [], False
     live = sum(1 for r in rows
                if (r.get("status") or "") in ("published", "live"))
     return {
@@ -3871,8 +3878,8 @@ def listings(request: Request, limit: int = LIST_CAP) -> dict:
     # Clamped like /api/notifications does, and for both of its reasons: a
     # caller-supplied ?limit had no ceiling (so one request could ask for every
     # listing JSON blob the store holds) and no floor (?limit=-1 is a Postgres
-    # error that db.list_listings swallows into [], i.e. an empty store
-    # reported as a 200).
+    # error, which db.list_listings used to swallow into [] -- an empty store
+    # reported as a 200; it now raises, and the clamp keeps it from arising).
     limit = max(1, min(limit, LIST_CAP))
     items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
     return {"listings": items, "db": db.db_status(), "authed": bool(user)}
@@ -3948,7 +3955,9 @@ def listing_metrics_route(request: Request) -> dict:
     user = auth.current_user(request)
     if not user:
         return {"metrics": {}}
-    items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
+    # Best effort: no numbers is a thinner panel, not a wrong statement, and
+    # it decides nothing that gets written.
+    items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"])
     status: dict = {}
     by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status)
     return {"metrics": by_id,
@@ -4930,7 +4939,9 @@ def _listing_map_by_item_id(uid: str) -> dict:
     records, so order exports/quotes can pre-fill the weight the seller
     already entered and link an order back to its listing."""
     out = {}
-    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+    # Best effort: this only pre-fills a weight the seller can type, so an
+    # unreadable store costs them a field, not a wrong answer.
+    for rec in db.list_listings_best_effort(limit=LIST_CAP, user_id=uid):
         listing = rec.get("listing") or {}
         item_id = str(listing.get("ebay_listing_id") or "")
         if not item_id:

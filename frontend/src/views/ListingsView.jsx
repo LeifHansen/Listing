@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw, Truck,
+  PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle,
 } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -17,6 +17,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
+import { listingsView } from "@/lib/listingsView";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -195,6 +196,10 @@ export function ListingsView({ search = "" }) {
     } catch (e) { window.scrollTo(0, 0); }
   };
 
+  const view = listingsView({
+    ...listingsState, user, count: listingsState.items.length,
+  });
+
   let body;
   if (listingsState.loading && !listingsState.loaded) {
     body = (
@@ -223,6 +228,21 @@ export function ListingsView({ search = "" }) {
             </Button>
           }
         />
+      </Card>
+    );
+  } else if (view.kind === "unavailable") {
+    // Not the empty state. "No listings yet" is a claim about the seller's
+    // account, and a read that failed is not evidence for it.
+    body = (
+      <Card>
+        <p className="text-sm text-ink flex gap-2">
+          <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+          <span>{view.message}</span>
+        </p>
+        <Button variant="soft" size="sm" className="mt-3"
+          onClick={() => loadListings()}>
+          Try again
+        </Button>
       </Card>
     );
   } else if (items.length === 0) {
