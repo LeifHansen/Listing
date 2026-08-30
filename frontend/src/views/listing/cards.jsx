@@ -913,7 +913,17 @@ export function PricingCard({ w }) {
         {/* Condition gets its own labeled row (not the last cell of the price
             grid, where it was easy to miss) paired with its description. */}
         <div className="grid sm:grid-cols-[minmax(200px,260px)_1fr] gap-4 pt-1 border-t border-line">
-          <Field label="Condition">
+          <Field
+            label="Condition"
+            /* When the lookup could not run, the list below is the generic
+               one, not eBay's for this category — so a pick that looks fine
+               here can still come back as error 25021 at publish. Saying so
+               beats letting the seller find out then. */
+            help={w.categoryMeta.conditionsChecked === false
+              ? "We couldn’t check which conditions eBay allows in this "
+                + "category, so these are the general ones."
+              : undefined}
+          >
             <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </Select>

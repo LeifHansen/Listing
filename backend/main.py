@@ -2441,6 +2441,41 @@ def _support_reference() -> str:
     return secrets.token_hex(4)
 
 
+def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPException:
+    """A marketplace lookup that failed, said in a sentence a seller can use.
+
+    P2-07's rule, applied to the four lookups the editor makes on nearly every
+    listing. They handed `raise_for_status()`'s own words straight into a
+    toast:
+
+        eBay Taxonomy API error: Client error '401 Unauthorized' for url
+        'https://api.ebay.com/commerce/taxonomy/v1/category_tree/0/
+        get_category_suggestions?q=vintage+levis' For more information check:
+        https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
+
+    — the deployment's API base, the exact call, the seller's own query and an
+    MDN link, in place of anything they could do. It also read identically for
+    a rate limit, an expired application token and a network blip, which are
+    three different waits.
+
+    The detail is not discarded; it goes to the log under `reference`, which
+    comes back in the message so support can join the two. Same shape as the
+    payments check and the token checkout above.
+
+    `doing` names the marketplace on purpose. That is not the implementation
+    detail this exists to remove — a seller listing on eBay knows the app
+    talks to eBay, and knowing whose side the problem is on is most of what
+    they wanted. What goes is the URL, the status line and the MDN link.
+    """
+    reference = _support_reference()
+    log.warning("lookup failed (%s) [%s]: %s", doing, reference, exc)
+    # The reference rides IN the sentence: lib/api.js reads `detail` as a
+    # string, so a structured body renders as "[object Object]".
+    return HTTPException(status, (
+        f"We couldn't {doing} just now. Try again in a moment — if it keeps "
+        f"happening, quote {reference} to support."))
+
+
 @app.get("/api/ebay/payments-status")
 def ebay_payments_status(request: Request) -> dict:
     """Live check of the connected eBay account's payments onboarding.
@@ -3275,7 +3310,7 @@ def category_suggestions(payload: dict, request: Request) -> dict:
     try:
         return taxonomy.suggest(query, limit=int(payload.get("limit", 5)))
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"eBay Taxonomy API error: {exc}") from exc
+        raise _lookup_failed("look up eBay's categories", exc) from exc
 
 
 @app.post("/api/price-suggestions")
@@ -3309,7 +3344,7 @@ def price_suggestions(payload: dict, request: Request) -> dict:
         # sentence about eBay — the shape P2-07 exists to stop.
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
+        raise _lookup_failed("check eBay for comparable prices", exc) from exc
 
 
 
@@ -3535,7 +3570,8 @@ def item_aspects(payload: dict, request: Request) -> dict:
     try:
         return taxonomy.item_aspects(cid)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"eBay aspects lookup failed: {exc}") from exc
+        raise _lookup_failed("load eBay's item specifics for that category",
+                             exc) from exc
 
 
 @app.post("/api/item-conditions")
@@ -3550,10 +3586,16 @@ def item_conditions(payload: dict, request: Request) -> dict:
     creds = _ebay_creds_for(request)
     token = creds.get("access_token") if creds else None
     try:
-        return taxonomy.item_conditions(cid, access_token=token)
+        return {**taxonomy.item_conditions(cid, access_token=token),
+                "checked": True}
     except Exception as exc:  # noqa: BLE001 - optional enhancement; fail soft
+        # Fail soft, but not silently: an empty list reads as "eBay puts no
+        # condition requirement on this category", which is a claim, and the
+        # editor would then offer conditions eBay will reject at publish time
+        # (error 25021 — the whole reason this lookup exists). `checked` is
+        # the same flag the price lookup and the notifications bell use.
         log.info("item-conditions(cat=%s) failed: %s", cid, exc)
-        return {"conditions": []}
+        return {"conditions": [], "checked": False}
 
 
 @app.post("/api/delete-image")

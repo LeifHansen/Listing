@@ -79,7 +79,8 @@ export function useListingForm() {
   const [fixTarget, setFixTarget] = useState(null); // which field group eBay flagged
   const [catSuggestions, setCatSuggestions] = useState(null);
   const [priceData, setPriceData] = useState(null);
-  const [categoryMeta, setCategoryMeta] = useState({ conditions: [], aspects: [] });
+  const [categoryMeta, setCategoryMeta] = useState(
+    { conditions: [], aspects: [], conditionsChecked: true });
 
   // ---------- marketplace targets ----------
   // Which marketplaces the Publish buttons hit — the shared remembered
@@ -125,7 +126,7 @@ export function useListingForm() {
       setFixTarget(null);
       setCatSuggestions(null);
       setPriceData(null);
-      setCategoryMeta({ conditions: [], aspects: [] });
+      setCategoryMeta({ conditions: [], aspects: [], conditionsChecked: true });
     }
   }, [sessionId, session]);
 
@@ -222,15 +223,22 @@ export function useListingForm() {
   const loadCategoryMeta = useCallback(async (categoryId) => {
     const cid = (categoryId ?? form.category_id ?? "").trim();
     if (!health.taxonomy_configured || !cid) {
-      setCategoryMeta({ conditions: [], aspects: [] });
+      setCategoryMeta({ conditions: [], aspects: [], conditionsChecked: true });
       return;
     }
     const [cond, asp] = await Promise.all([
-      postJson("/api/item-conditions", { category_id: cid }).catch(() => ({ conditions: [] })),
+      // `checked: false` is the route saying it could not ask eBay. An empty
+      // list otherwise means "eBay puts no condition requirement on this
+      // category", and the editor falls back to the generic list — which is
+      // how a seller picks a condition eBay refuses at publish (error 25021,
+      // the reason this lookup exists). A failed request is the same news.
+      postJson("/api/item-conditions", { category_id: cid })
+        .catch(() => ({ conditions: [], checked: false })),
       postJson("/api/item-aspects", { category_id: cid }).catch(() => ({ aspects: [] })),
     ]);
     const conditions = cond.conditions || [];
-    setCategoryMeta({ conditions, aspects: asp.aspects || [] });
+    setCategoryMeta({ conditions, aspects: asp.aspects || [],
+                      conditionsChecked: cond.checked !== false });
     // If the current condition isn't valid for this category, snap to the
     // first allowed one so we never submit a condition eBay rejects (25021).
     if (conditions.length) {
