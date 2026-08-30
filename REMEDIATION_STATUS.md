@@ -421,10 +421,33 @@ What still blocks it:
 5. **P1-05's legal half is outstanding**: counsel review, a retention
    schedule, a legal identity and address, and a support address on a company
    domain rather than a personal Gmail. None of that is a code change.
+6. **P0-08's problem exists for Etsy and Depop**, examined and deliberately
+   left with the reasoning at both call sites (see the agenda above). Closing
+   it needs a remote read per marketplace to build a shadow from, and
+   per-marketplace dirty tracking; neither marketplace has a sandbox to prove
+   the change against.
+7. **A revise cannot carry a package weight**, and now says so rather than
+   reporting the edit as delivered. Sending `ShippingPackageDetails` on a
+   revise was NOT attempted: eBay's documented behaviour is that omitting a
+   shipping field there removes it, and `developer.ebay.com` is unreachable
+   from this environment to establish which of the package fields are
+   revisable. That is the one place in this branch where the honest answer is
+   a message rather than a fix, and it is honest for the same reason as the
+   non-root container — the change could not be verified.
 
 A fair summary for whoever picks this up: the *silent-failure* class the audit
 was really about — an outcome reported as success, a read failure reported as
 emptiness, a fee or a commitment entered into without being shown — has been
-worked through systematically, in code and in tests. The *infrastructure*
-class (durable jobs, migrations, normalized schema, non-root, sandbox
-verification) is largely still ahead.
+worked through systematically, in code and in tests, and then swept for by
+inventory rather than by inspection: four scans now hold the classes shut (every
+scoped route checks its owner; no route answers 500 to a malformed request;
+every typed field survives the Trading XML; every field on `Listing` is
+classified as the seller's or the server's), each verified against a planted
+regression. Two of those four found nothing, which is the point of keeping them.
+
+The *infrastructure* class (durable jobs, migrations, normalized schema,
+non-root, sandbox verification) is largely still ahead — and one behaviour
+change is worth knowing about before the first outage: an authenticated request
+whose session lookup fails now answers 503 rather than answering as an
+anonymous caller. `/api/health` never reads the session, so the liveness probe
+and the deploy gate are unaffected.
