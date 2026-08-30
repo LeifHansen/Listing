@@ -65,6 +65,14 @@ class MarketplaceProvider(Protocol):
     # the UI, which then says "coming soon" instead of showing the operator's
     # missing-credentials explainer. Ignored once oauth_ready() is true.
 
+    # Also optional, and the mirror image of the above: an access_pending(uid)
+    # method (plus an access_pending_note) for when the credentials ARE in
+    # place and the marketplace still refuses THIS seller — Etsy's seller apps,
+    # which only their owner may authorize until Commercial Access is granted.
+    # Per-user precisely because the owner is the one account that can connect,
+    # and checked before the redirect: the refusal happens on the
+    # marketplace's own page, so there is no callback to turn into an error.
+
     # --- configuration / connection ---
     def oauth_ready(self) -> bool:
         """Operator-side credentials present (the config.py predicate)."""

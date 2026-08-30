@@ -4794,6 +4794,10 @@ def marketplace_roster(request: Request) -> dict:
         # marketplace's side (Depop's partner review). Self-clears once the
         # credentials land, so the UI needs no second deploy.
         soon, soon_note = marketplaces.coming_soon(p)
+        # The other kind of "not yet": configured and working, but the
+        # marketplace itself won't let THIS seller authorize it (Etsy's
+        # seller-app wall). Per-user, so it can't be folded into coming_soon.
+        pending, pending_note = marketplaces.access_pending(p, uid)
         out.append({
             "key": p.key,
             "label": p.label,
@@ -4801,6 +4805,8 @@ def marketplace_roster(request: Request) -> dict:
             "oauth_missing": p.oauth_missing(),
             "coming_soon": soon,
             "coming_soon_note": soon_note,
+            "access_pending": pending,
+            "access_pending_note": pending_note,
             "connected": bool(status.get("connected")),
             "username": status.get("username", ""),
             "env": status.get("env", "production"),
@@ -4885,6 +4891,18 @@ def marketplace_connect(marketplace: str, request: Request,
     uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, f"Log in before connecting {provider.label}.")
+    # Refuse before the redirect, not after: a marketplace that only lets
+    # certain accounts authorize it (Etsy, pre-Commercial Access) says so on
+    # its OWN page, off-site, with no callback to us — so a seller sent there
+    # lands on a dead end we never hear about and cannot explain.
+    #
+    # Back into the app rather than a raw 403: the Settings button is already
+    # disabled for these sellers, so the way to arrive here is a roster
+    # fetched before the gate went up — and stranding them on an error page is
+    # the exact thing the gate exists to prevent.
+    pending, _ = marketplaces.access_pending(provider, uid)
+    if pending:
+        return _finish_connect(request, f"/?connect_pending={marketplace}")
     import secrets as _secrets
     nonce = _secrets.token_urlsafe(24)
     url, flow = provider.authorize_url(auth.make_state(uid, nonce))

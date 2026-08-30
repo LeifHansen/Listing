@@ -696,9 +696,13 @@ export function AppProvider({ children }) {
         { kind: "success" });
     }
     else if (e === "error") toast(EBAY_CONNECT_ERRORS[params.get("why")] || EBAY_CONNECT_ERRORS.unknown, { kind: "error" });
-    // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy.
+    // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy, or
+    // ?connect_pending=etsy when the marketplace hasn't approved us for this
+    // seller's shop yet (Etsy's seller-app wall) and we turned them back at
+    // the door rather than letting the marketplace refuse them off-site.
     const ok = params.get("connected");
     const bad = params.get("connect_error");
+    const pending = params.get("connect_pending");
     const label = (k) => k ? k.charAt(0).toUpperCase() + k.slice(1) : "";
     if (ok) {
       toast(`${label(ok)} connected! You can now cross-post listings there.`, { kind: "success" });
@@ -707,10 +711,18 @@ export function AppProvider({ children }) {
       // fetch resolves, and this effect reads the URL once on mount.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMarketplaces();
+    } else if (pending) {
+      // Not "try again" — trying again cannot work until they approve us.
+      toast(`${label(pending)} hasn't approved us for other shops yet. `
+        + `Cross-posting switches on as soon as they do — nothing for you to do.`,
+        { kind: "warning" });
+      // The roster is what disables the button; this landing means theirs was
+      // stale, so refresh it before they click again.
+      loadMarketplaces();
     } else if (bad) {
       toast(`${label(bad)} connection failed. Please try again.`, { kind: "error" });
     }
-    if (e || ok || bad) history.replaceState({}, "", window.location.pathname);
+    if (e || ok || bad || pending) history.replaceState({}, "", window.location.pathname);
   }, [toast, loadMarketplaces]);
 
   // ---------- token purchase redirect landing ----------

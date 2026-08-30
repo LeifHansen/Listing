@@ -375,7 +375,11 @@ one failing never rolls back the others — and per-marketplace state
   keystring and nobody else, so either sign in as that account, or request
   Commercial Access to let other sellers connect. Reaching that page proves
   `ETSY_CLIENT_ID` and `ETSY_REDIRECT_URI` are registered correctly — a
-  wrong one fails before the consent screen. Details in `.env.example`.
+  wrong one fails before the consent screen. While that approval is pending,
+  set `ETSY_OWNER_EMAILS` to the owner's login: they keep connecting, and
+  every other seller gets a "Pending approval" card instead of being sent to
+  Etsy to be refused. `ETSY_COMMERCIAL_ACCESS=true` retires the gate once
+  Etsy grants it. Details in `.env.example`.
 - **Depop** — official Selling API, which is **partner-gated**: apply via
   Depop partnerships, then set the five `DEPOP_*` vars from onboarding
   (`.env.example`). Until then Depop simply stays hidden. No drafts or

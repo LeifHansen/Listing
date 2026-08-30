@@ -548,6 +548,46 @@ def etsy_oauth_ready() -> bool:
     return bool(ETSY_CLIENT_ID and ETSY_REDIRECT_URI)
 
 
+# Etsy app TYPE, which is a separate gate from the credentials above and the
+# one that actually stops sellers. Etsy registers apps as *Seller apps* by
+# default, and a Seller app can only ever be authorized by the single Etsy
+# account that owns the keystring; every other seller is turned away by Etsy
+# itself, on Etsy's page, after leaving this site — "Only the app owner may
+# authorize a seller app". Nothing redirects back, so the app cannot catch it
+# after the fact; the only kind fix is not sending them there.
+#
+# Commercial Access (Etsy reviews the app) is what lifts the wall. Until it is
+# granted, naming the owner's login here lets them keep connecting while
+# everyone else gets a pending-review card instead of that dead end.
+ETSY_COMMERCIAL_ACCESS = os.getenv(
+    "ETSY_COMMERCIAL_ACCESS", "").strip().lower() in ("1", "true", "yes", "on")
+ETSY_OWNER_EMAILS = tuple(
+    e.strip().lower()
+    for e in os.getenv("ETSY_OWNER_EMAILS", "").split(",") if e.strip())
+
+
+def etsy_gate_active() -> bool:
+    """Is the seller-app gate doing anything at all?
+
+    False once Etsy grants Commercial Access (nothing left to gate), and false
+    while no owner is named (nothing to gate WITH: there is no way to tell the
+    owner from anyone else, and guessing wrong would lock the operator out of
+    their own shop). Unconfigured therefore behaves exactly as it did before
+    the gate existed — every seller reaches Etsy, and Etsy decides.
+
+    Its own predicate so callers can skip the user lookup behind
+    etsy_access_pending(), which is a database round-trip per roster build.
+    """
+    return bool(ETSY_OWNER_EMAILS) and not ETSY_COMMERCIAL_ACCESS
+
+
+def etsy_access_pending(email: Optional[str]) -> bool:
+    """Would Etsy's seller-app wall turn THIS user away?"""
+    if not etsy_gate_active():
+        return False
+    return (email or "").strip().lower() not in ETSY_OWNER_EMAILS
+
+
 # --- Depop -----------------------------------------------------------------
 # Depop's official Selling API is partner-gated (partnerapi.depop.com): the
 # endpoints below become known once Depop grants partner credentials, so the
@@ -610,6 +650,15 @@ def config_warnings() -> list[str]:
         warnings.append(
             f"TOKENS_ENABLED={stray!r} is not one of 1/true/yes/on, so token "
             f"billing is OFF — which reads the same as never setting it.")
+    # Same trap, and it fails closed: an unparsed value reads as "Commercial
+    # Access not granted", so the operator thinks they opened Etsy to every
+    # seller while the app is still quietly showing them a pending-review card.
+    stray = _flag_set_but_false("ETSY_COMMERCIAL_ACCESS")
+    if stray:
+        warnings.append(
+            f"ETSY_COMMERCIAL_ACCESS={stray!r} is not one of 1/true/yes/on, so "
+            f"Etsy is still gated to ETSY_OWNER_EMAILS — which reads the same "
+            f"as never setting it.")
     # A Stripe key that is present but is not a SECRET key. Worth its own line
     # now that the secret is read from either of two names: a publishable
     # pk_... sitting in the slot satisfies every "is it configured?" check in

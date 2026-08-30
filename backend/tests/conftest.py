@@ -41,6 +41,10 @@ _SCRUBBED = (
     # they would make the warning fire (or not) for reasons unrelated to code.
     "STRIPE_API_SECRET_KEY", "STRIPE_API_WEBHOOK_SECRET",
     "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "API_SECRET_KEY",
+    # Etsy's seller-app gate: which sellers may reach Etsy's consent screen.
+    # Inherited from a developer's shell it would gate (or un-gate) the tests
+    # for reasons unrelated to the code.
+    "ETSY_COMMERCIAL_ACCESS", "ETSY_OWNER_EMAILS",
 )
 
 

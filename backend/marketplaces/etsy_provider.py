@@ -45,6 +45,26 @@ class EtsyProvider:
     key = "etsy"
     label = "Etsy"
 
+    # Etsy's seller-app wall. Until Etsy grants Commercial Access, only the
+    # account that owns the keystring may authorize this app — everyone else
+    # is refused on Etsy's own consent page, with nothing redirected back for
+    # us to catch. So we stop them here instead, with the truth, rather than
+    # sending them out to a dead end. Retires itself the moment
+    # ETSY_COMMERCIAL_ACCESS is set (see config.etsy_access_pending).
+    access_pending_note = (
+        "Etsy is reviewing our app for Commercial Access — the approval that "
+        "lets shops other than ours connect. Cross-posting to Etsy switches "
+        "on here as soon as they grant it; nothing for you to set up."
+    )
+
+    def access_pending(self, uid: Optional[str]) -> bool:
+        # Short-circuit before the lookup: with the gate off the answer is no
+        # for everyone, and this runs on every roster build.
+        if not config.etsy_gate_active():
+            return False
+        user = db.get_user_by_id(uid) if uid else None
+        return config.etsy_access_pending((user or {}).get("email", ""))
+
     # --- configuration / connection -------------------------------------
     def oauth_ready(self) -> bool:
         return config.etsy_oauth_ready()
