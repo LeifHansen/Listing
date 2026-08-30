@@ -235,7 +235,8 @@ def auto_promote_enabled(uid: Optional[str]) -> bool:
 
 def promote(record_id: str, listing: Listing, creds: Optional[dict],
             rate: Optional[float] = None,
-            ebay_listing_id: Optional[str] = None) -> dict:
+            ebay_listing_id: Optional[str] = None,
+            chosen_by_seller: bool = True) -> dict:
     """Turn Promoted Listings on for one listing and run the ad call.
 
     The single place that decides an ad rate: an explicit `rate` wins, else
@@ -244,15 +245,41 @@ def promote(record_id: str, listing: Listing, creds: Optional[dict],
     Promote toggled on were never actually promoted — so the rate is always
     filled in here. Mutates listing.promote/ad_rate_percent so the caller can
     persist what really ran, and never raises: a promotion problem must not
-    fail the publish that preceded it."""
+    fail the publish that preceded it.
+
+    `chosen_by_seller` says whether promoting THIS listing was an explicit
+    choice — the editor's Promote toggle, which sits next to a rate slider and
+    a live fee preview — or came from the account-wide auto-promote setting,
+    whose whole promise is "at eBay's recommended ad rate".
+
+    That distinction decides what happens when eBay has no recommendation.
+    Falling through to DEFAULT_AD_RATE is right for the first: it is the rate
+    the slider already showed them. For the second it is not — eBay's
+    recommendations are usually low single digits, so a silent 10% can be
+    several times what the seller agreed to, on a number no screen ever
+    displayed. There, no rate means no promotion. The listing is live and can
+    be promoted by hand at any time; an ad charged at a rate nobody was quoted
+    cannot be taken back.
+    """
     try:
-        listing.promote = True
         if not rate or rate <= 0:
             rate = None
             if ebay_listing_id:
                 recommended = promotions.suggested_ad_rates(
                     creds, [str(ebay_listing_id)])
                 rate = recommended.get(str(ebay_listing_id))
+        if not rate and not chosen_by_seller:
+            log.info("promote skipped (%s): no rate from eBay and the seller "
+                     "did not pick one", record_id)
+            return {"promoted": False,
+                    "message": ("We didn't promote this one: eBay had no "
+                                "suggested ad rate for it, and auto-promote "
+                                "runs at eBay's rate. Turn on Promote in the "
+                                "listing to pick your own.")}
+        # Only now: the flag is what the editor and the insights panel read as
+        # "this is promoted", so setting it before the decision would leave a
+        # listing marked promoted that never was.
+        listing.promote = True
         listing.ad_rate_percent = round(rate or promotions.DEFAULT_AD_RATE, 1)
         return promotions.promote_listing(record_id, listing, creds)
     except Exception as exc:  # noqa: BLE001 - promotion must never break publish
@@ -941,7 +968,12 @@ class EbayProvider:
                 result["promote_status"] = promote(
                     session_id, listing, creds,
                     rate=listing.ad_rate_percent,
-                    ebay_listing_id=res["listing_id"])
+                    ebay_listing_id=res["listing_id"],
+                    # Read BEFORE promote() sets it: the per-listing toggle is
+                    # the seller's own choice, made beside a rate slider and a
+                    # fee preview. Without it, everything auto-promote touched
+                    # would look like an explicit request.
+                    chosen_by_seller=bool(listing.promote))
                 # promote() records the rate it actually used on the listing.
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="published", user_id=ctx.uid)

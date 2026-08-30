@@ -405,7 +405,11 @@ export function SettingsView() {
           <SectionHeader
             icon={Megaphone}
             title="Promoted Listings"
-            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate. Promoted Listings costs a percentage of the sale price when an item sells through the ad, so this stays off until you turn it on."
+            /* The last sentence is not padding: the server now SKIPS the
+               promotion when eBay has no suggested rate, rather than falling
+               back to 10% — a rate this screen never showed. Saying so here
+               is what makes that skip legible instead of mysterious. */
+            hint="Automatically promote each listing the moment it publishes, at eBay's recommended ad rate. Promoted Listings costs a percentage of the sale price when an item sells through the ad, so this stays off until you turn it on. When eBay suggests no rate for a listing, we leave it unpromoted rather than pick one for you — you can still promote it yourself from the listing."
           />
           {prefsError ? (
             <PanelUnavailable
