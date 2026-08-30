@@ -317,11 +317,47 @@ Still open:
 
 - [ ] P1-01, MINUS the per-session auto-import and the rate-limit handling
       (both done, see above): the import is still N+1 — one `GetItem` per
-      listing where `GetSellerList`/`GetSellerEvents` would page the store —
-      there is no pooled HTTP client, and nothing budgets the daily quota
-      ahead of time or opens a circuit breaker. What is fixed is the
+      listing — there is no pooled HTTP client, and nothing budgets the daily
+      quota ahead of time or opens a circuit breaker. What is fixed is the
       behaviour once eBay says stop; what is not is spending less to begin
       with.
+
+      **Examined properly, and the finding is worth writing down.** The lead
+      is closer than the audit's `GetSellerList` suggestion: `watch_counts`
+      in `services/ebay_trading.py` ALREADY pages
+      `GetMyeBaySelling`/`ActiveList` with `DetailLevel=ReturnAll` and walks
+      `ItemArray/Item` — the same call, the same container, one request per
+      100 listings. And `_item_to_listing` is a pure function over an
+      `<Item>` element, so those elements could in principle be mapped
+      without a second call each. That is a 100× reduction with no new
+      client.
+
+      It was not done, for one reason: **nobody here can find out what
+      `ActiveList` actually returns inside each `<Item>`.** `watch_counts`
+      proves only that `ItemID` and `WatchCount` are there. The mapper needs
+      Description and ItemSpecifics too, and on `GetItem` those need
+      `DetailLevel=ReturnAll` *plus* `IncludeItemSpecifics` — which suggests
+      `ActiveList` omits them, and a record imported without a description or
+      any item specifics is a broken card, not a cheap one.
+      `developer.ebay.com` is blocked by this environment's egress proxy,
+      there is no sandbox account, and the repo's XML fixtures are
+      hand-written, so they cannot stand in for the real contract.
+
+      The safe shape, for whoever has a sandbox: map each `ActiveList`
+      `<Item>` with `_item_to_listing` and fall back to `GetItem` for any
+      item whose mapping comes back missing an essential field. If
+      `ActiveList` carries enough, the sync costs 1 call per 100 listings; if
+      it does not, every item falls back and the behaviour is exactly what it
+      is today. The failure mode is "no worse than now", which is what makes
+      it shippable — but only once someone has looked at one real response.
+      The alternative (import a light record and fill the heavy fields when
+      the listing is opened, which P1-12 already made the moment work
+      happens) is a bigger change: records would have two completeness
+      states, and the merge, the shadow and the revise all read them.
+
+      Connection pooling is listed too and is deliberately last: the binding
+      constraint the audit names is the **5,000-call daily quota**, and
+      pooling 500 calls still spends 500 of it.
 - [ ] P1-02, MINUS the sweep cooldown (done, see above): the eBay sweep
       cooldown is durable now, but the JOB RUNNER is not. Bulk photo batches
       are picked back up after a restart and every job reports how it ended,
