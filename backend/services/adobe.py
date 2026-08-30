@@ -26,11 +26,13 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from PIL import Image
 
 from .. import config, objstore
+from ..config import log
 
 
 class AdobeError(ValueError):
@@ -165,8 +167,33 @@ def _failure_detail(node: Any) -> str:
     return ""
 
 
+def _same_origin(href: str) -> bool:
+    """Is this poll URL on the endpoint we submitted the job to?"""
+    want = urlparse(config.ADOBE_IMAGE_API_BASE)
+    got = urlparse(href or "")
+    return (bool(got.scheme) and got.scheme == want.scheme
+            and bool(got.netloc) and got.netloc.lower() == want.netloc.lower())
+
+
 def _wait(href: str) -> None:
-    """Poll a job's status URL until it succeeds, fails, or times out."""
+    """Poll a job's status URL until it succeeds, fails, or times out.
+
+    The href came out of a RESPONSE BODY (_submit reads _links.self.href) and
+    every poll carries the IMS bearer token and the client id, so where it
+    points decides where a live credential is sent. Adobe is the one who wrote
+    it, which makes this hardening rather than a hole — but a response shape we
+    do not control choosing the destination for a secret is the wrong default,
+    and the correct constraint costs nothing: the poll URL must be on the
+    origin we submitted to. An operator pointing ADOBE_IMAGE_API_BASE at a
+    different Adobe endpoint still works; what cannot happen is the answer
+    moving us off it.
+    """
+    if not _same_origin(href):
+        # Deliberately does not echo the href: it is the untrusted half, and
+        # this string reaches a seller as a toast. The log line has it.
+        log.warning("adobe: refusing to poll a status URL off %s: %.200r",
+                    config.ADOBE_IMAGE_API_BASE, href)
+        raise AdobeError("Adobe returned a status link we can't trust.")
     deadline = time.time() + _JOB_TIMEOUT
     while True:
         try:
