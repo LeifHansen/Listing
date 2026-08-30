@@ -84,17 +84,27 @@ def test_one_listings_publishes_are_serialized():
     lock = publish_guard.session_lock("sess-1")
     overlapped = []
     inside = threading.Event()
+    tried = threading.Event()
 
     def hold():
         with publish_guard.session_lock("sess-1"):
             inside.set()
-            # Long enough that a second thread WOULD get in if the lock didn't
-            # hold it out.
-            threading.Event().wait(0.15)
+            # Held until the other thread has actually TRIED, rather than for
+            # a fixed 0.15s. The sleep was a bet that the contending thread
+            # gets scheduled inside that window: miss it on a loaded runner
+            # and the lock is already free, the acquire succeeds, and the test
+            # reports "the second publish got in while the first ran" — the
+            # exact opposite of what happened. Waiting on the attempt itself
+            # proves the lock was held ACROSS it, with no timing assumption.
+            assert tried.wait(5), "the contending thread never ran"
 
     def contend():
-        inside.wait(1)
-        overlapped.append(lock.acquire(blocking=False))
+        inside.wait(5)
+        got = lock.acquire(blocking=False)
+        overlapped.append(got)
+        if got:                 # only on the failure below; keep it clean
+            lock.release()
+        tried.set()
 
     t1, t2 = threading.Thread(target=hold), threading.Thread(target=contend)
     t1.start()
