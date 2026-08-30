@@ -128,6 +128,19 @@ SERVER_OWNED_FIELDS = (
     # eBay's own numbers. Two of them add up to the Sold total the seller
     # reads as fact, and none of them is something a client observes.
     "sold_price", "sold_quantity", "watch_count", "ebay_start_time",
+    # The EPS URLs of an imported listing's photos, written by the sync from
+    # eBay's answer and never by anything the seller does. The revise reads
+    # them as its fallback ("untouched photos → reuse the live EPS URLs") and
+    # a RELIST requires them, so a stale tab sending an empty list produced
+    # "this listing has no photos left to relist with" for a listing eBay is
+    # still hosting twelve photos for.
+    #
+    # It is also the field the Etsy publish fetches server-side. That hole is
+    # closed at the fetch (image_import.fetch_ebay_image) and this is not a
+    # substitute: the rule below only overrides a stored value that EXISTS, so
+    # a brand-new draft still carries whatever the client sent. Depth, not the
+    # guard.
+    "image_urls",
 )
 
 
