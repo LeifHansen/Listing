@@ -67,6 +67,31 @@ describe("saving two systems at once", () => {
     expect(r.saved).toEqual(["B"]);
   });
 
+  // The screen this runs behind can be in a state where NOTHING is sendable:
+  // the defaults read failed (so `prefs` is null and that section is skipped
+  // to stop the app's fallbacks being posted as the seller's choices) and the
+  // eBay half is skipped too, because it is either not connected or its own
+  // load failed. Nothing failed, because nothing was tried -- and the report
+  // read "Defaults saved", on a screen already saying it could not read them.
+  it("does not report a save when every section was skipped", async () => {
+    const r = await saveSections([{ name: "A", when: false, run: () => Promise.resolve() },
+                                  { name: "B", when: false, run: () => Promise.resolve() }]);
+    expect(r.saved).toEqual([]);
+    expect(r.message.toLowerCase()).not.toContain("defaults saved");
+    // And it has to be a failure, because the toast picks its colour off this
+    // and a green tick is the whole claim.
+    expect(r.ok).toBe(false);
+  });
+
+  it("says why nothing could be sent, not just that nothing was", async () => {
+    const r = await saveSections([{ name: "Your listing defaults", when: false,
+                                    run: () => Promise.resolve() }]);
+    // Actionable and implementation-neutral: the seller's next move is to
+    // wait and press it again, not to retype settings they cannot even see.
+    expect(r.message).toMatch(/couldn.t/i);
+    expect(r.message.toLowerCase()).toContain("nothing was saved");
+  });
+
   it("survives a rejection that is not an Error", async () => {
     // A fetch layer that throws a string must not take the reporting with it.
     const r = await saveSections([{ name: "A", run: () => Promise.reject("nope") }]);

@@ -32,6 +32,11 @@ function list(names) {
  * harder to reason about. What matters is that one failing does not skip the
  * others, and that the answer names which was which.
  *
+ * Three outcomes, not two. `{ok: true}` is a save that happened;
+ * `{ok: false, skipped: false}` is one that was tried and refused;
+ * `{ok: false, skipped: true}` is a Save that had nothing safe to send at all
+ * — which is not success, however few things went wrong.
+ *
  * @param {{name: string, when?: boolean, run: () => Promise<any>}[]} sections
  */
 export async function saveSections(sections) {
@@ -48,6 +53,20 @@ export async function saveSections(sections) {
   }
 
   let message;
+  if (!saved.length && !failed.length) {
+    // Nothing was tried, so nothing failed -- and "no failures" was being read
+    // as success. A section is skipped when there is nothing safe to send: the
+    // defaults read failed, so posting would put the app's fallbacks where the
+    // seller's choices are, and the eBay half is either not connected or could
+    // not load either. On that screen the seller is already being told the
+    // defaults could not be read; answering their Save with "Defaults saved"
+    // says the opposite in the same breath, and the settings they then believe
+    // are stored are not.
+    return { ok: false, saved, failed, skipped: true, message:
+      "We couldn’t save anything just now because we couldn’t read your "
+      + "current settings — nothing was saved and nothing was changed. Try "
+      + "again in a moment." };
+  }
   if (!failed.length) {
     message = "Defaults saved — they apply to every new listing you draft and publish.";
   } else if (!saved.length) {
@@ -58,7 +77,7 @@ export async function saveSections(sections) {
     message = `${list(saved)} saved. Couldn't save `
       + `${list(failed.map((f) => f.name))}: ${failed[0].message}`;
   }
-  return { ok: !failed.length, saved, failed, message };
+  return { ok: !failed.length, saved, failed, skipped: false, message };
 }
 
 const POLICY_KEYS = ["fulfillment", "payment", "return"];
