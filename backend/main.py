@@ -4315,6 +4315,40 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
 # listings lost the overflow twice over, once on import and again on read.
 LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
 
+# Fields dropped from each record's `listing` by GET /api/listings ONLY.
+#
+# A realistic record -- description, twelve photos, eighteen item specifics,
+# a synced shadow -- serialises to about 6.2 KB, so a seller at LIST_CAP was
+# downloading ~17.8 MiB on the app's busiest route, on a phone. Just under
+# half of that is `remote_shadow`: a complete second copy of the listing,
+# recording what eBay last said it contained. It is the base the three-way
+# merge reconciles against and nothing outside the server has ever read it.
+# `dirty_fields`, the set of fields edited since that shadow, is the same.
+#
+# Deliberately an omission list rather than an allowlist. An allowlist names
+# what the client may see, so it fails by dropping a field the UI needs, and
+# that failure is silent and looks like missing data. This fails the other
+# way: a new field is merely bigger than it had to be.
+#
+# GET /api/listings/{id} is NOT projected -- opening one listing still answers
+# with everything, which is where the editor and the merge dialog read from.
+# tests/test_the_list_does_not_ship_the_sync_ledger.py holds both halves, and
+# fails if the frontend ever starts referencing one of these names.
+LIST_OMITTED_LISTING_FIELDS = ("remote_shadow", "dirty_fields")
+
+
+def _projected_for_list(rec: dict) -> dict:
+    """`rec` without the sync ledger. Copies rather than mutating: the dict
+    under "listing" belongs to the row it was loaded from."""
+    listing = rec.get("listing")
+    if not isinstance(listing, dict):
+        return rec
+    if not any(k in listing for k in LIST_OMITTED_LISTING_FIELDS):
+        return rec
+    trimmed = {k: v for k, v in listing.items()
+               if k not in LIST_OMITTED_LISTING_FIELDS}
+    return {**rec, "listing": trimmed}
+
 
 @app.get("/api/listings")
 def listings(request: Request, limit: int = LIST_CAP) -> dict:
@@ -4341,7 +4375,8 @@ def listings(request: Request, limit: int = LIST_CAP) -> dict:
     # invented.
     rows = db.list_listings(limit=limit + 1, user_id=user["id"]) if user else []
     items, truncated = rows[:limit], len(rows) > limit
-    return {"listings": items, "db": db.db_status(), "authed": bool(user),
+    return {"listings": [_projected_for_list(r) for r in items],
+            "db": db.db_status(), "authed": bool(user),
             "truncated": truncated}
 
 
