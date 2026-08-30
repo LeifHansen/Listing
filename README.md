@@ -376,7 +376,8 @@ one failing never rolls back the others — and per-marketplace state
   Commercial Access to let other sellers connect. Reaching that page proves
   `ETSY_CLIENT_ID` and `ETSY_REDIRECT_URI` are registered correctly — a
   wrong one fails before the consent screen. While that approval is pending,
-  set `ETSY_OWNER_EMAILS` to the owner's login: they keep connecting, and
+  set `ETSY_OWNER_EMAILS` to the owner's login for *this* app (not their Etsy
+  one — it's matched against the account record): they keep connecting, and
   every other seller gets a "Pending approval" card instead of being sent to
   Etsy to be refused. `ETSY_COMMERCIAL_ACCESS=true` retires the gate once
   Etsy grants it. Details in `.env.example`.
