@@ -33,12 +33,22 @@ TREE = ast.parse(SRC)
 FUNCS = {n.name: n for n in TREE.body
          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
-# The two shapes an ownership check takes in this file: the shared helper, and
-# the inline comparison for handlers that already hold the record.
+# Two of the three shapes an ownership check takes in this file: the shared
+# helper, and the inline comparison for a handler that already holds the
+# record. The third — threading the caller's identity into the lookup so the
+# QUERY is scoped — cannot be a substring match, because the same expression
+# appears in log lines that check nothing; _scopes_a_call below finds it.
 OWNERSHIP = re.compile(r"_assert_session_owner|\['user_id'\] != |\.get\('user_id'\) != ")
 
-# Parameter names that mean "one listing" — the identifiers P0-01 was about.
-SCOPED_ARGS = {"session_id", "listing_id", "record_id", "sid"}
+# How this file spells "who is asking".
+IDENTITY = re.compile(r"_uid\(request\)|user\['id'\]|creds\['_uid'\]")
+
+# Every identifier namespace a route can be scoped by — not just the listing
+# ids P0-01 was about. A bulk job holds a seller's drafts and photos, and a
+# shipment id reaches a label carrying the BUYER's name and address, so those
+# ids need an owner too.
+SCOPED_ARGS = {"session_id", "listing_id", "record_id", "sid",
+               "job_id", "shipment_id"}
 
 # Routes that are scoped by one of those names and deliberately do NOT check.
 # Each needs a reason, and the reason is asserted below — an exemption that
@@ -52,10 +62,10 @@ EXEMPT = {
         "`session_id` is a Stripe Checkout session, not a listing session — "
         "a different namespace. It requires a login and confirms against "
         "Stripe scoped to that user.",
-    "delete_listing":
-        "The check is inside `db.delete_listing(listing_id, uid)`, which "
-        "filters by owner in the DELETE itself — one round trip instead of "
-        "read-then-check.",
+    "ebay_shipping_label_download":
+        "eBay scopes it. The download goes out on the CALLER's own OAuth "
+        "token, so a shipment id belonging to another seller is refused at "
+        "eBay rather than here — there is no local record to check against.",
 }
 
 
@@ -71,11 +81,32 @@ def _routes(node) -> list[tuple[str, str]]:
     return out
 
 
+def _scopes_a_call(node) -> bool:
+    """Is the caller's identity passed INTO a call — i.e. does the lookup
+    itself filter by owner (`db.delete_listing(id, _uid(request))`)?
+
+    An argument, deliberately, not a substring of the function: a handler that
+    only logs `_uid(request)` has checked nothing, and that is exactly what
+    `delete_listing` also does one line below its real check.
+    """
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        target = ast.unparse(call.func)
+        if target.split(".")[-1] in ("debug", "info", "warning", "error",
+                                     "exception", "critical"):
+            continue
+        args = call.args + [k.value for k in call.keywords]
+        if any(IDENTITY.search(ast.unparse(a)) for a in args):
+            return True
+    return False
+
+
 def _guarded(node, depth: int = 0, seen: frozenset = frozenset()) -> bool:
     """Does an ownership check appear anywhere in this handler's call graph?"""
     if depth > 3 or node.name in seen:
         return False
-    if OWNERSHIP.search(ast.unparse(node)):
+    if OWNERSHIP.search(ast.unparse(node)) or _scopes_a_call(node):
         return True
     seen = seen | {node.name}
     called = {c.func.id for c in ast.walk(node)
@@ -105,9 +136,10 @@ def test_the_scan_found_the_routes_it_is_meant_to_guard():
     """A scan that silently matches nothing passes forever. These are the
     handlers P0-01 was actually about; if one is renamed the list moves with
     it, but the scan going empty is the failure this catches."""
-    assert len(SCOPED) >= 15, f"only found {len(SCOPED)}: {sorted(SCOPED)}"
+    assert len(SCOPED) >= 20, f"only found {len(SCOPED)}: {sorted(SCOPED)}"
     for expected in ("save_listing", "patch_listing", "get_listing",
-                     "relist_listing", "upload_more"):
+                     "relist_listing", "upload_more", "bulk_status",
+                     "import_status", "ebay_shipping_label_download"):
         assert expected in SCOPED, f"{expected} is no longer being scanned"
 
 
@@ -131,9 +163,10 @@ def test_every_exemption_is_still_a_real_route(name):
     assert name in SCOPED, f"{name} is exempted but is not a scoped route"
 
 
-def test_the_exempt_delete_really_is_scoped_in_the_query():
-    """delete_listing's exemption rests entirely on db.delete_listing doing
-    the check. Pin that, or the exemption is just a comment."""
+def test_the_delete_is_scoped_in_the_query_itself():
+    """delete_listing passes the caller's uid rather than reading first, so
+    the scan sees it as guarded. That only holds while db.delete_listing
+    actually filters on it — pin the far end too."""
     db_src = (MAIN.parent / "db.py").read_text()
     fn = next(n for n in ast.parse(db_src).body
               if isinstance(n, ast.FunctionDef) and n.name == "delete_listing")
