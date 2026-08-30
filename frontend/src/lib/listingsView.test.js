@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { listingsView } from "./listingsView.js";
+import { listingsView, storeTotal } from "./listingsView.js";
 
 const USER = { id: "u1" };
 
@@ -69,5 +69,39 @@ describe("a page that is not the whole store", () => {
     // "3000 of 4127" would be an invented number: the endpoint asks for one
     // row more than it returns, so it knows there are more and not how many.
     expect(v.notice).not.toMatch(/of \d+/);
+  });
+});
+
+describe("a store total on the dashboard", () => {
+  // The tiles above the listings area are counted off the same page this
+  // module is about, so they inherit the same problem one level up: during an
+  // outage they all count zero and each states it as a fact. A seller acts on
+  // these -- nothing live is a reason to list something, nothing sold this
+  // week is a reason to cut prices -- so a number nobody measured is worse
+  // here than a blank.
+  it("refuses to report a number it could not measure", () => {
+    const t = storeTotal("unavailable", 0, "everything currently live");
+    expect(t.value).toBe("—");
+    expect(t.sub).toMatch(/couldn’t check/);
+  });
+
+  it("does not invent an outage over a store that is really empty", () => {
+    // The other direction. A seller with nothing listed has genuinely nothing
+    // live, and a dash where a zero belongs is its own kind of lie.
+    expect(storeTotal("empty", 0, "everything currently live"))
+      .toEqual({ value: 0, sub: "everything currently live" });
+  });
+
+  it("passes a real count through untouched", () => {
+    expect(storeTotal("list", 12, "$430.00 listed"))
+      .toEqual({ value: 12, sub: "$430.00 listed" });
+  });
+
+  it("works for a total that is already formatted, not just a count", () => {
+    // The Sold tile passes a money string, not a number.
+    expect(storeTotal("unavailable", "$412.00", "in the last 7 days").value)
+      .toBe("—");
+    expect(storeTotal("list", "$412.00", "in the last 7 days").value)
+      .toBe("$412.00");
   });
 });

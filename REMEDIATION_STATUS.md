@@ -80,7 +80,7 @@ Where things stand, measured rather than remembered:
 | Full backend (`pytest backend/tests`) | **1679 passed, 0 failed** |
 | A CI-`checks`-equivalent env (no image/AI stack) | **1164 passed, 45 skipped** |
 | The smoke job's API-tests step | **309 passed, 0 skipped** (it fails on a skip) |
-| Frontend Vitest | **19 files, 190 tests** |
+| Frontend Vitest | **19 files, 194 tests** |
 | Ruff · ESLint · `npm run build` | clean |
 
 The skips in the middle row are deliberate: those files `importorskip` the
@@ -434,9 +434,16 @@ P2-01, P2-03 and P2-07 are closed (rows above). Of the rest:
       Sandbox contract tests, impossible from this environment (see the
       release posture below), and journeys for settings partial outage,
       unknown publish outcome, conflict resolution, deletion and reconnect.
-      Each of those needs the server to fail on demand — a fixture that does
-      not exist yet, and the reason they are not simply the next four
-      journeys.
+      The store outage is done because it needed nothing faked: `page.route()`
+      breaks `/api/listings` and the app cannot tell the difference. The rest
+      all sit behind a CONNECTED marketplace — the policies panel does not
+      even render until `ebay.connected`, and a publish needs an account to
+      publish to — so each would first have to fake the connection, the
+      status, the policies and the publish response, at which point the test
+      is largely checking the fake. What they actually need is a sandbox
+      account, which is the same blocker as the contract tests. The tri-state
+      logic itself is covered directly in `lib/settingsSections.test.js`;
+      what is missing is proof that the screen is wired to it.
 
 ## Release posture
 
