@@ -63,12 +63,43 @@ export const footerNav = [
   },
 ];
 
-/** The marketplaces a listing can be published to today. */
+/**
+ * The marketplaces, and how available each one actually is.
+ *
+ * This is not aspirational. eBay is open to anyone. Etsy is approved at Etsy's
+ * PERSONAL tier (fly.toml: ETSY_ACCESS_TIER = 'personal'), which seats a
+ * handful of shops rather than everyone, so it ships as a beta. Depop's
+ * Selling API is partner-gated and those credentials have not been granted
+ * yet, so it is not connectable at all.
+ *
+ * Promising a marketplace a visitor cannot actually connect is the one thing
+ * a page like this must not do — they would sign up for it and hit a wall.
+ * Update `status` here when a tier changes and every page follows.
+ */
 export const marketplaces = [
-  { name: "eBay", note: "Drafts or live listings, with business policies and category resolution" },
-  { name: "Etsy", note: "Draft, then activate — shop id and shipping defaults remembered" },
-  { name: "Depop", note: "Published straight from the same draft" },
+  {
+    name: "eBay",
+    status: "live",
+    note: "Drafts or live listings, with business policies, category resolution and two-way sync.",
+  },
+  {
+    name: "Etsy",
+    status: "beta",
+    note: "Draft, then activate — shop id and shipping defaults remembered. Open to a limited group of shops while we test it.",
+  },
+  {
+    name: "Depop",
+    status: "soon",
+    note: "Built and waiting on Depop partner access. It publishes from the same draft the moment that lands.",
+  },
 ];
+
+/** Badge styling per availability. `live` gets no badge — it is the default. */
+export const marketplaceStatus = {
+  live: null,
+  beta: { label: "Beta", class: "bg-yellow-soft text-yellow-ink" },
+  soon: { label: "Coming soon", class: "bg-blue-soft text-blue-ink" },
+};
 
 /**
  * The pipeline, stage by stage. Mirrors the table in README.md — these are the

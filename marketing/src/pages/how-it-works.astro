@@ -4,7 +4,7 @@ import Container from "../components/Container.astro";
 import Section from "../components/Section.astro";
 import PipelineSteps from "../components/PipelineSteps.astro";
 import CTA from "../components/CTA.astro";
-import { marketplaces } from "../lib/site.js";
+import { marketplaces, marketplaceStatus } from "../lib/site.js";
 
 const description =
   "From photo to published listing: how Thryft Shop optimizes your images, " +
@@ -77,16 +77,26 @@ const description =
 
   <Section
     eyebrow="Publishing"
-    title="Three marketplaces, one draft"
-    lede="Select the marketplaces you want and publish once. Each one is attempted independently, so a rejection on one never costs you the others."
+    title="One draft, every marketplace you've connected"
+    lede="Select the ones you want and publish once. Each is attempted independently, so a rejection on one never costs you the others."
   >
     <div class="mt-14 grid gap-5 sm:grid-cols-3">
-      {marketplaces.map((m) => (
-        <div class="rounded-card border border-line bg-card p-6 shadow-card">
-          <h3 class="font-display text-xl font-semibold">{m.name}</h3>
-          <p class="mt-2 text-ink-secondary">{m.note}</p>
-        </div>
-      ))}
+      {marketplaces.map((m) => {
+        const badge = marketplaceStatus[m.status];
+        return (
+          <div class="rounded-card border border-line bg-card p-6 shadow-card">
+            <div class="flex flex-wrap items-center gap-2">
+              <h3 class="font-display text-xl font-semibold">{m.name}</h3>
+              {badge && (
+                <span class={`rounded-full px-2 py-0.5 font-display text-[11px] font-semibold ${badge.class}`}>
+                  {badge.label}
+                </span>
+              )}
+            </div>
+            <p class="mt-2 text-ink-secondary">{m.note}</p>
+          </div>
+        );
+      })}
     </div>
     <p class="mx-auto mt-10 max-w-2xl text-center text-ink-secondary">
       Haven't connected a marketplace yet? The app generates the exact API

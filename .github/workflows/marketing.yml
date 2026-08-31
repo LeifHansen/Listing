@@ -27,6 +27,13 @@ jobs:
       # convention in gates.yml — a tag is a mutable pointer the action's owner
       # can move.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history. The "App is untouched" gate below diffs this branch
+          # against the base, and the default shallow checkout leaves the two
+          # with no common ancestor — which made that diff fail, and a failed
+          # diff produces no output, which reads exactly like "nothing
+          # changed". The gate passed twice while verifying nothing.
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
@@ -68,14 +75,47 @@ jobs:
 
       # This site must never take the app down with it. Nothing outside
       # marketing/ and its own workflows belongs in one of its pull requests.
+      #
+      # .dockerignore is the one deliberate exception, and it is on the list
+      # rather than waived: adding a top-level directory to this repo means the
+      # Fly build context would upload it on every app deploy, since the
+      # Dockerfile never copies marketing/ but docker sends the whole context.
+      # Excluding it is part of adding it. Everything that actually decides how
+      # the app builds, tests, and ships — backend/, frontend/, the Dockerfile,
+      # fly.toml, gates.yml, deploy.yml — stays blocked.
       - name: App is untouched
         shell: bash
         run: |
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-          changed=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
-            | grep -vE '^(marketing/|\.github/workflows/marketing)' || true)
-          if [ -n "$changed" ]; then
-            echo "::error::this pull request touches files outside marketing/:"
-            echo "$changed"
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags origin "${{ github.base_ref }}"
+
+          # The diff must SUCCEED before its emptiness means anything. This
+          # gate previously piped `git diff` straight into grep with a
+          # `|| true`, so when the shallow checkout left no merge base, git
+          # printed "fatal: no merge base", produced nothing on stdout, and
+          # the gate read that silence as "no files outside marketing/".
+          # Green, and verifying nothing.
+          if ! changed=$(git diff --name-only "$base...HEAD"); then
+            echo "::error::cannot diff against $base — this gate can verify nothing, so it fails"
             exit 1
           fi
+
+          # This workflow only runs on pull requests that touch marketing/**,
+          # so a diff of zero files is not a small PR — it is a broken
+          # comparison. Fail on it rather than call it clean.
+          if [ -z "$changed" ]; then
+            echo "::error::diff against $base returned no files at all — the comparison is wrong"
+            exit 1
+          fi
+
+          echo "Files changed against $base:"
+          echo "$changed" | sed 's/^/  /'
+
+          outside=$(echo "$changed" \
+            | grep -vE '^(marketing/|\.github/workflows/marketing|\.dockerignore$)' || true)
+          if [ -n "$outside" ]; then
+            echo "::error::this pull request touches files outside marketing/:"
+            echo "$outside"
+            exit 1
+          fi
+          echo "OK: nothing outside marketing/ (plus its workflows and .dockerignore)"
