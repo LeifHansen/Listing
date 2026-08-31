@@ -107,6 +107,27 @@ def test_the_diagnostics_still_exist_behind_admin_auth(api, monkeypatch):
     assert "db" in body
 
 
+def test_diagnostics_report_the_etsy_tier_without_the_roster(api, monkeypatch):
+    """Which tier Etsy has the app on is the operator's answer to "why can't
+    this seller connect", and the seat ceiling is what says whether adding one
+    more will work or just move the refusal to Etsy's page. The roster itself
+    is people's email addresses, so it is reported as a count: an endpoint
+    that exists to explain a configuration is not a place to hand out the
+    beta list."""
+    from backend import config
+
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "s3cret")
+    monkeypatch.setattr(config, "ETSY_OWNER_EMAILS",
+                        ("owner@example.com", "beta@example.com"))
+    body = api.get("/api/admin/diagnostics",
+                   headers={"x-admin-token": "s3cret"}).json()
+
+    assert body["etsy_access_tier"] in config.ETSY_ACCESS_TIERS
+    assert body["etsy_seats"] == config.etsy_seat_ceiling()
+    assert body["etsy_roster"] == 2
+    assert "example.com" not in str(body)
+
+
 def test_diagnostics_refuse_a_wrong_or_missing_token(api, monkeypatch):
     from backend import config
 

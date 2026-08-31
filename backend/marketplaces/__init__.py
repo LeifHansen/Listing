@@ -76,16 +76,16 @@ def access_pending(provider: MarketplaceProvider,
 
     The sibling of coming_soon(), for the opposite situation: the credentials
     are configured and the integration works, but the marketplace only lets
-    certain accounts authorize it. Etsy is the case — a Seller app is
-    authorizable by the one Etsy account that owns it and nobody else, and
-    Etsy enforces that on its own consent page, after the seller has left this
-    site. There is no callback to turn into an error, so the check has to
+    certain accounts authorize it. Etsy is the case — its app tiers seat a
+    fixed number of shops (one, on the seller app Etsy registers by default)
+    and Etsy enforces that on its own consent page, after the seller has left
+    this site. There is no callback to turn into an error, so the check has to
     happen before the redirect.
 
-    Per-user, unlike coming_soon(): the app owner is precisely the account
-    that CAN connect, so this must be able to say yes to one seller and no to
-    the next. Providers opt in with an access_pending(uid) method; everyone
-    else is unaffected.
+    Per-user, unlike coming_soon(): the accounts holding those seats are
+    precisely the ones that CAN connect, so this must be able to say yes to
+    one seller and no to the next. Providers opt in with an access_pending(uid)
+    method; everyone else is unaffected.
     """
     if not provider.oauth_ready():
         return False, ""     # "not set up" is a different story, told first
