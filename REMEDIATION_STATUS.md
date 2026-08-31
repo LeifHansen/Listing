@@ -1,6 +1,11 @@
 # Enterprise beta remediation — status and agenda
 
-Working branch: `claude/get-to-work-1qorht` · PR: <https://github.com/LeifHansen/Listing/pull/202>
+Working branch: `claude/get-to-work-1qorht` · PR:
+<https://github.com/LeifHansen/Listing/pull/202> — **merged as `15e439c` on
+2026-08-30 and deployed**; production was verified running that build by the
+deploy's own health check. The remediation is not finished, so this file
+stays: what is left is in the agenda below, and section 1 is the part that
+happens on the machine rather than in a commit.
 
 This file is the resume point. It records what is done, what is not, and the
 exact next steps, so work can continue in a fresh session without re-deriving
@@ -266,18 +271,29 @@ on the day this ships and is exactly what the in-memory dict answered before
 it. The first background sweep after the deploy is therefore free, once per
 account, which is the same cost as one restart used to be — and the last one.
 
-- [ ] **Run `scripts/migrate_session_ids.py`** (dry run first, then `--apply`).
-      Until it runs, imported listings' photos are filed under the old
-      stripped names and will not be found. This is a **required deploy step**,
-      not optional. It reports collisions rather than guessing; investigate
+- [ ] **Run `scripts/migrate_session_ids.py`** (dry run first, then `--apply`)
+      — **a no-op today, and required before the first eBay store import.**
+      It only moves records whose id contains a non-alphanumeric, which means
+      the `ebay-<item>` ids the store import creates; app-created listings are
+      plain uuid4 hex and are untouched. The owner confirmed on 2026-08-30
+      that no store has been imported into production, so there is nothing to
+      move yet — which is what made the merge safe without it. The moment a
+      seller connects eBay and imports, this becomes required: until it runs,
+      those listings' photos are filed under the old stripped names and will
+      not be found. It reports collisions rather than guessing; investigate
       any it prints.
 - [ ] **Backfill `ebay_user_id`** on existing `ebay_accounts` rows. It is
       populated on connect and on profile sync, so today it fills in only when
       a seller reconnects. Until a row has it, that account's records fall back
       to username matching. Deletion notices for un-backfilled accounts record
       `no_match`.
-- [x] **Done.** `deploy.yml` refuses to deploy when `EBAY_VERIFICATION_TOKEN`
-      is not set on the Fly app, before shipping rather than after: the
+- [x] **Done, and it answered its own question on the first run:
+      `EBAY_VERIFICATION_TOKEN` was already set** in production — the gate
+      printed the app's secret names on the deploy of `15e439c` and it was
+      among them. (Only the Fly half is visible from here; that the same value
+      is registered on developer.ebay.com is still worth one look.)
+      `deploy.yml` refuses to deploy when it is
+      not set on the Fly app, before shipping rather than after: the
       deletion endpoint's GET challenge 503s without it, and eBay disables a
       Production keyset's notification subscription when that endpoint keeps
       failing. `flyctl secrets list` prints names and never values. An unset
@@ -300,8 +316,14 @@ account, which is the same cost as one restart used to be — and the last one.
       single row in `alembic_version` and changes nothing else. Once it is
       done, wiring `upgrade head` into the deploy is safe and is the point of
       having any of this.
-- [ ] **Set `ADMIN_TOKEN`** in production, or `/api/admin/diagnostics` stays
-      closed (deliberately — it fails closed). Documented in `.env.example`.
+- [x] **`ADMIN_TOKEN` set** by the owner on 2026-08-30 (reported, not
+      verified from here — this environment cannot reach the app). Note the
+      trap in how it was generated: `ADMIN_TOKEN="$(openssl rand -hex 32)"`
+      inline never prints the value and Fly will not give it back, so if the
+      endpoint is ever to be called by hand the token has to be generated,
+      SHOWN, and stored first. `/api/admin/diagnostics` is the only way to
+      read `deletion_backlog` and `owed_refunds`, which the first-deploy
+      checklist says to watch.
 - [x] **Decided: keep it off.** The owner confirmed the Promoted Listings
       default flip (P1-06) on 2026-08-30. It follows the audit and the
       remediation prompt, and reverses a product choice made in response to
