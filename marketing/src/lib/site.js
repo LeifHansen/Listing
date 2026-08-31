@@ -7,7 +7,7 @@
  * is the one to update — no page hardcodes a number.
  */
 
-export const SITE_URL = import.meta.env?.SITE || "https://thryft.shop";
+export const SITE_URL = import.meta.env?.SITE || "https://thryftshop.com";
 
 /** The live product. Real today; becomes app.<domain> when the domain lands. */
 export const APP_URL = "https://listing-lfwjrg.fly.dev";
@@ -20,7 +20,7 @@ export const site = {
     "Etsy and Depop — individually or all at once.",
   // PLACEHOLDER — a company address on the real domain replaces this before
   // launch. The founder's personal inbox is deliberately not published here.
-  supportEmail: "support@thryft.shop",
+  supportEmail: "support@thryftshop.com",
   // PLACEHOLDER — the public TestFlight invite link.
   testflightUrl: "",
   bundleId: "com.thryftshop.app",
@@ -50,7 +50,7 @@ export const footerNav = [
       { href: "/about", label: "About" },
       { href: "/blog", label: "Blog" },
       { href: "/faq", label: "Support & FAQ" },
-      { href: `mailto:${"support@thryft.shop"}`, label: "Contact" },
+      { href: `mailto:${site.supportEmail}`, label: "Contact" },
     ],
   },
   {

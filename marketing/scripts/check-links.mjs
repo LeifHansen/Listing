@@ -67,6 +67,46 @@ for (const file of pages) {
   // A page with more than one <h1> is an outline bug and an a11y problem.
   const h1s = (html.match(/<h1[\s>]/g) || []).length;
   if (h1s !== 1) errors.push(`${page}: expected exactly one <h1>, found ${h1s}`);
+
+  // The canonical, og:url and sitemap must all name the SAME url. The build
+  // emits .html files that the host serves at clean paths, so it is easy for
+  // the canonical to advertise /pricing.html while the sitemap says /pricing —
+  // which tells a crawler the two are different pages. Pin the one true form:
+  // no .html, and no trailing slash except on the root.
+  const canonical = html.match(/<link rel="canonical" href="([^"]+)"/)?.[1];
+  if (canonical) {
+    if (canonical.endsWith(".html")) {
+      errors.push(`${page}: canonical carries a .html suffix → ${canonical}`);
+    }
+    const afterOrigin = canonical.replace(/^https?:\/\/[^/]+/, "");
+    if (afterOrigin.length > 1 && afterOrigin.endsWith("/")) {
+      errors.push(`${page}: canonical has a trailing slash → ${canonical}`);
+    }
+    const ogUrl = html.match(/<meta property="og:url" content="([^"]+)"/)?.[1];
+    if (ogUrl && ogUrl !== canonical) {
+      errors.push(`${page}: og:url (${ogUrl}) disagrees with canonical (${canonical})`);
+    }
+  }
+}
+
+// Every canonical must appear in the sitemap, and vice versa — the two
+// disagreeing is the failure this whole block exists to catch.
+const sitemapPath = path.join(dist, "sitemap-0.xml");
+if (existsSync(sitemapPath)) {
+  const sitemap = readFileSync(sitemapPath, "utf8");
+  const listed = new Set([...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1]));
+  for (const file of pages) {
+    const html = readFileSync(file, "utf8");
+    // 404 is deliberately noindex and is not a sitemap entry.
+    if (/<meta name="robots" content="noindex/.test(html)) continue;
+    const canonical = html.match(/<link rel="canonical" href="([^"]+)"/)?.[1];
+    if (!canonical) continue;
+    if (!listed.has(canonical) && !listed.has(canonical + "/")) {
+      errors.push(
+        `/${path.relative(dist, file)}: canonical ${canonical} is not in the sitemap`,
+      );
+    }
+  }
 }
 
 // The files that must exist for search engines and app deep links.

@@ -1,6 +1,6 @@
 # Thryft Shop — marketing site
 
-The public site: `thryft.shop`. Statically generated with Astro, deployed to
+The public site: `thryftshop.com`. Statically generated with Astro, deployed to
 Cloudflare Pages, and **completely separate from the app**, which keeps serving
 at its own origin. Nothing here can take production down.
 
@@ -77,7 +77,7 @@ node scripts/build-og.mjs   # fetches Fredoka if fontconfig can't see it
 
 | Variable | Where | What it does |
 |---|---|---|
-| `SITE_URL` | build env | The public origin. Drives every canonical URL, sitemap entry and OG image URL. Defaults to `https://thryft.shop` |
+| `SITE_URL` | build env | The public origin. Drives every canonical URL, sitemap entry and OG image URL. Defaults to `https://thryftshop.com` |
 | `PUBLIC_SIGNUP_ENDPOINT` | build env | Where the notify-me forms POST. **Unset, the forms render as a mailto link instead** — they never silently discard an address |
 
 In CI these come from the repository variables `MARKETING_SITE_URL` and
@@ -97,17 +97,47 @@ marketing-deploy.yml` builds and publishes to Cloudflare Pages via
 reads that file at deploy time. Adding a third-party script means adding its
 origin there, or it will be blocked with no visible error.
 
+## The domain
+
+`thryftshop.com` is owned. It matches the iOS/Android bundle id
+(`com.thryftshop.app`), so the identity is consistent across the app stores and
+the web.
+
+The plan, in the order it can be done safely:
+
+| Host | Points at | Notes |
+|---|---|---|
+| `thryftshop.com` | Cloudflare Pages | The canonical origin. Every canonical URL, sitemap entry and OG image URL is built from it |
+| `www.thryftshop.com` | 301 → apex | Pick one and redirect the other, or the two compete in search. This site canonicalizes to the **apex** |
+| `app.thryftshop.com` | CNAME → the Fly app | Purely additive: a custom hostname and a cert. `listing-lfwjrg.fly.dev` keeps working, the SPA mount does not move, and no OAuth callback needs re-registering until you choose to |
+
+Nothing about the app has to change for the marketing site to go live. Moving
+the app onto `app.thryftshop.com` is a separate decision — and when you make
+it, the eBay/Etsy/Depop redirect URIs and `capacitor.config.json`'s
+`allowNavigation` are what need updating.
+
+### URL form
+
+One form, everywhere: **no `.html`, no trailing slash except the root.** The
+build emits `.html` files that the host serves at clean paths, so the canonical,
+`og:url`, the sitemap and the RSS feed could each easily disagree — and a
+canonical that contradicts the sitemap tells a crawler the two are separate
+pages. `npm run links` fails the build if they ever diverge.
+
 ## Before launch
 
-- [ ] Register the domain; set `MARKETING_SITE_URL` and update `robots.txt`
-- [ ] Replace `site.supportEmail` with a real address on that domain
-      (`src/lib/site.js`) — the founder's personal inbox is deliberately not
-      published here
+- [x] ~~Register the domain~~ — `thryftshop.com`. Set `MARKETING_SITE_URL` to
+      `https://thryftshop.com` in the repository variables so CI builds match
+      the default in `astro.config.mjs`
+- [ ] **Make `support@thryftshop.com` actually receive mail.** It is published
+      on five pages. An address that bounces is worse than no address —
+      Cloudflare Email Routing forwards it to an existing inbox for free. The
+      founder's personal Gmail is deliberately not published here
 - [ ] Add the TestFlight public link as `site.testflightUrl`; the iOS CTA falls
       back to an invite-request form until it is set
 - [ ] Drop real screenshots and the hero art into `marketing/assets/` and swap
       the placeholders (search the source for `ASSET SWAP`)
 - [ ] Fill in `public/.well-known/` once the App Store and Play releases exist
       (see the README there)
-- [ ] Point `app.<domain>` at the Fly app — additive, and it does not require
-      touching the app
+- [ ] Create the Cloudflare Pages project and set `CLOUDFLARE_API_TOKEN` +
+      `CLOUDFLARE_ACCOUNT_ID`

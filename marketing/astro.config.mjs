@@ -6,7 +6,7 @@ import tailwindcss from "@tailwindcss/vite";
 // The public origin the site is served from. Every canonical URL, OG image
 // URL, sitemap entry and RSS link is derived from this one value, so pointing
 // the site at a real domain (or at a *.pages.dev preview) is a single change.
-const SITE = process.env.SITE_URL || "https://thryft.shop";
+const SITE = process.env.SITE_URL || "https://thryftshop.com";
 
 export default defineConfig({
   site: SITE,

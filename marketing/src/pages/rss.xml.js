@@ -10,6 +10,8 @@ export async function GET(context) {
     title: `${site.name} blog`,
     description: site.description,
     site: context.site,
+    // Match the canonical and sitemap form exactly — no trailing slash.
+    trailingSlash: false,
     items: posts.map((post) => ({
       title: post.data.title,
       description: post.data.description,

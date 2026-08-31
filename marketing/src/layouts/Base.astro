@@ -13,7 +13,15 @@ const {
 } = Astro.props;
 
 // Astro.site is the `site` from astro.config.mjs; Astro.url is this page.
-const canonical = new URL(Astro.url.pathname, Astro.site).href.replace(/\/$/, "") || Astro.site.href;
+//
+// `build.format: "file"` means the emitted path carries a .html suffix, but the
+// host serves these at clean URLs and that is what the sitemap advertises. A
+// canonical that disagrees with the sitemap is a self-inflicted indexing
+// problem, so normalize to exactly one form here: no .html, no trailing slash
+// except on the root (which is how the sitemap writes it too).
+const rawPath = Astro.url.pathname.replace(/\/index\.html$/, "/").replace(/\.html$/, "");
+const cleanPath = rawPath === "/" ? "/" : rawPath.replace(/\/$/, "");
+const canonical = new URL(cleanPath, Astro.site).href;
 const ogImage = new URL(image, Astro.site).href;
 
 // The page title already carries the brand on the home page; everywhere else
