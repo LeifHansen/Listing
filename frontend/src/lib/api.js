@@ -89,6 +89,36 @@ export function isRepeatable(method) {
   return REPEATABLE.has(String(method || "GET").toUpperCase());
 }
 
+// Mark the error for a write whose ANSWER was lost, not one that was refused.
+//
+// The message below already draws that line for the seller, and callers that
+// have to ACT on it were left reading the sentence back with a regex. The
+// distinction is worth a flag of its own: a refusal is the seller's to fix,
+// while a lost answer is work the server is very likely still doing — the
+// difference between "open this draft" and "check your store before you
+// publish it a second time". See publishShared.resolveLostPublish, which is
+// what asks the server how one of these actually ended.
+function unknownOutcome(err, method) {
+  if (!isRepeatable(method)) err.unknownOutcome = true;
+  return err;
+}
+
+// How long a publish may take before the client stops waiting.
+//
+// Publishing waits on eBay, not on us, and the server's own budget for one
+// says how long that is: the Trading create is capped at 45s (and eBay
+// ingests every photo in the listing inside that call), with the calls
+// around it — token refresh, business policies, the ship-from lookup, the
+// inventory-location ensure, promotion — capped at 30s each. A publish that
+// is genuinely still working can therefore run into the minutes.
+//
+// The 90s default cut those off, and cutting one off does not stop it: the
+// server finished into a closed socket, the listing went live, and the
+// seller was told it had failed. On a bulk run that is the seven-item batch
+// this constant was written for, where the two slowest items came back as
+// failures and were the two most likely to be live. 45 + 5x30, rounded up.
+export const PUBLISH_TIMEOUT_MS = 240000;
+
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
@@ -132,14 +162,14 @@ export async function api(path, opts = {}) {
       // to create a second live listing, and this message used to be sent on
       // every timeout regardless of method.
       const seconds = Math.round(timeoutMs / 1000);
-      throw new Error(
+      throw unknownOutcome(new Error(
         isRepeatable(opts.method)
           ? `That took longer than ${seconds}s and was given up on. `
             + "Nothing was lost — try again."
           : `That took longer than ${seconds}s, so we stopped waiting — but it `
             + "may still have gone through. Check before trying again, so you "
             + "don't end up doing it twice.",
-        { cause: e });
+        { cause: e }), opts.method);
     }
     // Not a timeout: the connection itself failed — dropped mid-request, a
     // machine restarting, a phone changing networks. Same question as the
@@ -147,14 +177,14 @@ export async function api(path, opts = {}) {
     // request that never left from one whose reply was lost. Saying "try
     // again in a few seconds" to someone whose label purchase or publish may
     // already have gone through is how they pay twice.
-    throw new Error(
+    throw unknownOutcome(new Error(
       isRepeatable(opts.method)
         ? "Network error — the server may be starting up. Try again in a "
           + "few seconds."
         : "The connection dropped before we heard back, so we can't tell "
           + "whether it went through. Check before trying again, so you "
           + "don't end up doing it twice.",
-      { cause: e });
+      { cause: e }), opts.method);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -208,11 +238,15 @@ export async function api(path, opts = {}) {
   return res.json();
 }
 
-export function postJson(path, body) {
+// `opts` reaches api() untouched, which is how a caller with genuinely long
+// work (a publish; see PUBLISH_TIMEOUT_MS) gives its own request a deadline
+// that matches it instead of inheriting the 90s default.
+export function postJson(path, body, opts = {}) {
   return api(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    ...opts,
   });
 }
 

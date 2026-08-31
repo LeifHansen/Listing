@@ -18,7 +18,10 @@ import { useToast } from "@/components/ui/Toaster";
 import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
-import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
+import {
+  MarketTargetChips, publishListing, usePublishTargets, blockedReason,
+  UNCONFIRMED_PUBLISH,
+} from "./publishShared";
 import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
@@ -379,6 +382,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     stopped.current = false;
     fails.current = 0;
     notFound.current = 0;
+    // Resets "we stopped watching" for the NEW job. It cannot cascade — the
+    // effect keys on jobId and this writes neither jobId nor anything jobId
+    // is derived from — and it has to happen here rather than during render,
+    // because what it is synchronizing with is the poll loop started below,
+    // not anything React can see.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setUnwatched(false);
     let timer;
     const poll = async () => {
@@ -565,9 +574,16 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
                reason: res.published ? null
                  : blockedReason(res, "Publish blocked — open the full editor to fix.") };
     } catch (e) {
+      // publishListing has already asked the server what became of a publish
+      // whose answer was lost; reaching here with that flag still set means
+      // it could not tell. Say so as its own outcome — "refused" it is not,
+      // and the one thing this seller must not do is publish it again
+      // without looking.
+      const unconfirmed = !!e?.unknownOutcome;
+      const message = unconfirmed ? UNCONFIRMED_PUBLISH : e.message;
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
-        ? { ...x, error: e.message } : x));
-      return { published: false, reason: e.message };
+        ? { ...x, error: message } : x));
+      return { published: false, unconfirmed, reason: message };
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
@@ -704,7 +720,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       message: `Each goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return;
-    let ok = 0, failed = 0;
+    let ok = 0, failed = 0, unconfirmed = 0;
     const reasons = [];
     // Guarded like the drafts strip's equivalent: this is a loop of real,
     // fee-incurring eBay calls that runs for minutes on a full batch, and the
@@ -716,8 +732,14 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       for (const it of targets) {
         const res = await publishOne(it);
         if (res.published) ok++;
+        // Counted apart from the refusals, because it is a different
+        // instruction. A refused draft is opened and fixed; one whose answer
+        // never came back is checked on eBay first, and lumping the two
+        // together under "need attention" is how a live listing gets
+        // published a second time.
+        else if (res.unconfirmed) unconfirmed++;
         else { failed++; if (res.reason) reasons.push(res.reason); }
-        setBulkProgress((p) => ({ ...p, done: ok + failed }));
+        setBulkProgress((p) => ({ ...p, done: ok + failed + unconfirmed }));
       }
     } finally {
       setBulkProgress(null);
@@ -734,8 +756,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           ? (shared
               ? ` ${failed} refused: ${shared}`
               : ` ${failed} need attention — see the queue.`)
+          : "")
+      + (unconfirmed
+          ? ` ${unconfirmed} didn't answer in time and may already be live — `
+            + `check your eBay store before publishing ${unconfirmed === 1 ? "it" : "them"} again.`
           : ""),
-      { kind: failed ? "warning" : "success" });
+      { kind: failed || unconfirmed ? "warning" : "success" });
   };
 
   // The whole batch, no ticking required — the common ending for a batch the
@@ -772,9 +798,13 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     (it) => ebayBlockers(it.listing, { targets: effectiveTargets }).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
   // in a card, and the pairwise scan is quadratic in the size of the batch.
-  const dupes = useMemo(() => duplicateSuspects(drafts),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [drafts.map((d) => `${d.session_id}:${d.listing?.title || d.title || ""}`).join("|")]);
+  // Keyed on what the scan actually reads — ids and titles — so a poll that
+  // changed nothing, or a keystroke in a price field, re-uses the last answer.
+  const dupeKey = drafts
+    .map((d) => `${d.session_id}:${d.listing?.title || d.title || ""}`)
+    .join("|");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const dupes = useMemo(() => duplicateSuspects(drafts), [dupeKey]);
   const progressDetail = phase === "identifying" && job?.total_items
     ? ` (${job.current}/${job.total_items})`
     : phase === "optimizing" && job?.total_photos
