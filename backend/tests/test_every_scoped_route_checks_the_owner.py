@@ -66,6 +66,11 @@ EXEMPT = {
         "eBay scopes it. The download goes out on the CALLER's own OAuth "
         "token, so a shipment id belonging to another seller is refused at "
         "eBay rather than here — there is no local record to check against.",
+    "admin_get_listing":
+        "A superadmin console route: the cross-user read is the point. "
+        "Access is gated by _require_superadmin — fail-closed, the role "
+        "re-read from the user row on every request, 404 to everyone else "
+        "— pinned by test_admin_requires_a_superadmin.py.",
 }
 
 

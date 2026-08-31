@@ -76,6 +76,16 @@ class User(Base):
     # New-listing defaults (package weight/dims, quantity, condition, …) that
     # pre-fill every AI draft so repeat sellers stop re-typing them.
     prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # "user" or "superadmin" — who may open the operator console. Written only
+    # by scripts/grant_superadmin.py; no route writes it. Read with
+    # `or "user"`: rows on deployments older than the column answer None.
+    role: Mapped[str] = mapped_column(String(16), default="user")
+    # Set = locked out. Login refuses and auth.current_user drops live
+    # sessions at the same chokepoint a revocation does. NULL = active, which
+    # is every account on the day this ships. WITH TIME ZONE for the same
+    # reason as sessions_valid_from.
+    disabled_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -191,6 +201,11 @@ class MediaPurge(Base):
 
 class ListingRecord(Base):
     __tablename__ = "listings"
+    # The operator console groups the whole table by status on every Overview
+    # load, and the per-status counts back the seller-facing tabs too. Same
+    # rule as ix_notifications_user_unread: declared on the model so both
+    # schema sources (create_all and alembic) can see it exists.
+    __table_args__ = (Index("ix_listings_status", "status"),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
@@ -275,6 +290,37 @@ class Notification(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class AdminAuditLog(Base):
+    """Append-only record of every superadmin ACTION.
+
+    Mutations only — reads are covered by the access gate and the request
+    log. Written BEFORE the mutation it records (see admin_audit), so an
+    action that cannot be written down does not run.
+
+    Deliberately no ForeignKeys, matching the rest of the schema, and the
+    actor's email denormalized: the trail has to outlive both the actor row
+    and the target row, or disabling an account erases who disabled it.
+    There are no update or delete accessors for this table on purpose.
+    """
+
+    __tablename__ = "admin_audit_log"
+    # The console reads this newest-first with a keyset cursor on exactly
+    # this pair — same shape as the listings pager.
+    __table_args__ = (Index("ix_admin_audit_created", "created_at", "id"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(64), index=True)
+    actor_email: Mapped[str] = mapped_column(String(255), default="")
+    # grant_tokens | revoke_sessions | disable_account | enable_account |
+    # run_compliance_queue | grant_superadmin | revoke_superadmin
+    action: Mapped[str] = mapped_column(String(48), index=True)
+    target_type: Mapped[str] = mapped_column(String(16), default="")  # user|listing|system
+    target_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 def enabled() -> bool:
     return bool(config.DATABASE_URL)
 
@@ -353,6 +399,19 @@ _MIGRATIONS = (
     # which is the same answer the in-memory dict gave.
     "ALTER TABLE users ADD COLUMN last_sweep_at "
     "TIMESTAMP WITH TIME ZONE",
+    # The operator console. DEFAULT 'user' backfills existing rows on
+    # Postgres; reads still guard with `or "user"` because SQLite databases
+    # created before create_all knew the column get NULL.
+    "ALTER TABLE users ADD COLUMN role VARCHAR(16) DEFAULT 'user'",
+    # Account suspension. Nullable with no default: NULL means active, which
+    # is every account on the day this ships. WITH TIME ZONE for the same
+    # reason as sessions_valid_from above.
+    "ALTER TABLE users ADD COLUMN disabled_at "
+    "TIMESTAMP WITH TIME ZONE",
+    # The console's Overview groups the whole listings table by status.
+    # IF NOT EXISTS so this is a no-op after the first boot, same as the
+    # notifications index above.
+    "CREATE INDEX IF NOT EXISTS ix_listings_status ON listings (status)",
 )
 
 
@@ -781,6 +840,11 @@ def _user_to_dict(u: User) -> dict:
             # rides along here rather than being fetched separately because
             # this dict is already the per-request read.
             "sessions_valid_from": getattr(u, "sessions_valid_from", None),
+            # Read from the row on EVERY request (this dict is the per-request
+            # read), so revoking superadmin or disabling an account takes
+            # effect on the next request — no JWT claim to wait out.
+            "role": getattr(u, "role", None) or "user",
+            "disabled_at": getattr(u, "disabled_at", None),
             "created_at": u.created_at.isoformat()}
 
 
@@ -977,6 +1041,61 @@ def revoke_sessions(user_id: str,
         raise StorageUnavailable(
             "Couldn't sign out your other sessions just now. Try again in a "
             "moment.") from exc
+
+
+def set_user_role(user_id: str, role: str) -> Optional[dict]:
+    """Grant or revoke the operator console. Returns the updated user dict,
+    or None for an unknown user; RAISES when the write did not commit.
+
+    Strict like revoke_sessions and for the same reason: "you are (or are no
+    longer) a superadmin" reported on a write that never landed is a claim
+    somebody acts on. Only scripts/grant_superadmin.py and the tests call
+    this — there is deliberately no route that does.
+    """
+    if role not in ("user", "superadmin"):
+        raise ValueError(f"unknown role: {role!r}")
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                return None
+            u.role = role
+            s.commit()
+            return _user_to_dict(u)
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: set_user_role failed: {exc}")
+        raise StorageUnavailable("couldn't update the account's role") from exc
+
+
+def set_user_disabled(user_id: str, disabled: bool) -> Optional[dict]:
+    """Lock an account out (or back in). Returns the updated user dict, or
+    None for an unknown user; RAISES when the write did not commit.
+
+    Strict for the same reason as revoke_sessions: telling an operator an
+    account is locked when the write never landed means they stop looking
+    while the account keeps working.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                return None
+            u.disabled_at = _now() if disabled else None
+            s.commit()
+            return _user_to_dict(u)
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: set_user_disabled failed: {exc}")
+        raise StorageUnavailable("couldn't update the account's status") from exc
 
 
 def last_sweep(user_id: str) -> Optional[_dt.datetime]:
@@ -2274,3 +2393,482 @@ def db_status(refresh: bool = False) -> dict:
         result = {"configured": True, "connected": False, "error": str(exc)}
     _status_cache = (_time.time(), result)
     return result
+
+
+# --- superadmin console -----------------------------------------------------
+#
+# Cross-user reads, prefixed admin_ so they are greppable: everything above
+# this line is scoped to one user_id, and only the /api/admin routes (gated
+# by main._require_superadmin) may call what is below it. All of them follow
+# the module's read policy for reads that feed a REPORT: a failure RAISES
+# rather than answering zeros — the console renders "couldn't check", never
+# an invented 0 (the same dash-not-zero contract the dashboard has).
+
+def admin_audit(actor: dict, action: str, target_type: str = "",
+                target_id: str = "", ip: str = "",
+                data: Optional[dict] = None) -> str:
+    """Write one audit row and return its id. RAISES when it did not commit.
+
+    Called BEFORE the mutation it records: an admin action that cannot be
+    written down does not run. If the mutation then fails, the row records an
+    attempt and the route's error response says it did not complete — for
+    token grants the ledger `ref` carries this row's id, so reconciling the
+    two is mechanical.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            raise StorageUnavailable("no database configured")
+        row_id = _uuid.uuid4().hex
+        with Session(eng) as s:
+            s.add(AdminAuditLog(
+                id=row_id,
+                actor_id=str(actor.get("id") or ""),
+                actor_email=str(actor.get("email") or "")[:255],
+                action=action[:48],
+                target_type=target_type[:16],
+                target_id=str(target_id or "")[:64],
+                ip=(ip or "")[:64],
+                data=data,
+                created_at=_now()))
+            s.commit()
+        return row_id
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: admin_audit failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't record this admin action, so it was not performed. "
+            "Try again in a moment.") from exc
+
+
+def admin_audit_list(limit: int = 50,
+                     before: Optional[tuple[_dt.datetime, str]] = None
+                     ) -> list[dict]:
+    """The audit trail, newest first. Keyset on (created_at, id) — same
+    spelled-out OR shape as list_listings, and RAISES on a read failure."""
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            q = select(AdminAuditLog)
+            if before is not None:
+                ts, last_id = before
+                q = q.where(or_(AdminAuditLog.created_at < ts,
+                                and_(AdminAuditLog.created_at == ts,
+                                     AdminAuditLog.id < last_id)))
+            q = q.order_by(AdminAuditLog.created_at.desc(),
+                           AdminAuditLog.id.desc()).limit(limit)
+            rows = s.execute(q).scalars().all()
+            return [{"id": r.id, "actor_id": r.actor_id,
+                     "actor_email": r.actor_email, "action": r.action,
+                     "target_type": r.target_type, "target_id": r.target_id,
+                     "ip": r.ip, "data": r.data or {},
+                     "created_at": r.created_at.isoformat()
+                     if r.created_at else None} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_audit_list failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't read the audit log just now. Try again in a moment."
+        ) from exc
+
+
+def _as_float(value) -> Optional[float]:
+    """A JSON-extracted number as a float, or None — never a dialect's
+    choice of text vs numeric."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _admin_user_row(u: User) -> dict:
+    """A user as the console sees one. NEVER the password hash."""
+    disabled = getattr(u, "disabled_at", None)
+    return {"id": u.id, "email": u.email,
+            "display_name": getattr(u, "display_name", "") or "",
+            "role": getattr(u, "role", None) or "user",
+            "disabled_at": disabled.isoformat() if disabled else None,
+            "created_at": u.created_at.isoformat() if u.created_at else None}
+
+
+def admin_list_users(limit: int = 50,
+                     before: Optional[tuple[_dt.datetime, str]] = None,
+                     q: str = "") -> list[dict]:
+    """A page of accounts, newest first. RAISES on a read failure.
+
+    `q` narrows by email/display-name substring (case-insensitive,
+    autoescaped so a literal % is a percent sign) or exact user id. Keyset
+    on (created_at, id) for the same reason the listings pager is: a signup
+    between two page loads shifts every row an OFFSET would count past.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            query = select(User)
+            q = (q or "").strip()
+            if q:
+                query = query.where(or_(
+                    User.email.icontains(q, autoescape=True),
+                    User.display_name.icontains(q, autoescape=True),
+                    User.id == q))
+            if before is not None:
+                ts, last_id = before
+                query = query.where(or_(User.created_at < ts,
+                                        and_(User.created_at == ts,
+                                             User.id < last_id)))
+            query = query.order_by(User.created_at.desc(),
+                                   User.id.desc()).limit(limit)
+            rows = s.execute(query).scalars().all()
+            return [_admin_user_row(u) for u in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_list_users failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load the accounts just now. Try again in a moment."
+        ) from exc
+
+
+def admin_count_users() -> int:
+    """How many accounts exist. RAISES on a read failure — a zero here is a
+    claim about the whole platform, not a blank."""
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            return int(s.execute(
+                select(func.count()).select_from(User)).scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_count_users failed: {exc}")
+        raise StorageUnavailable("couldn't count the accounts") from exc
+
+
+def admin_user_rollups(user_ids: Sequence[str]) -> dict[str, dict]:
+    """Per-account facts for one PAGE of users, in four grouped queries.
+
+    Grouped over the page's ids rather than queried per row: the users list
+    renders fifty rows, and a lookup per row per fact is the N+1 that makes
+    the console unusable against a cross-region database. RAISES on a read
+    failure. Secrets never leave this function — connections are reported as
+    marketplace names, not tokens.
+    """
+    ids = [str(i) for i in user_ids if str(i)]
+    out: dict[str, dict] = {
+        uid: {"listings": 0, "last_active": None, "tokens": None,
+              "connections": []} for uid in ids}
+    if not ids:
+        return out
+    if len(ids) > _MAX_IDS_PER_LOOKUP:
+        raise ValueError(
+            f"admin_user_rollups was asked for {len(ids)} ids; bound the "
+            f"caller's input (max {_MAX_IDS_PER_LOOKUP})")
+    eng = _get_engine()
+    if eng is None:
+        return out
+    try:
+        with Session(eng) as s:
+            for uid, count, latest in s.execute(
+                    select(ListingRecord.user_id, func.count(),
+                           func.max(ListingRecord.updated_at))
+                    .where(ListingRecord.user_id.in_(ids))
+                    .group_by(ListingRecord.user_id)):
+                out[uid]["listings"] = int(count or 0)
+                out[uid]["last_active"] = (latest.isoformat()
+                                           if latest else None)
+            for acct in s.execute(
+                    select(TokenAccount)
+                    .where(TokenAccount.user_id.in_(ids))).scalars():
+                out[acct.user_id]["tokens"] = {
+                    "purchased": acct.purchased,
+                    "free_used": acct.free_used,
+                    "free_period": acct.free_period}
+            for uid, username in s.execute(
+                    select(EbayAccount.user_id, EbayAccount.ebay_username)
+                    .where(EbayAccount.user_id.in_(ids))
+                    .where(EbayAccount.refresh_token != "")):
+                out[uid]["connections"].append(
+                    {"marketplace": "ebay", "username": username or ""})
+            for uid, marketplace, username in s.execute(
+                    select(MarketplaceAccount.user_id,
+                           MarketplaceAccount.marketplace,
+                           MarketplaceAccount.external_username)
+                    .where(MarketplaceAccount.user_id.in_(ids))
+                    .where(MarketplaceAccount.refresh_token != "")):
+                out[uid]["connections"].append(
+                    {"marketplace": marketplace, "username": username or ""})
+            return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_user_rollups failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load the account details just now. Try again in a "
+            "moment.") from exc
+
+
+def admin_get_user(user_id: str) -> Optional[dict]:
+    """One account in full (still never the password hash): the row, the
+    rollup, per-status listing counts, and recent ledger entries. None for an
+    unknown user; RAISES on a read failure."""
+    eng = _get_engine()
+    if eng is None:
+        return None
+    try:
+        with Session(eng) as s:
+            u = s.get(User, user_id)
+            if u is None:
+                return None
+            by_status = {status: int(count or 0) for status, count in s.execute(
+                select(ListingRecord.status, func.count())
+                .where(ListingRecord.user_id == user_id)
+                .group_by(ListingRecord.status))}
+        detail = _admin_user_row(u)
+        detail["listings_by_status"] = by_status
+        detail.update(admin_user_rollups([user_id])[user_id])
+        detail["ledger"] = token_history(user_id, limit=20)
+        return detail
+    except StorageUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_get_user failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load that account just now. Try again in a moment."
+        ) from exc
+
+
+def admin_platform_kpis(days: int = 30) -> dict:
+    """The Overview numbers, over a window of `days`. RAISES on failure.
+
+    Scalar aggregates run in SQL; the daily signup series and the sold-value
+    sums are bucketed in Python from narrow column reads. Deliberately so:
+    cross-dialect date truncation (SQLite's date() vs Postgres date_trunc) is
+    a portability trap the SQLite-based suite would never catch, and sold
+    money lives inside the listings' JSON where `sold_price` may be absent —
+    the fallback to asking price mirrors lib/sales.js (`approx` counts how
+    often it was used, so the number is labeled, not laundered).
+    """
+    days = max(1, int(days))
+    since = _now() - _dt.timedelta(days=days)
+    eng = _get_engine()
+    if eng is None:
+        return {"available": False}
+    try:
+        with Session(eng) as s:
+            users_total = int(s.execute(
+                select(func.count()).select_from(User)).scalar() or 0)
+            signup_stamps = [row for row in s.execute(
+                select(User.created_at).where(User.created_at >= since)
+            ).scalars() if row is not None]
+            active: set[str] = set()
+            active.update(uid for uid in s.execute(
+                select(ListingRecord.user_id.distinct())
+                .where(ListingRecord.updated_at >= since)
+                .where(ListingRecord.user_id.is_not(None))).scalars())
+            active.update(uid for uid in s.execute(
+                select(TokenLedger.user_id.distinct())
+                .where(TokenLedger.created_at >= since)).scalars())
+            by_status = {status: int(count or 0) for status, count in s.execute(
+                select(ListingRecord.status, func.count())
+                .group_by(ListingRecord.status))}
+            sold_rows = s.execute(
+                select(_json_text(ListingRecord.data, "sold_at"),
+                       _json_text(ListingRecord.data, "sold_price"),
+                       _json_text(ListingRecord.data, "price"),
+                       _json_text(ListingRecord.data, "currency"))
+                .where(ListingRecord.status == "sold")).all()
+            token_kinds = {kind: {"count": int(count or 0),
+                                  "tokens": int(total or 0),
+                                  "paid_part": int(paid or 0)}
+                           for kind, count, total, paid in s.execute(
+                               select(TokenLedger.kind, func.count(),
+                                      func.sum(TokenLedger.tokens),
+                                      func.sum(TokenLedger.paid_part))
+                               .where(TokenLedger.created_at >= since)
+                               .group_by(TokenLedger.kind))}
+            feature_usage = [{"feature": feature or "",
+                              "count": int(count or 0),
+                              "tokens": -int(total or 0)}
+                             for feature, count, total in s.execute(
+                                 select(TokenLedger.feature, func.count(),
+                                        func.sum(TokenLedger.tokens))
+                                 .where(TokenLedger.kind == "spend")
+                                 .where(TokenLedger.created_at >= since)
+                                 .group_by(TokenLedger.feature))]
+        return {
+            "available": True,
+            "days": days,
+            "users": {"total": users_total,
+                      "signups": len(signup_stamps),
+                      "signup_series": _daily_series(signup_stamps, since,
+                                                     days),
+                      "active": len(active)},
+            "listings": {"by_status": by_status,
+                         "total": sum(by_status.values())},
+            "sales": _sold_summary(sold_rows, since),
+            "tokens": {"by_kind": token_kinds,
+                       "features": sorted(feature_usage,
+                                          key=lambda f: -f["tokens"])},
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_platform_kpis failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load the platform numbers just now. Try again in a "
+            "moment.") from exc
+
+
+def _daily_series(stamps: list, since: _dt.datetime, days: int) -> list[dict]:
+    """Per-day counts for `stamps`, oldest day first, zero-filled so the
+    sparkline's x-axis is time rather than 'days on which something
+    happened'."""
+    counts: dict[str, int] = {}
+    for stamp in stamps:
+        if stamp.tzinfo is None:
+            # SQLite hands back naive datetimes; stamps are written UTC.
+            stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+        counts[stamp.date().isoformat()] = \
+            counts.get(stamp.date().isoformat(), 0) + 1
+    start = since.date()
+    out = []
+    for offset in range(days + 1):
+        day = (start + _dt.timedelta(days=offset)).isoformat()
+        out.append({"day": day, "count": counts.get(day, 0)})
+    return out
+
+
+def _sold_summary(rows: list, since: _dt.datetime) -> dict:
+    """Sold count and value inside the window, from the JSON fields.
+
+    Mirrors lib/sales.js: the sale price is sold_price, falling back to the
+    asking price (counted in `approx`); a row with no parseable sold_at is
+    `undated` and excluded from the windowed numbers rather than guessed
+    into them; mixed currencies are reported, not summed together silently.
+    """
+    count = 0
+    value = 0.0
+    approx = 0
+    undated = 0
+    currencies: set[str] = set()
+    for sold_at, sold_price, price, currency in rows:
+        when = None
+        try:
+            when = _dt.datetime.fromisoformat(str(sold_at)) if sold_at else None
+        except ValueError:
+            when = None
+        if when is None:
+            undated += 1
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_dt.timezone.utc)
+        if when < since:
+            continue
+        count += 1
+        raw = sold_price if sold_price not in (None, "") else price
+        if sold_price in (None, ""):
+            approx += 1
+        try:
+            value += float(raw)
+        except (TypeError, ValueError):
+            pass
+        currencies.add(str(currency) if currency else "USD")
+    return {"count": count, "value": round(value, 2), "approx": approx,
+            "undated": undated,
+            "mixed_currency": len(currencies) > 1,
+            "currency": (sorted(currencies)[0] if len(currencies) == 1
+                         else None)}
+
+
+def admin_ledger(limit: int = 50,
+                 before: Optional[tuple[_dt.datetime, str]] = None,
+                 kind: str = "", user_id: str = "") -> list[dict]:
+    """The global token ledger, newest first. RAISES on a read failure.
+
+    Unlike token_history (a user's own view), this one carries user_id and
+    ref — the operator reconciling a Stripe dispute needs both.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            q = select(TokenLedger)
+            if kind:
+                q = q.where(TokenLedger.kind == kind)
+            if user_id:
+                q = q.where(TokenLedger.user_id == user_id)
+            if before is not None:
+                ts, last_id = before
+                q = q.where(or_(TokenLedger.created_at < ts,
+                                and_(TokenLedger.created_at == ts,
+                                     TokenLedger.id < last_id)))
+            q = q.order_by(TokenLedger.created_at.desc(),
+                           TokenLedger.id.desc()).limit(limit)
+            rows = s.execute(q).scalars().all()
+            return [{"id": r.id, "user_id": r.user_id, "kind": r.kind,
+                     "feature": r.feature, "tokens": r.tokens,
+                     "free_part": r.free_part, "paid_part": r.paid_part,
+                     "ref": r.ref, "note": r.note,
+                     "created_at": r.created_at.isoformat()
+                     if r.created_at else None} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_ledger failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't read the ledger just now. Try again in a moment."
+        ) from exc
+
+
+def admin_list_listings(limit: int = 50,
+                        before: Optional[tuple[_dt.datetime, str]] = None,
+                        q: str = "", status: str = "",
+                        user_id: str = "") -> list[dict]:
+    """A cross-user page of listing SUMMARIES, newest first. RAISES on a
+    read failure.
+
+    Summaries only — id, owner, status, title, money fields — never the
+    whole `data` blob: a page of fifty full documents is megabytes of other
+    people's sync ledgers shipped to render five columns (the same reasoning
+    as LIST_OMITTED_LISTING_FIELDS, one step further).
+    """
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            query = select(ListingRecord.id, ListingRecord.user_id,
+                           ListingRecord.status, ListingRecord.title,
+                           ListingRecord.updated_at,
+                           _json_text(ListingRecord.data, "price"),
+                           _json_text(ListingRecord.data, "sold_price"),
+                           _json_text(ListingRecord.data, "currency"))
+            q = (q or "").strip()
+            if q:
+                query = query.where(or_(
+                    ListingRecord.title.icontains(q, autoescape=True),
+                    ListingRecord.id == q))
+            if status:
+                query = query.where(ListingRecord.status == status)
+            if user_id:
+                query = query.where(ListingRecord.user_id == user_id)
+            if before is not None:
+                ts, last_id = before
+                query = query.where(or_(ListingRecord.updated_at < ts,
+                                        and_(ListingRecord.updated_at == ts,
+                                             ListingRecord.id < last_id)))
+            query = query.order_by(ListingRecord.updated_at.desc(),
+                                   ListingRecord.id.desc()).limit(limit)
+            # ->> hands back TEXT on Postgres and a real number on SQLite's
+            # JSON_EXTRACT; normalize so the API's shape is not a dialect's.
+            return [{"id": rid, "user_id": uid, "status": st, "title": title,
+                     "updated_at": updated.isoformat() if updated else None,
+                     "price": _as_float(price),
+                     "sold_price": _as_float(sold_price),
+                     "currency": currency}
+                    for rid, uid, st, title, updated, price, sold_price,
+                    currency in s.execute(query)]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: admin_list_listings failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load the listings just now. Try again in a moment."
+        ) from exc

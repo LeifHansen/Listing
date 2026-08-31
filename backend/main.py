@@ -702,6 +702,297 @@ def admin_diagnostics(request: Request) -> dict:
     return _diagnostics()
 
 
+# --- superadmin console ------------------------------------------------------
+#
+# The operator console: cross-user reads and a handful of account actions,
+# gated by users.role rather than the shared header token above. The two
+# doors deliberately coexist: /api/admin/diagnostics keeps working with the
+# database down (curl/CI), while everything below authenticates a PERSON,
+# so every action can be written down with a name on it.
+#
+# These handlers live in THIS module on purpose. The ownership guardrail
+# (tests/test_every_scoped_route_checks_the_owner.py) AST-scans main.py and
+# nothing else — an admin route in a separate module would silently leave
+# that scan, which is exactly how the next cross-user read ships unreviewed.
+# If main.py is ever split, extend that test's MAIN/FUNCS first.
+
+def _require_superadmin(request: Request) -> dict:
+    """The signed-in superadmin, or 404. Fail CLOSED.
+
+    404 rather than 401/403, on purpose: (a) it does not confirm an admin
+    surface exists to whoever is probing for one; (b) lib/api.js treats any
+    401 as "session expired" and signs the caller out client-side — the
+    wrong outcome for a curious logged-in seller who typed /api/admin into
+    devtools. A database outage propagates as StorageUnavailable → 503, like
+    every other authenticated route: "cannot check" is never "not an admin".
+    The role is re-read from the user row on every request (current_user's
+    per-request read), so revoking it takes effect immediately — there is no
+    role claim inside the 30-day JWT to wait out.
+    """
+    user = auth.current_user(request)
+    if not user or (user.get("role") or "") != "superadmin":
+        raise HTTPException(404, "Not found")
+    return user
+
+
+def _audit_admin(admin: dict, request: Request, action: str,
+                 target_type: str = "", target_id: str = "",
+                 data: Optional[dict] = None) -> str:
+    """Write the audit row for an admin action, BEFORE the action runs.
+
+    Raises (→ 503) when it cannot: an admin action that cannot be written
+    down does not run. Returns the row id — token grants carry it in their
+    ledger `ref`, so the two trails reconcile mechanically.
+    """
+    return db.admin_audit(admin, action, target_type=target_type,
+                          target_id=target_id, ip=_client_ip(request),
+                          data=data)
+
+
+def _admin_cursor(stamp: Optional[str], row_id: Optional[str]) -> Optional[str]:
+    """The same opaque "<stamp>|<id>" token _cursor_for mints, for admin
+    pages keyed on their own timestamp columns. None when the row cannot
+    name a place in the order — the page then honestly offers no button."""
+    if not stamp or not row_id:
+        return None
+    raw = f"{stamp}|{row_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+@app.get("/api/admin/system")
+def admin_system(request: Request) -> dict:
+    """_diagnostics(), for the console's System tab. Same payload as
+    /api/admin/diagnostics behind the session gate instead of the header."""
+    _require_superadmin(request)
+    return _diagnostics()
+
+
+@app.get("/api/admin/overview")
+def admin_overview(request: Request, days: int = 30) -> dict:
+    """The platform KPIs plus the two obligation backlogs. Reads raise
+    rather than answering zeros — the console renders "couldn't check"."""
+    _require_superadmin(request)
+    if days not in (7, 30, 90):
+        days = 30
+    kpis = db.admin_platform_kpis(days)
+    kpis["deletion_backlog"] = deletion_queue.backlog()
+    kpis["owed_refunds"] = owed_refunds.backlog()
+    return kpis
+
+
+@app.get("/api/admin/users")
+def admin_users(request: Request, q: str = "", before: str = "",
+                limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 100))
+    cursor = _cursor_from(before) if before else None
+    # One row more than will be returned, so the answer can say whether it
+    # is the whole list — same probe-row trade as /api/listings.
+    rows = db.admin_list_users(limit=limit + 1, before=cursor, q=q)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    out = {"users": rows,
+           "rollups": db.admin_user_rollups([u["id"] for u in rows]),
+           "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
+                                         rows[-1].get("id"))
+                           if truncated and rows else None)}
+    try:
+        out["total"] = db.admin_count_users()
+    except errors.StorageUnavailable:
+        # The page is honest without it; a total must never be invented.
+        pass
+    return out
+
+
+@app.get("/api/admin/users/{user_id}")
+def admin_user_detail(user_id: str, request: Request) -> dict:
+    _require_superadmin(request)
+    detail = db.admin_get_user(user_id)
+    if detail is None:
+        raise HTTPException(404, "No such account.")
+    return {"user": detail}
+
+
+# The most an admin can hand out in one grant. Not a product limit — a
+# typo guard: 1000000 where 1000 was meant is a real balance someone
+# spends, and there is no undo that claws back what was already used.
+_ADMIN_GRANT_CAP = 100_000
+
+
+@app.post("/api/admin/users/{user_id}/grant-tokens")
+def admin_grant_tokens(user_id: str, request: Request,
+                       payload: Optional[dict] = None) -> dict:
+    """Credit an account (a support goodwill, a refund made right). The
+    ledger row's ref carries the audit row's id, and token_credit's unique
+    ref makes a retried grant a no-op rather than a double credit."""
+    admin = _require_superadmin(request)
+    body = payload or {}
+    try:
+        amount = int(body.get("tokens"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "How many tokens? Send a whole number.")
+    if not 1 <= amount <= _ADMIN_GRANT_CAP:
+        raise HTTPException(
+            400, f"Grants are 1 to {_ADMIN_GRANT_CAP} tokens.")
+    note = str(body.get("note") or "").strip()[:200]
+    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
+    if not target:
+        raise HTTPException(404, "No such account.")
+    audit_id = _audit_admin(admin, request, "grant_tokens", "user", user_id,
+                            data={"tokens": amount, "note": note})
+    res = db.token_credit(user_id, amount, ref=f"admin:{audit_id}",
+                          kind="grant",
+                          note=note or f"granted by {admin['email']}")
+    if res is None:
+        raise HTTPException(
+            503, "The grant was recorded but could not be applied — it was "
+                 "NOT credited. Try again in a moment.")
+    return {"ok": True, "granted": amount,
+            "already": bool(res.get("already"))}
+
+
+@app.post("/api/admin/users/{user_id}/revoke-sessions")
+def admin_revoke_sessions(user_id: str, request: Request) -> dict:
+    """Force-sign-out one account everywhere (a stolen token, a support
+    request). db.revoke_sessions is strict, so success here means the write
+    landed."""
+    admin = _require_superadmin(request)
+    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
+    if not target:
+        raise HTTPException(404, "No such account.")
+    _audit_admin(admin, request, "revoke_sessions", "user", user_id)
+    db.revoke_sessions(user_id)
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{user_id}/disable")
+def admin_set_disabled(user_id: str, request: Request,
+                       payload: Optional[dict] = None) -> dict:
+    """Lock an account out ({"disabled": true}) or back in (false).
+
+    Two refusals: your own account (locking yourself out of the console
+    that unlocks accounts), and another superadmin (demote them with
+    scripts/grant_superadmin.py --revoke first, so removing an operator is
+    a deliberate, audited, out-of-band step rather than a console click).
+    Disabling also revokes sessions: the lockout must reach tokens that are
+    already minted, not just the next login.
+    """
+    admin = _require_superadmin(request)
+    body = payload or {}
+    disabled = body.get("disabled")
+    if not isinstance(disabled, bool):
+        raise HTTPException(400, 'Send {"disabled": true} or false.')
+    if user_id == admin["id"]:
+        raise HTTPException(400, "You can't disable your own account.")
+    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
+    if not target:
+        raise HTTPException(404, "No such account.")
+    if (target.get("role") or "") == "superadmin":
+        raise HTTPException(
+            400, "That account is a superadmin — revoke its role first "
+                 "(scripts/grant_superadmin.py --revoke).")
+    _audit_admin(admin, request,
+                 "disable_account" if disabled else "enable_account",
+                 "user", user_id)
+    updated = db.set_user_disabled(user_id, disabled)
+    if updated is None:
+        raise HTTPException(404, "No such account.")
+    if disabled:
+        db.revoke_sessions(user_id)
+    return {"ok": True, "disabled_at": updated.get("disabled_at")}
+
+
+@app.get("/api/admin/listings")
+def admin_listings(request: Request, q: str = "", status: str = "",
+                   user_id: str = "", before: str = "",
+                   limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 100))
+    cursor = _cursor_from(before) if before else None
+    rows = db.admin_list_listings(limit=limit + 1, before=cursor, q=q,
+                                  status=status, user_id=user_id)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"listings": rows,
+            "next_cursor": (_admin_cursor(rows[-1].get("updated_at"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/listings/{listing_id}")
+def admin_get_listing(listing_id: str, request: Request) -> dict:
+    """One listing in full, whoever owns it — the read-only detail behind a
+    row in the console's cross-user browse. See the ownership test's EXEMPT
+    entry: cross-user is the point here, and the gate above is the check."""
+    _require_superadmin(request)
+    rec = db.get_listing_strict(listing_id)
+    if rec is db.UNAVAILABLE:
+        raise HTTPException(
+            503, "Couldn't read that listing just now. Try again in a "
+                 "moment.")
+    if rec is None:
+        raise HTTPException(404, "Listing not found")
+    return rec
+
+
+@app.get("/api/admin/ledger")
+def admin_ledger_view(request: Request, kind: str = "", user_id: str = "",
+                      before: str = "", limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.admin_ledger(limit=limit + 1, before=cursor, kind=kind,
+                           user_id=user_id)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"entries": rows,
+            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/compliance")
+def admin_compliance(request: Request) -> dict:
+    """The two obligation queues. The counts raise on a read failure (a zero
+    here is a claim that nothing is owed), so an outage 503s the tab rather
+    than rendering 'Nothing owed' over queue rows nobody could read."""
+    _require_superadmin(request)
+    return {
+        "deletion_backlog": db.count_pending_deletion_notices(),
+        "media_purge_backlog": db.count_pending_media_purges(),
+        "deletion_notices": db.pending_deletion_notices(100),
+        "media_purges": db.pending_media_purges(100),
+    }
+
+
+@app.post("/api/admin/compliance/run")
+def admin_run_compliance(request: Request) -> dict:
+    """Kick the recovery passes now instead of waiting for the next boot —
+    the button an operator presses when the backlog number is not coming
+    down. Inline rather than backgrounded so the response can say what
+    actually happened."""
+    admin = _require_superadmin(request)
+    _audit_admin(admin, request, "run_compliance_queue", "system")
+    finished = _finish_pending_deletions()
+    refunds = _settle_owed_refunds()
+    return {"ok": True, "deletions": finished, "refunds_settled": refunds}
+
+
+@app.get("/api/admin/audit")
+def admin_audit_view(request: Request, before: str = "",
+                     limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.admin_audit_list(limit=limit + 1, before=cursor)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"entries": rows,
+            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
 # Disk below this and photo work will start failing mid-upload. Reporting it
 # as "not ready" is what lets a deploy or a load balancer act on it before a
 # seller loses a batch.

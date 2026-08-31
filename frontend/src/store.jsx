@@ -217,6 +217,12 @@ export function AppProvider({ children }) {
     setAuthOpen(true);
   }, []);
 
+  // The operator console gate, for RENDERING only (the Admin nav entry and
+  // the admin view). The server re-checks the role on every /api/admin call,
+  // so this can never grant anything — and because /api/auth/me re-reads the
+  // role from the database, a revoked admin loses the nav on the next poll.
+  const isSuperadmin = user?.role === "superadmin";
+
   // ---------- AI tokens (monetization) ----------
   // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
   // installs) hides the whole surface. The dialog opens from the TopBar chip
@@ -1049,6 +1055,7 @@ export function AppProvider({ children }) {
     listingsLayout, setListingsLayout,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
+    isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -1064,6 +1071,7 @@ export function AppProvider({ children }) {
     bulkRetry, clearBulkRetry,
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
+    isSuperadmin,
     listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     marketplaces, loadMarketplaces, connectedMarketplaces,

@@ -36,6 +36,10 @@ pytest.importorskip("sqlalchemy")
 # The schema as it stands. Not a description of what SHOULD exist — a record
 # of what does, so that growth is visible.
 SHIPPED = {
+    "admin_audit_log": (
+        "action", "actor_email", "actor_id", "created_at", "data", "id",
+        "ip", "target_id", "target_type",
+    ),
     "ebay_accounts": (
         "ebay_email", "ebay_user_id", "ebay_username",
         "fulfillment_policy_id", "merchant_location_key",
