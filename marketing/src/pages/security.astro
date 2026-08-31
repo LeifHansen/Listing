@@ -1,0 +1,182 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import Section from "../components/Section.astro";
+import Button from "../components/Button.astro";
+import { site } from "../lib/site.js";
+
+const description =
+  "How Thryft Shop handles seller data, marketplace credentials, photos and " +
+  "AI processing — and exactly what deleting your account reaches.";
+
+const subprocessors = [
+  { name: "Anthropic", purpose: "Claude vision and text models — identifies items and drafts listing copy", data: "Product photos and listing text" },
+  { name: "Stripe", purpose: "Payment processing for token packs", data: "Card details, direct to Stripe — never through us" },
+  { name: "Neon", purpose: "Managed Postgres — accounts, listings, token ledger", data: "Account and listing data" },
+  { name: "Cloudflare R2", purpose: "Object storage for photos, and the origin marketplaces fetch images from", data: "Uploaded and optimized photos" },
+  { name: "Fly.io", purpose: "Application hosting", data: "All traffic to the app" },
+  { name: "eBay, Etsy, Depop", purpose: "The marketplaces you choose to connect", data: "Only the listings you publish there" },
+];
+---
+<Base title="Security & privacy" description={description}>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="max-w-3xl py-16 sm:py-20">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+          Trust
+        </p>
+        <h1 class="mt-4 text-4xl sm:text-5xl">Your store, your credentials, your call</h1>
+        <p class="mt-6 text-lg text-ink-secondary">
+          This app holds the keys to your livelihood — a connected marketplace
+          account is not a low-stakes integration. Here is precisely what is
+          stored, where it goes, and what you can take back.
+        </p>
+      </div>
+    </Container>
+  </div>
+
+  <Section
+    eyebrow="Credentials"
+    title="We never see a marketplace password"
+    lede="Connecting an account uses each marketplace's own OAuth sign-in. You authenticate with them; they hand us a token scoped to what the app does."
+    align="left"
+  >
+    <div class="mt-12 grid gap-5 sm:grid-cols-2">
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Tokens encrypted at rest</h3>
+        <p class="mt-2 text-ink-secondary">
+          The refresh token a marketplace issues is encrypted before it is
+          stored, so a database dump is not a set of working credentials.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Passwords are hashed, never stored</h3>
+        <p class="mt-2 text-ink-secondary">
+          Your Thryft Shop password is stored as a bcrypt hash. We could not
+          tell you what it is, and neither could anyone who reached the
+          database.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Revocable from both ends</h3>
+        <p class="mt-2 text-ink-secondary">
+          Disconnect a marketplace in Settings, or revoke this app's access from
+          the marketplace's own account page. Either works, independently.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Sign out everywhere</h3>
+        <p class="mt-2 text-ink-secondary">
+          One action invalidates every session on every device — the thing you
+          want when a phone goes missing.
+        </p>
+      </div>
+    </div>
+  </Section>
+
+  <Section
+    tone="sunken"
+    eyebrow="AI processing"
+    title="What the model sees, and what it doesn't"
+    align="left"
+  >
+    <div class="mt-12 space-y-4">
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Only the photos you submit for a draft</h3>
+        <p class="mt-2 text-ink-secondary">
+          Product images go to Anthropic's Claude API to identify the item and
+          write the listing. Your account details, payment information and
+          marketplace tokens are never part of that request.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Your content is not training data</h3>
+        <p class="mt-2 text-ink-secondary">
+          Photos and listings are processed to produce your draft. They are not
+          used for advertising, and they are not sold.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Nothing publishes on its own</h3>
+        <p class="mt-2 text-ink-secondary">
+          The AI produces a draft and a list of what it was unsure about. A
+          human decision — yours — stands between every draft and every
+          marketplace.
+        </p>
+      </div>
+    </div>
+  </Section>
+
+  <Section
+    eyebrow="Subprocessors"
+    title="Everyone who touches your data"
+    lede="The complete list. If a provider is not here, your data does not reach it."
+    align="left"
+  >
+    <div class="mt-12 overflow-x-auto rounded-card border border-line bg-card shadow-card">
+      <table class="w-full min-w-[40rem] text-left text-sm">
+        <caption class="sr-only">Subprocessors and what each one handles</caption>
+        <thead>
+          <tr class="border-b border-line bg-bg-sunken">
+            <th scope="col" class="px-6 py-4 font-display font-semibold">Provider</th>
+            <th scope="col" class="px-6 py-4 font-display font-semibold">Purpose</th>
+            <th scope="col" class="px-6 py-4 font-display font-semibold">What it handles</th>
+          </tr>
+        </thead>
+        <tbody>
+          {subprocessors.map((row) => (
+            <tr class="border-b border-line last:border-0">
+              <th scope="row" class="px-6 py-4 font-semibold text-ink">{row.name}</th>
+              <td class="px-6 py-4 text-ink-secondary">{row.purpose}</td>
+              <td class="px-6 py-4 text-ink-secondary">{row.data}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </Section>
+
+  <Section
+    tone="sunken"
+    eyebrow="Deletion"
+    title="Delete it yourself, right now"
+    lede="Settings → Delete account. No email to send, no waiting period, no retention window to sit through."
+    align="left"
+  >
+    <div class="mt-12 grid gap-5 sm:grid-cols-2">
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Goes immediately</h3>
+        <ul class="mt-3 space-y-2 text-ink-secondary">
+          <li>· Your account and login</li>
+          <li>· Every listing draft</li>
+          <li>· Stored marketplace tokens</li>
+          <li>· Uploaded photos (the sweep follows just behind)</li>
+        </ul>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">What deletion cannot reach</h3>
+        <p class="mt-3 text-ink-secondary">
+          Listings you already published stay live on eBay, Etsy or Depop under
+          your own seller account — they are yours, on their platform. End them
+          there if you want them down. Deleting here also does not revoke the
+          authorization on the marketplace's side; do that in their settings.
+        </p>
+      </div>
+    </div>
+    <div class="mt-10 flex flex-col gap-3 sm:flex-row">
+      <Button href="/privacy" variant="secondary" size="lg">Read the Privacy Policy</Button>
+      <Button href="/terms" variant="ghost" size="lg">Read the Terms</Button>
+    </div>
+  </Section>
+
+  <Container>
+    <div class="max-w-3xl pb-20">
+      <div class="rule-fade"></div>
+      <p class="pt-6 text-sm text-ink-secondary">
+        Found a security issue? Write to
+        <a class="font-semibold text-blue-ink hover:underline" href={`mailto:${site.supportEmail}`}>{site.supportEmail}</a>
+        and we'll get back to you.
+      </p>
+    </div>
+  </Container>
+</Base>

@@ -1,0 +1,20 @@
+---
+import { features } from "../lib/site.js";
+
+const accents = {
+  blue: "bg-blue-soft text-blue-ink",
+  green: "bg-green-soft text-green-ink",
+  yellow: "bg-yellow-soft text-yellow-ink",
+  red: "bg-red-soft text-red-ink",
+};
+---
+<div class="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+  {features.map((feature) => (
+    <div class="rounded-card border border-line bg-card p-6 shadow-card transition-shadow duration-200 hover:shadow-card-hover">
+      <span class={`inline-flex rounded-tile px-2.5 py-1 font-display text-xs font-semibold ${accents[feature.accent]}`}>
+        {feature.title}
+      </span>
+      <p class="mt-4 text-ink-secondary">{feature.blurb}</p>
+    </div>
+  ))}
+</div>

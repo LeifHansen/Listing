@@ -1,0 +1,118 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import CTA from "../components/CTA.astro";
+import { site, FREE_TOKENS_PER_MONTH, draftsFor, APP_URL } from "../lib/site.js";
+
+const faqs = [
+  {
+    q: "Do I need an eBay account to try it?",
+    a: "No. You can upload photos, get a full AI draft and edit it without connecting anything. If no marketplace is connected, the app shows you the exact payload it would have sent — so you can see what publishing would do before you authorize it.",
+  },
+  {
+    q: "Which marketplaces can it publish to?",
+    a: "eBay today, for anyone. Etsy is in beta with a limited group of shops while we test it. Depop is built and waiting on partner access from Depop, so it is not connectable yet. Where you have connected more than one, you select any combination and publish once — each is attempted independently, so a rejection on one does not cost you the others.",
+  },
+  {
+    q: "Can I use it if I only sell on Etsy?",
+    a: "Not fully, yet. Etsy access is in beta and limited to a small number of shops, so you may see a pending notice when you try to connect. Everything up to publishing — photos, AI drafts, editing — works regardless, and eBay is open to everyone in the meantime.",
+  },
+  {
+    q: "What does it cost?",
+    a: `The app is free. AI features spend tokens, and every account gets ${FREE_TOKENS_PER_MONTH} of them each month — about ${draftsFor(FREE_TOKENS_PER_MONTH)} complete listing drafts. Packs start at $5.99 if you need more, and purchased tokens never expire.`,
+  },
+  {
+    q: "What happens if the AI gets it wrong?",
+    a: "You catch it, because nothing publishes without your review. Every draft carries a confidence score and an explicit list of what the photos could not settle. Every field is editable by hand, or you can tell the draft what to change in plain English.",
+  },
+  {
+    q: "Am I charged when an AI call fails?",
+    a: "No. Tokens are charged up front and refunded automatically when a call fails. You only pay for AI that worked.",
+  },
+  {
+    q: "How many photos should I take?",
+    a: "Three is the sweet spot for most items; you can attach up to eight. Include the size or care label if there is one — the draft reads brand, size, fabric and country of manufacture straight off it, which is exactly the tedious part.",
+  },
+  {
+    q: "Will it change my photos in ways I don't want?",
+    a: "Background removal is something you turn on, not something that happens to you. When it runs, a safety pass checks the result and rejects a cutout that removed part of the product. The square crop is taken at the photo's own scale and never zooms in.",
+  },
+  {
+    q: "Can it see listings I created elsewhere?",
+    a: "Yes. Connecting eBay imports the listings you already have, including ones this app never created, so your whole store is in one place rather than split between tools.",
+  },
+  {
+    q: "Is there an iPhone or Android app?",
+    a: "iOS is in TestFlight beta and Android is in development. The web app works on a phone browser today and does everything the native apps do.",
+  },
+  {
+    q: "How do I delete my account?",
+    a: "Settings → Delete account, inside the app. Your account, drafts and stored marketplace tokens go immediately, and your photos are erased just behind. No email, no waiting period.",
+  },
+];
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: faqs.map((f) => ({
+    "@type": "Question",
+    name: f.q,
+    acceptedAnswer: { "@type": "Answer", text: f.a },
+  })),
+};
+---
+<Base
+  title="Support & FAQ"
+  description="Answers about pricing, marketplaces, AI accuracy, photos, the mobile apps and account deletion."
+  jsonLd={jsonLd}
+>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="max-w-3xl py-16 sm:py-20">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+          Support
+        </p>
+        <h1 class="mt-4 text-4xl sm:text-5xl">Questions, answered</h1>
+        <p class="mt-6 text-lg text-ink-secondary">
+          If what you need isn't here, write to us — a person reads it.
+        </p>
+      </div>
+    </Container>
+  </div>
+
+  <Container>
+    <div class="max-w-3xl py-14 sm:py-16">
+      <div class="space-y-3">
+        {faqs.map((faq) => (
+          <details class="group rounded-card border border-line bg-card px-6 shadow-card">
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-4 py-5 [&::-webkit-details-marker]:hidden">
+              <h2 class="text-lg">{faq.q}</h2>
+              <svg
+                class="size-5 shrink-0 text-ink-secondary transition-transform duration-200 group-open:rotate-45"
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </summary>
+            <p class="pb-6 text-ink-secondary">{faq.a}</p>
+          </details>
+        ))}
+      </div>
+
+      <div class="mt-12 rounded-card border border-line bg-bg-sunken p-6">
+        <h2 class="text-lg">Still stuck?</h2>
+        <p class="mt-2 text-ink-secondary">
+          Email <a class="font-semibold text-blue-ink hover:underline" href={`mailto:${site.supportEmail}`}>{site.supportEmail}</a>,
+          or open the app and use the feedback link in Settings — that one arrives with
+          your account context attached, which usually saves a round trip.
+        </p>
+        <p class="mt-3 text-sm text-ink-secondary">
+          <a class="hover:underline" href={APP_URL}>Open the app →</a>
+        </p>
+      </div>
+    </div>
+  </Container>
+
+  <CTA />
+</Base>

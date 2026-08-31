@@ -1,0 +1,156 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import Section from "../components/Section.astro";
+import Button from "../components/Button.astro";
+import PipelineSteps from "../components/PipelineSteps.astro";
+import FeatureGrid from "../components/FeatureGrid.astro";
+import CTA from "../components/CTA.astro";
+import { site, marketplaces, marketplaceStatus, APP_URL, FREE_TOKENS_PER_MONTH, draftsFor } from "../lib/site.js";
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: site.name,
+  applicationCategory: "BusinessApplication",
+  operatingSystem: "Web, iOS, Android",
+  description: site.description,
+  offers: {
+    "@type": "Offer",
+    price: "0",
+    priceCurrency: "USD",
+    description: `Free to use, including ${FREE_TOKENS_PER_MONTH} AI tokens each month.`,
+  },
+};
+---
+<Base title={null} jsonLd={jsonLd}>
+  <!-- Hero -->
+  <section class="brand-wash relative overflow-hidden border-b border-line">
+    <Container>
+      <div class="grid items-center gap-12 py-16 sm:py-24 lg:grid-cols-[1.05fr_1fr]">
+        <div>
+          <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+            Web · iOS · Android
+          </p>
+          <h1 class="mt-4 text-4xl leading-[1.1] sm:text-5xl lg:text-[3.4rem]">
+            Snap it. AI writes it.<br />List it everywhere.
+          </h1>
+          <p class="mt-6 max-w-xl text-lg text-ink-secondary">
+            Photograph an item and get back a finished listing — title,
+            description, item specifics, category and price — then publish
+            straight to eBay. Etsy is in beta and Depop is on the way. What used
+            to be twenty minutes of typing is now a photo and a glance.
+          </p>
+          <div class="mt-9 flex flex-col gap-3 sm:flex-row">
+            <Button href={APP_URL} variant="primary" size="xl">Start listing free</Button>
+            <Button href="/how-it-works" variant="secondary" size="xl">See how it works</Button>
+          </div>
+          <p class="mt-5 text-sm text-ink-secondary">
+            {FREE_TOKENS_PER_MONTH} free AI tokens every month — about {draftsFor(FREE_TOKENS_PER_MONTH)} full
+            listings. No card required.
+          </p>
+        </div>
+
+        <!-- ASSET SWAP: replace with the wide cream hero banner (tag mascot
+             photographing the rack, pipeline flowing to a shipped box) once it
+             lands in marketing/assets/mascot/. It tells this whole story in one
+             image and should run full-bleed across the hero. -->
+        <div class="relative mx-auto w-full max-w-md">
+          <img
+            src="/brand/thryft-mascot-photo-upload.webp"
+            alt="The Thryft Shop mascot holding a camera"
+            width="440"
+            height="440"
+            fetchpriority="high"
+            class="w-full object-contain"
+          />
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Marketplaces -->
+  <section class="border-b border-line bg-card py-10">
+    <Container>
+      <div class="flex flex-col items-center gap-6 sm:flex-row sm:justify-center sm:gap-12">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-ink-secondary">
+          Publishes to
+        </p>
+        <ul class="flex flex-wrap items-center justify-center gap-x-10 gap-y-3">
+          {marketplaces.map((m) => {
+            const badge = marketplaceStatus[m.status];
+            return (
+              <li class="flex items-center gap-2">
+                <span class="font-display text-xl font-semibold text-ink">{m.name}</span>
+                {badge && (
+                  <span class={`rounded-full px-2 py-0.5 font-display text-[11px] font-semibold ${badge.class}`}>
+                    {badge.label}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Pipeline -->
+  <Section
+    eyebrow="How it works"
+    title="Five stages, one of which is you"
+    lede="The other four run on their own. You come in at the point where judgement actually matters — reviewing the draft before it goes live."
+    align="center"
+  >
+    <PipelineSteps limit={5} />
+    <div class="mt-10 text-center">
+      <Button href="/how-it-works" variant="soft" size="lg">Read the detail →</Button>
+    </div>
+  </Section>
+
+  <!-- Features -->
+  <Section
+    tone="sunken"
+    eyebrow="Beyond the basics"
+    title="Built for people who list a lot"
+    lede="A single listing is the easy case. These are the things that matter once you are running a store."
+  >
+    <FeatureGrid />
+  </Section>
+
+  <!-- Trust strip -->
+  <Section
+    eyebrow="Where you stay in control"
+    title="Nothing goes out without you"
+    lede="The AI drafts. You decide. That order never changes."
+  >
+    <div class="mt-14 grid gap-5 sm:grid-cols-3">
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Every field is yours</h3>
+        <p class="mt-2 text-ink-secondary">
+          Nothing publishes unreviewed. Edit anything by hand, or tell the draft
+          what to change in plain English.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">It tells you what it doesn't know</h3>
+        <p class="mt-2 text-ink-secondary">
+          Each draft carries a confidence score and an explicit list of what the
+          photos could not settle — so you check the right things.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Only pay for AI that worked</h3>
+        <p class="mt-2 text-ink-secondary">
+          A failed AI call is refunded automatically. You are never charged for
+          a draft you did not get.
+        </p>
+      </div>
+    </div>
+    <div class="mt-10 text-center">
+      <Button href="/security" variant="soft" size="lg">How your data is handled →</Button>
+    </div>
+  </Section>
+
+  <CTA />
+</Base>

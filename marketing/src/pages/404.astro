@@ -1,0 +1,26 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import Button from "../components/Button.astro";
+import { APP_URL } from "../lib/site.js";
+---
+<Base title="Page not found" description="That page doesn't exist." noindex={true}>
+  <Container>
+    <div class="mx-auto max-w-lg py-24 text-center sm:py-32">
+      <img
+        src="/brand/thryft-mascot-listings.webp"
+        alt=""
+        width="140" height="140"
+        class="mx-auto size-[140px] object-contain"
+      />
+      <h1 class="mt-8 text-4xl">This one's not on the shelf</h1>
+      <p class="mt-4 text-lg text-ink-secondary">
+        The page you're after doesn't exist, or it moved. Nothing you did.
+      </p>
+      <div class="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
+        <Button href="/" variant="primary" size="lg">Back to the home page</Button>
+        <Button href={APP_URL} variant="secondary" size="lg">Open the app</Button>
+      </div>
+    </div>
+  </Container>
+</Base>

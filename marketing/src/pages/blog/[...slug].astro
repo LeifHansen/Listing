@@ -1,0 +1,49 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import Container from "../../components/Container.astro";
+import CTA from "../../components/CTA.astro";
+import { site } from "../../lib/site.js";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog", ({ data }) => !data.draft);
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+const fmt = post.data.date.toLocaleDateString("en-US", {
+  year: "numeric", month: "long", day: "numeric",
+});
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  headline: post.data.title,
+  description: post.data.description,
+  datePublished: post.data.date.toISOString(),
+  author: { "@type": "Organization", name: post.data.author },
+  publisher: { "@type": "Organization", name: site.name },
+};
+---
+<Base title={post.data.title} description={post.data.description} jsonLd={jsonLd}>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="max-w-3xl py-16 sm:py-20">
+        <a href="/blog" class="text-sm font-semibold text-blue-ink hover:underline">← All posts</a>
+        <h1 class="mt-5 text-4xl sm:text-5xl">{post.data.title}</h1>
+        <p class="mt-4 text-ink-secondary">
+          <time datetime={post.data.date.toISOString()}>{fmt}</time> · {post.data.author}
+        </p>
+      </div>
+    </Container>
+  </div>
+
+  <Container>
+    <article class="prose max-w-3xl py-14 sm:py-16">
+      <Content />
+    </article>
+  </Container>
+
+  <CTA />
+</Base>
