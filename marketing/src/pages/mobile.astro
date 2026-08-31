@@ -1,0 +1,155 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import Section from "../components/Section.astro";
+import Button from "../components/Button.astro";
+import EmailCapture from "../components/EmailCapture.astro";
+import { site, APP_URL } from "../lib/site.js";
+
+const description =
+  "Thryft Shop on iOS and Android — list from the aisle, with the camera you " +
+  "already have in your hand. iOS is in beta; Android is close behind.";
+---
+<Base title="iOS & Android" description={description}>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="grid items-center gap-12 py-16 sm:py-20 lg:grid-cols-[1.05fr_1fr]">
+        <div>
+          <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+            iOS &amp; Android
+          </p>
+          <h1 class="mt-4 text-4xl sm:text-5xl">The camera is the app</h1>
+          <p class="mt-6 max-w-xl text-lg text-ink-secondary">
+            Sourcing happens standing in a thrift aisle, not sitting at a desk.
+            The phone app is the whole product — scan a shelf for resale
+            estimates before you buy, then photograph and list what you found
+            before you have left the shop.
+          </p>
+          <div class="mt-9 flex flex-col gap-3 sm:flex-row">
+            {site.testflightUrl ? (
+              <Button href={site.testflightUrl} variant="primary" size="xl">Join the iOS beta</Button>
+            ) : (
+              <Button href="#early-access" variant="primary" size="xl">Join the iOS beta</Button>
+            )}
+            <Button href={APP_URL} variant="secondary" size="xl">Use it on the web</Button>
+          </div>
+          <p class="mt-5 text-sm text-ink-secondary">
+            iOS is in TestFlight beta · Android is in development
+          </p>
+        </div>
+        <div class="relative mx-auto w-full max-w-sm">
+          <!-- ASSET SWAP: the tag mascot holding a phone (magic wand pose) is
+               the right art here once it lands in marketing/assets/mascot/. -->
+          <img
+            src="/brand/thryft-mascot-shop-mode.webp"
+            alt="The Thryft Shop mascot inspecting a thrift find"
+            width="400"
+            height="400"
+            class="w-full object-contain"
+          />
+        </div>
+      </div>
+    </Container>
+  </div>
+
+  <Section
+    eyebrow="Same product, everywhere"
+    title="Not a website in a wrapper"
+    lede="The phone apps are real native builds that bundle the interface and talk to the API directly — which is why they behave like apps rather than a browser pretending."
+  >
+    <div class="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Shoot straight into a draft</h3>
+        <p class="mt-2 text-ink-secondary">
+          The camera and photo library are reached only when you choose to add a
+          photo, and only the shots you pick are uploaded.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Shop Mode in the aisle</h3>
+        <p class="mt-2 text-ink-secondary">
+          Scan a shelf with the camera and get resale estimates back before the
+          item is in your basket.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Credentials kept in the keychain</h3>
+        <p class="mt-2 text-ink-secondary">
+          Sign-in tokens live in the device's secure storage, not in a web
+          cookie the app cannot protect.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">One account across devices</h3>
+        <p class="mt-2 text-ink-secondary">
+          Start a draft on the phone in the shop and finish it on a laptop.
+          Same listings, same store, same history.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Marketplace sign-in that returns</h3>
+        <p class="mt-2 text-ink-secondary">
+          Connecting eBay or Etsy opens their real sign-in page and hands you
+          back to the app when it is done.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Purchases in the system browser</h3>
+        <p class="mt-2 text-ink-secondary">
+          Token top-ups open Stripe in the real browser, so a purchase is made
+          somewhere you can see the address bar.
+        </p>
+      </div>
+    </div>
+  </Section>
+
+  <!-- Early access -->
+  <Section id="early-access" tone="sunken" align="left">
+    <div class="grid gap-10 lg:grid-cols-2">
+      <div class="rounded-card border border-line bg-card p-8 shadow-card">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+          iOS
+        </p>
+        <h2 class="mt-3 text-2xl">In TestFlight now</h2>
+        <p class="mt-3 text-ink-secondary">
+          The iOS build is in beta with a small group of sellers. Apple's
+          TestFlight handles the invites and the updates.
+        </p>
+        {site.testflightUrl ? (
+          <Button href={site.testflightUrl} variant="primary" size="lg" class="mt-6">
+            Open TestFlight
+          </Button>
+        ) : (
+          <EmailCapture
+            source="ios-beta"
+            label="Request an invite"
+            note="We'll send a TestFlight link as spots open up."
+          />
+        )}
+      </div>
+
+      <div class="rounded-card border border-line bg-card p-8 shadow-card">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-green-ink">
+          Android
+        </p>
+        <h2 class="mt-3 text-2xl">In development</h2>
+        <p class="mt-3 text-ink-secondary">
+          The Android build shares the same codebase as iOS, so it is a matter
+          of packaging and review rather than rewriting. Leave an address and
+          you'll hear the day it lands on Play.
+        </p>
+        <EmailCapture
+          source="android-waitlist"
+          label="Notify me"
+          note="One email, when it ships. Nothing else."
+        />
+      </div>
+    </div>
+
+    <p class="mt-10 text-sm text-ink-secondary">
+      Everything the phone apps do, the web app does today at
+      <a class="font-semibold text-blue-ink hover:underline" href={APP_URL}>{APP_URL.replace("https://", "")}</a> —
+      no install, no waiting list.
+    </p>
+  </Section>
+</Base>

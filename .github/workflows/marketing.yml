@@ -1,0 +1,81 @@
+name: Marketing site
+
+# The marketing site is a separate static build with its own deploy target, so
+# it gets its own workflow rather than a job inside gates.yml. That is
+# deliberate: gates.yml is what stands between a commit and production, and a
+# broken landing page must never be able to block shipping a fix to sellers.
+#
+# The path filter includes the app's token file because the marketing site
+# imports it directly (marketing/src/styles/global.css) — a change to the brand
+# tokens rebuilds this site, which is the whole point of the bridge, and it
+# should be checked when it happens.
+
+on:
+  pull_request:
+    paths:
+      - 'marketing/**'
+      - 'frontend/src/styles/tokens.css'
+      - '.github/workflows/marketing.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build + link check
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a commit SHA, with the release in the comment, matching the
+      # convention in gates.yml — a tag is a mutable pointer the action's owner
+      # can move.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: marketing/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: marketing
+
+      - name: Build
+        run: npm run build
+        working-directory: marketing
+
+      # Every internal href resolves, every page carries its title, description,
+      # canonical, og:image and a single h1, and the files search engines and
+      # app deep links need are present.
+      - name: Link + SEO check
+        run: npm run links
+        working-directory: marketing
+
+      # The bridge is the load-bearing idea of this site: the brand comes from
+      # the app's token file, not a copy. If that import ever stops resolving,
+      # the build still succeeds and the site silently renders unstyled — so
+      # assert the tokens actually made it into the CSS.
+      - name: Brand tokens reached the bundle
+        shell: bash
+        run: |
+          css=$(find dist/_astro -name '*.css' | head -1)
+          if [ -z "$css" ]; then echo "::error::no stylesheet was emitted"; exit 1; fi
+          for token in '--brand-blue' '--bg' '--radius-card' '--shadow-card'; do
+            if ! grep -q -- "$token" "$css"; then
+              echo "::error::$token missing from the built CSS — the import of frontend/src/styles/tokens.css is broken"
+              exit 1
+            fi
+          done
+          echo "brand tokens present in $css"
+        working-directory: marketing
+
+      # This site must never take the app down with it. Nothing outside
+      # marketing/ and its own workflows belongs in one of its pull requests.
+      - name: App is untouched
+        shell: bash
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+            | grep -vE '^(marketing/|\.github/workflows/marketing)' || true)
+          if [ -n "$changed" ]; then
+            echo "::error::this pull request touches files outside marketing/:"
+            echo "$changed"
+            exit 1
+          fi

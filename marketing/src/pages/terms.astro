@@ -1,0 +1,10 @@
+---
+import { getEntry, render } from "astro:content";
+import Legal from "../layouts/Legal.astro";
+
+const entry = await getEntry("legal", "terms");
+const { Content } = await render(entry);
+---
+<Legal entry={entry}>
+  <Content />
+</Legal>

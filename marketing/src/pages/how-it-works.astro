@@ -1,0 +1,99 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import Section from "../components/Section.astro";
+import PipelineSteps from "../components/PipelineSteps.astro";
+import CTA from "../components/CTA.astro";
+import { marketplaces } from "../lib/site.js";
+
+const description =
+  "From photo to published listing: how Thryft Shop optimizes your images, " +
+  "identifies the item with AI, and fans the result out to eBay, Etsy and Depop.";
+---
+<Base title="How it works" description={description}>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="max-w-3xl py-16 sm:py-20">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+          How it works
+        </p>
+        <h1 class="mt-4 text-4xl sm:text-5xl">From a photo to a live listing</h1>
+        <p class="mt-6 text-lg text-ink-secondary">
+          Five stages run between the shutter and the marketplace. Four of them
+          are automatic. The fifth is you, checking the draft — which is the one
+          step that should never be automated.
+        </p>
+      </div>
+    </Container>
+  </div>
+
+  <Container>
+    <div class="py-16">
+      <PipelineSteps />
+    </div>
+  </Container>
+
+  <Section
+    tone="sunken"
+    eyebrow="The photo pipeline"
+    title="Why the images matter as much as the words"
+    lede="Marketplace search ranks on photo quality, and a bad cutout costs you the sale. This is what happens to every image before it is attached to a listing."
+  >
+    <div class="mt-14 grid gap-5 sm:grid-cols-2">
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Framed at the scale it was shot</h3>
+        <p class="mt-2 text-ink-secondary">
+          The square crop is taken at the photo's own scale. It never zooms in
+          on the item — a zoomed crop of a 12MP phone photo is a soft, upscaled
+          listing image, and buyers can tell.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">A cutout that refuses to eat your product</h3>
+        <p class="mt-2 text-ink-secondary">
+          Background removal drops the item onto a white canvas with a soft
+          contact shadow, and a safety pass checks the result. A mask that
+          removed part of the product is rejected rather than shipped.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">Sized to the marketplace's own advice</h3>
+        <p class="mt-2 text-ink-secondary">
+          Auto-oriented from EXIF, resized to 1600px on the long edge, and given
+          a finishing sharpen — the dimensions eBay itself recommends for search
+          and zoom.
+        </p>
+      </div>
+      <div class="rounded-card border border-line bg-card p-6 shadow-card">
+        <h3 class="text-lg">It reads the tags</h3>
+        <p class="mt-2 text-ink-secondary">
+          Photograph the size and care label and the draft picks up brand, size,
+          fabric and country of manufacture from it — the item specifics that
+          are tedious to type and that marketplace search actually filters on.
+        </p>
+      </div>
+    </div>
+  </Section>
+
+  <Section
+    eyebrow="Publishing"
+    title="Three marketplaces, one draft"
+    lede="Select the marketplaces you want and publish once. Each one is attempted independently, so a rejection on one never costs you the others."
+  >
+    <div class="mt-14 grid gap-5 sm:grid-cols-3">
+      {marketplaces.map((m) => (
+        <div class="rounded-card border border-line bg-card p-6 shadow-card">
+          <h3 class="font-display text-xl font-semibold">{m.name}</h3>
+          <p class="mt-2 text-ink-secondary">{m.note}</p>
+        </div>
+      ))}
+    </div>
+    <p class="mx-auto mt-10 max-w-2xl text-center text-ink-secondary">
+      Haven't connected a marketplace yet? The app generates the exact API
+      payload it would have sent, so you can see precisely what would go out
+      before you connect anything.
+    </p>
+  </Section>
+
+  <CTA title="See it on your own photos." lede="The first ten listings are on us, every month." />
+</Base>
