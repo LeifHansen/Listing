@@ -633,6 +633,19 @@ def _diagnostics() -> dict:
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
         "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
+        # Etsy, where "configured" is only half the answer: which of Etsy's
+        # three access tiers the app is on decides how many shops may connect
+        # at all, and the roster is how the operator seats them. Counts, never
+        # the addresses — this is a diagnostics endpoint, not a place to hand
+        # out the beta's email list to anyone holding the admin token.
+        # `etsy_seats: 0` means no ceiling (Commercial Access); a roster
+        # larger than the ceiling also gets its own config_warnings() line,
+        # because the overflow is refused on Etsy's page rather than here.
+        "etsy_configured": config.etsy_oauth_ready(),
+        "etsy_access_tier": config.etsy_access_tier(),
+        "etsy_seats": config.etsy_seat_ceiling(),
+        "etsy_roster": len(config.ETSY_OWNER_EMAILS),
+        "etsy_gate_active": config.etsy_gate_active(),
         # adobe_configured = credentials present; adobe_ready = pipeline can
         # actually run (Adobe's APIs need R2 as presigned-URL hand-off storage).
         "adobe_configured": config.adobe_configured(),

@@ -647,8 +647,8 @@ export function SettingsView() {
 
 // Cross-posting marketplaces — every registered marketplace except eBay
 // (which keeps its own card above). One section per marketplace: connected →
-// account + Disconnect; the marketplace hasn't approved us for this seller's
-// shop yet (Etsy's seller-app wall) → a "Pending approval" pill and the wait
+// account + Disconnect; the marketplace hasn't cleared this seller's shop yet
+// (Etsy's app-tier wall) → a "Pending approval" pill and the wait
 // explained, with the Connect button held back rather than walking them into
 // the marketplace's own error page; configured but not connected → Connect
 // button; coming soon (credentials pending on the marketplace's side) → a
@@ -713,7 +713,7 @@ function MarketplaceConnections() {
                 ) : m.access_pending ? (
                   <p className="text-sm text-ink-secondary">
                     {m.access_pending_note
-                      || `${m.label} hasn’t approved this app for other shops yet — cross-posting turns on as soon as they do.`}
+                      || `${m.label} hasn’t opened this app up to your shop yet — cross-posting turns on as soon as they do.`}
                   </p>
                 ) : m.oauth_ready ? (
                   <p className="text-sm text-ink-secondary">

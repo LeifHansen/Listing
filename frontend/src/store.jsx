@@ -925,9 +925,9 @@ export function AppProvider({ children }) {
     }
     else if (e === "error") toast(EBAY_CONNECT_ERRORS[params.get("why")] || EBAY_CONNECT_ERRORS.unknown, { kind: "error" });
     // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy, or
-    // ?connect_pending=etsy when the marketplace hasn't approved us for this
-    // seller's shop yet (Etsy's seller-app wall) and we turned them back at
-    // the door rather than letting the marketplace refuse them off-site.
+    // ?connect_pending=etsy when the marketplace hasn't cleared this seller's
+    // shop yet (Etsy's app-tier wall) and we turned them back at the door
+    // rather than letting the marketplace refuse them off-site.
     const ok = params.get("connected");
     const bad = params.get("connect_error");
     const pending = params.get("connect_pending");
@@ -940,8 +940,11 @@ export function AppProvider({ children }) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMarketplaces();
     } else if (pending) {
-      // Not "try again" — trying again cannot work until they approve us.
-      toast(`${label(pending)} hasn't approved us for other shops yet. `
+      // Not "try again" — trying again cannot work until they clear the shop.
+      // Deliberately vaguer than the roster's per-marketplace note, which is
+      // the one that knows whether the app is unapproved or approved with the
+      // seats already taken: this line has only the marketplace's name.
+      toast(`${label(pending)} hasn't opened this app up to your shop yet. `
         + `Cross-posting switches on as soon as they do — nothing for you to do.`,
         { kind: "warning" });
       // The roster is what disables the button; this landing means theirs was

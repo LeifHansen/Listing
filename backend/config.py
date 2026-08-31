@@ -559,21 +559,68 @@ def etsy_oauth_ready() -> bool:
 
 
 # Etsy app TYPE, which is a separate gate from the credentials above and the
-# one that actually stops sellers. Etsy registers apps as *Seller apps* by
-# default, and a Seller app can only ever be authorized by the single Etsy
-# account that owns the keystring; every other seller is turned away by Etsy
-# itself, on Etsy's page, after leaving this site — "Only the app owner may
-# authorize a seller app". Nothing redirects back, so the app cannot catch it
-# after the fact; the only kind fix is not sending them there.
+# one that actually stops sellers. Etsy tiers API access in THREE steps, and
+# the tier — not the credentials — decides who may authorize this app:
 #
-# Commercial Access (Etsy reviews the app) is what lifts the wall. Until it is
-# granted, naming the owner's login here lets them keep connecting while
-# everyone else gets a pending-review card instead of that dead end.
+#   seller      What Etsy registers by default. Authorizable by the single
+#               Etsy account that owns the keystring and nobody else; every
+#               other seller is turned away by Etsy itself, on Etsy's page,
+#               after leaving this site — "Only the app owner may authorize a
+#               seller app". Nothing redirects back, so the app cannot catch
+#               it after the fact; the only kind fix is not sending them there.
+#   personal    Reviewed and approved by Etsy for a handful of shops (Etsy
+#               documents the ceiling as 4). The wall still stands, but the
+#               named sellers can now genuinely authorize, so ETSY_OWNER_EMAILS
+#               stops being a list of one and becomes a real beta roster.
+#   commercial  Unlimited sellers. Granted on an APPROVED personal app, and
+#               the end of this gate: nothing left to hold anyone back for.
+#
+# Unset reads as `seller` — that is what Etsy hands out by default, and it is
+# the answer that keeps the gate up. ETSY_COMMERCIAL_ACCESS=true is the older
+# way to say `commercial` and still means exactly that.
+ETSY_ACCESS_TIERS = ("seller", "personal", "commercial")
+# Shops Etsy lets authorize the app, by tier; 0 means no ceiling. Etsy's
+# numbers, not ours — ETSY_APP_SEATS overrides them the day Etsy moves them,
+# without waiting for a deploy of this file.
+_ETSY_TIER_SEATS = {"seller": 1, "personal": 4, "commercial": 0}
+
 ETSY_COMMERCIAL_ACCESS = os.getenv(
     "ETSY_COMMERCIAL_ACCESS", "").strip().lower() in ("1", "true", "yes", "on")
+# Kept as typed, and lowered only where it is compared: the warning below has
+# to echo the value the operator will be searching their secrets dashboard
+# for, not a tidied copy of it.
+_ETSY_ACCESS_TIER = os.getenv("ETSY_ACCESS_TIER", "").strip()
+_ETSY_APP_SEATS = os.getenv("ETSY_APP_SEATS", "").strip()
 ETSY_OWNER_EMAILS = tuple(
     e.strip().lower()
     for e in os.getenv("ETSY_OWNER_EMAILS", "").split(",") if e.strip())
+
+
+def etsy_access_tier() -> str:
+    """Which of Etsy's three access tiers this deployment is on.
+
+    Fails closed twice over: unset and unparseable both read as `seller`, the
+    tier that holds back the most, so a typo cannot quietly hand Connect Etsy
+    to sellers Etsy is going to refuse. The two are indistinguishable from
+    out here, which is why config_warnings() names the typo.
+    """
+    if ETSY_COMMERCIAL_ACCESS:
+        return "commercial"
+    if _ETSY_ACCESS_TIER.lower() in ETSY_ACCESS_TIERS:
+        return _ETSY_ACCESS_TIER.lower()
+    return "seller"
+
+
+def etsy_seat_ceiling() -> int:
+    """How many shops may authorize this app at the current tier; 0 = no cap.
+
+    An unreadable ETSY_APP_SEATS falls back to the tier's own number rather
+    than to "no cap": the override exists to track Etsy's ceiling, and a typo
+    in it must not read as permission to add sellers without one.
+    """
+    if _ETSY_APP_SEATS.isdigit():
+        return int(_ETSY_APP_SEATS)
+    return _ETSY_TIER_SEATS[etsy_access_tier()]
 
 
 def etsy_gate_active() -> bool:
@@ -588,7 +635,7 @@ def etsy_gate_active() -> bool:
     Its own predicate so callers can skip the user lookup behind
     etsy_access_pending(), which is a database round-trip per roster build.
     """
-    return bool(ETSY_OWNER_EMAILS) and not ETSY_COMMERCIAL_ACCESS
+    return bool(ETSY_OWNER_EMAILS) and etsy_access_tier() != "commercial"
 
 
 def etsy_access_pending(email: Optional[str]) -> bool:
@@ -669,6 +716,42 @@ def config_warnings() -> list[str]:
             f"ETSY_COMMERCIAL_ACCESS={stray!r} is not one of 1/true/yes/on, so "
             f"Etsy is still gated to ETSY_OWNER_EMAILS — which reads the same "
             f"as never setting it.")
+    # The tier fails closed the same way, and its typo is the quieter one: a
+    # misspelled tier reads as `seller`, so the operator believes their
+    # approved app is seating a beta while every named seller but one is
+    # still being held back by this app.
+    if _ETSY_ACCESS_TIER and _ETSY_ACCESS_TIER.lower() not in ETSY_ACCESS_TIERS:
+        warnings.append(
+            f"ETSY_ACCESS_TIER={_ETSY_ACCESS_TIER!r} is not one of "
+            f"{'/'.join(ETSY_ACCESS_TIERS)}, so Etsy is treated as an "
+            f"unapproved seller app — which reads the same as never setting "
+            f"it.")
+    if _ETSY_APP_SEATS and not _ETSY_APP_SEATS.isdigit():
+        warnings.append(
+            f"ETSY_APP_SEATS={_ETSY_APP_SEATS!r} is not a whole number, so the "
+            f"ceiling for the {etsy_access_tier()} tier is used instead.")
+    # And the one that puts sellers back in front of Etsy's error page. Naming
+    # more sellers than Etsy seats does not seat them: it waves the overflow
+    # past THIS app's gate, and Etsy refuses them on its own page, off-site,
+    # with nothing redirected back — the exact dead end the gate exists to
+    # prevent. Nobody finds that out from the roster, because from in here a
+    # named seller and a seated one look identical.
+    # Keyed on the gate being up, not just on the list being long: at
+    # commercial tier the roster gates nobody, so a stale list left behind
+    # there is untidy rather than harmful — and warning about it would train
+    # the operator to ignore the line that means something.
+    seats = etsy_seat_ceiling()
+    if etsy_gate_active() and seats and len(ETSY_OWNER_EMAILS) > seats:
+        tier, over = etsy_access_tier(), len(ETSY_OWNER_EMAILS) - seats
+        detail = ("a seller app is authorizable by the keystring's owner "
+                  "alone" if tier == "seller" else
+                  f"Etsy's {tier} tier seats {seats}")
+        warnings.append(
+            f"ETSY_OWNER_EMAILS names {len(ETSY_OWNER_EMAILS)} sellers and "
+            f"{detail}, so {over} of them skip this app's pending card and "
+            f"are refused on Etsy's own page instead — the dead end the gate "
+            f"exists to prevent. Trim the list, or set ETSY_APP_SEATS if Etsy "
+            f"has moved the ceiling.")
     # A Stripe key that is present but is not a SECRET key. Worth its own line
     # now that the secret is read from either of two names: a publishable
     # pk_... sitting in the slot satisfies every "is it configured?" check in

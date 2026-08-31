@@ -44,7 +44,8 @@ _SCRUBBED = (
     # Etsy's seller-app gate: which sellers may reach Etsy's consent screen.
     # Inherited from a developer's shell it would gate (or un-gate) the tests
     # for reasons unrelated to the code.
-    "ETSY_COMMERCIAL_ACCESS", "ETSY_OWNER_EMAILS",
+    "ETSY_COMMERCIAL_ACCESS", "ETSY_ACCESS_TIER", "ETSY_APP_SEATS",
+    "ETSY_OWNER_EMAILS",
 )
 
 

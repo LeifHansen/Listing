@@ -260,3 +260,122 @@ def test_unparsed_commercial_access_flag_is_reported(fresh_config):
 def test_a_properly_set_commercial_access_flag_is_silent(fresh_config):
     assert fresh_config(ETSY_COMMERCIAL_ACCESS="true").config_warnings() == []
     assert fresh_config(ETSY_COMMERCIAL_ACCESS="1").config_warnings() == []
+
+
+# --- which tier Etsy has us on ---------------------------------------------
+# The wall above is Etsy's DEFAULT, not its only setting. Etsy tiers API
+# access in three steps — seller (the keystring's owner alone), personal
+# (approved for a handful of shops), commercial (everyone) — and the tier is
+# what decides whether naming a second seller in ETSY_OWNER_EMAILS seats them
+# or just moves where Etsy refuses them.
+
+def test_the_tier_is_seller_until_etsy_says_otherwise(fresh_config):
+    """Unset must read as the tier Etsy actually hands out by default, which
+    is also the one that holds the most back. Reading it as anything else
+    sends sellers to a consent screen that will refuse them."""
+    cfg = fresh_config()
+    assert cfg.etsy_access_tier() == "seller"
+    assert cfg.etsy_seat_ceiling() == 1
+
+
+def test_a_personal_approval_seats_a_roster_and_keeps_the_gate(fresh_config):
+    """The day this branch was written for. Etsy approved the app for a
+    handful of shops, so the named sellers can genuinely authorize now — and
+    everyone else must still be held back, because Commercial Access is a
+    separate grant that has not happened."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="personal",
+                       ETSY_OWNER_EMAILS="owner@example.com,beta@example.com")
+    assert cfg.etsy_access_tier() == "personal"
+    assert cfg.etsy_seat_ceiling() == 4
+    assert cfg.etsy_gate_active() is True
+    assert cfg.etsy_access_pending("beta@example.com") is False
+    assert cfg.etsy_access_pending("stranger@example.com") is True
+    assert cfg.config_warnings() == []
+
+
+def test_the_commercial_tier_retires_the_gate(fresh_config):
+    """Same end state the older flag reaches, by the newer name."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="commercial",
+                       ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_gate_active() is False
+    assert cfg.etsy_access_pending("anyone@example.com") is False
+
+
+def test_the_older_commercial_flag_still_names_the_tier(fresh_config):
+    """ETSY_COMMERCIAL_ACCESS=true is documented and may already be set
+    somewhere; it has to keep meaning what it said, and to win over a tier
+    left behind at a lower value."""
+    assert fresh_config(ETSY_COMMERCIAL_ACCESS="true").etsy_access_tier() == "commercial"
+    assert fresh_config(ETSY_COMMERCIAL_ACCESS="true",
+                        ETSY_ACCESS_TIER="personal"
+                        ).etsy_access_tier() == "commercial"
+
+
+def test_a_misspelled_tier_fails_closed_and_is_reported(fresh_config):
+    """Fails closed, so the silent version of this is an operator who thinks
+    their approved app is seating a beta while the app holds every named
+    seller but one back."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="Personal-App",
+                       ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_access_tier() == "seller"
+    warning = [w for w in cfg.config_warnings() if "ETSY_ACCESS_TIER" in w]
+    assert warning and "Personal-App" in warning[0]
+
+
+# --- more sellers than Etsy seats ------------------------------------------
+# The failure the approval creates. Naming a seller here does not seat them
+# with Etsy: it waves them past THIS app's gate, and an unseated one is then
+# refused on Etsy's own page, off-site, with nothing redirected back — the
+# exact dead end the gate exists to prevent. From in here a named seller and a
+# seated one look identical, so nobody finds out from the roster.
+
+def test_a_roster_longer_than_etsy_seats_is_reported(fresh_config):
+    cfg = fresh_config(ETSY_ACCESS_TIER="personal",
+                       ETSY_OWNER_EMAILS=",".join(
+                           f"s{i}@example.com" for i in range(5)))
+    warning = [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w]
+    assert warning and "5 sellers" in warning[0] and "seats 4" in warning[0]
+
+
+def test_a_second_name_on_an_unapproved_app_is_reported(fresh_config):
+    """A seller app is authorizable by the keystring's owner alone, so the
+    second address does not open anything — it only moves the refusal from a
+    card in this app to Etsy's error page."""
+    cfg = fresh_config(ETSY_OWNER_EMAILS="owner@example.com,friend@example.com")
+    warning = [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w]
+    assert warning and "keystring's owner alone" in warning[0]
+
+
+def test_commercial_access_has_no_ceiling_to_exceed(fresh_config):
+    """Nothing is gated at that tier, so a long list is just a stale list —
+    including one measured against a seat count left behind with it."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="commercial",
+                       ETSY_OWNER_EMAILS=",".join(
+                           f"s{i}@example.com" for i in range(9)))
+    assert cfg.etsy_seat_ceiling() == 0
+    assert cfg.config_warnings() == []
+    assert fresh_config(ETSY_ACCESS_TIER="commercial", ETSY_APP_SEATS="4",
+                        ETSY_OWNER_EMAILS=",".join(
+                            f"s{i}@example.com" for i in range(9))
+                        ).config_warnings() == []
+
+
+def test_the_seat_count_follows_etsy_not_this_file(fresh_config):
+    """The ceiling is Etsy's to move, and a deploy of this repo is the wrong
+    thing to need when they do."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="personal", ETSY_APP_SEATS="6",
+                       ETSY_OWNER_EMAILS=",".join(
+                           f"s{i}@example.com" for i in range(5)))
+    assert cfg.etsy_seat_ceiling() == 6
+    assert cfg.config_warnings() == []
+
+
+def test_an_unreadable_seat_override_keeps_a_ceiling(fresh_config):
+    """Falling back to "no ceiling" would turn a typo into permission to add
+    sellers Etsy has no seat for."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="personal", ETSY_APP_SEATS="four",
+                       ETSY_OWNER_EMAILS=",".join(
+                           f"s{i}@example.com" for i in range(5)))
+    assert cfg.etsy_seat_ceiling() == 4
+    assert [w for w in cfg.config_warnings() if "ETSY_APP_SEATS" in w]
+    assert [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w]

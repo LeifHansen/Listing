@@ -378,14 +378,20 @@ one failing never rolls back the others — and per-marketplace state
   documents 4; deeper review) → **Commercial Access** (unlimited, and only
   on an *approved* Personal app). Reaching that page proves
   `ETSY_CLIENT_ID` and `ETSY_REDIRECT_URI` are registered correctly — a
-  wrong one fails before the consent screen. While that approval is pending,
-  set `ETSY_OWNER_EMAILS` to the owner's login for *this* app (not their Etsy
-  one — it's matched against the account record): they keep connecting, and
-  every other seller gets a "Pending approval" card instead of being sent to
-  Etsy to be refused. It takes a comma-separated list, which is what makes a
-  Personal-app beta possible — name the handful of shops you're onboarding
-  and everyone else keeps the card. `ETSY_COMMERCIAL_ACCESS=true` retires the
-  gate once Etsy grants it. Details in `.env.example`.
+  wrong one fails before the consent screen. `ETSY_ACCESS_TIER` records
+  which tier you're on (`seller` if unset, and an unreadable value reads the
+  same, so a typo can't hand Connect Etsy to sellers Etsy will refuse).
+  **This app is on `personal`: Etsy approved it 2026-08-31**, so the seats
+  are real and `ETSY_OWNER_EMAILS` is now the beta roster rather than a list
+  of one — the app logins (not the Etsy ones; they're matched against the
+  account record) of the shops you're onboarding. They connect; every other
+  seller gets a "Pending approval" card that says which wait they're in,
+  instead of being sent to Etsy to be refused. Naming **more sellers than
+  Etsy seats** puts the overflow back in front of that refusal, so
+  `config_warnings()` counts the roster against the tier's ceiling
+  (`ETSY_APP_SEATS` overrides it if Etsy moves it). Setting the tier to
+  `commercial` — or the older `ETSY_COMMERCIAL_ACCESS=true` — retires the
+  gate the day Etsy grants it. Details in `.env.example`.
 - **Depop** — official Selling API, which is **partner-gated**: apply via
   Depop partnerships, then set the five `DEPOP_*` vars from onboarding
   (`.env.example`). Until then Depop simply stays hidden. No drafts or

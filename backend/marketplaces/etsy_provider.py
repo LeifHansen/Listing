@@ -43,17 +43,29 @@ class EtsyProvider:
     key = "etsy"
     label = "Etsy"
 
-    # Etsy's seller-app wall. Until Etsy grants Commercial Access, only the
-    # account that owns the keystring may authorize this app — everyone else
-    # is refused on Etsy's own consent page, with nothing redirected back for
-    # us to catch. So we stop them here instead, with the truth, rather than
-    # sending them out to a dead end. Retires itself the moment
-    # ETSY_COMMERCIAL_ACCESS is set (see config.etsy_access_pending).
-    access_pending_note = (
-        "Etsy is reviewing our app for Commercial Access — the approval that "
-        "lets shops other than ours connect. Cross-posting to Etsy switches "
-        "on here as soon as they grant it; nothing for you to set up."
-    )
+    # Etsy's app-type wall. Until Etsy grants Commercial Access, only a
+    # limited set of accounts may authorize this app — everyone else is
+    # refused on Etsy's own consent page, with nothing redirected back for us
+    # to catch. So we stop them here instead, with the truth, rather than
+    # sending them out to a dead end. Retires itself the moment the tier
+    # reads `commercial` (see config.etsy_access_pending).
+    #
+    # A property, not a constant, because the truth differs by tier and this
+    # sentence is the only place a seller learns which wait they are in: an
+    # unapproved app has not been cleared for anyone else at all, while an
+    # approved personal app has seats — just not one for them yet. Telling a
+    # seller we are "under review" after Etsy has approved us is a small lie
+    # that outlives the wait it describes.
+    @property
+    def access_pending_note(self) -> str:
+        if config.etsy_access_tier() == "personal":
+            return ("Etsy has approved us for a limited number of shops so "
+                    "far, and yours isn't one of them yet. Cross-posting to "
+                    "Etsy opens to every seller once Etsy grants us "
+                    "Commercial Access; nothing for you to set up.")
+        return ("Etsy only lets our own shop connect until they approve our "
+                "app for other sellers. Cross-posting to Etsy switches on "
+                "here as soon as that lands; nothing for you to set up.")
 
     def access_pending(self, uid: Optional[str]) -> bool:
         # Short-circuit before the lookup: with the gate off the answer is no
