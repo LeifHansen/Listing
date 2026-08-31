@@ -41,13 +41,13 @@ jobs:
     needs: gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned, not @master: this step runs in the job holding
       # FLY_API_TOKEN, so following a moving branch means whatever
       # superfly pushed most recently gets that token. v1.5 is the
       # current release tag; a commit sha would be stronger still and is
       # tracked in REMEDIATION_STATUS.md with the other actions.
-      - uses: superfly/flyctl-actions/setup-flyctl@fc53c09e1bc3be6f54706524e3b82c4f462f77be # 1.5
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       # --no-cache and an immediate replace, because a deploy that reports
       # success while production keeps serving the previous image is the
       # failure this pipeline actually had: on 2026-08-26 six consecutive
