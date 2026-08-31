@@ -379,3 +379,36 @@ def test_an_unreadable_seat_override_keeps_a_ceiling(fresh_config):
     assert cfg.etsy_seat_ceiling() == 4
     assert [w for w in cfg.config_warnings() if "ETSY_APP_SEATS" in w]
     assert [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w]
+
+
+def test_a_seat_count_that_is_not_a_count_cannot_stop_the_app_booting(
+        fresh_config):
+    """config_warnings() runs at import, so a value that raises while being
+    read is not a wrong ceiling — it is a container that never binds a port
+    and a deploy that fails its health poll. Reloading config under each of
+    these IS the assertion: a raise here fails the test the way it would fail
+    the boot. "2" superscript is the trap a string predicate walks into
+    (str.isdigit() says yes, int() says no); a negative is the other one,
+    since 0 already means "no ceiling" and clamping would hand a typo the
+    answer that gates nobody."""
+    for value in ("\u00b2", "-1", "4.0", "4 shops"):
+        cfg = fresh_config(ETSY_ACCESS_TIER="personal", ETSY_APP_SEATS=value,
+                           ETSY_OWNER_EMAILS="owner@example.com")
+        assert cfg.etsy_seat_ceiling() == 4, value
+        assert [w for w in cfg.config_warnings() if "ETSY_APP_SEATS" in w], value
+    # Whitespace is the one shape that is NOT a typo to report: it strips to
+    # empty, which is what an unset variable looks like from here, and every
+    # other var in this file reads it that way too.
+    blank = fresh_config(ETSY_ACCESS_TIER="personal", ETSY_APP_SEATS="   ",
+                         ETSY_OWNER_EMAILS="owner@example.com")
+    assert blank.etsy_seat_ceiling() == 4
+    assert blank.config_warnings() == []
+
+
+def test_a_readable_seat_count_is_silent_whatever_its_shape(fresh_config):
+    """Padding and a plus sign are things a hand-typed number picks up; they
+    parse, so they must not spend the operator's attention on a warning."""
+    cfg = fresh_config(ETSY_ACCESS_TIER="personal", ETSY_APP_SEATS=" +6 ",
+                       ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_seat_ceiling() == 6
+    assert cfg.config_warnings() == []

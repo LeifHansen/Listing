@@ -611,6 +611,27 @@ def etsy_access_tier() -> str:
     return "seller"
 
 
+def _etsy_seats_override() -> Optional[int]:
+    """ETSY_APP_SEATS as a number, or None when it is unset or unusable.
+
+    try/except rather than a string predicate: `.isdigit()` is true for
+    Unicode digits int() then refuses (a superscript "\u00b2" pasted out of a
+    rendered doc), and this is read from config_warnings(), which runs at
+    module import — so a value that raises here does not cost the seat
+    ceiling, it stops the app from booting. env_float above carries the same
+    warning about the same trap.
+
+    A negative count is unusable rather than clamped: 0 already means "no
+    ceiling" here, so clamping -1 to 0 would turn a typo into the one answer
+    that gates nobody.
+    """
+    try:
+        seats = int(_ETSY_APP_SEATS)
+    except ValueError:
+        return None
+    return seats if seats >= 0 else None
+
+
 def etsy_seat_ceiling() -> int:
     """How many shops may authorize this app at the current tier; 0 = no cap.
 
@@ -618,9 +639,8 @@ def etsy_seat_ceiling() -> int:
     than to "no cap": the override exists to track Etsy's ceiling, and a typo
     in it must not read as permission to add sellers without one.
     """
-    if _ETSY_APP_SEATS.isdigit():
-        return int(_ETSY_APP_SEATS)
-    return _ETSY_TIER_SEATS[etsy_access_tier()]
+    override = _etsy_seats_override()
+    return override if override is not None else _ETSY_TIER_SEATS[etsy_access_tier()]
 
 
 def etsy_gate_active() -> bool:
@@ -726,10 +746,11 @@ def config_warnings() -> list[str]:
             f"{'/'.join(ETSY_ACCESS_TIERS)}, so Etsy is treated as an "
             f"unapproved seller app — which reads the same as never setting "
             f"it.")
-    if _ETSY_APP_SEATS and not _ETSY_APP_SEATS.isdigit():
+    if _ETSY_APP_SEATS and _etsy_seats_override() is None:
         warnings.append(
-            f"ETSY_APP_SEATS={_ETSY_APP_SEATS!r} is not a whole number, so the "
-            f"ceiling for the {etsy_access_tier()} tier is used instead.")
+            f"ETSY_APP_SEATS={_ETSY_APP_SEATS!r} is not a seat count (a whole "
+            f"number, 0 for no ceiling), so the ceiling for the "
+            f"{etsy_access_tier()} tier is used instead.")
     # And the one that puts sellers back in front of Etsy's error page. Naming
     # more sellers than Etsy seats does not seat them: it waves the overflow
     # past THIS app's gate, and Etsy refuses them on its own page, off-site,
