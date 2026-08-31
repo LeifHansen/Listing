@@ -1,8 +1,9 @@
 """The export contract: what comes out of optimize() and lands on eBay.
 
 Six properties, each of which someone could plausibly "improve" away:
-upright, trimmed to the subject, centred on a square white canvas with even
-padding, 1600x1600, JPEG at the agreed quality, and carrying no EXIF. The
+upright, framed square on the item — trimmed onto a white canvas with even
+padding when the background came off, at the photo's own scale when it did
+not — 1600x1600, JPEG at the agreed quality, and carrying no EXIF. The
 last one is a privacy guarantee -- a phone photo knows where the seller
 lives -- and it holds today only because Pillow drops metadata by default,
 which is exactly the kind of thing a helpful refactor restores.
@@ -105,12 +106,24 @@ def test_framing_keeps_the_whole_item_even_when_it_is_long_and_thin(tmp_path):
     assert xs.min() > 0 and xs.max() < framed.width - 1, "the ends were cut off"
 
 
-def test_a_photo_that_keeps_its_background_is_still_cropped_to_fill(tmp_path):
-    """The other half of the rule: white bars around a photo that kept its
-    scenery look broken, so those still fill the frame."""
+def test_a_photo_that_keeps_its_background_keeps_its_scale(tmp_path):
+    """The other half of the rule: a photo that kept its scenery is framed at
+    the scale it was shot at. The square window is the frame's short side slid
+    over the item — not a zoom that crops the backdrop away and takes the
+    edges of the item with it."""
     out = images.optimize(_photo(tmp_path), tmp_path / "out", remove_bg=False)
     assert out["output_size"] == (1600, 1600)
     assert not out["background_removed"]
+
+    import numpy as np
+    with Image.open(tmp_path / "out.jpg") as done:
+        arr = np.asarray(done.convert("L"), dtype=np.uint8)
+    # Backdrop still in all four corners: nothing was zoomed in past the item.
+    assert min(arr[8, 8], arr[8, -8], arr[-8, 8], arr[-8, -8]) > 200
+    # The 600px item sat in a 1200px window, so it arrives at half the frame
+    # width — the share the seller framed. Zooming would blow that up.
+    xs = np.nonzero((arr < 200).any(axis=0))[0]
+    assert 0.4 < (xs.max() - xs.min()) / arr.shape[1] < 0.6
 
 
 def test_the_quality_setting_is_the_one_we_publish_at(tmp_path):

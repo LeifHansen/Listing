@@ -21,7 +21,7 @@ payload when you don't have eBay credentials yet).
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
-| Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (or trim plain borders when removal is off), square-frame without cropping the item, resize to 1600px, finishing sharpen | Pillow |
+| Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (when removal is on), square-frame on the item at the photo's own scale — never a zoom — resize to 1600px, finishing sharpen | Pillow |
 | Identify | Photos sent to Claude vision; returns structured listing draft + confidence + "missing info" to verify | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
@@ -769,8 +769,12 @@ sellers who connected eBay before it was added reconnect once to grant it
 
 - The AI never invents serial numbers, authenticity guarantees, or unverifiable
   specs — it flags those under "missing info" for you to confirm.
-- Image optimization is intentionally non-destructive of subject framing; the
-  border auto-crop only triggers on clearly plain backgrounds.
+- Image optimization never zooms. A photo that keeps its background is framed
+  with the largest square the frame holds, slid over the item, so the backdrop
+  you composed stays in the shot and nothing gets clipped in the gallery
+  thumbnail; an item too big for that square keeps the whole photo, padded out
+  to square. Tighter framing is yours to make — Crop and Smart crop in the
+  photo studio.
 - Category ID is auto-resolved via the eBay Taxonomy API when
   `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET` are set; otherwise enter it manually in
   the preview. Taxonomy data in the eBay **sandbox** is limited, so category

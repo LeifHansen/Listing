@@ -1527,31 +1527,6 @@ def warm() -> None:
         log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
 
 
-def _autocrop_borders(img: Image.Image) -> Image.Image:
-    """Trim near-uniform borders (e.g. plain background) around the subject."""
-    rgb = _flatten(img)
-    # Compare against the top-left corner color as the assumed background.
-    bg = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
-    from PIL import ImageChops
-
-    diff = ImageChops.difference(rgb, bg)
-    bbox = diff.getbbox()
-    if not bbox:
-        return img
-    # Add a small margin so we don't crop too tight.
-    left, top, right, bottom = bbox
-    margin_x = int((right - left) * 0.03)
-    margin_y = int((bottom - top) * 0.03)
-    left = max(0, left - margin_x)
-    top = max(0, top - margin_y)
-    right = min(img.size[0], right + margin_x)
-    bottom = min(img.size[1], bottom + margin_y)
-    # Only crop if it meaningfully reduces the image.
-    if (right - left) < img.size[0] * 0.55 and (bottom - top) < img.size[1] * 0.55:
-        return img  # too aggressive; likely not a plain background
-    return img.crop((left, top, right, bottom))
-
-
 def _subject_box(img_rgb: Image.Image) -> Optional[tuple[int, int, int, int]]:
     """Best-effort subject bounding box via a cheap corner-color difference.
 
@@ -1592,10 +1567,6 @@ def _pad_square(crop: Image.Image, pad_color: tuple) -> Image.Image:
     return canvas
 
 
-# A subject longer than this ratio (long side / short side) cannot fit a
-# square window without getting chopped — think train-set boxes, skis, bats.
-_ELONGATED = 1.35
-
 # Breathing room around a cut-out subject on its white canvas, as a fraction of
 # the canvas per side. eBay's own gallery shots sit at roughly this; tighter
 # and the item collides with the thumbnail's edge, looser and it shrinks in
@@ -1606,12 +1577,12 @@ PAD_FRACTION = float(os.getenv("CUTOUT_PAD_FRACTION", "0.09") or 0.09)
 def _frame_cutout(img: Image.Image, pad: float = PAD_FRACTION) -> Image.Image:
     """Centre a cut-out subject on a square white canvas with even padding.
 
-    The difference from _fill_square, which every photo used to get: that one
-    CROPS to fill the frame, so a subject with an awkward aspect ratio loses
-    its edges. On a photo that kept its background, filling is right — the
-    background is scenery and cropping it is free. On a cutout the background
-    IS the canvas, so there is nothing to gain by cropping and an item to
-    lose. Pad instead, and the item arrives whole and consistently sized.
+    The difference from _fill_square, the path a photo that kept its
+    background takes: that one holds the photo at its own scale, because there
+    the frame is a picture the seller composed and everything in it is real.
+    On a cutout the background IS the canvas — blank white this pass painted
+    on — so there is nothing to preserve outside the item, and sizing the
+    canvas to it is what makes a row of listing photos look like a set.
 
     Falls back to _fill_square when the subject can't be located (which for a
     cutout on white would mean it filled the frame or vanished).
@@ -1623,9 +1594,9 @@ def _frame_cutout(img: Image.Image, pad: float = PAD_FRACTION) -> Image.Image:
     w, h = rgb.size
     left, top, right, bottom = box
     longest = max(right - left, bottom - top)
-    # The window: subject plus `pad` on each side. Floored at half the photo's
-    # short side, the same over-zoom guard _fill_square uses — a ring shot from
-    # across the room should not be blown up to 1600px of blur.
+    # The window: subject plus `pad` on each side, floored at half the photo's
+    # short side so a ring shot from across the room is not blown up to 1600px
+    # of blur.
     side = max(int(round(longest / max(0.1, 1 - 2 * pad))), min(w, h) // 2)
     cx, cy = (left + right) // 2, (top + bottom) // 2
     sx, sy = cx - side // 2, cy - side // 2
@@ -1669,47 +1640,46 @@ def _plain_backdrop(rgb: Image.Image, tol: int = 28) -> bool:
 
 
 def _fill_square(img: Image.Image) -> Image.Image:
-    """Square-frame the photo around its subject (eBay's recommended shape).
+    """Square-frame the photo around its subject, at the photo's own scale.
 
-    A subject that fits inside a square window gets a square crop that frames
-    it tightly (plus margin) so the item fills the photo — no letterbox bars.
-    A subject that does NOT fit — an elongated one (train-set boxes, skis,
-    bats) or simply one that spans more than the short side of the frame, like
-    a shirt shot to fill a portrait photo — is cropped as a rectangle around
-    the whole subject and padded to square with the photo's own backdrop
-    color. The square window is never smaller than the subject itself: cutting
-    the item off (chopped sleeves and hems) is worse than a little padding.
-    Whole item beats full frame."""
+    The window is always the largest square the frame can hold, slid over the
+    subject: the crop re-CENTRES, it never tightens. Framing used to pick a
+    window as small as the subject plus ~30% and let the resize to TARGET_SIZE
+    blow it back up, which cost three things at once — the item was magnified
+    (and softened) beyond the photo the seller took, most of the background
+    they deliberately shot was thrown away, and wherever the cheap corner-diff
+    subject box came in short of the real item, the gallery thumbnail arrived
+    with its edges sliced off. A seller who does want a tighter frame has Crop
+    and Smart crop in the photo studio; the pipeline no longer decides it for
+    them.
+
+    A subject too big for that window — one filling a portrait frame, or an
+    elongated one like skis or a curtain rod — keeps the whole photo, padded
+    out to square with the photo's own backdrop color. Whole item beats full
+    frame."""
     rgb = _flatten(img)
     w, h = rgb.size
-    window = min(w, h)  # the largest square the frame can hold
+    side = min(w, h)  # the largest square the frame holds — never smaller
     box = _subject_box(rgb)
     if box:
         left, top, right, bottom = box
         bw, bh = right - left, bottom - top
         mx, my = max(6, int(bw * 0.05)), max(6, int(bh * 0.05))
         # What a square crop would have to contain to keep the whole subject.
-        need = max(bw + 2 * mx, bh + 2 * my)
-        elongated = max(bw, bh) / max(1, min(bw, bh)) > _ELONGATED
-        if elongated or need > window:
-            crop = rgb.crop((max(0, left - mx), max(0, top - my),
-                             min(w, right + mx), min(h, bottom + my)))
-            return _pad_square(crop, _border_color(rgb))
+        if max(bw + 2 * mx, bh + 2 * my) > side:
+            # Bigger than any square this frame holds: a crop would cut the
+            # item, so keep every pixel and pad out to square instead.
+            return _pad_square(rgb, _border_color(rgb))
         cx, cy = (left + right) // 2, (top + bottom) // 2
-        # A square big enough for the subject + ~30% breathing room, but never
-        # larger than the frame, nor a tiny over-zoom, nor — above all —
-        # smaller than the subject it has to hold.
-        want = int(max(bw, bh) * 1.3)
-        side = max(window // 2, min(want, window), need)
     elif _plain_backdrop(rgb):
         # No clean box on a plain backdrop: the item runs edge to edge (or is
         # a speck on an empty sweep). Either way there's nothing safe to crop,
         # so pad the frame out to square and keep every pixel of it.
         return _pad_square(rgb, _border_color(rgb))
     else:
-        # Busy, textured scene — no idea where the item is. Center crop.
+        # Busy, textured scene — no idea where the item is. Leave the window
+        # on the middle of the frame.
         cx, cy = w // 2, h // 2
-        side = window
     # Clamp the window so it stays fully inside the image (still no padding).
     left = min(max(0, cx - side // 2), w - side)
     top = min(max(0, cy - side // 2), h - side)
@@ -1778,12 +1748,11 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
             img, bg_engine, bg_error, studio_applied, studio_error, bg_review = \
                 _studio_and_cutout(img)
             bg_removed = bg_engine not in (None, "none")
-        else:
-            img = _autocrop_borders(img)
         # Square frame. A cutout gets centred with padding on its white canvas
         # (the canvas is the point — cropping it only risks the item); a photo
-        # that kept its background gets cropped to fill, because there the
-        # background is scenery and white bars around it look broken.
+        # that kept its background gets the largest square the frame holds,
+        # slid over the item — its own scale, scenery and all. Neither path
+        # zooms: tighter framing is the seller's call, in the photo studio.
         img = _frame_cutout(img) if bg_removed else _fill_square(img)
 
         if img.size[0] != TARGET_SIZE:

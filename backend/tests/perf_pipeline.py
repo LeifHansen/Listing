@@ -105,7 +105,6 @@ def main() -> None:
           lambda: images._fill_interior_holes(refined, rgb))
     timed("_compose_on_white (shadow + holes)",
           lambda: images._compose_on_white(rgb, refined))
-    timed("_autocrop_borders", lambda: images._autocrop_borders(rgb))
     timed("_fill_square", lambda: images._fill_square(rgb))
     sized = rgb.resize((1600, 1600), Image.LANCZOS)
     timed("_finish @1600", lambda: images._finish(sized))
