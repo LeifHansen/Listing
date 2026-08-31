@@ -14,6 +14,15 @@ primary_region = 'sjc'
   EBAY_ENV = 'production'
   PORT = '8080'
   DATA_DIR = '/data'
+  # Etsy approved this app on 2026-08-31 — at the PERSONAL tier, which seats a
+  # handful of shops (Etsy documents 4), not the unlimited Commercial Access
+  # above it. Not a secret, so it lives here rather than in `fly secrets`:
+  # nothing about it is worth hiding, and the tier is exactly the kind of fact
+  # that should change in a reviewable commit. It decides which wait a gated
+  # seller is told about; WHO gets through is still ETSY_OWNER_EMAILS (a
+  # secret, since it is people's email addresses). Set ETSY_ACCESS_TIER =
+  # 'commercial' the day Etsy grants it and the gate retires itself.
+  ETSY_ACCESS_TIER = 'personal'
   # Background removal defaults to the FREE on-server model (BG_ENGINE unset =
   # auto: Pixian if its keys are ever added as secrets, else local). The paid
   # Photoroom/Adobe engines only run if a BG_ENGINE secret explicitly selects
