@@ -305,6 +305,18 @@ export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000, on
 // can't decode (e.g. HEIC) fall through and upload as-is — the server
 // handles them.
 const MAX_UPLOAD_SIDE = 2000;
+// What goes UNDER a photo that has transparency, and why there has to be
+// something: a canvas starts fully transparent, and toBlob("image/jpeg")
+// composites whatever it cannot store onto SOLID BLACK — the HTML spec says
+// so. So every photo with an alpha channel (a PNG cut-out, an iPhone "lift
+// subject" shot, a transparent screenshot, anything exported by another
+// photo tool) came out of this re-encode with a black background, and it was
+// black BEFORE the server ever saw it. The pipeline has a function for
+// exactly this (services/images._flatten) and it never got the chance: there
+// was no alpha left to composite by the time the file arrived. This is the
+// same colour that function uses, so a photo that is downscaled here and one
+// that is small enough to skip it land on the same backdrop.
+const CANVAS_COLOR = "#f8f8f8";  // services/images.CANVAS_COLOR (248, 248, 248)
 export async function downscaleForUpload(file) {
   try {
     let bmp;
@@ -330,7 +342,10 @@ export async function downscaleForUpload(file) {
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(w * scale));
     canvas.height = Math.max(1, Math.round(h * scale));
-    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = CANVAS_COLOR;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
     bmp.close?.();
     const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
     if (!blob) return file;

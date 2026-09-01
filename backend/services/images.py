@@ -74,6 +74,12 @@ def _flatten(img: Image.Image) -> Image.Image:
     instead of dropping it. A plain `.convert("RGB")` discards transparency and
     leaves formerly-transparent pixels black; product cutout PNGs need the
     alpha composited so the background reads as the clean canvas, not black."""
+    if img.mode == "RGB":
+        # Already flat. `convert` would hand back a full-size COPY, and this
+        # now runs once per photo on the pipeline's main path — on a 250-photo
+        # batch that is 250 pointless 30MB allocations on a machine that is
+        # already the reason MAX_WORK_SIDE exists.
+        return img
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
         canvas = Image.new("RGBA", rgba.size, CANVAS_COLOR + (255,))
@@ -1739,6 +1745,18 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         # Downscale oversized inputs before the memory-heavy passes below.
         if max(img.size) > MAX_WORK_SIDE:
             img.thumbnail((MAX_WORK_SIDE, MAX_WORK_SIDE), Image.LANCZOS)
+
+        # Alpha is composited HERE, once, before anything looks at the photo.
+        # The framing passes each did their own _flatten, so a photo that kept
+        # its background was safe — but the cutout path in between reached the
+        # source with a bare `.convert("RGB")`, which turns every transparent
+        # pixel BLACK. So a photo that arrived already cut out (a PNG, an
+        # iPhone "lift subject" shot, another tool's export) was handed to the
+        # matte — and to the paid engines, which are billed per image — as an
+        # item on a black field, and any of it the cutout kept came out black.
+        # One flatten up front means every path below works on the same
+        # opaque photo, and the framing ones no-op on it.
+        img = _flatten(img)
 
         studio_applied, studio_error = False, None
         bg_removed = False
