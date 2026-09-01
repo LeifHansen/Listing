@@ -26,6 +26,7 @@ import {
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
 import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
+import { duplicateSuspects } from "./duplicateSuspects";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
    identifies each item, and (optionally) publishes them; this component polls
@@ -48,36 +49,6 @@ function phaseMessages(phase, removeBg) {
     return ["Optimizing photos…", "Straightening & removing backgrounds…"];
   }
   return PHASE_MESSAGES[phase] || ["Working…"];
-}
-
-// Duplicate-suspect detection: two drafts whose titles share most of their
-// meaningful words are probably the same item split in two — surface a hint
-// pointing at "Merge into one" instead of silently letting both publish.
-// Ticking either one of them is enough; the merge dialog asks for the other.
-const STOP_WORDS = new Set(["the", "and", "with", "for", "size", "mens", "womens", "new", "vintage"]);
-function titleTokens(t) {
-  return new Set((t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
-    .map((w) => w.replace(/s$/, ""))  // light stemming: phases ≈ phase
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w)));
-}
-function sharesEnough(A, B) {
-  if (A.size < 3 || B.size < 3) return false;
-  let shared = 0;
-  A.forEach((w) => { if (B.has(w)) shared += 1; });
-  return shared >= 3 && shared / Math.min(A.size, B.size) >= 0.4;
-}
-function duplicateSuspects(drafts) {
-  // Tokenize ONCE per draft, not once per pair: the comparison is already
-  // quadratic, and re-splitting both titles inside it made a big batch chew
-  // through thousands of regex passes on every render.
-  const tokens = drafts.map((d) => titleTokens(d.listing?.title || d.title || ""));
-  const pairs = [];
-  for (let i = 0; i < drafts.length; i++) {
-    for (let j = i + 1; j < drafts.length; j++) {
-      if (sharesEnough(tokens[i], tokens[j])) pairs.push([drafts[i], drafts[j]]);
-    }
-  }
-  return pairs;
 }
 
 // Selling formats, mirroring the full editor's Pricing card.
@@ -858,10 +829,19 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     (it) => ebayBlockers(it.listing, { targets: effectiveTargets }).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
   // in a card, and the pairwise scan is quadratic in the size of the batch.
-  // Keyed on what the scan actually reads — ids and titles — so a poll that
-  // changed nothing, or a keystroke in a price field, re-uses the last answer.
+  // Keyed on everything the scan reads — ids, titles, and the brand and
+  // specifics it weighs against them — so a poll that changed nothing, or a
+  // keystroke in a price field, re-uses the last answer, while correcting a
+  // brand on a card re-runs it. A key that stopped at the title was fine when
+  // the scan did too; it would now pin a stale verdict to an edited card.
   const dupeKey = drafts
-    .map((d) => `${d.session_id}:${d.listing?.title || d.title || ""}`)
+    .map((d) => [
+      d.session_id,
+      d.listing?.title || d.title || "",
+      d.listing?.brand || "",
+      (d.listing?.item_specifics || [])
+        .map((s) => `${s.name}=${s.value}`).join(","),
+    ].join(":"))
     .join("|");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const dupes = useMemo(() => duplicateSuspects(drafts), [dupeKey]);

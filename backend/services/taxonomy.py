@@ -377,6 +377,16 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
         mode = constraint.get("aspectMode", "FREE_TEXT")
         values = [v.get("localizedValue", "")
                   for v in (a.get("aspectValues") or []) if v.get("localizedValue")]
+        # Which OTHER aspect's answers each of those values is legal beside.
+        #
+        # eBay does not validate Size and Size Type as two independent boxes:
+        # it publishes, per value, the values of a controlling aspect that
+        # value may be paired with, and refuses the rest at publish time with
+        # "“Regular” is not a valid Size Type for the Size “33”. Select a
+        # compatible Size Type and Size combination." — after the photos have
+        # uploaded, with no listing. Dropping this on the way in is what left
+        # the app guessing at a pairing eBay had already spelled out.
+        pairs = _value_constraints(a.get("aspectValues") or [])
         # For SELECTION_ONLY aspects the value MUST come from this list, so keep
         # it whole — capping it drops valid choices (e.g. Country/Region of
         # Manufacture has ~250 entries and was truncating at "Dominica"). For
@@ -404,12 +414,113 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
             "data_type": (constraint.get("aspectDataType") or "STRING").upper(),
             "format": constraint.get("aspectFormat") or "",
             "max_length": int(constraint.get("aspectMaxLength") or 0),
+            # {value: {controlling aspect: [values it may be paired with]}} —
+            # empty for the aspects eBay places no such restriction on, which
+            # is most of them.
+            "pairs_with": pairs,
         })
     # Required first, then by name, so the UI can show must-haves up top.
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
     result = {"aspects": aspects}
     _cache_put(_ASPECTS_CACHE, cache_key, result, bound=300)
     return result
+
+
+def _value_constraints(aspect_values: list[dict]) -> dict:
+    """eBay's valueConstraints, as {value: {controlling aspect: [values]}}.
+
+    Kept only where eBay actually names a controlling aspect and values for
+    it; an unconstrained value carries no entry at all, so "not in here" reads
+    as "eBay places no restriction on this", never as "nothing is allowed".
+    """
+    out: dict[str, dict[str, list[str]]] = {}
+    for v in aspect_values:
+        label = (v.get("localizedValue") or "").strip()
+        if not label:
+            continue
+        for c in (v.get("valueConstraints") or []):
+            name = (c.get("applicableForLocalizedAspectName") or "").strip()
+            allowed = [str(x).strip() for x in
+                       (c.get("applicableForLocalizedAspectValues") or [])
+                       if str(x).strip()]
+            if name and allowed:
+                out.setdefault(label, {}).setdefault(name, []).extend(allowed)
+    return out
+
+
+def compatible_values(aspects: list[dict], aspect_name: str,
+                      value: str) -> dict:
+    """{controlling aspect: [values]} this aspect's `value` may be paired with.
+
+    Empty when eBay named no constraint for it — which is the common case, and
+    means every answer is legal as far as the pairing rules go.
+    """
+    want = (aspect_name or "").strip().lower()
+    label = (value or "").strip().lower()
+    for a in aspects or []:
+        if (a.get("name") or "").strip().lower() != want:
+            continue
+        for known, pairs in (a.get("pairs_with") or {}).items():
+            if known.strip().lower() == label:
+                return {k: list(dict.fromkeys(v)) for k, v in pairs.items()}
+    return {}
+
+
+def fit_paired_aspects(listing, aspects: list[dict]) -> list[tuple]:
+    """Make every item specific legal beside the ones it is paired with.
+
+    eBay's own answer to "which Size Type goes with Size 33" is in the
+    category's aspect list; this applies it. For each specific the seller (or
+    the AI) has answered, the controlling aspect eBay names for that answer is
+    set to a value eBay lists as compatible — replacing one that isn't, and
+    filling one that is blank. A required Size Type that nothing filled is
+    therefore answered from the Size rather than defaulted to "Regular" and
+    refused.
+
+    Returns [(aspect, was, now)] for what it changed, so a caller can log or
+    say what it did. Never raises, never invents a value eBay did not list,
+    and never touches an aspect already holding a compatible answer.
+    """
+    changed: list[tuple[str, str, str]] = []
+    if not aspects:
+        return changed
+    specifics = list(getattr(listing, "item_specifics", None) or [])
+    for row in list(specifics):
+        name = (getattr(row, "name", "") or "").strip()
+        value = (getattr(row, "value", "") or "").strip()
+        if not name or not value:
+            continue
+        for controlling, allowed in compatible_values(aspects, name, value).items():
+            if not allowed:
+                continue
+            current = ""
+            holder = None
+            for other in specifics:
+                if (getattr(other, "name", "") or "").strip().lower() \
+                        == controlling.strip().lower():
+                    val = (getattr(other, "value", "") or "").strip()
+                    if val:
+                        current, holder = val, other
+                        break
+                    holder = holder or other
+            if current and any(current.lower() == a.lower() for a in allowed):
+                continue  # already a pairing eBay accepts
+            # One compatible answer is eBay's answer. Several means the Size
+            # alone does not decide it, and picking one at random would be the
+            # same guess that put "Regular" beside a 33 — so an answer the
+            # seller already gave is left for them to correct, and only a
+            # blank is filled, with the first value eBay offers.
+            if len(allowed) > 1 and current:
+                continue
+            pick = allowed[0]
+            if holder is not None:
+                holder.value = pick
+            else:
+                specifics.append(type(row)(name=controlling, value=pick))
+            changed.append((controlling, current, pick))
+    if changed:
+        listing.item_specifics = specifics
+    return changed
 
 
 # --- aspect-value validation -------------------------------------------------
