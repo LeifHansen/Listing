@@ -402,7 +402,16 @@ export function PublishBar({ w }) {
     : canPublishLive ? "Publish Live" : "Publish";
 
   return (
-    <div className="sticky bottom-20 md:bottom-4 z-30 pt-1">
+    // bottom-20 was measured against a bottom nav that has no home-indicator
+    // inset. On every current iPhone that nav is 28px taller, and its raised
+    // "Sell" button reaches 20px higher still — right across the bottom of
+    // "Publish Live", where a tap starts a NEW listing instead of publishing
+    // this one. The bar has to rise by exactly what the nav grew by, so the
+    // clearance holds on a phone with an inset and on one without.
+    <div
+      data-publish-bar
+      className="sticky bottom-[calc(5rem_+_env(safe-area-inset-bottom))] md:bottom-4 z-30 pt-1"
+    >
       <div className={cn(
         "rounded-card border-2 backdrop-blur shadow-float p-3.5 sm:p-4 bg-card/95",
         "flex flex-col gap-3",
