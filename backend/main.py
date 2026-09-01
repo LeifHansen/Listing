@@ -1212,6 +1212,12 @@ def _merge_filled_specifics(listing: Listing, filled: list,
       the first vision pass used to block every further tick, which is why the
       checkbox specifics reached eBay with one box ticked at most.
 
+    Then, on the merged result, the size-type rule: a men's garment sized XXL
+    or larger is Size Type "Big & Tall", never "Regular" — eBay rejects that
+    pairing. It runs here, after the merge, because the merged Size is what
+    decides it, and here rather than only at publish so the seller sees the
+    answer in the editor and can change it.
+
     Returns how many values were added."""
     multi = {a["name"].strip().lower() for a in aspects
              if (a.get("cardinality") or "SINGLE") == "MULTI"}
@@ -1264,6 +1270,7 @@ def _merge_filled_specifics(listing: Listing, filled: list,
             else:
                 listing.item_specifics[blank_at] = f
             added += 1
+    taxonomy.apply_big_and_tall(listing, aspects)
     return added
 
 

@@ -21,6 +21,7 @@ import httpx
 
 from .. import config
 from ..config import log
+from ..models import ItemSpecific
 
 # Simple in-process caches (token + per-marketplace tree id).
 _token_cache: dict = {"token": None, "expires_at": 0.0}
@@ -510,13 +511,160 @@ def coerce_aspect_value(value: str, aspect: dict) -> Optional[str]:
     return v[:max_len]
 
 
+# --- size type ---------------------------------------------------------------
+# eBay files a men's garment sized past XL under Size Type "Big & Tall", and
+# refuses the pairing it knows is wrong: Size "XXL" with Size Type "Regular"
+# comes back as an item-specifics error and no listing at all. Nothing here
+# ever asked, because the two values arrive from different places — Size is
+# read off the tag, Size Type off whatever the category defaults to — so they
+# disagreed on every big shirt that went out.
+#
+# The rule below is deliberately narrow. It fires only where eBay's OWN aspect
+# list for the category offers a Big & Tall value, which is what tells a men's
+# category from a women's one: there XXL means Size Type "Plus", "Regular" is
+# perfectly legal, and stamping "Big & Tall" on it would be the same mistake
+# in the other direction.
+
+SIZE_TYPE_ASPECT = "size type"
+
+# How the value gets spelled, best first. eBay says "Big & Tall"; the rest are
+# here so a category that punctuates it differently still matches.
+BIG_AND_TALL_VALUES = ("Big & Tall", "Big and Tall", "Big-Tall", "Big/Tall")
+
+# The Size Types this rule may overwrite. "Big", "Tall" and "Big & Tall" are
+# all answers a seller can honestly mean on a 2XL shirt, so they stand as
+# entered; "Regular" is the one eBay refuses, and a blank has nothing to lose.
+_OVERRIDABLE_SIZE_TYPES = {"", "regular", "standard", "regular size"}
+
+# Every way a tag spells a size past XL: "2XL", "XXL", "XXX-Large", "4X",
+# "3XLT". The multiplier is the digit, or the number of X's. Both patterns
+# refuse to start or end mid-word, which is what keeps "XXS", "MAXX" and the
+# waist-by-inseam form "32 X 34" out of a rule about extra-larges.
+_DIGIT_XL_RE = re.compile(r"(?<![\w.])(\d)\s*X(?:\s*-?\s*L(?:ARGE)?)?T?(?!\w)(?!\s*\d)")
+_REPEAT_XL_RE = re.compile(r"(?<!\w)(X{2,6})(?:\s*-?\s*L(?:ARGE)?)?T?(?!\w)")
+
+
+def size_multiplier(value: str) -> int:
+    """How many X's a size carries: 2 for XXL and 2XL, 3 for XXXL and 3XL, 0
+    for XL and everything below it (and for sizes that aren't X-sizes at all).
+
+    Reads the LARGEST answer in the value, because tags and eBay values pair
+    the spellings — "XXL/2XL" is a 2, "XXL (3XL)" a 3.
+    """
+    v = (value or "").strip().upper()
+    if not v:
+        return 0
+    best = 0
+    for m in _DIGIT_XL_RE.finditer(v):
+        best = max(best, int(m.group(1)))
+    for m in _REPEAT_XL_RE.finditer(v):
+        best = max(best, len(m.group(1)))
+    return best
+
+
+def is_big_and_tall_size(value: str) -> bool:
+    """True when the size is XXL or larger — the point past which eBay wants
+    Size Type "Big & Tall" rather than "Regular" on a men's garment."""
+    return size_multiplier(value) >= 2
+
+
+def _is_size_aspect(name: str) -> bool:
+    """Whether an aspect name holds the item's SIZE ("Size", "Men's Size",
+    "Shirt Size", "Size (Men's)") as opposed to describing it ("Size Type").
+    Neighbours like "Neck Size" are in — they never carry an X-size, so
+    reading them costs nothing and missing the real one costs the listing."""
+    n = (name or "").strip().lower()
+    return n != SIZE_TYPE_ASPECT and bool(re.search(r"\bsize\b", n))
+
+
+def offered_big_and_tall(aspect: dict) -> str:
+    """The category's own spelling of Big & Tall for a Size Type `aspect`, or
+    "" when it doesn't offer one.
+
+    That absence is the men's-vs-women's test this rule leans on: eBay lists
+    Big & Tall in men's apparel and Plus / Petite / Maternity in women's, so a
+    category with no Big & Tall value is one where this rule has no business
+    firing. "" is also the answer when the category offers "Big" and "Tall"
+    only separately — there is no way to pick between them honestly.
+    """
+    values = [v for v in (aspect.get("values") or []) if v]
+    if not values:
+        return ""
+    for spelling in BIG_AND_TALL_VALUES:
+        matched = match_selection_value(spelling, values)
+        if matched:
+            return matched
+    return ""
+
+
+def apply_big_and_tall(listing, aspects: Optional[list[dict]] = None) -> str:
+    """Default Size Type to Big & Tall on a listing whose size is XXL or
+    larger, in place. Returns the value written, or "" when nothing changed.
+
+    eBay rejects "Size: XXL" + "Size Type: Regular" outright, so this runs on
+    the draft (the seller sees the answer and can still change it) and again
+    just before publish (where it is the difference between a listing and an
+    error). Only a blank or "Regular" is overwritten — a seller who picked
+    "Big" or "Tall" has already answered the question.
+
+    `aspects` is the category's aspect list when the caller already has it;
+    otherwise it is looked up. Best-effort throughout: no category, no Size
+    Type aspect, or a Taxonomy call that fails all mean the listing passes
+    through untouched.
+    """
+    specifics = list(getattr(listing, "item_specifics", None) or [])
+    if not specifics:
+        return ""
+    if aspects is None:
+        cid = (getattr(listing, "category_id", "") or "").strip()
+        if not cid:
+            return ""
+        try:
+            aspects = item_aspects(cid).get("aspects", [])
+        except Exception as exc:  # noqa: BLE001 - the rule is best-effort
+            log.info("size type skipped (cat=%s): %s", cid, exc)
+            return ""
+    aspect = next((a for a in (aspects or [])
+                   if (a.get("name") or "").strip().lower() == SIZE_TYPE_ASPECT),
+                  None)
+    if aspect is None:
+        return ""
+    big_and_tall = offered_big_and_tall(aspect)
+    if not big_and_tall:
+        return ""
+    size = next((s.value for s in specifics
+                 if _is_size_aspect(s.name) and is_big_and_tall_size(s.value)), "")
+    if not size:
+        return ""
+    canonical = (aspect.get("name") or "Size Type").strip()
+    row = next((s for s in specifics
+                if (s.name or "").strip().lower() == SIZE_TYPE_ASPECT), None)
+    if row is not None:
+        if (row.value or "").strip().lower() not in _OVERRIDABLE_SIZE_TYPES:
+            return ""
+        row.name, row.value = canonical, big_and_tall
+        # "high": this isn't a guess about the item, it's what the size the
+        # seller can read on the tag means in eBay's own vocabulary.
+        row.confidence = "high"
+    else:
+        listing.item_specifics = [
+            *specifics,
+            ItemSpecific(name=canonical, value=big_and_tall, confidence="high"),
+        ]
+    log.info("size type: %r is XXL or larger — %s is %r, not Regular "
+             "(eBay rejects that pairing)", size, canonical, big_and_tall)
+    return big_and_tall
+
+
 def sanitize_specifics(listing) -> None:
     """Rewrite listing.item_specifics into publish-safe form, in place:
     canonical aspect names for the category (case drift and the "Height" vs
     "Item Height" alias both reject publishes), values coerced to each
     aspect's constraints via coerce_aspect_value, one value per SINGLE-
     cardinality aspect, and unfixable values dropped — a busy specific must
-    never sink the listing. Best-effort: without a category (or with the
+    never sink the listing. Then the size-type rule (apply_big_and_tall), on
+    the cleaned values and last, because this is the final thing that touches
+    a listing before eBay does. Best-effort: without a category (or with the
     Taxonomy API down) the specifics pass through untouched."""
     if not listing.category_id:
         return
@@ -558,3 +706,7 @@ def sanitize_specifics(listing) -> None:
         spec.name, spec.value = canonical, legal
         cleaned.append(spec)
     listing.item_specifics = cleaned
+    # Last, on the cleaned values: a men's top sized XXL or larger goes out as
+    # Size Type "Big & Tall". eBay rejects the whole listing when that one says
+    # "Regular", and this is the last place before it is sent.
+    apply_big_and_tall(listing, aspects)
