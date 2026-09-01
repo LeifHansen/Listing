@@ -830,10 +830,19 @@ class EbayProvider:
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
                                                  creds))
+                # Refused, or never answered for? ebay_errors already writes
+                # the right sentence from this; the flag is how a CLIENT can
+                # tell without reading it. Both places: the dataclass field
+                # for the fan-out's results map, and `raw` because the legacy
+                # single-eBay body is returned verbatim and is what the bulk
+                # queues read. See PublishOutcome.
+                unknown = bool(getattr(exc, "outcome_unknown", False))
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
+                    outcome_unknown=unknown,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc), "issues": issues})
+                         "message": str(exc), "issues": issues,
+                         **({"outcome_unknown": True} if unknown else {})})
             # The record's owner. Publishing through this account's creds IS
             # the ownership fact, so write it down — without this the record's
             # ebay_account stayed empty forever and the account-switch
@@ -998,10 +1007,18 @@ class EbayProvider:
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
                                                  creds))
+                # The create is the call where this matters most: an
+                # unanswered AddFixedPriceItem may have minted a live listing
+                # the record cannot point at, and the record above stays a
+                # draft precisely because we do not know. Saying "refused" to
+                # that seller is what produces the second one.
+                unknown = bool(getattr(exc, "outcome_unknown", False))
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
+                    outcome_unknown=unknown,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc), "issues": issues})
+                         "message": str(exc), "issues": issues,
+                         **({"outcome_unknown": True} if unknown else {})})
             # Record the item id FIRST. Everything below is optional extra work
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:

@@ -220,7 +220,13 @@ class DepopProvider:
                  "title": "Depop rejected the listing", "fix": str(exc)}]
             log.warning("depop publish failed: session=%s: %s",
                         ctx.session_id, exc)
-            return PublishOutcome(ok=False, message=str(exc), issues=issues)
+            # Same question as everywhere else a write leaves this app: was
+            # this a refusal, or an answer that never came back? See
+            # PublishOutcome; services/depop raises UnknownOutcome for the
+            # second.
+            return PublishOutcome(
+                ok=False, message=str(exc), issues=issues,
+                outcome_unknown=bool(getattr(exc, "outcome_unknown", False)))
 
         listing_id = res.get("listing_id") or existing_id
         log.info("depop publish ok: session=%s product=%s",

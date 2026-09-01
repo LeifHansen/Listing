@@ -13,7 +13,10 @@ import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
-import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
+import {
+  MarketTargetChips, publishListing, usePublishTargets, publishTally,
+  UNCONFIRMED_PUBLISH,
+} from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
 
 /* The drafts experience on the merged Sell screen: every draft one click
@@ -163,8 +166,22 @@ export function DraftsStrip({ search = "" }) {
       // Move the card out of Drafts on the spot — the refresh below confirms
       // it, but a live listing must never linger under Drafts waiting for one.
       if (res.published) patchListing(item.id, { status: "published" });
-      return { published: !!res.published, res };
+      // The same three-way read the batch queue uses. An outcome the server
+      // could not establish stays a draft here (it may not be one on eBay,
+      // which is exactly why the seller is sent to look) but it is never
+      // counted or worded as a refusal.
+      const tally = publishTally(
+        res, "Publish blocked — open the draft to see what to fix.");
+      return { published: tally.published, res, reason: tally.reason,
+               unconfirmed: tally.unconfirmed,
+               ...(tally.unconfirmed ? { error: UNCONFIRMED_PUBLISH } : {}) };
     } catch (e) {
+      // publishListing has already asked the server what became of a publish
+      // whose answer was lost; still flagged here means it could not tell.
+      // Not a refusal, and not something to retry blind — see BulkMode.
+      if (e?.unknownOutcome) {
+        return { published: false, unconfirmed: true, error: UNCONFIRMED_PUBLISH };
+      }
       return { published: false, error: e.message };
     } finally {
       setPublishing((p) => ({ ...p, [item.id]: false }));
@@ -181,9 +198,16 @@ export function DraftsStrip({ search = "" }) {
       message: `"${name}" goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return false;
-    const { published, res, error } = await publishItem(item);
+    const { published, res, error, reason, unconfirmed } = await publishItem(item);
     if (error) {
-      toast(`Publish error: ${error}`, { kind: "error" });
+      // "Publish error" is the wrong headline for a publish that may have
+      // worked — the sentence already says what to do, and calling it an
+      // error is what makes someone press the button again.
+      toast(unconfirmed ? error : `Publish error: ${error}`,
+        { kind: unconfirmed ? "warning" : "error" });
+      // The listings refresh still runs: if it DID land, the card should
+      // leave Drafts on its own rather than sit there inviting a retry.
+      if (unconfirmed) await loadListings({ quiet: true });
       return false;
     }
     const summary = resultSummary(res);
@@ -195,10 +219,11 @@ export function DraftsStrip({ search = "" }) {
         : (res.message || "Published! It's live now."),
         { kind: partial ? "warning" : "success" });
     } else {
-      // blockedReason, not res.message — see publishShared: eBay's catch-all
-      // for an account-level hold blames the title.
-      toast(blockedReason(res, "Publish blocked — open the draft to see what to fix."),
-        { kind: "warning" });
+      // The reason publishItem worked out, not res.message — see
+      // publishShared: eBay's catch-all for an account-level hold blames the
+      // title. (An unanswered publish never reaches here; it left through the
+      // `error` branch above with its own sentence.)
+      toast(reason, { kind: "warning" });
     }
     await loadListings({ quiet: true });
     return published;
@@ -223,13 +248,18 @@ export function DraftsStrip({ search = "" }) {
           : ""),
       confirmLabel: "Publish live",
     }))) return;
-    let ok = 0, failed = 0;
+    let ok = 0, failed = 0, unconfirmed = 0;
     const reasons = [];
     setBulkProgress({ done: 0, total: readyToPublish.length });
     try {
       for (const item of readyToPublish) {
         const out = await publishItem(item);
         if (out.published) ok++;
+        // A publish nobody got an answer to is its own outcome. Counting it
+        // as a refusal tells the seller to open a draft and fix it, when the
+        // listing may well be live on eBay already and the only safe next
+        // step is to look.
+        else if (out.unconfirmed) unconfirmed++;
         else {
           failed++;
           // WHY, not just how many. publishItem hands back the response and
@@ -237,10 +267,9 @@ export function DraftsStrip({ search = "" }) {
           // one account-level hold reported "5 need attention — open them to
           // fix" and sent the seller to inspect five listings that were never
           // the problem. That is the shape of the failures in production.
-          reasons.push(out.error
-            || blockedReason(out.res, "Publish blocked — open the draft to see what to fix."));
+          reasons.push(out.error || out.reason);
         }
-        setBulkProgress((p) => ({ ...p, done: ok + failed }));
+        setBulkProgress((p) => ({ ...p, done: ok + failed + unconfirmed }));
       }
     } finally {
       setBulkProgress(null);
@@ -254,8 +283,12 @@ export function DraftsStrip({ search = "" }) {
           ? (shared ? ` All ${failed} were refused: ${shared}`
                     : ` ${failed} need attention — open them to fix.`)
           : "")
+      + (unconfirmed
+          ? ` ${unconfirmed} didn't answer in time and may already be live — `
+            + `check your eBay store before publishing ${unconfirmed === 1 ? "it" : "them"} again.`
+          : "")
       + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
-      { kind: failed || notReady ? "warning" : "success" });
+      { kind: failed || unconfirmed || notReady ? "warning" : "success" });
   };
 
   const deleteSelected = async () => {

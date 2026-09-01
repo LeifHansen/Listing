@@ -351,12 +351,21 @@ export function useListingForm() {
   }, []);
 
   // One-tap 90° clockwise rotate; only the rotated tile refreshes.
+  //
+  // RETHROWS after the toast. The tile turns its photo the moment the button
+  // is pressed and undoes that turn if the rotate fails (see PhotoTile) — and
+  // swallowing the error here meant the undo never ran. The photo stayed
+  // turned on screen while the saved file was untouched, and since a failed
+  // rotate also bumps no version, nothing else came along to correct it: the
+  // seller was left looking at an orientation that did not exist, on a tile
+  // that would keep it until the editor was reopened.
   const rotateImage = useCallback(async (name) => {
     try {
       await postJson("/api/rotate-image", { session_id: sessionId, name });
       bumpImageVersion(name);
     } catch (e) {
       toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
+      throw e;
     }
   }, [sessionId, bumpImageVersion, toast]);
 
