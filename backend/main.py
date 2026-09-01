@@ -1026,6 +1026,13 @@ def ready(response: Response) -> dict:
     Deliberately cheap and side-effect free — no model load, no inference, no
     outbound call. A probe that does real work is a probe that falls over
     under the load it is meant to detect.
+
+    This is also the only PUBLIC payload carrying operational numbers, which
+    is deliberate: /api/health went back to liveness plus capability flags so
+    it stops publishing the deployment's internals to anyone who asks, and the
+    health-watch alarm reads its thresholds from here instead. Everything
+    added here has to earn that — a number or a boolean an operator acts on,
+    never a name, a host, a bucket or an exception's text.
     """
     free_mb = round(storage.disk_free_bytes() / 1e6)
     database = db.db_status()
@@ -1038,11 +1045,36 @@ def ready(response: Response) -> dict:
         "database": (not database.get("configured")) or bool(database.get("connected")),
     }
     engine = images.engine_state()
+    # Photo offload, reported OUTSIDE `checks` on purpose.
+    #
+    # R2 failing is invisible from everywhere else: the module latches itself
+    # off, every photo quietly stays on the volume, the volume then cannot be
+    # reclaimed, and publishes start failing later for what looks like an
+    # unrelated reason. So it has to be visible to the alarm.
+    #
+    # But it must not flip the 503. Photos still land on the volume and the
+    # app is still serving; taking the only machine out of the load balancer
+    # over a Cloudflare blip would turn a degradation into an outage.
+    #
+    # Booleans only. The bucket name, the URL mode, the missing variables'
+    # NAMES and the raw error (whose endpoint carries the R2 account id) stay
+    # on /api/admin/diagnostics, behind the token.
+    objstore_state = {
+        # Credentials present. Deliberately NOT objstore.enabled(), which also
+        # goes false for the 600s latch: read through enabled(), "nobody ever
+        # set this up" and "it broke ten minutes ago" arrive as the same
+        # answer, which is what used to send an operator hunting for variables
+        # that were all set. This stays true through the latch; `degraded`
+        # below owns that case.
+        "configured": config.r2_configured(),
+        # The latch is tripped right now: photos are not reaching the bucket.
+        "degraded": objstore.last_error() is not None,
+    }
     ok = all(checks.values())
     if not ok:
         response.status_code = 503
     return {"ready": ok, "checks": checks, "disk_free_mb": free_mb,
-            "image_engine": engine}
+            "object_storage": objstore_state, "image_engine": engine}
 
 
 def _category_query(listing) -> str:

@@ -116,10 +116,21 @@ alerting floor in `health-watch.yml` is 400MB free and the volume runs near
 500MB. `fly volumes list -a <app>` reports the size; `fly volumes extend
 <id> --size 3` raises it without a redeploy.
 
-Everything else worth checking, production answers itself:
+Everything else worth checking, production answers itself — but mind **which**
+endpoint, because that changed. `/api/health` is anonymous and unrate-limited,
+so it was cut back to liveness plus the capability flags the UI reads; it no
+longer carries a single field below. The operator detail moved behind
+`ADMIN_TOKEN`, and the operational numbers are on the public readiness probe:
 
 ```bash
-curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
+# Disk, object storage and the database. Public — no token, and what the
+# health-watch alarm reads.
+curl -s https://<app>.fly.dev/api/ready | python3 -m json.tool
+
+# Everything else: config_warnings, bg_engines, the R2 bucket and the missing
+# variables by name, tokens/Stripe, the raw db and objstore errors.
+curl -s -H "x-admin-token: $ADMIN_TOKEN" \
+  https://<app>.fly.dev/api/admin/diagnostics | python3 -m json.tool
 ```
 
 - **`config_warnings`** is the field to read first. It names the two
@@ -152,8 +163,14 @@ curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
   into the key already there instead. Either turns ~107s per photo into a
   couple of seconds; both cost money per image, which is exactly why neither
   switches itself on.
-- **`disk_free_mb`**, **`db`**, **`objstore_*`** and **`build`** cover the rest;
-  `health-watch.yml` already alerts on them every two hours.
+- **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
+  cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
+  on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
+  it at the latter is what left it failing on every schedule for four days
+  against a production that was entirely healthy, and an alarm that is always
+  red cannot report the real thing. `object_storage` there is two booleans on
+  purpose (`configured`, `degraded`): the bucket name and the raw reason name
+  the R2 account, so they stay on the diagnostics endpoint.
 
 The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
 sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
@@ -268,7 +285,9 @@ Without them, you can still type a category ID manually in the preview.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET`  | `/api/health` | Config status (AI / eBay) |
+| `GET`  | `/api/health` | Liveness, the build sha, and the capability flags the UI reads (AI / eBay / taxonomy). Public, and nothing else — the operator detail is on `/api/admin/diagnostics` |
+| `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
+| `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id` |
 | `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
@@ -425,8 +444,10 @@ errors on a DB problem. Tables are auto-created on first use.
    Only `R2_ACCOUNT_ID` + `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` are
    needed — the bucket is auto-created (override with `R2_BUCKET`) and photos
    are served via presigned URLs, or straight from the bucket if you set
-   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset; `/api/health`
-   shows `objstore_missing` when partially configured.
+   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset;
+   `/api/admin/diagnostics` shows `objstore_missing` when partially
+   configured, and `/api/ready` says `object_storage.configured` without a
+   token.
 7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
    reuses every `/api/*` endpoint.
 8. **Item Identifier (mobile-only)** — double-layer identification: Claude's
