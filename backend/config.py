@@ -196,6 +196,43 @@ def r2_public_urls() -> bool:
 # Used for CORS and to send OAuth flows back into the app when they finish.
 NATIVE_APP_ORIGIN = os.getenv("NATIVE_APP_ORIGIN", "capacitor://localhost").strip().rstrip("/")
 
+
+# --- The hostnames this app answers on -------------------------------------
+# The app is reachable on more than one origin (app.thryftshop.com and its
+# listing-*.fly.dev host). That is invisible to almost everything -- URLs are
+# built from the incoming request -- with one exception: an OAuth flow.
+#
+# A marketplace sends the seller back to the ONE callback URL registered
+# against the credential (eBay resolves a RuName to a single accepted URL;
+# Etsy and Depop match redirect_uri exactly). The CSRF nonce cookie set when
+# the flow starts is host-only, so a connect begun on one origin and returned
+# to another arrives with no cookie and is rejected as "expired" -- on a
+# hostname where the seller's session cookie does not exist either, so they
+# also look logged out.
+#
+# OAUTH_ORIGIN names the origin those callback URLs point at. When a connect
+# starts anywhere else, it is bounced there first (carrying a 60-second ticket,
+# since the session cookie cannot cross) and the seller is returned to the
+# origin they started on when the flow ends. Leave it unset and none of that
+# happens -- the single-origin behaviour every self-hoster and local dev has.
+OAUTH_ORIGIN = os.getenv("OAUTH_ORIGIN", "").strip().rstrip("/")
+
+# Every origin this app is served on. The ONLY values a connect flow will send
+# a seller back to, which is what keeps the return trip from becoming an open
+# redirect: the Host header is client-controlled (Fly forwards what it is
+# given), so neither the origin a connect arrives on nor the one asked for in
+# the bounce is trusted unless it is named here.
+APP_ORIGINS = tuple(
+    o.strip().rstrip("/")
+    for o in os.getenv("APP_ORIGINS", "").split(",")
+    if o.strip()
+)
+
+
+def oauth_return_ok(origin: str) -> bool:
+    """Is `origin` one this app is served on, and safe to return a flow to?"""
+    return bool(origin) and origin in APP_ORIGINS
+
 # --- Anthropic / Claude ----------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()

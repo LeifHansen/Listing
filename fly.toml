@@ -13,6 +13,24 @@ primary_region = 'sjc'
   # production API. (A secret named EBAY_ENV would override this either way.)
   EBAY_ENV = 'production'
   PORT = '8080'
+  # The app answers on app.thryftshop.com as well as listing-lfwjrg.fly.dev
+  # (GoDaddy CNAME + the certificate the deploy workflow registers). Only OAuth
+  # cares which one a request arrived on: eBay resolves EBAY_RUNAME to a single
+  # accepted URL, and Etsy/Depop match redirect_uri exactly, so every callback
+  # comes back to ONE origin no matter where the seller started.
+  #
+  # OAUTH_ORIGIN is that origin. It stays the .fly.dev host because that is
+  # what is registered in the marketplace consoles today — so nothing has to be
+  # re-registered for app.thryftshop.com to work, and a seller who starts a
+  # connect there is bounced here for the handshake and returned to
+  # app.thryftshop.com at the end. Change it only in step with the accepted URL
+  # on developer.ebay.com and the Etsy/Depop callback settings.
+  OAUTH_ORIGIN = 'https://listing-lfwjrg.fly.dev'
+  # Every origin the app is served on, and the only ones a connect flow will
+  # return a seller to. The Host header is client-controlled, so this list is
+  # what stops the return trip being an open redirect. Add a hostname here in
+  # the same commit that gives it a certificate.
+  APP_ORIGINS = 'https://app.thryftshop.com,https://listing-lfwjrg.fly.dev'
   DATA_DIR = '/data'
   # Etsy approved this app on 2026-08-31 — at the PERSONAL tier, which seats a
   # handful of shops (Etsy documents 4), not the unlimited Commercial Access

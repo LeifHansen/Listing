@@ -178,25 +178,55 @@ In GoDaddy → your domain → DNS → Records:
 | `A` | `@` | `66.241.124.158` | The apex. An `A` record, so no apex-CNAME problem. Shared IPv4 — Fly routes by SNI, which is all an HTTPS site needs |
 | `AAAA` | `@` | `2a09:8280:1::180:7b83:0` | Dedicated |
 | `CNAME` | `www` | `thryft-marketing.fly.dev` | Redirected to the apex; this site canonicalizes to the apex |
-| `CNAME` | `app` | `listing-lfwjrg.fly.dev` | The product. Additive — the `.fly.dev` host keeps working |
+| `CNAME` | `app` | `listing-lfwjrg.fly.dev` | The product, and where the site's CTAs point. Additive — the `.fly.dev` host keeps working |
 
 Then tell Fly which hostnames it should answer for, and it issues the
 certificates itself:
 
 ```bash
 cd marketing && fly certs add thryftshop.com && fly certs add www.thryftshop.com
-fly certs add app.thryftshop.com -a listing-lfwjrg          # only when cutting the app over
 ```
 
 DNS alone is not enough — a Fly app rejects a hostname it has not been told
 about, and the certificate is issued against the DNS record, so add the record
 first and the cert second.
 
-Moving the product onto `app.thryftshop.com` stays a separate decision from
-putting this site live. `listing-lfwjrg.fly.dev` keeps working throughout, the
-SPA mount does not move, and the eBay/Etsy/Depop redirect URIs and
-`capacitor.config.json`'s `allowNavigation` only need updating if and when you
-cut over.
+**`app.thryftshop.com` is not on that list, because it is no longer a manual
+step.** The product's own deploy workflow registers it (`.github/workflows/
+deploy.yml`, "The app answers for app.thryftshop.com") — idempotently, and
+without ever failing a release if the token cannot mint certificates. That line
+used to live here, annotated "only when cutting the app over", and the
+predictable happened: the `app` CNAME resolved for weeks while the hostname
+served a certificate error, because a command in a README is not a command
+anyone runs. The bootstrap the marketing deploy already does for its own app
+and IPs is the precedent; this is the same idea one file over.
+
+### The app is on both hostnames
+
+`https://app.thryftshop.com` is where the marketing site sends everyone
+(`src/lib/site.js`, `APP_URL`). `listing-lfwjrg.fly.dev` keeps working
+alongside it — the SPA mount does not move, and every URL the backend builds
+comes from the incoming request.
+
+The one thing that cannot follow the request is OAuth. A marketplace returns a
+seller to the single callback URL registered against the credential (eBay
+resolves `EBAY_RUNAME` to one accepted URL; Etsy and Depop match `redirect_uri`
+exactly), while the CSRF nonce cookie is host-only — so a connect begun on the
+hostname the callback does *not* return to would be refused as "expired", on a
+host where the seller's session cookie does not exist either.
+
+So the app is told which origin those callbacks point at. `fly.toml` sets:
+
+| | |
+|---|---|
+| `OAUTH_ORIGIN` | `https://listing-lfwjrg.fly.dev` — what is registered in the marketplace consoles today |
+| `APP_ORIGINS` | both hostnames; the only origins a flow may return a seller to |
+
+A connect started on `app.thryftshop.com` is sent to `OAUTH_ORIGIN` for the
+handshake and the seller is returned to `app.thryftshop.com` at the end.
+**Nothing has to be re-registered at eBay, Etsy or Depop for this to work.** If
+you ever do move the accepted URL onto `app.thryftshop.com`, change
+`OAUTH_ORIGIN` in the same commit and it keeps working in the other direction.
 
 ### Reserved, deliberately unset
 
@@ -231,12 +261,20 @@ Done:
 - [x] ~~A deploy credential for CI~~ — `FLY_MARKETING_TOKEN`, scoped to this
       app alone. `FLY_API_TOKEN` is scoped to the product and cannot reach
       this one, which is what made the first three deploys fail
+- [x] ~~The four DNS records at GoDaddy~~ (see "The records" above) — all
+      resolve: the apex and `www` reach `thryft-marketing`, and `app` reaches
+      `listing-lfwjrg`
+- [x] ~~A certificate for `app.thryftshop.com`~~ — the product's deploy
+      workflow registers it on every run, so it cannot be forgotten again. This
+      is the half that was missing: the `app` record resolved while the
+      hostname still served a certificate error
 
 Left:
 
-- [ ] The four DNS records at GoDaddy (see "The records" above), then
-      `fly certs add thryftshop.com -a thryft-marketing` and the same for
-      `www.` — DNS first, certificate second
+- [ ] Confirm `fly certs add thryftshop.com -a thryft-marketing` and the same
+      for `www.` have been run. DNS is in place, so nothing blocks them; unlike
+      the app's certificate these are still a manual step, because the
+      marketing deploy only prints the commands into its job summary
 - [ ] Set the `MARKETING_SITE_URL` repository variable to
       `https://thryftshop.com` so CI builds and the deploy check match. Until
       then the site builds against the default and deploys to
