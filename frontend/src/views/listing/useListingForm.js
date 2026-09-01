@@ -9,7 +9,8 @@ import {
 } from "./publishShared";
 import { ebayBlockers, weightOz } from "./blockers";
 import {
-  confirmSpecificRows, specificValues, toggleSpecificValue as toggleValue,
+  confirmSpecificRows, specificRowIndex, specificValues,
+  toggleSpecificValue as toggleValue,
 } from "./specifics";
 
 /* All state + actions for the listing workflow. The form object mirrors the
@@ -150,18 +151,33 @@ export function useListingForm() {
       package_length_in: num(form.package_length_in),
       package_width_in: num(form.package_width_in),
       package_height_in: num(form.package_height_in),
-      item_specifics: form.item_specifics
-        .map((s) => ({ name: s.name.trim(), value: s.value.trim(), confidence: s.confidence || "" }))
-        .filter((s) => s.name),
+      // Blank rows are kept (a specific being typed still needs its row) —
+      // except where the SAME aspect already has an answer elsewhere in the
+      // list. Those are pure leftovers, and a blank row sitting in front of
+      // the answer is what made a filled aspect read as empty.
+      item_specifics: (() => {
+        const rows = form.item_specifics
+          .map((s) => ({ name: s.name.trim(), value: s.value.trim(),
+                         confidence: s.confidence || "" }))
+          .filter((s) => s.name);
+        const answered = new Set(
+          rows.filter((s) => s.value).map((s) => s.name.toLowerCase()));
+        return rows.filter((s) => s.value || !answered.has(s.name.toLowerCase()));
+      })(),
       images: form.images || [],
       currency: form.currency || "USD",
     };
   }, [form, session]);
 
   // ---------- item specifics (single source of truth) ----------
-  const getSpecificRow = useCallback((name) => form.item_specifics.find(
-    (s) => s.name.trim().toLowerCase() === name.toLowerCase()) || null,
-  [form.item_specifics]);
+  // The aspect's ANSWER row — the first one holding a value, not just the
+  // first one carrying the name (see specifics.js). An empty leftover row
+  // used to shadow the real value: the field rendered blank and the blocker
+  // list called a filled aspect missing.
+  const getSpecificRow = useCallback((name) => {
+    const i = specificRowIndex(form.item_specifics, name);
+    return i >= 0 ? form.item_specifics[i] : null;
+  }, [form.item_specifics]);
 
   const getSpecific = useCallback(
     (name) => getSpecificRow(name)?.value || "", [getSpecificRow]);
@@ -185,7 +201,9 @@ export function useListingForm() {
   const upsertSpecific = useCallback((name, value) => {
     setForm((f) => {
       const specs = [...f.item_specifics];
-      const i = specs.findIndex((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+      // The same row getSpecificRow shows, so an edit lands on the value the
+      // seller is looking at rather than on an empty row hiding above it.
+      const i = specificRowIndex(specs, name);
       if (i >= 0) specs[i] = { ...specs[i], value, confidence: "" };
       else if (value) specs.push({ name, value, confidence: "" });
       return { ...f, item_specifics: specs };
@@ -487,7 +505,15 @@ export function useListingForm() {
   const runPreflight = useCallback(async () => {
     setAiBusy(["Checking everything the marketplaces require…"]);
     try {
-      const body = { session_id: sessionId, listing: collect(), mode: "live" };
+      // The mode the PUBLISH will actually run in: an edit to a live listing
+      // is a revise, and the server checks a revise against what it resends,
+      // not against the full create contract (see preflight.validate). Asking
+      // for the create checklist here reported a package weight and category
+      // aspects the live listing had already satisfied on eBay.
+      const body = {
+        session_id: sessionId, listing: collect(),
+        mode: isLive ? "revise" : "live",
+      };
       if (chipTargets) body.marketplaces = chipTargets;
       const res = await postJson("/api/publish-preflight", body);
       // Marketplace-specific checklists ride along under by_marketplace —
@@ -512,7 +538,7 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }, [collect, sessionId, toast, chipTargets]);
+  }, [collect, sessionId, toast, chipTargets, isLive]);
 
   // ---------- publish ----------
   const publish = useMemo(() => once("publish", async (mode) => {
@@ -740,12 +766,18 @@ export function useListingForm() {
   // categoryMeta. Everything downstream — the card chips, the publish bar,
   // the jump buttons — reads this and nothing else, so a card can only be
   // flagged for a reason that genuinely blocks a publish.
+  // Checked against the contract this listing will actually publish under:
+  // "revise" for one that is already live on eBay (the Update button), "live"
+  // for a draft or a relist. Editing a live listing was being held to the
+  // create contract, so a seller could be locked out of fixing a typo by a
+  // package weight eBay never asked them for.
   const blockers = useMemo(
     () => ebayBlockers(collect(), {
       targets: chipTargets,
       aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
+      mode: isLive ? "revise" : "live",
     }),
-    [collect, categoryMeta.aspects, chipTargets]);
+    [collect, categoryMeta.aspects, chipTargets, isLive]);
 
   // ---------- completion per workflow card ----------
   // Three states, and the distinction between the last two is the whole

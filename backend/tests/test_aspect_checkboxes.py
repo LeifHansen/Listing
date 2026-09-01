@@ -153,6 +153,36 @@ def test_single_aspect_keeps_the_value_it_has():
     assert [s.value for s in listing.item_specifics] == ["Slim"]
 
 
+def test_a_blank_row_is_filled_in_place_not_duplicated():
+    """The identify pass can return an aspect NAMED with nothing in it, and a
+    cleared field leaves the same shape behind. Appending the enrichment's
+    value as a second row left the listing holding ["Color" = "", "Color" =
+    "Multi-Color"]: answered to anything reading every row (this server) and
+    EMPTY to anything stopping at the first — which is how a seller was told a
+    required Color was missing while looking straight at it."""
+    listing = _listing([ItemSpecific(name="Color", value="", confidence="medium")])
+    added = main._merge_filled_specifics(
+        listing, [ItemSpecific(name="Color", value="Multi-Color",
+                               confidence="medium")],
+        [_aspect("Color", values=["Multi-Color", "Red"], required=True)])
+    assert added == 1
+    assert [(s.name, s.value) for s in listing.item_specifics] == [
+        ("Color", "Multi-Color")]
+
+
+def test_a_blank_row_is_reused_once_then_the_rest_append():
+    """A multi-select aspect still collects every tick — the blank row is one
+    slot, not a lid on the aspect."""
+    listing = _listing([ItemSpecific(name="Features", value="",
+                                     confidence="medium")])
+    added = main._merge_filled_specifics(listing, [
+        ItemSpecific(name="Features", value="Lined", confidence="medium"),
+        ItemSpecific(name="Features", value="Pockets", confidence="medium"),
+    ], [FEATURES])
+    assert added == 2
+    assert [s.value for s in listing.item_specifics] == ["Lined", "Pockets"]
+
+
 def test_empty_aspect_takes_every_tick():
     added = main._merge_filled_specifics(listing := _listing([]), [
         ItemSpecific(name="Features", value="Lined", confidence="medium"),

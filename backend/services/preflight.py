@@ -245,7 +245,12 @@ def validate(listing: Listing, mode: str, *,
 
     # --- category-required item specifics ---
     if required_aspects:
-        have = {(s.name or "").strip().lower() for s in listing.item_specifics if s.value}
+        # Any row for the aspect that carries a value answers it — an aspect
+        # can own several rows (eBay's multi-selects) and a blank one can sit
+        # in front of the real answer. A value of nothing but spaces is not an
+        # answer, and eBay does not accept it as one.
+        have = {(s.name or "").strip().lower() for s in listing.item_specifics
+                if (s.value or "").strip()}
         if listing.brand:
             have.add("brand")
         missing = [a for a in required_aspects if a.strip().lower() not in have]

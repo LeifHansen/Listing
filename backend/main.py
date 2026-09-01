@@ -1168,11 +1168,22 @@ def _merge_filled_specifics(listing: Listing, filled: list,
              if (a.get("cardinality") or "SINGLE") == "MULTI"}
     have: dict[str, set[str]] = {}
     seller_owned: set[str] = set()
-    for s in listing.item_specifics:
+    # Rows that carry a NAME but no value — an identify pass that returned the
+    # aspect empty, a value the seller cleared. The fill below reuses them
+    # instead of appending a second row for the same aspect: a listing left
+    # holding ["Color" = "", "Color" = "Multi-Color"] reads as answered to
+    # anything that scans every row (this server) and as EMPTY to anything
+    # that stops at the first (the browser's blocker list did), which is how a
+    # seller ended up locked out of publishing over a Color they could see
+    # filled in. Same aspect, one row.
+    blanks: dict[str, int] = {}
+    for i, s in enumerate(listing.item_specifics):
         value = (s.value or "").strip()
-        if not value:
-            continue
         k = s.name.strip().lower()
+        if not value:
+            if k:
+                blanks.setdefault(k, i)
+            continue
         have.setdefault(k, set()).add(value.lower())
         if not (s.confidence or "").strip():
             seller_owned.add(k)
@@ -1198,7 +1209,11 @@ def _merge_filled_specifics(listing: Listing, filled: list,
                 continue
             held.add(value.lower())
             have[k] = held
-            listing.item_specifics.append(f)
+            blank_at = blanks.pop(k, None)
+            if blank_at is None:
+                listing.item_specifics.append(f)
+            else:
+                listing.item_specifics[blank_at] = f
             added += 1
     return added
 
