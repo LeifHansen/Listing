@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { FolderTree, Pencil, X } from "lucide-react";
-import { postJson } from "@/lib/api";
+import { patchJson, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useApp } from "@/store";
+import { useToast } from "@/components/ui/Toaster";
 
 /* Compact category display + changer for draft cards (drafts strip + bulk
    queue). A wrong AI category pick is easy to miss on a card that only shows
@@ -113,6 +115,42 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
           </span>
         </button>
       ))}
+    </div>
+  );
+}
+
+
+/* The same control, wired to a SAVED listing — display, pick, patch, refresh.
+
+   A wrong category is the AI misfire that costs most once it is published,
+   and it is invisible on a card that shows a title and a price. So it sits on
+   the face of every draft card there is: the drafts strip, the bulk queue,
+   the dashboard's recent cards and the listings manager. One component, so
+   the four cannot drift.
+*/
+export function DraftCategoryEdit({ item, className }) {
+  const { loadListings } = useApp();
+  const { toast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const save = async (patch) => {
+    setSaving(true);
+    try {
+      // The patch names the two category fields and leaves everything else
+      // as stored — a card must never write back a whole listing it only
+      // holds a summary of.
+      await patchJson(`/api/listings/${item.id}`, patch);
+      // Refresh the cache so the card (and its Publish gate, and the
+      // condition list that hangs off the category) sees the change.
+      await loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't save the category: ${e.message}`, { kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className={className}>
+      <CategoryQuickPick listing={item.listing} onPick={save} saving={saving} />
     </div>
   );
 }
