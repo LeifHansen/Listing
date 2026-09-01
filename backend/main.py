@@ -3892,6 +3892,78 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     return {"ok": True, "listing": data}
 
 
+def _listing_image_order(session_id: str,
+                         rec: Optional[dict]) -> Optional[list[str]]:
+    """The photo order this listing is SAVED with, or None when it is saved
+    nowhere yet.
+
+    The database row first, then the on-disk draft. The disk fallback is not
+    belt-and-braces: a database is optional (README: set DATABASE_URL "to
+    persist every listing"), and even where one is configured a row can be
+    absent because an earlier upsert never landed. With the row as the only
+    source, "no row" reads as "this listing has no photos" — which is what
+    turned every reorder on such a listing into the 409 below, telling the
+    seller their photos had "changed somewhere else" when nothing had
+    changed anywhere.
+    """
+    stored = [str(n) for n in ((rec or {}).get("listing") or {}).get("images") or []]
+    if stored:
+        return stored
+    disk = storage.load_listing(session_id)
+    if disk is None:
+        return None
+    return [str(n) for n in (disk.get("images") or [])]
+
+
+def _save_image_order(session_id: str, rec: Optional[dict],
+                      images: list[str], user_id: Optional[str]) -> list[str]:
+    """Persist `images` as the listing's photo order, and nothing else.
+
+    RAISES rather than reporting a save that recorded nothing: the caller's
+    client has already moved (or removed) the photo on screen, so a write
+    that quietly went nowhere is the seller dragging their main photo into
+    place and finding it moved again after a reload.
+    """
+    def _set_order(data: dict) -> dict:
+        data["images"] = list(images)
+        return data
+
+    if rec:
+        # A row exists, so it is the truth. Written under the row lock, like
+        # every other write that shares a listing with publish's background
+        # threads — and a failure is reported, not papered over with the disk
+        # copy, because the row is what the next page load reads.
+        data = db.mutate_listing_data(session_id, _set_order,
+                                      status=_sticky_status(rec), user_id=user_id)
+        if data is None:
+            raise errors.StorageUnavailable(
+                "Couldn't update this listing's photos just now — nothing has "
+                "changed. Try again in a moment.")
+        # Keep the on-disk copy in step; eBay is served photos in this order.
+        try:
+            storage.save_listing(session_id, Listing(**data))
+        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+            log.warning("images: disk mirror not updated for %s: %s",
+                        session_id, exc)
+        return [str(n) for n in (data.get("images") or images)]
+
+    # No row: the on-disk draft is the listing (see _listing_image_order).
+    disk = storage.load_listing(session_id)
+    if disk is None:
+        raise errors.StorageUnavailable(
+            "Couldn't update this listing's photos just now — this listing "
+            "isn't saved yet. Try again in a moment.")
+    data = _set_order(dict(disk))
+    try:
+        storage.save_listing(session_id, Listing(**data))
+    except Exception as exc:  # noqa: BLE001 - nothing was persisted; say so
+        log.warning("images: could not write the order for %s: %s", session_id, exc)
+        raise errors.StorageUnavailable(
+            "Couldn't update this listing's photos just now — nothing has "
+            "changed. Try again in a moment.") from exc
+    return [str(n) for n in (data.get("images") or images)]
+
+
 @app.patch("/api/listings/{session_id}/images/order")
 def reorder_images(session_id: str, req: ImageOrderRequest,
                    request: Request) -> dict:
@@ -3908,10 +3980,21 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     DELETE the photos missing from it, and "my photos vanished when I dragged
     one" is a considerably worse bug than the one being fixed. A mismatch is
     409 — the client refetches rather than forcing its stale view through.
+
+    What the guard compares against is the listing as it is SAVED — row,
+    on-disk draft, or (for a session whose draft predates either) the
+    optimized files themselves. Comparing against the database row alone made
+    the guard fire on listings that had drifted from it for reasons that were
+    never the client's doing, and the seller was told their photos had changed
+    somewhere else when they had not changed at all.
     """
     _assert_session_owner(session_id, request)
     rec = db.get_listing(session_id) or {}
-    stored = list((rec.get("listing") or {}).get("images") or [])
+    stored = _listing_image_order(session_id, rec)
+    if not stored:
+        # Never saved with a photo list of its own: the files on the volume
+        # are the only record of what this session holds.
+        stored = storage.list_optimized(session_id)
     wanted = [str(n).strip() for n in req.images if str(n).strip()]
     if sorted(wanted) != sorted(stored):
         log.info("reorder rejected: session=%s sent=%d stored=%d",
@@ -3922,22 +4005,7 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     if wanted == stored:
         return {"images": stored}
 
-    def _set_order(data: dict) -> dict:
-        data["images"] = wanted
-        return data
-
-    # Under the row lock, like every other write that shares a listing with
-    # publish's background threads.
-    data = db.mutate_listing_data(session_id, _set_order,
-                                  status=_sticky_status(rec), user_id=_uid(request))
-    saved = list((data or {}).get("images") or wanted)
-    # Keep the on-disk copy in step; eBay is served photos in this order.
-    if data:
-        try:
-            storage.save_listing(session_id, Listing(**data))
-        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
-            log.warning("reorder: disk mirror not updated for %s: %s",
-                        session_id, exc)
+    saved = _save_image_order(session_id, rec, wanted, _uid(request))
     log.info("reorder: session=%s %d photos", session_id, len(saved))
     return {"images": saved}
 
@@ -3994,6 +4062,25 @@ def delete_image(payload: dict, request: Request) -> dict:
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents:  # path-traversal guard
         raise HTTPException(400, "Invalid image name")
+    # Out of the LISTING first, then off the disk — and if the listing can't
+    # be written, nothing is deleted at all.
+    #
+    # This route used to unlink the file and stop there, which left the photo
+    # in the saved listing forever: a reload brought the deleted tile back
+    # pointing at bytes that no longer existed, a publish handed eBay a photo
+    # that 404s, and — because the editor's list and the stored list could
+    # never agree again — every later reorder was refused as a listing that
+    # "changed somewhere else". Bulk mode already knew this and followed its
+    # delete with a whole-listing save; doing it here means both callers get
+    # it, without a stale full-listing payload riding along (the very thing
+    # PATCH .../images/order exists to avoid).
+    rec = db.get_listing(session_id) or {}
+    stored = _listing_image_order(session_id, rec)
+    images = None
+    if stored is not None:
+        images = [n for n in stored if n != name]
+        if images != stored:
+            images = _save_image_order(session_id, rec, images, _uid(request))
     if path.is_file():
         try:
             path.unlink()
@@ -4005,7 +4092,12 @@ def delete_image(payload: dict, request: Request) -> dict:
         _in_background(objstore.delete, objstore.key_for(session_id, name),
                        what="delete-image R2")
     log.info("delete-image: session=%s name=%s", session_id, name)
-    return {"ok": True, "remaining": storage.list_optimized(session_id)}
+    remaining = storage.list_optimized(session_id)
+    # `images` is the listing's own order with the photo gone — what the
+    # editor should now be holding, and what the next reorder is checked
+    # against. A session with no saved listing has only its files to report.
+    return {"ok": True, "images": images if images is not None else remaining,
+            "remaining": remaining}
 
 
 # ---------- Bulk mode: one photo dump -> many listings ----------

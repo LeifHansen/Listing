@@ -372,6 +372,13 @@ export function useListingForm() {
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
   // server delete fails.
+  //
+  // The SESSION is updated alongside the form, and the server's remaining
+  // list is applied on top. Both matter beyond tidiness: the delete is now
+  // persisted server-side (see /api/delete-image), so its answer is the list
+  // the next reorder is checked against — and a form and session that
+  // disagree about the photos are what made a delete followed by a drag come
+  // back as "this listing's photos changed somewhere else".
   const deleteImage = useCallback(async (name, confirmFn) => {
     const prev = form.images || [];
     if (prev.length <= 1) {
@@ -384,14 +391,21 @@ export function useListingForm() {
       confirmLabel: "Delete",
       danger: true,
     }))) return;
-    setForm((f) => ({ ...f, images: f.images.filter((n) => n !== name) }));
+    const setImages = (imgs) => {
+      setForm((f) => ({ ...f, images: imgs }));
+      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+    };
+    const next = prev.filter((n) => n !== name);
+    setImages(next);
     try {
-      await postJson("/api/delete-image", { session_id: sessionId, name });
+      const res = await postJson("/api/delete-image", { session_id: sessionId, name });
+      const saved = Array.isArray(res?.images) && res.images.length ? res.images : next;
+      if (saved.join("|") !== next.join("|")) setImages(saved);
     } catch (e) {
-      setForm((f) => ({ ...f, images: prev }));
+      setImages(prev);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, toast]);
+  }, [form.images, sessionId, setForm, setSession, toast]);
 
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
