@@ -19,7 +19,7 @@ import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
-  MarketTargetChips, publishListing, usePublishTargets, blockedReason,
+  MarketTargetChips, publishListing, usePublishTargets, publishTally,
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
 import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
@@ -556,23 +556,25 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             .map(([key, r]) => `${key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
             .join(" · ")
         : null;
+      // Refused, unanswered, or live — the three outcomes, decided in one
+      // place (see publishShared.publishTally). Not blockedReason directly:
+      // eBay's catch-all for an account-level hold blames the title, and an
+      // outcome the SERVER could not establish is not a rejection at all.
+      const tally = publishTally(
+        res, "Publish blocked — open the full editor to fix.");
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
         ? {
             ...x,
-            status: res.published ? "published" : "draft",
+            status: tally.published ? "published" : "draft",
             listing_id: (res.multi
               ? res.results?.ebay?.listing_id : res.listing_id) || null,
-            error: res.published
+            error: tally.published
               ? (res.multi && Object.values(res.results || {}).some((r) => !r.ok)
                   ? `${summary} — open the full editor to fix the rest.` : null)
-              // blockedReason, not res.message — see publishShared: eBay's
-              // catch-all for an account-level hold blames the title.
-              : blockedReason(res, "Publish blocked — open the full editor to fix."),
+              : tally.reason,
           }
         : x));
-      return { published: !!res.published,
-               reason: res.published ? null
-                 : blockedReason(res, "Publish blocked — open the full editor to fix.") };
+      return tally;
     } catch (e) {
       // publishListing has already asked the server what became of a publish
       // whose answer was lost; reaching here with that flag still set means

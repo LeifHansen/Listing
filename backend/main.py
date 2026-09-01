@@ -5418,6 +5418,12 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                 "url": o.url,
                 "message": o.message,
                 "issues": o.issues,
+                # Only when true, like the two below it: a marketplace that
+                # refused the listing says nothing here, and the clients read
+                # its absence as "this outcome is known". What it means when
+                # present is in PublishOutcome — the seller must check that
+                # marketplace before publishing again, not fix a field.
+                **({"outcome_unknown": True} if o.outcome_unknown else {}),
                 **({"promote_status": o.raw["promote_status"]}
                    if o.raw.get("promote_status") else {}),
                 **({"record_warning": o.raw["record_warning"]}

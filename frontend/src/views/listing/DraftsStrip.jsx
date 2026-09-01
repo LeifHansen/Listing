@@ -14,7 +14,7 @@ import { ViewToggle } from "@/components/ui/ViewToggle";
 import { CategoryQuickPick } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
-  MarketTargetChips, publishListing, usePublishTargets, blockedReason,
+  MarketTargetChips, publishListing, usePublishTargets, publishTally,
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
@@ -166,7 +166,15 @@ export function DraftsStrip({ search = "" }) {
       // Move the card out of Drafts on the spot — the refresh below confirms
       // it, but a live listing must never linger under Drafts waiting for one.
       if (res.published) patchListing(item.id, { status: "published" });
-      return { published: !!res.published, res };
+      // The same three-way read the batch queue uses. An outcome the server
+      // could not establish stays a draft here (it may not be one on eBay,
+      // which is exactly why the seller is sent to look) but it is never
+      // counted or worded as a refusal.
+      const tally = publishTally(
+        res, "Publish blocked — open the draft to see what to fix.");
+      return { published: tally.published, res, reason: tally.reason,
+               unconfirmed: tally.unconfirmed,
+               ...(tally.unconfirmed ? { error: UNCONFIRMED_PUBLISH } : {}) };
     } catch (e) {
       // publishListing has already asked the server what became of a publish
       // whose answer was lost; still flagged here means it could not tell.
@@ -190,7 +198,7 @@ export function DraftsStrip({ search = "" }) {
       message: `"${name}" goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return false;
-    const { published, res, error, unconfirmed } = await publishItem(item);
+    const { published, res, error, reason, unconfirmed } = await publishItem(item);
     if (error) {
       // "Publish error" is the wrong headline for a publish that may have
       // worked — the sentence already says what to do, and calling it an
@@ -211,10 +219,11 @@ export function DraftsStrip({ search = "" }) {
         : (res.message || "Published! It's live now."),
         { kind: partial ? "warning" : "success" });
     } else {
-      // blockedReason, not res.message — see publishShared: eBay's catch-all
-      // for an account-level hold blames the title.
-      toast(blockedReason(res, "Publish blocked — open the draft to see what to fix."),
-        { kind: "warning" });
+      // The reason publishItem worked out, not res.message — see
+      // publishShared: eBay's catch-all for an account-level hold blames the
+      // title. (An unanswered publish never reaches here; it left through the
+      // `error` branch above with its own sentence.)
+      toast(reason, { kind: "warning" });
     }
     await loadListings({ quiet: true });
     return published;
@@ -258,8 +267,7 @@ export function DraftsStrip({ search = "" }) {
           // one account-level hold reported "5 need attention — open them to
           // fix" and sent the seller to inspect five listings that were never
           // the problem. That is the shape of the failures in production.
-          reasons.push(out.error
-            || blockedReason(out.res, "Publish blocked — open the draft to see what to fix."));
+          reasons.push(out.error || out.reason);
         }
         setBulkProgress((p) => ({ ...p, done: ok + failed + unconfirmed }));
       }

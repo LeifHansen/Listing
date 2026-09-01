@@ -145,6 +145,38 @@ export const UNCONFIRMED_PUBLISH =
   "eBay didn't answer in time. This may already be live — check your store "
   + "before publishing it again.";
 
+// Did the SERVER say it could not establish what the marketplace did?
+//
+// The other half of the same question `err.unknownOutcome` answers for this
+// client. When the request reaches eBay and the reply is lost on the server
+// side, the app is not left guessing: services/ebay_trading raises its own
+// UnknownOutcome, and the providers now stamp `outcome_unknown` on the
+// publish body (top level on the legacy single-eBay response, per
+// marketplace on a fan-out). Before that flag existed this arrived as an
+// ordinary unsuccessful publish, and the bulk summaries called it "refused".
+export function outcomeUnknown(res) {
+  if (!res) return false;
+  if (res.outcome_unknown) return true;
+  return Object.values(res.results || {}).some((r) => r?.outcome_unknown);
+}
+
+// How one publish lands in a bulk run's tally, and what its card says.
+//
+// Three outcomes, not two, and the third is the one that matters: a listing
+// eBay refused (open it, fix the field), a listing that went live, and a
+// listing nobody can say either way about — which must be CHECKED, never
+// republished on the strength of a summary line. Both queues ask this rather
+// than each writing the ternary themselves; they are the two screens where a
+// wrong answer is repeated across a whole batch.
+export function publishTally(res, fallback) {
+  if (res?.published) return { published: true, unconfirmed: false, reason: null };
+  if (outcomeUnknown(res)) {
+    return { published: false, unconfirmed: true, reason: UNCONFIRMED_PUBLISH };
+  }
+  return { published: false, unconfirmed: false,
+           reason: blockedReason(res, fallback) };
+}
+
 // What to TELL the seller when a publish did not go live.
 //
 // res.message is eBay's own sentence, and for its catch-all rejections that

@@ -355,8 +355,15 @@ class EtsyProvider:
             # Catching Exception, not just ValueError: an httpx.ReadTimeout on
             # the photo upload is the same situation and used to escape to the
             # orchestrator's broad handler, which had no id to record either.
-            return PublishOutcome(ok=False, listing_id=str(listing_id or ""),
-                                  message=str(exc), issues=issues)
+            # Refused by Etsy, or sent and never answered for? The client
+            # raises its own UnknownOutcome for the second (see
+            # services/etsy), and the flag is how the surfaces downstream can
+            # tell the two apart without reading the sentence. See
+            # PublishOutcome.
+            return PublishOutcome(
+                ok=False, listing_id=str(listing_id or ""),
+                message=str(exc), issues=issues,
+                outcome_unknown=bool(getattr(exc, "outcome_unknown", False)))
 
         url = res.get("url") or _view_url(listing_id)
         log.info("etsy publish ok: session=%s listing=%s mode=%s",
