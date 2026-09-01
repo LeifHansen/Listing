@@ -198,13 +198,24 @@ export function AppProvider({ children }) {
   // ---------- auth ----------
   const [user, setUser] = useState(null);
   const [authOpen, setAuthOpen] = useState(false);
+  // Which tab the auth dialog opens on. Lifted out of AuthDialog so arriving
+  // from the marketing site's "Sign up" can choose it before the dialog mounts.
+  const [authMode, setAuthMode] = useState("login");
+  // The marketing site's Sign up links land on /?signup=1. Read once, at the
+  // first render, because loadAuth removes it from the URL once it has acted.
+  const signupIntent = useRef(
+    typeof window !== "undefined"
+    && new URLSearchParams(window.location.search).get("signup") === "1",
+  );
   // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
   const afterLogin = useRef(null);
 
   const loadAuth = useCallback(async () => {
+    let signedIn = false;
     try {
       const res = await api("/api/auth/me");
       setUser(res.user);
+      signedIn = !!res.user;
     } catch (e) {
       // A server that cannot ANSWER is not a server saying "not signed in".
       // /api/auth/me is 503 when the session lookup itself fails (a database
@@ -219,6 +230,28 @@ export function AppProvider({ children }) {
       // cold load there is nothing to keep, so a first-time visitor still
       // lands on the signed-out app.
       if (e.status && e.status < 500) setUser(null);
+    } finally {
+      // Someone who clicked "Sign up" on the marketing site should land in the
+      // signup form, not on a signed-out app with nothing open.
+      //
+      // This lives here, after the answer, rather than in an effect watching
+      // `user`: `user` is null both before /api/auth/me replies and when it
+      // says nobody is signed in, so an effect cannot tell those apart without
+      // a second state to track it — and a seller who is ALREADY signed in and
+      // follows the same link (a bookmark, a pasted URL) must never get a
+      // signup box thrown over their own dashboard while the request is still
+      // in flight. The param is then dropped, so a refresh does not reopen it
+      // forever.
+      if (signupIntent.current) {
+        signupIntent.current = false;
+        if (!signedIn) {
+          setAuthMode("signup");
+          setAuthOpen(true);
+        }
+        const url = new URL(window.location.href);
+        url.searchParams.delete("signup");
+        window.history.replaceState({}, "", url.toString());
+      }
     }
   }, []);
 
@@ -1123,7 +1156,7 @@ export function AppProvider({ children }) {
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     listingsLayout, setListingsLayout,
     health, loadHealth,
-    user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
+    user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
     marketplaces, loadMarketplaces, connectedMarketplaces,
@@ -1140,7 +1173,7 @@ export function AppProvider({ children }) {
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
   }), [
-    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
+    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
     isSuperadmin,
     listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,

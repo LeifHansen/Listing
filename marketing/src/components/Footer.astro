@@ -1,6 +1,6 @@
 ---
 import Container from "./Container.astro";
-import { site, footerNav, APP_URL } from "../lib/site.js";
+import { site, footerNav, LOGIN_URL } from "../lib/site.js";
 const year = new Date().getFullYear();
 ---
 <footer class="border-t border-line bg-bg-sunken">
@@ -12,8 +12,8 @@ const year = new Date().getFullYear();
           <span class="font-display text-lg font-semibold text-ink">{site.name}</span>
         </div>
         <p class="mt-3 max-w-xs text-sm text-ink-secondary">{site.tagline}</p>
-        <a href={APP_URL} class="mt-4 inline-block text-sm font-semibold text-blue-ink hover:underline">
-          Open the app →
+        <a href={LOGIN_URL} class="mt-4 inline-block text-sm font-semibold text-blue-ink hover:underline">
+          Log in →
         </a>
       </div>
 

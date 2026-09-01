@@ -16,8 +16,8 @@ export function AuthDialog() {
   // convention here so the React Compiler can tell it is a ref (it loses that
   // identity coming out of the context object) and allows the `.current` write
   // below. Same object either way — rename only.
-  const { authOpen, setAuthOpen, setUser, loadEbayStatus, afterLogin: afterLoginRef } = useApp();
-  const [mode, setMode] = useState("login");
+  const { authOpen, setAuthOpen, authMode: mode, setAuthMode: setMode,
+          setUser, loadEbayStatus, afterLogin: afterLoginRef } = useApp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
