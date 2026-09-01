@@ -467,6 +467,35 @@ def fit_condition_to_category(listing: Listing,
     return current
 
 
+def fit_paired_aspects_to_category(listing: Listing) -> list[tuple]:
+    """Make the listing's item specifics legal beside each other.
+
+    eBay refuses a Size Type that its own aspect list does not pair with the
+    Size ("“Regular” is not a valid Size Type for the Size “33”. Select a
+    compatible Size Type and Size combination") — after the photos are up,
+    with no listing and nothing on screen the seller can act on. eBay
+    publishes the pairing per category; this applies it rather than guessing.
+
+    Best-effort in every direction: no category, no aspect list, or a Taxonomy
+    call that fails all leave the listing exactly as it was. A convenience,
+    never a blocker.
+    """
+    cid = (listing.category_id or "").strip()
+    if not cid.isdigit() or not config.taxonomy_ready():
+        return []
+    try:
+        aspects = taxonomy.item_aspects(cid).get("aspects", [])
+        fixed = taxonomy.fit_paired_aspects(listing, aspects)
+    except Exception as exc:  # noqa: BLE001 - a convenience, never a blocker
+        log.info("aspect pairing: category %s failed: %s: %s",
+                 cid, type(exc).__name__, exc)
+        return []
+    for name, was, now in fixed:
+        log.info("aspect pairing: %s %s -> %s (category %s)",
+                 name, was or "(blank)", now, cid)
+    return fixed
+
+
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = creds_for(uid)
@@ -733,6 +762,11 @@ class EbayProvider:
         # first; anything that can't be fitted honestly is left alone and the
         # checklist below reports it.
         fit_condition_to_category(listing, creds)
+        # Same shape of failure one field over: eBay pairs Size Type with
+        # Size, and refuses a combination it does not publish. Runs here, on
+        # the way out, so a draft already carrying a refused pairing is
+        # rescued without the seller re-doing anything.
+        fit_paired_aspects_to_category(listing)
         # Which of the three publish routes this request takes is the single
         # most useful thing to know when a publish "does nothing" — create,
         # revise, or the Inventory fallback, and what decided it. One line,

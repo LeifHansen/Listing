@@ -1296,6 +1296,7 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[in
     added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    _pair_aspects(listing, aspects)
     return added
 
 
@@ -1373,6 +1374,17 @@ def _identify_chain() -> str:
     return os.getenv("IDENTIFY_CHAIN", "v2").strip().lower() or "v2"
 
 
+def _pair_aspects(listing: Listing, aspects: list[dict]) -> None:
+    """Make the specifics eBay pairs with each other agree. Never raises —
+    the draft is worth more than the tidy-up."""
+    try:
+        for name, was, now in taxonomy.fit_paired_aspects(listing, aspects):
+            log.info("aspect pairing: %s %s -> %s (cat=%s)",
+                     name, was or "(blank)", now, listing.category_id)
+    except Exception as exc:  # noqa: BLE001 - a convenience, never a blocker
+        log.info("aspect pairing skipped (cat=%s): %s", listing.category_id, exc)
+
+
 def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
                        progress=None) -> Optional[int]:
     """Chain v2 enrichment: ONE consolidated vision call fills the category's
@@ -1403,6 +1415,11 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
     added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    # eBay pairs some aspects with others — a Size Type has to be one it
+    # publishes beside the Size on the tag. Done here, on the draft, so the
+    # seller reads the answer in the editor and can still change it; the
+    # publish path applies the same rule again for drafts made before this.
+    _pair_aspects(listing, aspects)
     if candidate:
         # Re-check what's still missing AFTER the merge — "Brand" is itself an
         # aspect, so the fill above may have just answered it, and the verify
