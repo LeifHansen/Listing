@@ -310,6 +310,7 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
+| `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 | `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |
@@ -684,11 +685,24 @@ problem:
   eBay through the same revise path a single edit uses.
 - **Promote listings → "Promote all"** promotes every live, unpromoted listing at
   eBay's recommended ad rate.
+- **Fill in details → "Enrich all"** fills every listing in the group in one
+  pass: eBay's required and recommended item specifics for that listing's
+  category, read off its own photos (the same enrichment a fresh AI draft
+  gets, `_enrich_listing`), merged in **without** overwriting anything the
+  seller wrote, then pushed to the live listing. Notes in `missing_info` that
+  the fill actually answered are dropped, so the suggestion goes away instead
+  of sitting there after the work is done; a note nothing filled is kept, and
+  that listing is reported as one that still needs a human. Because a vision
+  pass per listing takes minutes, this one runs as a **background job**
+  (`POST /api/listings/enrich` → `job_id`, polled on `/api/bulk/status/{id}`),
+  one per account at a time, capped at `BULK_ENRICH_CAP` (default 25) per run.
+  It spends AI tokens per listing, so the button confirms the count and the
+  cost first, and a listing it can't reach (no category, photos gone, eBay not
+  connected) is skipped **before** it is charged for.
 
-Photos, specifics, finish and relist deliberately have none: the first two need a
-human looking at each item, and the last two create listings, which isn't
-something to put behind a single button. The rules bulk runs follow —
-`services/bulk_actions.py`:
+Photos, finish and relist deliberately have none: photos need a human holding
+the item, and the last two create listings, which isn't something to put behind
+a single button. The rules bulk runs follow — `services/bulk_actions.py`:
 
 - **Scope is never implicit.** The client sends the group's own listing ids, so a
   group of twelve can't turn into the whole store.
@@ -696,9 +710,19 @@ something to put behind a single button. The rules bulk runs follow —
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
   listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
-- **The run is bounded** (`BULK_PRICE_CAP`, default 40) because each listing is
-  its own serial eBay revise; the remainder comes back as `deferred` for another
-  pass instead of the request outliving the gateway.
+- **The run is bounded** (`BULK_PRICE_CAP`, default 40; `BULK_ENRICH_CAP`,
+  default 25) because each listing is its own serial eBay revise; the remainder
+  comes back as `deferred` for another pass instead of the request outliving
+  the gateway.
+
+Every row also carries a **dismiss** (×). The engine rebuilds this list from
+scratch on every load, so advice the seller has already considered and decided
+against otherwise comes back for good — and a to-do list that will not shrink
+stops being read. A dismissal is per listing **and** per suggestion kind, kept
+in the browser (`lib/dismissedRecs.js`, bounded so it can't grow without
+limit), and undone in one tap from **Restore N dismissed** on the section
+header — which stays on screen even when every suggestion has been dismissed,
+so the X is never a one-way door.
 
 ## What a sale actually made
 

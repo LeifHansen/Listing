@@ -5322,6 +5322,288 @@ def lower_prices(payload: dict, request: Request) -> dict:
     return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
 
 
+# How many listings one enrich run touches. Far below the price cap above
+# because the work per listing is a different order of magnitude: a Claude
+# vision pass over that listing's photos (plus, for an imported one, a
+# download of those photos first) and then an eBay revise. Whatever is left
+# over comes back as `deferred` for the seller to run again.
+BULK_ENRICH_CAP = int(os.getenv("BULK_ENRICH_CAP", "25") or "25")
+
+# The enrichment runs as a background job, one per account at a time: it
+# spends AI credits per listing, and two tabs firing it at the same store
+# would pay twice to fill the same blanks.
+# user id -> job id of the enrich currently running for them.
+_ENRICH_JOBS: dict[str, str] = {}
+_ENRICH_LOCK = threading.Lock()
+
+
+def _drop_answered_missing_info(listing: Listing) -> int:
+    """Drop the 'a human should check this' notes an enrichment has answered.
+
+    `missing_info` is the whole reason the dashboard says "Fill in details",
+    so a listing whose blanks were just filled has to stop asking — otherwise
+    the button that filled them leaves its own suggestion on screen and reads
+    as a no-op.
+
+    A note is answered when an item specific (or the brand) of that name now
+    holds a value: "exact model number" by a filled Model, "size" by Size.
+    Whole words only — "Type" must not answer "typewriter model" — and a note
+    nothing filled is KEPT, because a blank the AI could not settle is still
+    a real one and silencing it would be the more expensive lie.
+
+    Returns how many notes were settled.
+    """
+    filled = {s.name.strip().lower() for s in listing.item_specifics
+              if (s.value or "").strip() and s.name.strip()}
+    if (listing.brand or "").strip():
+        filled.add("brand")
+    if not filled:
+        return 0
+    kept = [note for note in listing.missing_info
+            if not any(re.search(rf"\b{re.escape(name)}\b", note.lower())
+                       for name in filled)]
+    settled = len(listing.missing_info) - len(kept)
+    listing.missing_info = kept
+    return settled
+
+
+def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
+                note_charge=None) -> dict:
+    """Fill ONE listing's blanks: eBay's recommended item specifics for its
+    category, read off its own photos, plus the maker double-check — the same
+    enrichment a fresh AI draft gets, applied to a listing that is already
+    live. Pushed to eBay when the listing is live, saved locally otherwise.
+
+    `note_charge(receipts)` (optional) is told about the AI charge while it is
+    outstanding, and told `None` once it has been settled in this process —
+    so a restart mid-listing can pay back a charge that bought nothing rather
+    than leaving the seller to spot it (see _settle_interrupted_jobs).
+
+    Returns a bulk_actions outcome: {"ok": True, ...}, {"skip": reason}, or
+    {"message": why it failed}.
+    """
+    rid = rec["id"]
+    status = rec.get("status") or ""
+    if status in ("sold", "ended"):
+        # A settled listing is an archive record: its photos are purged on
+        # sale, and eBay will not revise a finished item. Relist is the verb
+        # for those, and it is a different suggestion.
+        return {"skip": "Sold and ended listings can't be revised."}
+    if status in ("published", "live") and not creds:
+        # Checked BEFORE the charge: filling in a live listing that we then
+        # cannot revise leaves the buyer-facing page exactly as blank as it
+        # was, and billing for that is billing for nothing the seller can see.
+        return {"skip": "Connect eBay first — this one is live there."}
+    # An imported listing's photos live on eBay, and the AI reads files, so
+    # adopt them the way the editor does before it will open one. Adoption
+    # WRITES the local filenames onto the record, which is why it happens
+    # before the model is built: a Listing read a moment earlier carries an
+    # empty `images`, and the save below would put that straight back over
+    # the photos this just downloaded.
+    _adopt_imported_images(rid, rec)
+    listing = Listing(**(rec.get("listing") or {}))
+    # Item specifics are per category, so a listing without one has nothing to
+    # fill. Imported listings usually do carry eBay's own category; the ones
+    # that don't get the same best-effort resolve a fresh draft gets, which is
+    # what keeps this a one-click action instead of a detour through the editor.
+    _resolve_category(listing)
+    if not listing.category_id:
+        return {"skip": "No eBay category yet — open it and pick one."}
+    names = listing.images or storage.list_optimized(rid)
+    opt_dir = storage.optimized_dir(rid)
+    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    if not paths:
+        return {"skip": "This listing's photos aren't on the server anymore."}
+
+    before_brand = (listing.brand or "").strip()
+    spent = _charge_uid(uid, "specifics")
+    if note_charge:
+        note_charge(tokens.receipts(spent))
+    try:
+        try:
+            added = _enrich_listing(listing, paths)
+        except Exception:
+            tokens.refund(spent)
+            raise
+        if added is None:
+            # The enrichment never ran (no taxonomy, no model, no aspects for
+            # this category). `_enrich_listing` swallows its own failures, so
+            # "didn't run" is the return value rather than an exception — and
+            # nothing was earned, so the charge goes back.
+            tokens.refund(spent)
+            return {"skip": "The AI couldn't read eBay's details for that category."}
+        settled = _drop_answered_missing_info(listing)
+        if not added and not settled:
+            # The AI did run and found nothing the photos could answer, which
+            # is a real (billable) answer — the same one the single-listing
+            # autofill gives. What it is not is done.
+            return {"skip": "Nothing the photos could answer — this one needs you."}
+
+        if status in ("published", "live") and creds:
+            # A revise carries only what is marked changed (see dirty_fields),
+            # and this edit never passed through a save, so nothing marked it.
+            # Unmarked, eBay would receive an empty revise: the record would
+            # show the new specifics, the seller would be told it worked, and
+            # the live listing would still be blank — the exact silence this
+            # button exists to end.
+            listing.mark_dirty("item_specifics")
+            if (listing.brand or "").strip() != before_brand:
+                listing.mark_dirty("brand")
+            outcome = marketplaces.get("ebay").publish(
+                PublishContext(session_id=rid, listing=listing, mode="live",
+                               base_url=base_url, uid=uid, prev_record=rec),
+                creds)
+            if not outcome.ok:
+                return {"message": outcome.message or "eBay rejected the new details."}
+            return {"ok": True, "added": added, "settled": settled, "pushed": True}
+        # A draft (or a seller with no eBay connection): the fill is still
+        # worth keeping, it just has nowhere to go yet.
+        storage.save_listing(rid, listing)
+        db.upsert_listing(rid, listing.model_dump(), status=_sticky_status(rec),
+                          user_id=uid)
+        return {"ok": True, "added": added, "settled": settled, "pushed": False}
+    finally:
+        # Settled either way by the time we get here: earned by a fill that
+        # landed, or handed back above. Anything still recorded as outstanding
+        # would be refunded a second time on the next boot.
+        if note_charge:
+            note_charge(None)
+
+
+def _run_enrich_job(job_id: str, records: list[dict], uid: str,
+                    creds: Optional[dict], base_url: str,
+                    deferred: int = 0) -> None:
+    """Background worker for "Enrich all". One vision pass per listing means a
+    dozen of them take minutes — far longer than a browser (or the proxy in
+    front of us) holds a request open — so this is a job the client polls, and
+    every listing it finishes is saved as it goes rather than at the end."""
+    result = bulk_actions.BulkResult()
+    stopped = ""
+    finished = 0
+    try:
+        for i, rec in enumerate(records):
+            title = ((rec.get("listing") or {}).get("title")
+                     or rec.get("title") or "this listing")
+            jobstore.update(job_id, phase="enriching", current=i,
+                            current_title=title[:80])
+            try:
+                outcome = _enrich_one(
+                    rec, uid, creds, base_url,
+                    note_charge=lambda r: jobstore.update(job_id, _refunds=r)) or {}
+            except HTTPException as exc:
+                # Out of AI credits (402) or logged out from under the job.
+                # Whatever is already filled is filled; say where it stopped
+                # instead of reporting the rest as failures.
+                stopped = str(exc.detail)
+                break
+            except Exception as exc:  # noqa: BLE001 - one listing can't sink the run
+                log.warning("enrich failed for %s: %s", rec.get("id"), exc)
+                result.failed.append({"listing_id": rec.get("id") or "",
+                                      "title": title, "message": str(exc)[:200]})
+                finished = i + 1
+                continue
+            if outcome.get("skip"):
+                result.skipped.append({"listing_id": rec.get("id") or "",
+                                       "title": title, "message": outcome["skip"]})
+            elif outcome.get("ok"):
+                result.changed.append({"listing_id": rec.get("id") or "",
+                                       "title": title,
+                                       **{k: v for k, v in outcome.items() if k != "ok"}})
+            else:
+                result.failed.append({
+                    "listing_id": rec.get("id") or "", "title": title,
+                    "message": outcome.get("message") or "Couldn't fill this one in."})
+            finished = i + 1
+        filled = sum(int(c.get("added") or 0) for c in result.changed)
+        log.info("bulk enrich %s: user=%s listings=%d changed=%d skipped=%d "
+                 "failed=%d specifics=%d deferred=%d", job_id, uid, len(records),
+                 len(result.changed), len(result.skipped), len(result.failed),
+                 filled, deferred)
+        jobstore.update(job_id, done=True, phase="done", current=finished,
+                        result={"deferred": deferred, "filled": filled,
+                                "stopped": stopped, **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = _support_reference()
+        log.warning("enrich job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish filling these in. Try again in a moment — if "
+            f"it keeps happening, quote {reference} to support."))
+    finally:
+        with _ENRICH_LOCK:
+            if _ENRICH_JOBS.get(uid) == job_id:
+                _ENRICH_JOBS.pop(uid, None)
+
+
+@app.post("/api/listings/enrich")
+def enrich_listings(payload: dict, request: Request) -> dict:
+    """Fill in the blanks on several listings at once — the dashboard's "Fill
+    in details" group applied in one go instead of opening a dozen listings to
+    make the same edit on each.
+
+    Per listing: eBay's recommended item specifics for its category, read off
+    its own photos, merged in WITHOUT touching anything the seller already
+    wrote, and pushed to eBay when the listing is live.
+
+    The caller names the listings (the group's own membership), so this can
+    never widen to the seller's whole store — which matters more here than it
+    does for a price drop, because every listing this touches spends AI
+    credits. Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing to fill in.")
+    # Bounded for the same reason the price drop is: the lookup below is BY
+    # id, and an unbounded body is an unbounded `IN (...)`. Nothing useful is
+    # lost — a pass enriches at most BULK_ENRICH_CAP of them either way, and
+    # the remainder comes back as deferred for a second run.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    uid = user["id"]
+    with _ENRICH_LOCK:
+        running = _ENRICH_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                # Two tabs, or a double tap. Hand back the job already running
+                # rather than paying a second time to fill the same blanks.
+                return {"job_id": running, "running": True, "total": 0,
+                        "deferred": 0}
+            _ENRICH_JOBS.pop(uid, None)
+    # Ownership is enforced inside the read, and an id the seller doesn't own
+    # is simply absent from the answer (see db.get_listings).
+    mine = db.get_listings(ids, uid)
+    records, deferred = mine[:BULK_ENRICH_CAP], mine[BULK_ENRICH_CAP:]
+    if not records:
+        raise HTTPException(404, "None of those listings are here anymore.")
+    creds = _ebay_creds_for(request)
+    base_url = _base_url(request)
+    job_id = storage.new_session_id()
+    with _ENRICH_LOCK:
+        _ENRICH_JOBS[uid] = job_id
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "enrich", "phase": "enriching", "done": False,
+        "error": None, "current": 0, "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(
+        target=_run_enrich_job,
+        args=(job_id, records, uid, creds, base_url, len(deferred)),
+        daemon=True,
+    ).start()
+    log.info("bulk enrich %s: started for user=%s listings=%d deferred=%d",
+             job_id, uid, len(records), len(deferred))
+    return {"job_id": job_id, "running": True, "total": len(records),
+            "deferred": len(deferred)}
+
+
 @app.get("/api/listings/{listing_id}")
 def get_listing(listing_id: str, request: Request) -> dict:
     rec = db.get_listing(listing_id)

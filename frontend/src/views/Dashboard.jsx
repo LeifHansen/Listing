@@ -4,12 +4,14 @@ import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, Megaphone, TrendingDown, RotateCcw,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign, AlertTriangle,
+  ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
-import { api, postJson } from "@/lib/api";
+import { api, pollJob, postJson } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
+import { dismiss as dismissRec, readDismissed, restoreAll,
+         withoutDismissed } from "@/lib/dismissedRecs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -52,8 +54,13 @@ const REC_GROUP_LABEL = {
   specifics: "Fill in details",
 };
 
-// One suggestion row — the pre-grouping list item, unchanged.
-function RecRow({ rec, promoting, promoteOne, openListing }) {
+// One suggestion row. Every row carries a dismiss control, because this list
+// is rebuilt from scratch on every load: advice the seller has considered and
+// decided against otherwise comes back for good, and a to-do list that will
+// not shrink stops being read. See lib/dismissedRecs — and the "Restore
+// dismissed" control on the section header, which is what keeps a mis-tapped
+// X from being a one-way door.
+function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
   const Icon = REC_ICON[rec.type] || Lightbulb;
   const isPromote = rec.type === "promote";
   return (
@@ -80,6 +87,12 @@ function RecRow({ rec, promoting, promoteOne, openListing }) {
           {rec.label} <ArrowRight aria-hidden />
         </Button>
       )}
+      <Button variant="ghost" size="iconSm" className="shrink-0 -mr-1"
+        aria-label={`Dismiss: ${rec.label} — ${rec.listing_title}`}
+        title="Dismiss this suggestion"
+        onClick={() => onDismiss(rec)}>
+        <X aria-hidden />
+      </Button>
     </div>
   );
 }
@@ -87,16 +100,29 @@ function RecRow({ rec, promoting, promoteOne, openListing }) {
 // The group-level verbs. A suggestion category earns an entry here when the
 // same edit makes sense across every listing in it — repeating one edit a dozen
 // times by hand is the whole problem. `amount` marks the ones that need a
-// number first (lower prices by HOW much); the rest fire on click.
+// number first (lower prices by HOW much); the rest fire on click. `shared`
+// marks the one whose spinner is the per-listing `promoting` latch, because
+// its rows fire the very same action.
 //
-// Photos, specifics, finish and relist are deliberately absent: the first two
-// need a human looking at each item, and the last two create listings, which is
-// not something to hand a single button.
+// Photos, finish and relist are deliberately absent: photos need a human
+// holding the item, and the last two create listings, which is not something
+// to hand a single button.
 const BULK_ACTIONS = {
   promote: {
     verb: "Promote all",
     icon: Megaphone,
+    shared: true,
     run: (ctx) => ctx.promoteAll((ctx.group?.recs || []).length),
+  },
+  // "Fill in details" used to be a prompt to go and do it: open each listing,
+  // wait for the AI to read its photos, save, repeat. It is the same edit
+  // every time and the AI already knows how to make it, so it is a button —
+  // one pass over the whole group, filling eBay's recommended item specifics
+  // on each listing from its own photos and pushing them to the live listing.
+  specifics: {
+    verb: "Enrich all",
+    icon: Sparkles,
+    run: (ctx) => ctx.enrichAll(ctx.group),
   },
   lower_price: {
     verb: "Lower all…",
@@ -174,14 +200,17 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
 function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
-                    lowerAll, busy }) {
+                    lowerAll, enrichAll, onDismiss, busy, progress }) {
   const [open, setOpen] = useState(false);
   const [amountOpen, setAmountOpen] = useState(false);
   const Icon = REC_ICON[group.type] || Lightbulb;
   const action = BULK_ACTIONS[group.type];
-  // Promote's spinner is the shared `promoting` latch (its rows share it);
-  // parameterized actions get the per-group one.
-  const actionBusy = action?.amount ? busy : !!promoting;
+  // Promote's spinner is the shared `promoting` latch, because its rows fire
+  // the same action; every other group gets its own. Keyed off the action
+  // rather than off "does it take an amount" — that read left a group whose
+  // action needs no number spinning on the promote latch, so "Enrich all"
+  // would have gone busy because a promote was running elsewhere.
+  const actionBusy = action?.shared ? !!promoting : busy;
   const ActionIcon = action?.icon;
   return (
     <div>
@@ -219,11 +248,24 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
             aria-expanded={action.amount ? amountOpen : undefined}
             onClick={() => (action.amount
               ? setAmountOpen((o) => !o)
-              : action.run({ group, promoteAll, lowerAll }))}>
+              : action.run({ group, promoteAll, lowerAll, enrichAll }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
       </div>
+      {/* What a long run is actually doing. "Enrich all" is minutes of AI
+          reading photos, one listing at a time, and a spinner with no end in
+          sight is the shape of a hang — so the group says which listing it is
+          on and how far through it is. */}
+      {progress && (
+        <p className="px-4 pb-3.5 -mt-1 text-[13px] text-ink-secondary flex items-center gap-1.5">
+          <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
+          <span className="truncate">
+            {progress.title ? `“${progress.title}” · ` : ""}
+            {Math.min(progress.done + 1, progress.total)} of {progress.total}
+          </span>
+        </p>
+      )}
       <AnimatePresence initial={false}>
         {action?.amount && amountOpen && (
           <BulkAmountPanel
@@ -231,7 +273,7 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
             onCancel={() => setAmountOpen(false)}
             onSubmit={(value) => {
               setAmountOpen(false);
-              action.run({ group, promoteAll, lowerAll }, value);
+              action.run({ group, promoteAll, lowerAll, enrichAll }, value);
             }} />
         )}
       </AnimatePresence>
@@ -248,7 +290,7 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
               {group.recs.map((rec) => (
                 <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
                   promoting={promoting} promoteOne={promoteOne}
-                  openListing={openListing} />
+                  openListing={openListing} onDismiss={onDismiss} />
               ))}
             </div>
           </motion.div>
@@ -414,7 +456,7 @@ function SoldRangePicker({ value, onChange }) {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay, tokens, loadTokens } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
   const storeView = listingsView({
@@ -451,6 +493,15 @@ export function Dashboard() {
       .catch(() => {});
   }, [user]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, items.length]);
+
+  // The suggestions this seller has waved away. Read once, from this browser
+  // (see lib/dismissedRecs); the API has no idea and rebuilds the full list
+  // every time, so the filtering happens here.
+  const [dismissed, setDismissed] = useState(readDismissed);
+  const visibleInsights = withoutDismissed(insights, dismissed);
+  const hiddenCount = insights.length - visibleInsights.length;
+  const dismissOne = (rec) => setDismissed((d) => dismissRec(d, rec));
+  const restoreDismissed = () => setDismissed(restoreAll());
 
   const afterPromote = (res) => {
     if (res.needs_reconnect) {
@@ -518,6 +569,68 @@ export function Dashboard() {
     } catch (e) {
       toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
     } finally { setBulkBusy(null); }
+  };
+
+  // "Enrich all" — the whole "Fill in details" group filled in at once.
+  //
+  // This is what the suggestion used to ask the seller to do by hand: open a
+  // listing, wait for the AI to read its photos, let it fill eBay's
+  // recommended item specifics, save, push, repeat. The edit is the same one
+  // every time and nothing about it needs a human, so the group does it.
+  //
+  // It runs as a background JOB rather than one long request: a vision pass
+  // per listing over a dozen listings is minutes of work, which no browser
+  // (or the proxy in front of the server) will hold a connection open for.
+  // `bulkProgress` is what the job reports as it goes, rendered on the group.
+  const [bulkProgress, setBulkProgress] = useState(null);
+  const enrichAll = async (group) => {
+    const ids = group.recs.map((r) => r.listing_id);
+    const n = ids.length;
+    // Every listing this touches spends AI credits, and this button reaches a
+    // whole group from one tap. Say what it will do — and what it will cost —
+    // before it does it, the same way promoting the store does.
+    const cost = tokens.enabled && tokens.costs?.specifics
+      ? ` It uses ${tokens.costs.specifics * n} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
+      : "";
+    if (!(await confirm({
+      title: `Fill in details on ${n} listing${n === 1 ? "" : "s"}?`,
+      message: "The AI reads each listing's own photos and fills in eBay's "
+        + "recommended item specifics — the fields buyers filter by — then "
+        + "pushes them to the live listing. Anything you've already written "
+        + `is left exactly as it is.${cost}`,
+      confirmLabel: "Fill them in",
+    }))) return;
+    setBulkBusy(group.type);
+    setBulkProgress({ type: group.type, done: 0, total: n, title: "" });
+    try {
+      const start = await postJson("/api/listings/enrich", { listing_ids: ids });
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setBulkProgress({
+          type: group.type, done: j.current || 0,
+          total: j.total_items || n, title: j.current_title || "",
+        }),
+      });
+      const parts = [];
+      if (res.changed) {
+        parts.push(`Filled in ${res.changed} listing${res.changed === 1 ? "" : "s"}`
+          + (res.filled ? ` · ${res.filled} detail${res.filled === 1 ? "" : "s"} added` : ""));
+      }
+      // Skipped is the honest half: a listing with no category, no photos left
+      // on the server, or nothing its photos could answer is not a failure and
+      // is not done either.
+      if (res.skipped) parts.push(`${res.skipped} need you`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
+      if (res.stopped) parts.push(res.stopped);
+      toast(parts.join(" · ") || "Nothing to fill in.", {
+        kind: res.changed ? "success" : res.failed ? "error" : "info",
+      });
+      refreshInsights();
+      loadListings({ quiet: true });
+      loadTokens();
+    } catch (e) {
+      toast(`Couldn't fill these in: ${e.message}`, { kind: "error" });
+    } finally { setBulkBusy(null); setBulkProgress(null); }
   };
 
   const askDelete = async (item) => {
@@ -770,17 +883,31 @@ export function Dashboard() {
       </motion.div>
 
       {/* Suggested actions — the recommendation engine's picks, one collapsed
-          group per category (expand for the per-listing rows). */}
+          group per category (expand for the per-listing rows), minus whatever
+          the seller has dismissed.
+
+          The section is gated on the WHOLE list rather than the visible one,
+          so dismissing the last row leaves the "Restore dismissed" control on
+          screen instead of taking it away with the thing it undoes. */}
       {insights.length > 0 && (
         <motion.div variants={rise}>
-          <SectionHeader icon={Lightbulb} title="Suggested actions" />
+          <SectionHeader icon={Lightbulb} title="Suggested actions"
+            action={hiddenCount > 0 && (
+              <Button variant="ghost" size="sm" onClick={restoreDismissed}>
+                <Undo2 aria-hidden /> Restore {hiddenCount} dismissed
+              </Button>
+            )} />
           <Card className="p-0 divide-y divide-line overflow-hidden">
-            {(() => {
+            {visibleInsights.length === 0 ? (
+              <p className="p-4 text-[13px] text-ink-secondary">
+                Nothing left here — every suggestion is dismissed.
+              </p>
+            ) : (() => {
               // Group by type, preserving arrival order: the API sorts by
               // priority desc, so groups order by their strongest rec.
               const groups = [];
               const byType = {};
-              for (const rec of insights) {
+              for (const rec of visibleInsights) {
                 if (!byType[rec.type]) {
                   byType[rec.type] = { type: rec.type, recs: [] };
                   groups.push(byType[rec.type]);
@@ -791,7 +918,9 @@ export function Dashboard() {
                 <RecGroup key={g.type} group={g} promoting={promoting}
                   promoteAll={promoteAll} promoteOne={promoteOne}
                   openListing={openListing} lowerAll={lowerAll}
-                  busy={bulkBusy === g.type} />
+                  enrichAll={enrichAll} onDismiss={dismissOne}
+                  busy={bulkBusy === g.type}
+                  progress={bulkProgress?.type === g.type ? bulkProgress : null} />
               ));
             })()}
           </Card>
