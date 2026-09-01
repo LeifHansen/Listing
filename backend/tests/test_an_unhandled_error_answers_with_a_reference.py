@@ -110,6 +110,53 @@ def test_the_row_carries_the_traceback_and_the_real_crash_site(crashing):
     assert row["severity"] == "high"
 
 
+def test_a_deep_traceback_keeps_the_end_where_the_error_is(crashing):
+    """Truncation must cut the middle, never the tail.
+
+    Python puts the outermost frames first and the exception's own type and
+    message LAST, so plain truncation throws away precisely the part worth
+    keeping. CI found this rather than the author: the runner's anyio produced
+    a deeper ExceptionGroup than the development machine's, the traceback
+    crossed the cap, and the recorded row stopped before it reached the error
+    it was reporting — a wall of framework internals with the actual failure
+    missing.
+    """
+    client, db = crashing
+
+    def deep(n):
+        if n:
+            return deep(n - 1)
+        raise RuntimeError("the innermost thing that broke")
+
+    from backend.services import errorlog
+
+    # The trimming itself, against a stack long enough to need it. (A
+    # recursive one will not do: format_exception collapses repeats into
+    # "[Previous line repeated N more times]", so it never grows.)
+    frames = "".join(f'  File "f{i}.py", line {i}, in step{i}\n    call()\n'
+                     for i in range(600))
+    raw = ("Traceback (most recent call last):\n" + frames
+           + "RuntimeError: the innermost thing that broke")
+    trimmed = errorlog.trim_traceback(raw)
+
+    assert len(raw) > 8000, "the fixture has to be long enough to matter"
+    assert trimmed.endswith("RuntimeError: the innermost thing that broke")
+    assert trimmed.startswith("Traceback (most recent call last):")
+    assert "elided" in trimmed, "and it should say what it dropped"
+    assert len(trimmed) < len(raw)
+
+    # And end to end: what lands in the row still names the error.
+    try:
+        deep(3)
+    except RuntimeError as exc:
+        errorlog.record(kind="backend", level="ERROR", exc=exc)
+    errorlog.flush()
+
+    row = [r for r in db.error_events_list() if r["func"] == "deep"][0]
+    assert len(row["traceback"]) <= 8000, "the column is String(8000)"
+    assert "the innermost thing that broke" in row["traceback"]
+
+
 def test_an_inbound_request_id_is_honoured_only_if_it_looks_like_one(crashing):
     """It is echoed and logged, so its shape is checked before it is trusted."""
     client, _db = crashing

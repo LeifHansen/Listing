@@ -139,6 +139,40 @@ def normalize(message: object) -> str:
     return out[:_FINGERPRINT_CHARS]
 
 
+# The database column is String(8000). Trim below it so scrubbing, which can
+# lengthen a line slightly, cannot push the result back over and get it cut
+# by the column — from the wrong end.
+TRACEBACK_BUDGET = 6500
+
+
+def trim_traceback(text: str, budget: int = TRACEBACK_BUDGET) -> str:
+    """A long traceback shortened from the MIDDLE, never from the end.
+
+    Plain truncation cuts from the front, which on a traceback throws away
+    exactly the part worth having: Python puts the outermost frames first and
+    the exception's own type and message LAST. A deep stack — anything through
+    Starlette's middleware chain and anyio's task groups is dozens of frames —
+    would arrive as a wall of framework internals with the actual error
+    missing, which is a row nobody can act on.
+
+    CI found this, not the test author: the runner's anyio produced a deeper
+    ExceptionGroup than the development machine's, crossed 8000 characters,
+    and the recorded traceback stopped before it reached the RuntimeError it
+    was reporting.
+
+    So: keep the head, which names the request and the entry point, keep the
+    much larger tail, which is where it broke, and say how much went.
+    """
+    if len(text) <= budget:
+        return text
+    head = budget // 5
+    tail = budget - head
+    dropped = len(text) - budget
+    return (text[:head]
+            + f"\n\n… {dropped} characters of stack elided …\n\n"
+            + text[-tail:])
+
+
 def fingerprint(*, logger: str = "", level: str = "", module: str = "",
                 func: str = "", template: object = "", exc_type: str = "",
                 kind: str = "backend") -> str:
@@ -282,7 +316,7 @@ def record(*, kind: str = "backend", level: str = "ERROR",
                                  has_traceback=bool(trace), message=text),
             "exc_type": exc_type[:120],
             "message": scrub(text, max_len=2000),
-            "traceback": scrub(trace, max_len=8000),
+            "traceback": scrub(trim_traceback(trace), max_len=8000),
             "route": (route or ctx.get("path") or "")[:200],
             "method": (method or ctx.get("method") or "")[:8],
             "status": status,
