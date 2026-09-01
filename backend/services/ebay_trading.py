@@ -530,7 +530,13 @@ _CONDITION_TO_ID = {
     # — a missing key silently dropped <ConditionID>, and eBay then rejected
     # with "condition is required" (architect finding #5).
     "LIKE_NEW": "2750",
-    "USED_EXCELLENT": "3000", "USED_VERY_GOOD": "4000", "USED_GOOD": "5000",
+    # eBay's Pre-loved Apparel grades. Clothing categories accept these and
+    # NOT 4000/5000/6000, which is what made "Used - Good" on a t-shirt come
+    # back as error 25021 — see taxonomy.nearest_allowed_condition, which is
+    # what puts a listing on the grade its category actually offers.
+    "PRE_OWNED_EXCELLENT": "2990",
+    "USED_EXCELLENT": "3000", "PRE_OWNED_FAIR": "3010",
+    "USED_VERY_GOOD": "4000", "USED_GOOD": "5000",
     "USED_ACCEPTABLE": "6000", "FOR_PARTS_OR_NOT_WORKING": "7000",
 }
 

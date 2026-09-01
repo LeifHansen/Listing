@@ -1087,7 +1087,7 @@ def _resolve_category(listing: Listing) -> None:
     opposite fixes.
     """
     if listing.category_id:
-        return
+        return _fit_condition_to_category(listing)
     if not config.taxonomy_ready():
         log.warning("category: no id resolved — the Taxonomy API needs "
                     "EBAY_CLIENT_ID/EBAY_CLIENT_SECRET, which aren't set")
@@ -1103,12 +1103,61 @@ def _resolve_category(listing: Listing) -> None:
             listing.category_id = best["category_id"]
             if best.get("path"):
                 listing.category_suggestion = best["path"]
-            return
+            return _fit_condition_to_category(listing)
         log.info("category: no eBay match for %r", query[:120])
     log.warning("category: eBay matched no category for %r — the draft goes "
                 "out without an id and can't publish until one is picked",
                 (listing.title or "")[:80])
     _needs_a_category(listing)
+
+
+def _fit_condition_to_category(listing: Listing) -> None:
+    """The category decides which conditions exist — so pick the condition
+    AFTER the category, not before it.
+
+    The AI grades what it can see in the photos ("used, some wear" -> Used -
+    Good) with no idea where the item will be filed, and eBay offers a
+    different ladder in nearly every part of the site: Very Good / Good /
+    Acceptable exist only in media, the pre-owned grades only in apparel, and
+    most of the rest of eBay has one plain "Used". A grade the category
+    doesn't offer is not a warning at publish time — it is error 25021 and no
+    listing, which is what took out three of the seller's last four.
+
+    So the draft leaves identify carrying a condition its own category
+    accepts: the same grade where it exists, the closest one in the same
+    new/used family where it doesn't. Best-effort — a lookup that fails leaves
+    the AI's grade alone and the preflight says so before anything reaches
+    eBay.
+    """
+    cid = (listing.category_id or "").strip()
+    current = (listing.condition or "").strip().upper()
+    if not cid.isdigit() or not current or not config.taxonomy_ready():
+        return
+    try:
+        allowed = taxonomy.allowed_condition_enums(cid)
+    except Exception as exc:  # noqa: BLE001 - never block identify on this
+        log.warning("condition: eBay's condition list for category %s failed: "
+                    "%s: %s — leaving %s as it is", cid, type(exc).__name__,
+                    exc, current)
+        return
+    if not allowed or current in allowed:
+        return
+    fitted = taxonomy.nearest_allowed_condition(current, allowed)
+    if fitted and fitted != current:
+        log.info("condition: %s isn't offered in category %s (%s) — using %s",
+                 current, cid, ", ".join(allowed), fitted)
+        listing.condition = fitted
+        return
+    # Nothing in the item's own family is on offer — a used item in a
+    # new-only category. There is no honest substitute to make, so say it on
+    # the draft instead of inventing one; the preflight blocks the publish
+    # with the same news, and the Condition dropdown shows what eBay allows.
+    log.info("condition: %s isn't offered in category %s and nothing there "
+             "substitutes for it (%s)", current, cid, ", ".join(allowed))
+    note = ("item condition — eBay doesn't offer that condition in this "
+            "category; pick one from the Condition list")
+    if not any("item condition" in m.lower() for m in listing.missing_info):
+        listing.missing_info = [*listing.missing_info, note]
 
 
 def _needs_a_category(listing: Listing) -> None:

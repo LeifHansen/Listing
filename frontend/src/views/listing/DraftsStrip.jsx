@@ -11,20 +11,19 @@ import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
-import { CategoryQuickPick } from "./CategoryQuickPick";
+import { DraftCategoryEdit } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
+import { isDraft } from "@/lib/listingsView";
 
 /* The drafts experience on the merged Sell screen: every draft one click
    from Publish or Review & List, plus select-mode bulk publish/delete.
    Renders nothing when there are no (matching) drafts — the upload box
    directly above is the empty-state CTA. */
-
-const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 
 // Shipping policy right on a draft's card — the same one control the editor
 // and the bulk queue use (see ShippingPolicySelect). Saves on change.
@@ -67,30 +66,6 @@ function DraftShipping({ item, className }) {
       />
     </div>
   );
-}
-
-// Category display + quick fix right on the draft card — a miscategorized
-// item is the AI misfire that costs most once it's published, so the pick
-// has to be visible (and fixable) without opening the full editor.
-function DraftCategory({ item }) {
-  const { loadListings } = useApp();
-  const { toast } = useToast();
-  const [saving, setSaving] = useState(false);
-  const save = async (patch) => {
-    setSaving(true);
-    try {
-      // Same reason as DraftShipping above: the patch names the two category
-      // fields and leaves everything else as stored.
-      await patchJson(`/api/listings/${item.id}`, patch);
-      // Refresh the cache so the card (and its Publish gate) sees the change.
-      await loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't save the category: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
-  };
-  return <CategoryQuickPick listing={item.listing} onPick={save} saving={saving} />;
 }
 
 // A multi-marketplace publish response as one toast line: "eBay ✓ · Etsy ✗".
@@ -461,7 +436,7 @@ export function DraftsStrip({ search = "" }) {
                       a wrong category is the AI misfire that costs most, and
                       hiding it behind a layout switch would bury it. */}
                   <div className={cn(list && "min-w-0 w-full sm:w-56")}>
-                    <DraftCategory item={item} />
+                    <DraftCategoryEdit item={item} />
                   </div>
                   <DraftShipping item={item} className={cn(list ? "min-w-0" : undefined)} />
                 </div>

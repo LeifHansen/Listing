@@ -4,7 +4,10 @@ import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
   ArrowRight, X,
 } from "lucide-react";
-import { cn, CONDITIONS, conditionLabel, mediaUrl } from "@/lib/utils";
+import { cn, mediaUrl } from "@/lib/utils";
+import {
+  CONDITIONS, conditionLabel, conditionsFor, nearestCondition,
+} from "@/lib/conditions";
 import { api, postJson } from "@/lib/api";
 import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
@@ -87,6 +90,37 @@ const LISTING_FORMATS = [
 // starting number in the box.
 const DEFAULT_AD_RATE = 10;
 
+/* eBay's conditions for one category, fetched once per category (conditionsFor
+   caches), or null while it is loading or when the lookup could not be made —
+   which every rule below reads as "we don't know", never as "anything goes". */
+function useCategoryConditions(categoryId) {
+  const cid = String(categoryId || "").trim();
+  // The category is stored WITH the answer so a card whose category has just
+  // changed reads as "don't know yet" rather than briefly showing the old
+  // category's conditions — without a synchronous reset on every render.
+  const [got, setGot] = useState({ cid: null, list: null });
+  useEffect(() => {
+    let live = true;
+    conditionsFor(cid).then((list) => { if (live) setGot({ cid, list }); });
+    return () => { live = false; };
+  }, [cid]);
+  return got.cid === cid ? got.list : null;
+}
+
+/* The dropdown's options: what the category offers once we know, the full
+   list until then — plus whatever the listing is currently set to, always. A
+   controlled <select> whose value isn't among its options renders BLANK, and
+   a condition that looks unset is how a seller "fixes" a field that was
+   already right. */
+function conditionOptions(conditions, current) {
+  const options = (conditions && conditions.length)
+    ? conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
+    : CONDITIONS.map((c) => ({ value: c, label: conditionLabel(c) }));
+  return options.some((o) => o.value === current) || !current
+    ? options
+    : [{ value: current, label: conditionLabel(current) }, ...options];
+}
+
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
   onDelete, deleting, onDeletePhoto, targets,
@@ -95,11 +129,32 @@ function BulkItemCard({
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
   const isAuction = fmt.startsWith("AUCTION");
+  // Which conditions eBay offers for THIS item's category. The queue publishes
+  // without ever opening the editor, so this is the only place the seller can
+  // see them — and before it existed the dropdown offered all thirteen grades
+  // for every category, which is how a bone fish figurine and a ceramic bear
+  // went out as "Used - Good" and came back as error 25021.
+  const conditions = useCategoryConditions(l.category_id);
+  // A draft made before the server started fitting conditions to categories
+  // (or one whose category the seller has just changed) can be sitting on a
+  // grade this category doesn't offer. Move it to the closest one that fits,
+  // where the seller can see it happen, rather than letting them press
+  // Publish into a refusal. nearestCondition never crosses the new/used line;
+  // where nothing fits it returns null and the blocker below stands.
+  useEffect(() => {
+    if (!editable || !conditions || !conditions.length || !l.condition) return;
+    const fitted = nearestCondition(l.condition, conditions.map((c) => c.enum));
+    if (fitted && fitted !== l.condition) onChange({ ...l, condition: fitted });
+    // `l` is rebuilt on every change; the condition and the list are what
+    // this actually watches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conditions, l.condition, editable]);
   // What is stopping THIS item from reaching eBay — the same rules the
   // editor and the drafts strip use (blockers.js). Target-aware: an
   // Etsy-only publish must not be gated on eBay-only fields (package weight,
   // eBay category).
-  const blockers = item.status === "draft" ? ebayBlockers(l, { targets }) : [];
+  const blockers = item.status === "draft"
+    ? ebayBlockers(l, { targets, conditions }) : [];
   // All of the item's photos, not just the first. An item that failed before
   // a listing existed still has the server-picked `thumb`.
   const photos = l.images?.length
@@ -214,10 +269,13 @@ function BulkItemCard({
               onChange={(e) => onChange({ ...l, price: e.target.value === "" ? null : parseFloat(e.target.value) })}
             />
             <Select
-              value={l.condition || "USED_GOOD"}
+              aria-label="Condition"
+              value={l.condition || ""}
               onChange={(e) => onChange({ ...l, condition: e.target.value })}
             >
-              {CONDITIONS.map((c) => <option key={c} value={c}>{conditionLabel(c)}</option>)}
+              {conditionOptions(conditions, l.condition).map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
             </Select>
           </div>
 
