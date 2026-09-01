@@ -6,7 +6,7 @@ import Button from "../components/Button.astro";
 import PipelineSteps from "../components/PipelineSteps.astro";
 import FeatureGrid from "../components/FeatureGrid.astro";
 import CTA from "../components/CTA.astro";
-import { site, marketplaces, marketplaceStatus, APP_URL, FREE_TOKENS_PER_MONTH, draftsFor } from "../lib/site.js";
+import { site, marketplaces, marketplaceStatus, SIGNUP_URL, FREE_TOKENS_PER_MONTH, draftsFor } from "../lib/site.js";
 
 const jsonLd = {
   "@context": "https://schema.org",
@@ -42,7 +42,7 @@ const jsonLd = {
             to be twenty minutes of typing is now a photo and a glance.
           </p>
           <div class="mt-9 flex flex-col gap-3 sm:flex-row">
-            <Button href={APP_URL} variant="primary" size="xl">Start listing free</Button>
+            <Button href={SIGNUP_URL} variant="primary" size="xl">Start listing free</Button>
             <Button href="/how-it-works" variant="secondary" size="xl">See how it works</Button>
           </div>
           <p class="mt-5 text-sm text-ink-secondary">

@@ -1,7 +1,7 @@
 ---
 import Container from "./Container.astro";
 import Button from "./Button.astro";
-import { APP_URL } from "../lib/site.js";
+import { SIGNUP_URL } from "../lib/site.js";
 
 const {
   title = "Start with the pile you've been avoiding.",
@@ -22,7 +22,7 @@ const {
       <h2 class="mx-auto max-w-2xl text-3xl sm:text-4xl">{title}</h2>
       <p class="mx-auto mt-4 max-w-xl text-lg text-ink-secondary">{lede}</p>
       <div class="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-        <Button href={APP_URL} variant="primary" size="xl">Open the app</Button>
+        <Button href={SIGNUP_URL} variant="primary" size="xl">Sign up free</Button>
         <Button href="/how-it-works" variant="secondary" size="xl">See how it works</Button>
       </div>
       <p class="mt-5 text-sm text-ink-secondary">No card required · Nothing publishes until you approve it</p>
