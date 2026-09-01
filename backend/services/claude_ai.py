@@ -286,7 +286,13 @@ def identify(image_paths: list[Path], image_names: list[str],
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=4096,
+        # The description alone is now a 300-600 word SEO body, and it shares
+        # the budget with the specifics, the tag boxes and the observations.
+        # A draft that runs past the cap is not a truncated description — it
+        # is unparseable JSON, raised below as an error the seller has to
+        # retry, so the headroom is worth more than the unused tokens (only
+        # what is generated is billed).
+        max_tokens=8192,
         system=[{"type": "text", "text": _IDENTIFY_SYSTEM,
                  "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content}],
@@ -565,7 +571,9 @@ def refine(listing: Listing, prompt: str) -> Listing:
     )
     resp = client.messages.create(
         model=config.CONTENT_MODEL,
-        max_tokens=4096,
+        # A refine echoes the WHOLE listing back, long description included,
+        # so it needs at least as much room as the draft that produced it.
+        max_tokens=8192,
         messages=[{"role": "user", "content": msg}],
     )
     if resp.stop_reason == "max_tokens":
@@ -835,10 +843,16 @@ def _aspect_lines(named: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Enough of the description to carry the Key Details block, where the values
+# an aspect fill is looking for (material, colour, size, year, markings) are
+# spelled out. 500 characters stopped inside the opening paragraph.
+_CONTEXT_DESCRIPTION_CHARS = 2_000
+
+
 def _listing_context(listing: Listing) -> str:
     return (f"Title: {listing.title}\nBrand: {listing.brand}\n"
             f"Category: {listing.category_suggestion}\n"
-            f"Description: {(listing.description or '')[:500]}")
+            f"Description: {(listing.description or '')[:_CONTEXT_DESCRIPTION_CHARS]}")
 
 
 # Separators a model reaches for when it comma-joins a repeatable aspect's

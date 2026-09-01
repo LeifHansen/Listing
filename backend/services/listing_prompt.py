@@ -37,7 +37,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "condition": "one of: %s",
   "condition_description": "string describing visible wear/flaws",
   "category_suggestion": "human-readable eBay category path",
-  "description": "string, 2-4 short paragraphs, buyer-friendly, no false claims, opening on the item itself (see the description rule below)",
+  "description": "string, LONG. The full listing body: no character limit, aim 1800-3500 characters (~300-600 words) across the labelled sections in the description rule below. Buyer-friendly, keyword-rich, no false claims, opening on the item itself",
   "price": number or null (suggested USD price based on item & condition),
   "purchase_price": number or null (ONLY the price on a store/thrift PRICE STICKER or price tag visible in the photos — what it costs to buy this item right now. null when no price sticker is legible. Never estimate; never confuse with the resale price above),
   "quantity": integer (default 1),
@@ -76,7 +76,14 @@ Rules:
   80 characters is a budget, not a target: when the title runs long, cut from
   the BACK — the general words first, then the condition wording — never the
   brand, model or size at the front.
-- Description: the FIRST WORDS must be item-specific — brand, then model or
+- Description: the longest field in the listing and the one that does the most
+  SEO work. eBay indexes description text as well as the title, Google indexes
+  the whole listing page, and a buyer still reading is a buyer close to
+  committing. There is NO character limit — do NOT write a short blurb. Aim for
+  1,800-3,500 characters (roughly 300-600 words). Go under ~900 characters only
+  when the photos genuinely support nothing more to say, and NEVER pad with
+  invented facts to reach a length.
+  OPENING: the FIRST WORDS must be item-specific — brand, then model or
   product name, then what the thing is ("Pyrex Cinderella 441 mixing bowl...",
   "Levi's 501 straight-leg jeans..."). NEVER open on a generic age or hype
   adjective: Vintage, Antique, Retro, Rare, Unique, Beautiful, Stunning,
@@ -85,6 +92,62 @@ Rules:
   spends the highest-value position in the listing on nothing. Keep those words
   — just later in the sentence ("Pyrex Cinderella 441 mixing bowl, vintage
   1960s milk glass").
+  STRUCTURE: PLAIN TEXT only — no markdown, no HTML tags, no emoji, no
+  asterisks or hash marks. Write these sections in this order, separated by a
+  BLANK LINE, each heading alone on its own line spelled exactly as below:
+  a. Overview (no heading) — 4-6 sentences. Brand, model or pattern, what the
+     thing is, era or year when you know it, material, colour, size, and the
+     details that mark out THIS piece: markings, backstamps, sewn labels,
+     hardware, closures, trim, print, edition, included accessories.
+  b. "Key Details:" — one "Label: value" per line (Brand, Model/Pattern, Type,
+     Material, Colour, Size, Style, Country of Manufacture, Year, Markings,
+     Quantity, MPN/UPC). Mirror the item_specifics you returned; write a line
+     only for what you can see or confidently infer.
+  c. "Condition:" — expand condition_description into full sentences: what is
+     right about the item first, then every flaw you can see AND WHERE it is
+     (chips, cracks, crazing, pilling, fading, stains, scuffs, missing parts,
+     odours, repairs), and say plainly when something is untested. Detailed
+     honest wear sells better than a vague "good condition", and it must agree
+     with the condition field you returned.
+  d. "Measurements:" — ONLY measurements you can actually read off a tag, box,
+     or a ruler/tape in the photos, each labelled with its units. If none are
+     legible, leave this section out entirely and put "exact measurements" in
+     missing_info — never estimate a measurement here.
+  e. "Why You'll Love It:" — 3-5 sentences on how the item is worn, used,
+     displayed, collected or gifted: the outfits and occasions, the rooms and
+     collections it suits, who it is for, why the maker or era matters. This is
+     where long-tail search phrases live ("mid-century modern kitchen decor",
+     "gift for a coffee collector", "cottagecore tea party") — every one of
+     them must be TRUE of this item.
+  f. Closing — 1-2 sentences inviting questions and offering more photos.
+     Never state shipping speed, handling time, returns, payment, or where the
+     item ships from: the seller's account settles those once, and a promise
+     made here can contradict it.
+  KEYWORDS (the SEO half of the job):
+  * Name the item the way a buyer types it. Use the full identifying phrase —
+    brand + model/pattern + item type — in the first sentence, again in Key
+    Details, and once more further down: 3-5 natural uses across the whole
+    description, never the same sentence repeated.
+  * Spell out the variants a buyer might search: abbreviations and their
+    expansions ("MCM" and "mid-century modern", "NWT" and "new with tags"),
+    singular and plural, hyphenated and not ("t-shirt", "tee"), and the other
+    word for the same thing ("sofa"/"couch", "purse"/"handbag").
+  * Work the specifics into prose as words, not only as a "Label: value" line:
+    size, colour, material, pattern, style, department, era, theme. Search
+    reads sentences; a value that exists only in the specifics grid is a value
+    the description index never sees.
+  * The general words kept OUT of the front of the title — vintage, antique,
+    retro, rare, MCM, boho, unique — belong here, in the body, where they cost
+    no position and still get searched.
+  * NEVER keyword-stuff. eBay's keyword-spam policy demotes or removes a
+    listing that names brands the item is not, appends a block of
+    comma-separated keywords, says "similar to" or "like <brand>", or repeats
+    words unnaturally. Every keyword has to be a true statement about THIS
+    item, inside a real sentence.
+  * Never pad with false claims. If a section would need a fact you cannot
+    see, leave the fact out and add it to missing_info — the length comes from
+    detail that is really there plus honest use, care and context, never from
+    invention.
 - ALWAYS estimate the packed shipping box dimensions (package_length_in,
   package_width_in, package_height_in) and weight — judge the item's real-world
   size from the photos and add a little room for packaging. Never leave the
@@ -130,8 +193,11 @@ Rules:
 # The title/description ordering has to survive a refine too: a rewrite there
 # reaches the same buyers and the same search snippet as the first draft, and
 # "shorten this" is exactly the instruction that would otherwise trade the
-# identifying words for the generic ones. Conditioned on the seller not asking
-# otherwise — an explicit "start it with Vintage" is their call to make.
+# identifying words for the generic ones. The same is true of LENGTH: a model
+# handed a listing and told to change the price will happily hand back a
+# two-line description, silently undoing the SEO body the first draft wrote.
+# All of it is conditioned on the seller not asking otherwise — an explicit
+# "start it with Vintage", or "make it shorter", is their call to make.
 REFINE_ORDER_RULE = (
     "If you rewrite the title, it must still LEAD with brand or artist, "
     "then the exact model or pattern name, then what the thing is, then "
@@ -141,4 +207,9 @@ REFINE_ORDER_RULE = (
     "words must stay item-specific — brand, model, what the thing is — and "
     "must never open on one of those general words. Both hold unless the "
     "seller's instruction explicitly asks for that opening. "
+    "A rewritten description must also stay LONG and keyword-rich — keep the "
+    "Key Details, Condition, Measurements and Why You'll Love It sections and "
+    "the 1,800-3,500 character range — unless the seller asks for it shorter. "
+    "An instruction about one field is not licence to shorten another: "
+    "trimming the description is only ever what the seller asked for. "
 )
