@@ -54,6 +54,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
+from .services import errorlog
 from .services.background import run_in_background
 
 
@@ -99,6 +100,10 @@ app.add_middleware(
                    "https://localhost", "http://localhost"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the Capacitor shell cannot READ the header, so a crash
+    # reported from the native app would carry no reference and could not be
+    # joined to the request that caused it.
+    expose_headers=["X-Request-Id"],
     max_age=86400,
 )
 
@@ -184,6 +189,11 @@ def build_csp(index_html: Path) -> str:
 # The response headers a browser needs in order to defend the seller, none of
 # which were being sent. Assembled once — they are the same on every response.
 _CSP = build_csp(FRONTEND_DIR / "index.html")
+
+# An inbound X-Request-Id is echoed back and written into logs, so its shape
+# is checked before it is trusted with either: 8-32 hex characters, which is
+# what this app mints and nothing else.
+_REFERENCE_RE = re.compile(r"[0-9a-fA-F]{8,32}")
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": _CSP,
@@ -290,6 +300,57 @@ async def _out_of_space(request: Request, exc: OSError):
     )
 
 
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """The last resort: a crash answers with a reference somebody can quote.
+
+    Until this existed, anything nobody handled fell through to Starlette's
+    default and became a bare "Internal Server Error" — no reference, no
+    record, and nothing tying the seller's report to the traceback uvicorn
+    printed. The seller was shown a fault with no next step, which is the same
+    complaint the two handlers above were written for.
+
+    Two things about this are easy to get wrong.
+
+    It does NOT swallow. Starlette's ServerErrorMiddleware calls this handler
+    to build the response and then re-raises, so uvicorn still logs the
+    traceback and TestClient(raise_server_exceptions=True) still raises. The
+    handler is additive; no existing test changes behaviour because of it.
+
+    It runs OUTSIDE every @app.middleware("http"), including _security_headers
+    — ServerErrorMiddleware is the outermost layer Starlette installs. So the
+    headers have to be applied here by hand, or the one response an attacker
+    can most easily steer the app into would be the only one served without a
+    CSP. test_security_headers.py::test_an_error_response_is_protected_too
+    passes today only because a 404 is raised INSIDE the middleware stack.
+    """
+    reference = errorlog.current_reference() or errorlog.new_reference()
+    # error, not exception: ServerErrorMiddleware re-raises after this, so
+    # uvicorn prints the traceback anyway and log.exception would put a
+    # second copy of it in the Fly window. The row below keeps its own.
+    #
+    # errorlog_skip stops the capture handler recording this line as well:
+    # it would fingerprint on THIS function, so every unhandled error in the
+    # app would collapse into one row called "_unhandled". The explicit
+    # record() below fingerprints at the innermost frame instead — the place
+    # that actually broke.
+    log.error("unhandled error on %s %s [%s]: %s", request.method,
+              request.url.path, reference, exc,
+              extra={"errorlog_skip": True})
+    errorlog.record(kind="backend", level="ERROR", exc=exc, status=500,
+                    route=request.url.path, method=request.method,
+                    reference=reference)
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Something went wrong on our end. If you need "
+                           f"help, quote {reference}."},
+    )
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    response.headers.setdefault("X-Request-Id", reference)
+    return response
+
+
 class _DropDeletionAcks(logging.Filter):
     """Drop the access-log lines for successfully acked eBay account-deletion
     notifications. eBay sends them 1-2 times a MINUTE, around the clock, and
@@ -308,6 +369,15 @@ class _DropDeletionAcks(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(_DropDeletionAcks())
+
+# Mirror WARNING-and-above into error_events, so the Errors tab and the daily
+# triage job have something to read. Installed here, beside the other log
+# wiring, rather than in config.py — importing config must never start a
+# thread or open a database connection, since every test and every script
+# does it. See services/errorlog for why capture is at the handler and not at
+# the 400-odd call sites. This only fills an in-memory queue; the thread that
+# drains it into Postgres starts with the other daemons in _warm_models.
+errorlog.install()
 
 # The frontend is a Vite/React app; serve its build output. (The Dockerfile
 # builds it in a node stage; run.sh builds it for local dev.)
@@ -348,6 +418,36 @@ async def _cache_headers(request: Request, call_next):
         # debugging an account switch against yesterday's answer. no-store,
         # not no-cache: there is nothing here worth revalidating.
         response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.middleware("http")
+async def _request_context(request: Request, call_next):
+    """Give every request an id, and publish it as X-Request-Id.
+
+    Registered LAST on purpose. With @app.middleware("http") the last one
+    registered runs OUTERMOST, so this opens the context before
+    _cache_headers, _security_headers or any route can log a line — which is
+    the whole point, since a line logged before the context exists carries no
+    reference and joins to nothing.
+
+    The id is the same 8 hex characters _support_reference() has always
+    minted, and it is now the SAME VALUE the seller is shown. Before this,
+    each failure site minted its own, so the reference in a toast joined to
+    exactly one log line; it now joins to every line that request emitted,
+    plus its row in error_events.
+
+    An inbound X-Request-Id is honoured so the native shell (or a future
+    proxy) can carry one end to end. It is not a trusted value and never
+    reaches a query — it is a label, validated for shape only.
+    """
+    inbound = (request.headers.get("x-request-id") or "").strip()
+    reference = inbound if _REFERENCE_RE.fullmatch(inbound) else \
+        errorlog.new_reference()
+    errorlog.begin_request(method=request.method, path=request.url.path,
+                           reference=reference)
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-Id", reference)
     return response
 
 
@@ -572,6 +672,10 @@ def _warm_models() -> None:
     threading.Thread(target=objstore.probe, daemon=True).start()
     threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
+    # Drains the error queue into the database. Started here rather than at
+    # import, so a pytest run or a one-off script does not get a thread
+    # racing whatever it was about to assert.
+    errorlog.start_writer()
 
 
 def _base_url(request: Request) -> str:
@@ -1535,6 +1639,12 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
 
 def _uid(request: Request):
     user = auth.current_user(request)
+    # The one choke point where the seller's id is already resolved. Doing
+    # this in the request middleware instead would add a database read to
+    # every asset fetch — and auth.current_user RAISES StorageUnavailable on
+    # a database blip, which would turn one Neon hiccup into a failing
+    # liveness probe on the only machine.
+    errorlog.note_user(user["id"] if user else "")
     return user["id"] if user else None
 
 
@@ -3045,8 +3155,17 @@ def _support_reference() -> str:
     Short because someone has to read it out or paste it into an email. It is
     not a secret and identifies nothing on its own — it exists so mapping a
     failure to a product state does not throw the evidence away.
+
+    It now returns the CURRENT REQUEST's id rather than minting a fresh one
+    per failure. Same alphabet, same width, and every existing call site is
+    unchanged — but the reference a seller quotes now identifies the whole
+    request, so it joins to every line that request logged and to its row in
+    error_events, instead of to the single line at one failure site.
+
+    Falls back to a fresh value off-request (a background sweep, a startup
+    task), where there is no context to belong to.
     """
-    return secrets.token_hex(4)
+    return errorlog.current_reference() or errorlog.new_reference()
 
 
 def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPException:

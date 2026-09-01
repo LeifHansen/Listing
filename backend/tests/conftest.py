@@ -95,6 +95,26 @@ def dbmod(monkeypatch, tmp_path):
     return db
 
 
+@pytest.fixture(autouse=True)
+def _drain_error_queue():
+    """Start every test with an empty error queue.
+
+    Importing backend.main installs the capture handler process-wide, so from
+    then on EVERY log.warning in the suite — including ones a test deliberately
+    provokes — leaves a payload queued. Without this, a test that asserts on
+    what was recorded sees the previous test's failures too, and which ones
+    depends on collection order.
+    """
+    from backend.services import errorlog
+
+    while True:
+        try:
+            errorlog._queue.get_nowait()
+        except Exception:  # noqa: BLE001 - Empty, or the queue is not in use
+            break
+    yield
+
+
 # --- no test may talk to the internet ---------------------------------------
 #
 # Three tests in test_ebay_error_240.py were making REAL HTTPS requests to

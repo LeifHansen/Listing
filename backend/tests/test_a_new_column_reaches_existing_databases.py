@@ -40,6 +40,12 @@ SHIPPED = {
         "action", "actor_email", "actor_id", "created_at", "data", "id",
         "ip", "target_id", "target_type",
     ),
+    "error_events": (
+        "build", "count", "data", "exc_type", "fingerprint", "first_seen",
+        "fix_pr", "func", "id", "kind", "last_seen", "level", "lineno",
+        "message", "method", "module", "reference", "resolved_at", "route",
+        "severity", "status", "traceback", "user_id",
+    ),
     "ebay_accounts": (
         "ebay_email", "ebay_user_id", "ebay_username",
         "fulfillment_policy_id", "merchant_location_key",
