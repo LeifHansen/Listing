@@ -49,6 +49,12 @@ ERROR_TTL_DAYS = int(os.getenv("ERROR_TTL_DAYS", "30") or 30)
 # ingest route cannot be used to fill the table.
 CLIENT_ERROR_MAX_PER_WINDOW = int(
     os.getenv("CLIENT_ERROR_MAX_PER_WINDOW", "20") or 20)
+# The daily triage job's own door onto the error report. Deliberately NOT
+# ADMIN_TOKEN: that one also opens /api/admin/diagnostics, whose payload names
+# the Neon host, the database role and the R2 account in raw exception text.
+# A robot that only needs to read which bugs are open should not hold a
+# credential to that. Unset means CLOSED, like ADMIN_TOKEN.
+ERROR_FEED_TOKEN = os.getenv("ERROR_FEED_TOKEN", "").strip()
 
 # --- Paths -----------------------------------------------------------------
 # DATA_DIR can be pointed at a mounted volume (e.g. on Fly.io) so uploaded and

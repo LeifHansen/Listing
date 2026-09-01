@@ -456,8 +456,12 @@ def _writer_loop() -> None:
             now = _time.time()
             # Once a day, not once a flush. Aggregation already bounds the
             # row count; this bounds how long a fixed bug keeps being listed.
+            # The archive goes out first, so what is about to be pruned has
+            # already been written down somewhere that outlives the table.
             if now - last_prune > 86400:
                 last_prune = now
+                from . import logarchive
+                logarchive.archive_day()
                 db.prune_error_events(config.ERROR_TTL_DAYS)
         except Exception:  # noqa: BLE001 - the writer outlives every failure
             try:

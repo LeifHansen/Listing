@@ -1110,6 +1110,104 @@ def admin_run_compliance(request: Request) -> dict:
     return {"ok": True, "deletions": finished, "refunds_settled": refunds}
 
 
+def _require_error_feed(request: Request) -> None:
+    """The triage job's door. Fails CLOSED, like _require_admin.
+
+    A twin of _require_admin rather than a reuse of it, reading its own
+    ERROR_FEED_TOKEN. The distinction is the point: ADMIN_TOKEN also opens
+    /api/admin/diagnostics, which reports raw database and object-store
+    exception text — the Neon host, the role, the R2 account. A scheduled job
+    that reads which bugs are open has no business holding that, and a
+    credential in CI is the one most likely to leak.
+    """
+    expected = (config.ERROR_FEED_TOKEN or "").strip()
+    supplied = (request.headers.get("x-error-feed-token") or "").strip()
+    if not expected or not supplied or not secrets.compare_digest(supplied,
+                                                                 expected):
+        raise HTTPException(401, "Not authorised.")
+
+
+def _error_report(before: str = "", limit: int = 50, since_hours: int = 0,
+                  min_severity: str = "", include_resolved: bool = True
+                  ) -> dict:
+    """The distinct failures, newest-seen first. Shared by both doors below.
+
+    `sink` rides along because a queue that is dropping rows would otherwise
+    look exactly like a quiet day — the most dangerous thing a monitor can
+    do. It is the lesson check_health.py's docstring records, one layer down:
+    an alarm that cannot tell "nothing happened" from "I could not see" is
+    worse than no alarm.
+    """
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.error_events_list(limit=limit + 1, before=cursor,
+                                since_hours=since_hours,
+                                min_severity=min_severity,
+                                include_resolved=include_resolved)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"errors": rows,
+            "sink": errorlog.stats(),
+            "next_cursor": (_admin_cursor(rows[-1].get("last_seen"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/errors")
+def admin_errors(request: Request, before: str = "", limit: int = 50,
+                 since_hours: int = 0, severity: str = "",
+                 include_resolved: bool = True) -> dict:
+    """The console's Errors tab. Session-gated, like the rest of the console."""
+    _require_superadmin(request)
+    return _error_report(before=before, limit=limit, since_hours=since_hours,
+                         min_severity=severity,
+                         include_resolved=include_resolved)
+
+
+@app.get("/api/ops/error-feed")
+def ops_error_feed(request: Request, limit: int = 50, since_hours: int = 36,
+                   severity: str = "") -> dict:
+    """The same report, for the daily triage job. Token-gated.
+
+    Two doors onto one payload, exactly as /api/admin/system and
+    /api/admin/diagnostics already coexist: the session door authenticates a
+    PERSON, which is right for the console and wrong for a robot that would
+    have to hold a human's long-lived session to use it.
+
+    Under /api/ops rather than /api/admin, and that is not cosmetic.
+    test_every_console_route_is_gated walks app.routes and requires EVERY
+    /api/admin/ path to answer 404 to a non-superadmin — "the next admin route
+    is born tested". It carries exactly one exception, /api/admin/diagnostics,
+    described in its own docstring as the older door. Adding two more would
+    turn a guardrail that cannot be forgotten into a list somebody maintains,
+    which is how the next unreviewed cross-user read ships. Machine doors get
+    their own prefix instead, and the console's guarantee stays absolute.
+
+    Defaults to a 36-hour window rather than 24: the job runs on a daily cron,
+    and a calendar-day read drops anything that happened in the seam between
+    one run and the next. Overlap costs nothing, because the fingerprint
+    dedupes.
+    """
+    _require_error_feed(request)
+    return _error_report(limit=limit, since_hours=since_hours,
+                         min_severity=severity, include_resolved=False)
+
+
+@app.post("/api/ops/errors/{fingerprint}/fixed")
+def ops_error_fixed(fingerprint: str, request: Request,
+                    payload: Optional[dict] = None) -> dict:
+    """Mark a failure as having a fix proposed, so the job stops proposing one.
+
+    Token-gated, and under /api/ops for the reason the feed above gives. It
+    is never cleared automatically — if the bug returns, `last_seen` moves and
+    the row surfaces again on its own, which is a fact rather than a guess
+    about whether the fix worked.
+    """
+    _require_error_feed(request)
+    pr = str((payload or {}).get("pr") or "")[:200]
+    return {"ok": db.mark_error_fixed(fingerprint, pr)}
+
+
 @app.get("/api/admin/audit")
 def admin_audit_view(request: Request, before: str = "",
                      limit: int = 50) -> dict:
