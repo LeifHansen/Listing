@@ -14,7 +14,7 @@ import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
-import { reviewAspectCount } from "./specifics";
+import { reviewAspectCount, specificRowIndex } from "./specifics";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
 import {
@@ -536,14 +536,18 @@ export function SpecificsCard({ w }) {
     if (a.mode === "SELECTION_ONLY" && a.cardinality === "MULTI" && a.values?.length) {
       return <AspectChecklist key={a.name} w={w} a={a} />;
     }
-    const row = w.getSpecificRow(a.name);
+    // The aspect's answer row — the first one with a VALUE (specifics.js),
+    // which is not always the first row carrying the name.
+    const rowIndex = specificRowIndex(w.form.item_specifics, a.name);
+    const row = rowIndex >= 0 ? w.form.item_specifics[rowIndex] : null;
     // MULTI-value aspects (Season, Features, Theme...) can hold several
-    // values; the field edits the first and the rest show as removable chips
-    // — without this they'd be invisible (hidden from freeRows by name).
+    // values; the field edits the answer row and the rest show as removable
+    // chips — without this they'd be invisible (hidden from freeRows by
+    // name). Empty leftovers are not values and get no chip.
     const extras = w.form.item_specifics
       .map((s, i) => ({ ...s, i }))
-      .filter((s) => s.name.trim().toLowerCase() === a.name.toLowerCase())
-      .slice(1);
+      .filter((s) => s.name.trim().toLowerCase() === a.name.toLowerCase()
+        && s.i !== rowIndex && (s.value || "").trim());
     // Brand lives on the listing itself (Title card, AI identify, the maker
     // double-check) — mirror it here so the Brand aspect never LOOKS empty
     // when the listing has one, and edits flow back to the brand field.
@@ -628,7 +632,17 @@ export function SpecificsCard({ w }) {
       id="specifics" icon={ListChecks} title="Item specifics"
       hint={catAspects.length
         ? `${filledCount} of ${catAspects.length} filled by the AI`
-          + (missingRequired ? ` · ${missingRequired} required still empty — eBay blocks the publish until they're filled` : "")
+          + (missingRequired
+            ? ` · ${missingRequired} required still empty — `
+              + (w.isLive
+                // A listing eBay is already showing: the update goes through
+                // either way (a revise doesn't resend the category's aspect
+                // list), so claiming it is blocked is simply untrue — and
+                // telling a seller their live listing is missing a required
+                // field is how they conclude the app is broken.
+                ? "worth filling so buyers' filters find it"
+                : "eBay blocks the publish until they're filled")
+            : "")
           + (reviewCount ? ` · ${reviewCount} AI guess${reviewCount === 1 ? "" : "es"} to check (doesn't block publishing)` : "")
           + ". A wrong specific is worse than a missing one, so check anything flagged."
         : "Details buyers filter by — only the required ones gate publishing"}
@@ -652,8 +666,12 @@ export function SpecificsCard({ w }) {
               <strong className="font-bold">
                 {missingRequired} required {missingRequired === 1 ? "specific is" : "specifics are"} empty
               </strong>
-              {" — eBay won't accept the listing until "}
-              {missingRequired === 1 ? "it's filled in" : "they're filled in"}
+              {w.isLive
+                ? " — your update still goes through; filling "
+                  + (missingRequired === 1 ? "it" : "them")
+                  + " puts the listing in more buyers' filters"
+                : " — eBay won't accept the listing until "
+                  + (missingRequired === 1 ? "it's filled in" : "they're filled in")}
             </span>
           </div>
         )}
