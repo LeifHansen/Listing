@@ -109,14 +109,15 @@ if (existsSync(sitemapPath)) {
   }
 }
 
-// The files that must exist for search engines and app deep links.
+// The files that must exist for search engines and app deep links. Response
+// headers are nginx's job now (security-headers.conf) and are checked by the
+// container smoke test in .github/workflows/marketing.yml, not from dist/.
 for (const required of [
   "sitemap-index.xml",
   "robots.txt",
   "rss.xml",
   "og-default.png",
   "404.html",
-  "_headers",
   ".well-known/apple-app-site-association",
   ".well-known/assetlinks.json",
 ]) {

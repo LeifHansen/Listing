@@ -1,0 +1,41 @@
+# Marketing site — thryftshop.com
+#
+# A second, deliberately tiny Fly app. It shares nothing with the product:
+# no volume, no database, no secrets, no models. If it falls over, sellers
+# never notice.
+
+app = 'thryft-marketing'
+primary_region = 'sjc'
+
+[build]
+  dockerfile = 'Dockerfile'
+  # dist/ is built by `npm run build` before the image — see Dockerfile.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  # A marketing page is usually someone's first impression, and a cold start
+  # is a bad one. One machine always up costs a couple of dollars a month and
+  # keeps time-to-first-byte honest.
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 250
+    soft_limit = 200
+
+[[http_service.checks]]
+  grace_period = '5s'
+  interval = '30s'
+  method = 'GET'
+  timeout = '5s'
+  path = '/'
+
+# nginx serving static files needs almost nothing. This is the smallest Fly
+# offers; if it ever needs more, it is the traffic that changed, not the site.
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'

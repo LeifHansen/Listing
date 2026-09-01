@@ -1,8 +1,8 @@
 # Thryft Shop — marketing site
 
-The public site: `thryftshop.com`. Statically generated with Astro, deployed to
-Cloudflare Pages, and **completely separate from the app**, which keeps serving
-at its own origin. Nothing here can take production down.
+The public site: `thryftshop.com`. Statically generated with Astro, served by
+nginx on its own small Fly app, and **completely separate from the product**,
+which keeps serving at its own origin. Nothing here can take production down.
 
 ```bash
 cd marketing
@@ -83,38 +83,122 @@ node scripts/build-og.mjs   # fetches Fredoka if fontconfig can't see it
 In CI these come from the repository variables `MARKETING_SITE_URL` and
 `MARKETING_SIGNUP_ENDPOINT`.
 
+## Hosting
+
+A second Fly app, `thryft-marketing`, running nginx over the built `dist/`.
+It shares nothing with the product: no volume, no database, no secrets, no
+models — a `shared-cpu-1x` / 256mb machine that serves files.
+
+### Why the Dockerfile has no build stage
+
+The site imports its brand from `frontend/src/styles/tokens.css`, which lives
+*outside* `marketing/`. A Docker build context of `marketing/` cannot see it,
+and a context of the repo root would be filtered by the root `.dockerignore`,
+which excludes `marketing/` to keep it out of the *app's* context.
+
+So `npm run build` runs before the image does, on a checkout that has the whole
+repo — which is what CI already does, and what the link and SEO checks already
+ran against. The image ships exactly the bytes that were verified rather than a
+second build that could differ. Building it by hand means building the site
+first:
+
+```bash
+cd marketing
+npm ci && npm run build
+fly deploy
+```
+
+The image refuses to build without a `dist/`, and refuses again if the brand
+tokens did not reach the stylesheet — both produce a working nginx serving
+something useless, so they fail at build time instead of in a browser.
+
+### What nginx is responsible for
+
+Two things a managed static host would have done for us:
+
+- **Clean URLs.** Astro's `build.format: "file"` emits `/pricing.html`, while
+  every canonical URL, sitemap entry and internal link says `/pricing`. The
+  `try_files $uri $uri.html` fallback is what stops every page 404ing.
+- **Security headers.** CSP, HSTS, framing and referrer policy, in
+  `security-headers.conf`. Note that nginx's `add_header` does **not** inherit
+  into a location that sets one of its own, which is why the snippet is
+  `include`d in each location rather than set once at the server level.
+
+A missing page returns a real `404` with the branded page — not a `200` that
+tells crawlers a dead URL is live.
+
 ## Deploying
 
-Push to `main` with changes under `marketing/`. `.github/workflows/
-marketing-deploy.yml` builds and publishes to Cloudflare Pages via
-`npx wrangler`. It needs:
+Push to `main` with changes under `marketing/`.
+`.github/workflows/marketing-deploy.yml` builds the site, runs the link and SEO
+checks, deploys to Fly, and then **polls the live site until it reports the
+commit it just shipped** (the image stamps it at `/.build`). A deploy that
+reports success while the old image keeps serving is the failure the app's
+pipeline was built to catch; the same reasoning applies here.
 
-- secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`
-- variables: `CLOUDFLARE_PAGES_PROJECT` (defaults to `thryft-marketing`),
-  `MARKETING_SITE_URL`
+It needs `FLY_API_TOKEN` — already a repository secret, used by `deploy.yml` —
+and the repository variable `MARKETING_SITE_URL`.
 
-`public/_headers` carries the CSP, HSTS and framing rules — Cloudflare Pages
-reads that file at deploy time. Adding a third-party script means adding its
-origin there, or it will be blocked with no visible error.
+### First-time setup
+
+Once, from `marketing/`:
+
+```bash
+fly apps create thryft-marketing
+fly ips allocate-v4 --shared      # free; a dedicated v4 is only needed for non-HTTP
+fly ips allocate-v6
+fly ips list                      # note these — the apex A/AAAA records use them
+```
 
 ## The domain
 
-`thryftshop.com` is owned. It matches the iOS/Android bundle id
-(`com.thryftshop.app`), so the identity is consistent across the app stores and
-the web.
+`thryftshop.com` is registered at **GoDaddy**, and stays there. Nothing about
+this setup needs the nameservers moved: Fly is reached by plain `A`/`AAAA` and
+`CNAME` records, which GoDaddy handles like any other host.
 
-The plan, in the order it can be done safely:
+### The records
 
-| Host | Points at | Notes |
-|---|---|---|
-| `thryftshop.com` | Cloudflare Pages | The canonical origin. Every canonical URL, sitemap entry and OG image URL is built from it |
-| `www.thryftshop.com` | 301 → apex | Pick one and redirect the other, or the two compete in search. This site canonicalizes to the **apex** |
-| `app.thryftshop.com` | CNAME → the Fly app | Purely additive: a custom hostname and a cert. `listing-lfwjrg.fly.dev` keeps working, the SPA mount does not move, and no OAuth callback needs re-registering until you choose to |
+In GoDaddy → your domain → DNS → Records:
 
-Nothing about the app has to change for the marketing site to go live. Moving
-the app onto `app.thryftshop.com` is a separate decision — and when you make
-it, the eBay/Etsy/Depop redirect URIs and `capacitor.config.json`'s
-`allowNavigation` are what need updating.
+| Type | Name | Value | Notes |
+|---|---|---|---|
+| `A` | `@` | *(Fly IPv4 from `fly ips list`)* | The apex. An `A` record, so no apex-CNAME problem |
+| `AAAA` | `@` | *(Fly IPv6 from `fly ips list`)* | |
+| `CNAME` | `www` | `thryft-marketing.fly.dev` | Redirected to the apex; this site canonicalizes to the apex |
+| `CNAME` | `app` | `listing-lfwjrg.fly.dev` | The product. Additive — the `.fly.dev` host keeps working |
+
+Then tell Fly which hostnames it should answer for, and it issues the
+certificates itself:
+
+```bash
+cd marketing && fly certs add thryftshop.com && fly certs add www.thryftshop.com
+fly certs add app.thryftshop.com -a listing-lfwjrg          # only when cutting the app over
+```
+
+DNS alone is not enough — a Fly app rejects a hostname it has not been told
+about, and the certificate is issued against the DNS record, so add the record
+first and the cert second.
+
+Moving the product onto `app.thryftshop.com` stays a separate decision from
+putting this site live. `listing-lfwjrg.fly.dev` keeps working throughout, the
+SPA mount does not move, and the eBay/Etsy/Depop redirect URIs and
+`capacitor.config.json`'s `allowNavigation` only need updating if and when you
+cut over.
+
+### Reserved, deliberately unset
+
+`admin.thryftshop.com` **has no DNS record, and does not need one.**
+
+The superadmin console shipped in #213, but it is a role-gated tab inside the
+existing app — `view === "admin"` in `frontend/src/App.jsx`, guarded by
+`isSuperadmin` — not a separate deployment. It is already reachable wherever
+the app is, and pointing a subdomain at it would add a hostname to maintain
+and a certificate to renew without changing who can see it.
+
+If it is ever split into its own service, it gets a `CNAME` to that service's
+`.fly.dev` host and a `fly certs add`, the same as everything else here. Until
+then a record would aim at a host nobody has claimed, which is a
+subdomain-takeover waiting to happen.
 
 ### URL form
 
@@ -126,18 +210,24 @@ pages. `npm run links` fails the build if they ever diverge.
 
 ## Before launch
 
-- [x] ~~Register the domain~~ — `thryftshop.com`. Set `MARKETING_SITE_URL` to
-      `https://thryftshop.com` in the repository variables so CI builds match
-      the default in `astro.config.mjs`
+- [x] ~~Register the domain~~ — `thryftshop.com`, at GoDaddy, staying there
+- [ ] `fly apps create thryft-marketing` and allocate its IPs (see First-time
+      setup). Everything below needs the app to exist
+- [ ] Add the four DNS records at GoDaddy, then `fly certs add` for each
+      hostname
+- [ ] Set the `MARKETING_SITE_URL` repository variable to
+      `https://thryftshop.com` so CI builds and the deploy check match
 - [ ] **Make `support@thryftshop.com` actually receive mail.** It is published
-      on five pages. An address that bounces is worse than no address —
-      Cloudflare Email Routing forwards it to an existing inbox for free. The
-      founder's personal Gmail is deliberately not published here
+      on twelve pages. An address that bounces is worse than no address, and
+      GoDaddy can forward it. The founder's personal Gmail is deliberately not
+      published here
 - [ ] Add the TestFlight public link as `site.testflightUrl`; the iOS CTA falls
       back to an invite-request form until it is set
 - [ ] Drop real screenshots and the hero art into `marketing/assets/` and swap
       the placeholders (search the source for `ASSET SWAP`)
 - [ ] Fill in `public/.well-known/` once the App Store and Play releases exist
       (see the README there)
-- [ ] Create the Cloudflare Pages project and set `CLOUDFLARE_API_TOKEN` +
-      `CLOUDFLARE_ACCOUNT_ID`
+- [ ] Pick an analytics tool, or decide to go without. Nothing is wired up
+
+`FLY_API_TOKEN` is already a repository secret, so there is no new credential
+to create for the deploy.
