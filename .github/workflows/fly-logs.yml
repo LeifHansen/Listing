@@ -79,11 +79,18 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       # Compact tail so a reader only needs the LAST few lines of this job.
-      # Config and disk headroom come from /api/health and /api/ready rather
-      # than a hardcoded secrets grep: health already reports objstore state,
-      # disk_free_mb, the AI engines, tokens_missing, stripe_live_mode and db,
-      # so it cannot drift out of date the way a fixed key list did (that grep
-      # never learned about STRIPE_* or DATABASE_URL).
+      # Config and disk headroom come from the endpoints rather than a
+      # hardcoded secrets grep, so they cannot drift out of date the way a
+      # fixed key list did (that grep never learned about STRIPE_* or
+      # DATABASE_URL).
+      #
+      # WHICH endpoint has what has changed: /api/health is now liveness plus
+      # the UI's capability flags only. Disk, object storage and the database
+      # are on /api/ready (public, dumped below); the bucket name, the missing
+      # variables' names, tokens_missing, stripe_live_mode and the raw errors
+      # are on /api/admin/diagnostics, behind ADMIN_TOKEN. This job only
+      # prints, so it never broke -- the health-watch alarm read the same
+      # stale assumption as a fact and failed on every schedule for four days.
       - name: SUMMARY
         run: |
           echo "===== SUMMARY ====="

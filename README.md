@@ -116,10 +116,21 @@ alerting floor in `health-watch.yml` is 400MB free and the volume runs near
 500MB. `fly volumes list -a <app>` reports the size; `fly volumes extend
 <id> --size 3` raises it without a redeploy.
 
-Everything else worth checking, production answers itself:
+Everything else worth checking, production answers itself — but mind **which**
+endpoint, because that changed. `/api/health` is anonymous and unrate-limited,
+so it was cut back to liveness plus the capability flags the UI reads; it no
+longer carries a single field below. The operator detail moved behind
+`ADMIN_TOKEN`, and the operational numbers are on the public readiness probe:
 
 ```bash
-curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
+# Disk, object storage and the database. Public — no token, and what the
+# health-watch alarm reads.
+curl -s https://<app>.fly.dev/api/ready | python3 -m json.tool
+
+# Everything else: config_warnings, bg_engines, the R2 bucket and the missing
+# variables by name, tokens/Stripe, the raw db and objstore errors.
+curl -s -H "x-admin-token: $ADMIN_TOKEN" \
+  https://<app>.fly.dev/api/admin/diagnostics | python3 -m json.tool
 ```
 
 - **`config_warnings`** is the field to read first. It names the two
@@ -152,8 +163,14 @@ curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
   into the key already there instead. Either turns ~107s per photo into a
   couple of seconds; both cost money per image, which is exactly why neither
   switches itself on.
-- **`disk_free_mb`**, **`db`**, **`objstore_*`** and **`build`** cover the rest;
-  `health-watch.yml` already alerts on them every two hours.
+- **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
+  cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
+  on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
+  it at the latter is what left it failing on every schedule for four days
+  against a production that was entirely healthy, and an alarm that is always
+  red cannot report the real thing. `object_storage` there is two booleans on
+  purpose (`configured`, `degraded`): the bucket name and the raw reason name
+  the R2 account, so they stay on the diagnostics endpoint.
 
 The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
 sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
@@ -268,7 +285,9 @@ Without them, you can still type a category ID manually in the preview.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET`  | `/api/health` | Config status (AI / eBay) |
+| `GET`  | `/api/health` | Liveness, the build sha, and the capability flags the UI reads (AI / eBay / taxonomy). Public, and nothing else — the operator detail is on `/api/admin/diagnostics` |
+| `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
+| `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id` |
 | `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
@@ -291,6 +310,7 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
+| `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 | `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |
@@ -424,8 +444,10 @@ errors on a DB problem. Tables are auto-created on first use.
    Only `R2_ACCOUNT_ID` + `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` are
    needed — the bucket is auto-created (override with `R2_BUCKET`) and photos
    are served via presigned URLs, or straight from the bucket if you set
-   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset; `/api/health`
-   shows `objstore_missing` when partially configured.
+   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset;
+   `/api/admin/diagnostics` shows `objstore_missing` when partially
+   configured, and `/api/ready` says `object_storage.configured` without a
+   token.
 7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
    reuses every `/api/*` endpoint.
 8. **Item Identifier (mobile-only)** — double-layer identification: Claude's
@@ -663,11 +685,24 @@ problem:
   eBay through the same revise path a single edit uses.
 - **Promote listings → "Promote all"** promotes every live, unpromoted listing at
   eBay's recommended ad rate.
+- **Fill in details → "Enrich all"** fills every listing in the group in one
+  pass: eBay's required and recommended item specifics for that listing's
+  category, read off its own photos (the same enrichment a fresh AI draft
+  gets, `_enrich_listing`), merged in **without** overwriting anything the
+  seller wrote, then pushed to the live listing. Notes in `missing_info` that
+  the fill actually answered are dropped, so the suggestion goes away instead
+  of sitting there after the work is done; a note nothing filled is kept, and
+  that listing is reported as one that still needs a human. Because a vision
+  pass per listing takes minutes, this one runs as a **background job**
+  (`POST /api/listings/enrich` → `job_id`, polled on `/api/bulk/status/{id}`),
+  one per account at a time, capped at `BULK_ENRICH_CAP` (default 25) per run.
+  It spends AI tokens per listing, so the button confirms the count and the
+  cost first, and a listing it can't reach (no category, photos gone, eBay not
+  connected) is skipped **before** it is charged for.
 
-Photos, specifics, finish and relist deliberately have none: the first two need a
-human looking at each item, and the last two create listings, which isn't
-something to put behind a single button. The rules bulk runs follow —
-`services/bulk_actions.py`:
+Photos, finish and relist deliberately have none: photos need a human holding
+the item, and the last two create listings, which isn't something to put behind
+a single button. The rules bulk runs follow — `services/bulk_actions.py`:
 
 - **Scope is never implicit.** The client sends the group's own listing ids, so a
   group of twelve can't turn into the whole store.
@@ -675,9 +710,19 @@ something to put behind a single button. The rules bulk runs follow —
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
   listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
-- **The run is bounded** (`BULK_PRICE_CAP`, default 40) because each listing is
-  its own serial eBay revise; the remainder comes back as `deferred` for another
-  pass instead of the request outliving the gateway.
+- **The run is bounded** (`BULK_PRICE_CAP`, default 40; `BULK_ENRICH_CAP`,
+  default 25) because each listing is its own serial eBay revise; the remainder
+  comes back as `deferred` for another pass instead of the request outliving
+  the gateway.
+
+Every row also carries a **dismiss** (×). The engine rebuilds this list from
+scratch on every load, so advice the seller has already considered and decided
+against otherwise comes back for good — and a to-do list that will not shrink
+stops being read. A dismissal is per listing **and** per suggestion kind, kept
+in the browser (`lib/dismissedRecs.js`, bounded so it can't grow without
+limit), and undone in one tap from **Restore N dismissed** on the section
+header — which stays on screen even when every suggestion has been dismissed,
+so the X is never a one-way door.
 
 ## What a sale actually made
 
