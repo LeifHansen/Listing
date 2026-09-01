@@ -1167,8 +1167,11 @@ export function DescriptionCard({ w }) {
       hint="The story buyers read before they commit"
       state={w.completion.description} flagged={w.fixTarget === "description"}
     >
+      {/* The AI now drafts a full SEO body — several hundred words in
+          labelled sections — so a 7-row box showed a tenth of it at a time
+          and made every edit a scroll hunt. It is still resize-y. */}
       <Textarea
-        rows={7}
+        rows={18}
         value={w.form.description}
         needsFix={w.fixTarget === "description"}
         onChange={(e) => w.set("description", e.target.value)}

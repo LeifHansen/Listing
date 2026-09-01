@@ -30,6 +30,8 @@ this replaces; picking remote throws away what the seller just typed.
 """
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -45,6 +47,34 @@ REMOTE_OWNED = ("watch_count", "sold_quantity", "view_url", "sold_price",
                 # back to False when the seller removes them, or the
                 # quarantine never lifts.
                 "has_variations")
+
+
+# The description is the one TRACKED field the two sides hold in different
+# FORMS. This app keeps it as plain text — the AI drafts it that way and the
+# editor is a textarea — while eBay renders <Description> as HTML, so the
+# publish wraps it in paragraphs on the way out (ebay_trading
+# ._description_html). GetItem then hands back the marked-up form of the same
+# words, and comparing that byte for byte against the local copy reports an
+# edit on every sync of a listing this app published: the description would
+# ride along on every revise, and a genuine Seller Hub edit would arrive as a
+# conflict over what is only formatting. So descriptions are compared as the
+# words they contain.
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _as_text(value: Any) -> str:
+    """A description reduced to its words: markup, entities and trailing
+    whitespace removed, paragraph breaks kept (they are the seller's)."""
+    text = re.sub(r"(?i)<br\s*/?>", "\n", str(value or ""))
+    text = re.sub(r"(?i)</p\s*>", "\n\n", text)
+    text = html.unescape(_TAG_RE.sub("", text))
+    text = "\n".join(line.strip() for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _versions(name: str, value: Any) -> Any:
+    """One side of a field, in the form the other side can be compared to."""
+    return _as_text(value) if name == "description" else _comparable(value)
 
 
 @dataclass
@@ -96,9 +126,9 @@ def three_way(local: Listing, shadow: Optional[dict], remote: dict,
         if name not in remote:
             # eBay did not report this field, so it says nothing about it.
             continue
-        base_v = _comparable(shadow.get(name))
-        local_v = _comparable(getattr(local, name, None))
-        remote_v = _comparable(remote.get(name))
+        base_v = _versions(name, shadow.get(name))
+        local_v = _versions(name, getattr(local, name, None))
+        remote_v = _versions(name, remote.get(name))
 
         local_changed = (local_v != base_v) or (name in dirty)
         remote_changed = remote_v != base_v

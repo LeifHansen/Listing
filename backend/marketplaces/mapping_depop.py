@@ -49,6 +49,32 @@ def truncate_title(title: str, limit: int = TITLE_LIMIT) -> str:
     return (cut or title[:limit]).rstrip(" ,;:-—")
 
 
+def truncate_description(text: str, limit: int = DESCRIPTION_LIMIT) -> str:
+    """Cut at a paragraph, then a sentence, then a word boundary.
+
+    The listing description is written for eBay, which has no practical limit,
+    so it runs to several thousand characters of labelled sections. Depop takes
+    1000, and a hard slice lands mid-word — usually halfway through a heading,
+    which reads like a bug rather than an edit."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    # Only accept a boundary in the back half: cutting a 1000-character
+    # description down to 200 to land on a paragraph break loses more than the
+    # ragged edge costs.
+    floor = limit // 2
+    para = head.rfind("\n\n")
+    if para >= floor:
+        return head[:para].rstrip()
+    stop = max(head.rfind(". "), head.rfind(".\n"),
+               head.rfind("! "), head.rfind("? "))
+    if stop >= floor:
+        return head[:stop + 1].rstrip()
+    space = head.rfind(" ")
+    return (head[:space] if space >= floor else head).rstrip(" ,;:-—")
+
+
 def size_for(listing: Listing) -> str:
     """The explicit Depop size wins; else any "Size" item specific."""
     if listing.depop.size.strip():
@@ -62,7 +88,7 @@ def size_for(listing: Listing) -> str:
 def build_product_payload(listing: Listing) -> dict:
     payload = {
         "title": truncate_title(listing.title),
-        "description": (listing.description or "").strip()[:DESCRIPTION_LIMIT],
+        "description": truncate_description(listing.description),
         "price": round(float(listing.price or 0), 2),
         "currency": listing.currency or "USD",
         "condition": CONDITION_MAP.get(

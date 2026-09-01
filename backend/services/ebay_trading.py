@@ -300,6 +300,31 @@ def _esc(value: Any) -> str:
     return html.escape(str(value if value is not None else ""), quote=False)
 
 
+# Any tag at all. eBay renders <Description> as HTML, so a description that
+# already carries markup — everything GetItem imports, and anything a seller
+# typed by hand — has to go back exactly as it came.
+_HTML_TAG_RE = re.compile(r"<[a-zA-Z][^>]*>")
+
+
+def _description_html(text: str) -> str:
+    """A listing description as the HTML eBay will render.
+
+    The AI writes the description as plain text in labelled sections separated
+    by blank lines, and the editor is a plain textarea, but eBay renders the
+    field as markup: newlines collapse, so a 400-word description arrives as
+    one unbroken wall. Plain text is escaped and rebuilt as paragraphs;
+    anything already containing a tag is left alone.
+    """
+    text = (text or "").strip()
+    if not text or _HTML_TAG_RE.search(text):
+        return text
+    blocks = [b for b in (b.strip() for b in re.split(r"\n\s*\n", text)) if b]
+    return "".join(
+        "<p>" + "<br>".join(_esc(line.strip()) for line in block.split("\n"))
+        + "</p>"
+        for block in blocks)
+
+
 def _cdata(value: str) -> str:
     """Wrap text in CDATA so listing HTML survives intact.
 
@@ -875,7 +900,9 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
         parts.append(f"<SubTitle>{_esc(listing.subtitle[:SUBTITLE_MAX_CHARS])}"
                      "</SubTitle>")
     if listing.description and wanted("description"):
-        parts.append(f"<Description>{_cdata(listing.description)}</Description>")
+        parts.append("<Description>"
+                     f"{_cdata(_description_html(listing.description))}"
+                     "</Description>")
     if listing.category_id and wanted("category_id"):
         parts.append("<PrimaryCategory><CategoryID>"
                      f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
