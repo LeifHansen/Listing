@@ -1,11 +1,12 @@
 name: Deploy marketing site
 
-# Publishes the static build to Cloudflare Pages. Runs only for changes that
-# can actually affect the site, and is entirely independent of deploy.yml —
-# shipping the app and shipping the marketing site are separate events.
+# Ships the marketing site to its own Fly app. Entirely separate from
+# deploy.yml: this app has no volume, no database and no secrets, and nothing
+# here can affect the product's release.
 #
-# Deploys through `npx wrangler` rather than a third-party action, so the only
-# code that sees CLOUDFLARE_API_TOKEN is Cloudflare's own published CLI.
+# Path-filtered, and the filter includes the app's token file because the site
+# imports its brand from it (marketing/src/styles/global.css) — a change to
+# those tokens genuinely restyles this site and should redeploy it.
 
 on:
   push:
@@ -36,9 +37,10 @@ jobs:
         run: npm ci
         working-directory: marketing
 
-      # SITE_URL is what every canonical URL, sitemap entry and OG image URL is
-      # built from. Set it as a repository variable once the domain exists; the
-      # default in astro.config.mjs is used until then.
+      # The build happens HERE, not inside the Docker image. The site imports
+      # its brand tokens from frontend/src/styles/tokens.css, which is outside
+      # the image's build context — so the image serves a dist/ that this step
+      # produced and the next step verified.
       - name: Build
         run: npm run build
         working-directory: marketing
@@ -50,42 +52,36 @@ jobs:
         run: npm run links
         working-directory: marketing
 
-      # The Cloudflare project may not exist yet. A deploy workflow that
-      # cannot deploy should say so plainly, not fail the run and put a red X
-      # on main for a condition nobody has got to yet — and equally must not
-      # pass quietly, or "it went green" would come to mean nothing.
-      - name: Check Cloudflare is configured
-        id: cfg
-        shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            missing=""
-            [ -z "$CLOUDFLARE_API_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
-            [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
-            echo "::warning::Marketing site was built but NOT published — missing secret(s):$missing"
-            {
-              echo "## Marketing site was not published"
-              echo
-              echo "The build and its checks passed, but these repository secrets are unset:"
-              echo
-              for s in $missing; do echo "- \`$s\`"; done
-              echo
-              echo "Set them (and \`CLOUDFLARE_PAGES_PROJECT\`, if the project is not"
-              echo "named \`thryft-marketing\`), then re-run this workflow to publish."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+      # Pinned to a commit SHA, not @master: this job holds FLY_API_TOKEN, so
+      # following a moving branch hands that token to whatever superfly pushed
+      # most recently. Same pin deploy.yml uses.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
 
-      - name: Publish to Cloudflare Pages
-        if: steps.cfg.outputs.ready == 'true'
-        run: npx --yes wrangler@4 pages deploy dist --project-name "$PROJECT" --branch main
+      - name: Deploy to Fly
+        run: |
+          flyctl deploy --config fly.toml --remote-only \
+            --build-arg GIT_SHA="$GITHUB_SHA"
         working-directory: marketing
         env:
-          PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'thryft-marketing' }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # A deploy can report success while the previous image keeps serving —
+      # that exact failure is why the app's pipeline verifies itself, and the
+      # reasoning does not stop applying because this app is smaller. The image
+      # stamps the commit at /.build; poll until the live site reports the one
+      # we just shipped.
+      - name: Verify the site is running this commit
+        shell: bash
+        run: |
+          host="${{ vars.MARKETING_SITE_URL || 'https://thryft-marketing.fly.dev' }}"
+          for i in $(seq 1 30); do
+            live=$(curl -fsS --max-time 10 "$host/.build" 2>/dev/null | tr -d '[:space:]' || true)
+            if [ "$live" = "$GITHUB_SHA" ]; then
+              echo "OK: $host is serving $GITHUB_SHA"
+              exit 0
+            fi
+            echo "attempt $i: live='$live' want='$GITHUB_SHA'"
+            sleep 5
+          done
+          echo "::error::$host never reported $GITHUB_SHA — the deploy said it succeeded but the site is serving something else"
+          exit 1
