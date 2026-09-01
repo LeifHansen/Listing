@@ -1287,11 +1287,13 @@ def _merge_filled_specifics(listing: Listing, filled: list,
             added += 1
     # Never raises: this runs on the identify path OUTSIDE the enrichment's
     # own try, so an exception here would take the whole draft down over a
-    # convenience. The size type is not worth a listing.
+    # convenience. A size type is not worth a listing.
     try:
+        # Size first — it decides what the size type rule reads.
+        taxonomy.fix_size_specifics(listing, aspects)
         taxonomy.apply_big_and_tall(listing, aspects)
     except Exception as exc:  # noqa: BLE001 - a default, never a blocker
-        log.info("size type skipped: %s", exc)
+        log.info("size defaults skipped: %s", exc)
     return added
 
 
