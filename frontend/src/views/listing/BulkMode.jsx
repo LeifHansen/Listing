@@ -131,6 +131,10 @@ function BulkItemCard({
   // eBay category).
   const blockers = item.status === "draft"
     ? ebayBlockers(l, { targets, conditions }) : [];
+  const needsInfo = !leaving
+    && (blockers.length > 0
+      || item.status === "error"
+      || (item.status === "draft" && !!item.needs_info));
   // All of the item's photos, not just the first. An item that failed before
   // a listing existed still has the server-picked `thumb`.
   const photos = l.images?.length
@@ -146,6 +150,15 @@ function BulkItemCard({
       className={cn(
         "relative bg-card rounded-card border shadow-card p-4 flex flex-col gap-3",
         item.status === "error" ? "border-warning/50" : "border-line",
+        // Amber card = this one needs the seller before it can be posted:
+        // a field eBay refuses it without, or a publish eBay actually turned
+        // down. Same signal the drafts strip's cards carry, for the same
+        // reason — in a queue of twenty, a small warning line under a card is
+        // easy to publish straight past. `needs_info` and not merely
+        // `item.error`, because a publish nobody could get an answer to also
+        // leaves an error on the card and is emphatically NOT something to
+        // go and fix (see publishOne).
+        needsInfo && "bg-warning-soft border-warning/45",
         // On its way off the queue — nothing on it is still actionable.
         leaving && "pointer-events-none",
       )}
@@ -592,6 +605,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
 
   const publishOne = useCallback(async (it) => {
     setPublishing((p) => ({ ...p, [it.session_id]: true }));
+    // Last attempt's verdict is not this one's — clear it before we ask
+    // again, so a retry is never shown beside the refusal it is retrying.
+    setItems((cur) => cur.map((x) => x.session_id === it.session_id
+      ? { ...x, needs_info: false } : x));
     try {
       // Persist inline edits first, then publish (one request per item — the
       // backend fans out to every selected marketplace); see publishShared.
@@ -622,6 +639,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               ? (res.multi && Object.values(res.results || {}).some((r) => !r.ok)
                   ? `${summary} — open the full editor to fix the rest.` : null)
               : tally.reason,
+            // Refused, so the card goes amber and stays amber. An outcome
+            // nobody could establish is not a refusal and must not: the next
+            // step there is to CHECK the store, never to edit and republish.
+            needs_info: !tally.published && !tally.unconfirmed,
           }
         : x));
       return tally;
@@ -634,7 +655,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       const unconfirmed = !!e?.unknownOutcome;
       const message = unconfirmed ? UNCONFIRMED_PUBLISH : e.message;
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
-        ? { ...x, error: message } : x));
+        ? { ...x, error: message, needs_info: !unconfirmed } : x));
       return { published: false, unconfirmed, reason: message };
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));

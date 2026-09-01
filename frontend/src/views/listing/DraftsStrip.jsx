@@ -96,6 +96,17 @@ export function DraftsStrip({ search = "" }) {
   const [selecting, setSelecting] = useState(false);
   const [sel, setSel] = useState({});
   const [publishing, setPublishing] = useState({});   // id -> bool
+  // Drafts eBay REFUSED, and what it said. A refusal is the seller's to fix —
+  // a field to fill in, an account hold to clear — and until this existed the
+  // only place it was ever said was a toast that is gone in seconds. The card
+  // it belongs to now carries it: amber background, the reason underneath,
+  // and it stays there until the next publish attempt answers differently.
+  // Keyed by id and in-memory, like `publishing` — a reload re-asks eBay
+  // rather than showing a verdict from an hour ago. (An unconfirmed publish
+  // is NOT in here: nobody established that it was refused, and painting it
+  // "needs info" would send the seller to edit and republish a listing that
+  // may already be live.)
+  const [refused, setRefused] = useState({});        // id -> reason
   const [startingOver, setStartingOver] = useState(null);
   // The send-off a card gets on its way live (see publishCelebration): a
   // burst of confetti, then it lifts off the grid. What is left when a batch
@@ -152,6 +163,9 @@ export function DraftsStrip({ search = "" }) {
   // rather than one per item.
   const publishItem = async (item) => {
     setPublishing((p) => ({ ...p, [item.id]: true }));
+    // Last run's verdict is not this run's. Cleared up front so a retry never
+    // shows the old refusal beside the new attempt.
+    setRefused((r) => (r[item.id] ? { ...r, [item.id]: undefined } : r));
     try {
       const res = await publishListing(item.id, item.listing || {}, effectiveTargets);
       // Move the card out of Drafts on the spot — the refresh below confirms
@@ -168,6 +182,10 @@ export function DraftsStrip({ search = "" }) {
       // counted or worded as a refusal.
       const tally = publishTally(
         res, "Publish blocked — open the draft to see what to fix.");
+      // Refused: mark the card so the reason outlives the toast.
+      if (!tally.published && !tally.unconfirmed) {
+        setRefused((r) => ({ ...r, [item.id]: tally.reason }));
+      }
       return { published: tally.published, res, reason: tally.reason,
                unconfirmed: tally.unconfirmed,
                ...(tally.unconfirmed ? { error: UNCONFIRMED_PUBLISH } : {}) };
@@ -178,6 +196,9 @@ export function DraftsStrip({ search = "" }) {
       if (e?.unknownOutcome) {
         return { published: false, unconfirmed: true, error: UNCONFIRMED_PUBLISH };
       }
+      // The server (or eBay through it) said no, with a reason. Same
+      // treatment as a refusal in the body above — it is the seller's to fix.
+      setRefused((r) => ({ ...r, [item.id]: e.message }));
       return { published: false, error: e.message };
     } finally {
       setPublishing((p) => ({ ...p, [item.id]: false }));
@@ -400,6 +421,20 @@ export function DraftsStrip({ search = "" }) {
         : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4")}>
         {cards.map((item, i) => {
           const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
+          // Two ways a draft ends up needing the seller, and the card looks
+          // the same for both: fields a browser can already see eBay will
+          // refuse it over, and a publish eBay actually turned down. The
+          // second is the one the seller could previously miss entirely —
+          // the toast said it once and the card went on looking publishable.
+          const refusal = refused[item.id];
+          const needsInfo = blockers.length > 0 || !!refusal;
+          // Worded as a verdict on the LAST ATTEMPT, not on the draft as it
+          // stands: the flag is cleared by the next publish, not by an edit,
+          // so "eBay refuses this" could outlive the fix. "The last publish
+          // was refused" stays true either way.
+          const needsInfoWhy = blockers.length
+            ? `Needs info before it can go on eBay — ${blockerLabels(blockers)}.`
+            : refusal ? `The last publish was refused: ${refusal}` : null;
           // Live, and on its way off the grid. Its controls come off with it:
           // a click landing on a departing card would open, publish or delete
           // a listing the seller never chose.
@@ -430,6 +465,8 @@ export function DraftsStrip({ search = "" }) {
                 onSkip={() => toggleSkipDraft(item.id)}
                 skipped={skippedDraftIds.has(item.id)}
                 metrics={metricsById[item.id]}
+                needsInfo={needsInfo && !leaving}
+                needsInfoWhy={needsInfoWhy}
                 selectable={selecting && !leaving}
                 selected={!!sel[item.id]}
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
@@ -460,14 +497,21 @@ export function DraftsStrip({ search = "" }) {
                   {/* In a list row this drops to the end of the wrapped line
                       (order-last); stacked cards keep it under the buttons,
                       where it reads as the reason Publish is disabled. */}
-                  {blockers.length > 0 && (
+                  {(blockers.length > 0 || refusal) && (
                     <p className={cn(
                       "flex items-start gap-1.5 text-[12px] font-semibold text-warning",
                       list ? "w-full order-last" : "mt-1.5")}
-                      title={blockers.map((b) => `${b.label}: ${b.why}`).join("\n")}>
+                      title={blockers.length
+                        ? blockers.map((b) => `${b.label}: ${b.why}`).join("\n")
+                        : refusal}>
                       <AlertTriangle size={13} className="shrink-0 mt-px" aria-hidden />
                       <span className="min-w-0">
-                        Keeping this off eBay: {blockerLabels(blockers)}
+                        {blockers.length
+                          ? `Keeping this off eBay: ${blockerLabels(blockers)}`
+                          /* eBay's verdict, kept on the card. Nothing local is
+                             blocking, so without this the amber card would
+                             have no reason on it at all. */
+                          : `Last publish refused: ${refusal}`}
                       </span>
                     </p>
                   )}

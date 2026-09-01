@@ -42,7 +42,8 @@ const MAX_BATCH_FILES = 250;
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
 export function UploadPhase() {
-  const { setSession, runBulkUpload, bulkRetry, clearBulkRetry } = useApp();
+  const { setSession, runBulkUpload, bulkRetry, clearBulkRetry,
+          invalidateListings } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -146,6 +147,11 @@ export function UploadPhase() {
         // the editor's autofill effect skips its (re-charging) re-run.
         specificsAutofilled: !!result.specifics_autofilled,
       });
+      // A listing that did not exist a moment ago now does. Nothing else asks
+      // the server again on its own, so without this the new draft is absent
+      // from Drafts, from the tab counts and from the dashboard until some
+      // unrelated refresh happens along. See store.invalidateListings.
+      invalidateListings();
     } catch (e) {
       toast(`Error: ${e.message}`, { kind: "error" });
     } finally {
