@@ -57,6 +57,48 @@ jobs:
       # most recently. Same pin deploy.yml uses.
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
 
+      # First-run bootstrap. The app and its IPs have to exist before a deploy
+      # can land, and doing it here rather than by hand means the first deploy
+      # works from a clean account with nothing typed into a terminal. Every
+      # command is safe to re-run: create is skipped when the app is already
+      # there, and IPs are only allocated when there are none.
+      - name: Create the Fly app if it does not exist
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
+          echo "app: $app"
+          if flyctl status -a "$app" >/dev/null 2>&1; then
+            echo "already exists"
+          else
+            echo "not found — creating"
+            # A deploy token scoped to another app cannot create this one. If
+            # that is the case, say so precisely instead of failing on the
+            # deploy three steps later with a less obvious error.
+            if ! flyctl apps create "$app" --org personal 2>&1 | tee /tmp/create.log; then
+              if grep -qi "unauthor\|permission\|not allowed\|token" /tmp/create.log; then
+                echo "::error::FLY_API_TOKEN cannot create apps — it is probably a deploy token scoped to the existing app. Create an org-scoped token (fly tokens create org) and update the FLY_API_TOKEN secret, or run 'fly apps create $app' once by hand."
+              fi
+              exit 1
+            fi
+          fi
+        working-directory: marketing
+
+      - name: Give it IPs if it has none
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
+          ips=$(flyctl ips list -a "$app" 2>/dev/null || true)
+          echo "$ips"
+          # A shared v4 is free and is all an HTTPS site needs; a dedicated one
+          # is only required for non-HTTP services.
+          echo "$ips" | grep -q "v4" || flyctl ips allocate-v4 --shared -a "$app"
+          echo "$ips" | grep -q "v6" || flyctl ips allocate-v6 -a "$app"
+        working-directory: marketing
+
       - name: Deploy to Fly
         run: |
           flyctl deploy --config fly.toml --remote-only \
@@ -64,6 +106,37 @@ jobs:
         working-directory: marketing
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # The DNS records cannot be written until these values exist, so print
+      # them where they can be read rather than telling someone to go and run
+      # a command to find them.
+      - name: The DNS records to create
+        if: always()
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
+          v4=$(flyctl ips list -a "$app" 2>/dev/null | awk '$1=="v4"{print $2; exit}')
+          v6=$(flyctl ips list -a "$app" 2>/dev/null | awk '$1=="v6"{print $2; exit}')
+          {
+            echo "## DNS records for GoDaddy"
+            echo
+            echo "| Type | Name | Value |"
+            echo "|---|---|---|"
+            echo "| A | @ | \`${v4:-not allocated}\` |"
+            echo "| AAAA | @ | \`${v6:-not allocated}\` |"
+            echo "| CNAME | www | \`$app.fly.dev\` |"
+            echo "| CNAME | app | \`listing-lfwjrg.fly.dev\` |"
+            echo
+            echo "Then, once those resolve:"
+            echo '```'
+            echo "flyctl certs add thryftshop.com -a $app"
+            echo "flyctl certs add www.thryftshop.com -a $app"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "v4=${v4:-none} v6=${v6:-none}"
+        working-directory: marketing
 
       # A deploy can report success while the previous image keeps serving —
       # that exact failure is why the app's pipeline verifies itself, and the
