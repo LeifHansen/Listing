@@ -223,13 +223,24 @@ pages. `npm run links` fails the build if they ever diverge.
 
 ## Before launch
 
+Done:
+
 - [x] ~~Register the domain~~ — `thryftshop.com`, at GoDaddy, staying there
-- [ ] `fly apps create thryft-marketing` and allocate its IPs (see First-time
-      setup). Everything below needs the app to exist
-- [ ] Add the four DNS records at GoDaddy, then `fly certs add` for each
-      hostname
+- [x] ~~`fly apps create thryft-marketing` and allocate its IPs~~ — the app
+      exists, with `66.241.124.158` (shared v4) and `2a09:8280:1::180:7b83:0`
+- [x] ~~A deploy credential for CI~~ — `FLY_MARKETING_TOKEN`, scoped to this
+      app alone. `FLY_API_TOKEN` is scoped to the product and cannot reach
+      this one, which is what made the first three deploys fail
+
+Left:
+
+- [ ] The four DNS records at GoDaddy (see "The records" above), then
+      `fly certs add thryftshop.com -a thryft-marketing` and the same for
+      `www.` — DNS first, certificate second
 - [ ] Set the `MARKETING_SITE_URL` repository variable to
-      `https://thryftshop.com` so CI builds and the deploy check match
+      `https://thryftshop.com` so CI builds and the deploy check match. Until
+      then the site builds against the default and deploys to
+      `thryft-marketing.fly.dev`, which works
 - [ ] **Make `support@thryftshop.com` actually receive mail.** It is published
       on twelve pages. An address that bounces is worse than no address, and
       GoDaddy can forward it. The founder's personal Gmail is deliberately not
@@ -242,5 +253,9 @@ pages. `npm run links` fails the build if they ever diverge.
       (see the README there)
 - [ ] Pick an analytics tool, or decide to go without. Nothing is wired up
 
-`FLY_API_TOKEN` is already a repository secret, so there is no new credential
-to create for the deploy.
+### Triggering a deploy by hand
+
+A push to `main` touching `marketing/**` deploys. To run it without a code
+change: **Actions → Deploy marketing site → Run workflow**. Adding or changing
+a repository secret does *not* start a run on its own — the secret is only read
+when a run begins.
