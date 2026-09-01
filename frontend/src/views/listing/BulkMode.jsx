@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
   ArrowRight, X,
@@ -26,6 +26,9 @@ import {
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
 import { blockerLabels, ebayBlockers, TITLE_MAX } from "./blockers";
+import {
+  liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
+} from "./publishCelebration";
 import { duplicateSuspects } from "./duplicateSuspects";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
@@ -94,8 +97,10 @@ function conditionOptions(conditions, current) {
 
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
-  onDelete, deleting, onDeletePhoto, targets,
+  onDelete, deleting, onDeletePhoto, targets, leaving,
 }) {
+  // `leaving` is which phase of its send-off this card is in, or undefined.
+  const reduced = useReducedMotion();
   const l = item.listing || {};
   const editable = item.status !== "error";
   const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
@@ -131,16 +136,23 @@ function BulkItemCard({
   const photos = l.images?.length
     ? l.images.map((n) => ({ name: n, src: mediaUrl(item.session_id, n, 1) }))
     : (item.thumb ? [{ name: null, src: apiUrl(`${item.thumb}?v=1`) }] : []);
+  const motionProps = publishedCardMotion(leaving, { reduced: !!reduced });
   return (
     <motion.div
-      layout
+      layout="position"
       initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
+      animate={motionProps.animate}
+      transition={motionProps.transition}
       className={cn(
-        "bg-card rounded-card border shadow-card p-4 flex flex-col gap-3",
+        "relative bg-card rounded-card border shadow-card p-4 flex flex-col gap-3",
         item.status === "error" ? "border-warning/50" : "border-line",
+        // On its way off the queue — nothing on it is still actionable.
+        leaving && "pointer-events-none",
       )}
     >
+      {leaving && (
+        <PublishedBurst label={liveLabel(targets)} reduced={!!reduced} />
+      )}
       <div className="flex items-center gap-3">
         {item.status === "draft" && (
           <input
@@ -384,6 +396,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // concurrent pass. Same shape as DraftsStrip's.
   const [bulkProgress, setBulkProgress] = useState(null);
   const [deleting, setDeleting] = useState({});
+  // The send-off a published item gets before it leaves the queue (see
+  // publishCelebration). The batch's own list keeps every item forever — the
+  // poll merge depends on it — so `departed` is what actually takes a live
+  // one off the screen, leaving the queue holding only what still needs work.
+  const { celebrating, departed, celebrate } = usePublishCelebration();
   // The merge review dialog. `key` bumps on every open so the dialog remounts
   // with fresh state (which draft merges in, which is master, which entries
   // win) instead of reopening on the last merge's answers; `drafts` (ticked)
@@ -591,6 +608,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       // outcome the SERVER could not establish is not a rejection at all.
       const tally = publishTally(
         res, "Publish blocked — open the full editor to fix.");
+      // Purely visual, and only ever started by a CONFIRMED publish: the
+      // item's status below is what the queue reads, so an interrupted
+      // animation can never lose a listing that did not go live.
+      if (tally.published) celebrate(it.session_id, it);
       setItems((cur) => cur.map((x) => x.session_id === it.session_id
         ? {
             ...x,
@@ -618,7 +639,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     } finally {
       setPublishing((p) => ({ ...p, [it.session_id]: false }));
     }
-  }, [effectiveTargets]);
+  }, [effectiveTargets, celebrate]);
 
   // One card's Publish button. Asks first — it posts a real, fee-incurring
   // listing; "Publish selected" asks once for its whole set instead, which is
@@ -821,6 +842,14 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     return 95;
   })());
   const drafts = items.filter((it) => it.status === "draft");
+  // A published item leaves the queue once its send-off has played, so what
+  // is left on screen at the end of a batch is the work that is left: the
+  // drafts eBay refused and the ones still missing a field. The items
+  // themselves stay in `items` — the poll merge above reads them — and the
+  // receipt below keeps the eBay item ids the cards used to carry.
+  const gone = (it) => it.status === "published" && departed.has(it.session_id);
+  const publishedGone = items.filter(gone);
+  const visible = items.filter((it) => !gone(it));
   // What the selection-driven buttons are armed by. Drafts for publish/merge
   // (a published or failed item is neither), every ticked item for delete.
   const selectedDrafts = drafts.filter((d) => checked[d.session_id]).length;
@@ -956,6 +985,27 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         </Card>
       )}
 
+      {/* The receipt. The card each of these rode out on carried its eBay
+          item id, and that was the only place the id appeared — so it moves
+          here rather than leaving with the animation. */}
+      {publishedGone.length > 0 && (
+        <Card className="py-3.5 border-success/30">
+          <p className="text-sm text-ink flex items-start gap-2">
+            <CheckCircle2 size={17} className="text-success shrink-0 mt-0.5" aria-hidden />
+            <span title="Live on eBay — find them under Active in your listings.">
+              <strong>{publishedGone.length} listing{publishedGone.length === 1 ? "" : "s"} published live</strong>
+              {" "}and cleared out of this batch
+              {publishedGone.some((it) => it.listing_id)
+                ? ` — ${publishedGone.filter((it) => it.listing_id).map((it) => it.listing_id).join(", ")}`
+                : ""}.
+              {drafts.length > 0
+                ? " What's below still needs you."
+                : ""}
+            </span>
+          </p>
+        </Card>
+      )}
+
       {drafts.length > 0 && (
         <MarketTargetChips selected={bulkTargets} toggle={toggleBulkTarget}
           otherConnected={otherConnected} />
@@ -1018,9 +1068,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       {/* Preview cards stream in one by one, as each item is drafted. */}
       <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
         <AnimatePresence>
-          {items.map((it) => (
+          {visible.map((it) => (
             <BulkItemCard
               key={it.session_id}
+              leaving={celebrating[it.session_id]?.phase}
               item={it}
               checked={!!checked[it.session_id]}
               onCheck={(v) => setChecked((c) => ({ ...c, [it.session_id]: v }))}
