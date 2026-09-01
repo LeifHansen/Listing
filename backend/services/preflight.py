@@ -105,11 +105,49 @@ def check_weight_vs_services(listing: Listing, services: list[dict]) -> list[dic
     return issues
 
 
+def condition_label(enum: str) -> str:
+    """"USED_GOOD" -> "Used Good". eBay's own wording for the grade is better
+    and the checklist uses it wherever the lookup supplied one; this is for
+    the value the listing is carrying, which by definition eBay did not."""
+    return (enum or "").replace("_", " ").title()
+
+
+def _check_condition_fits_category(listing: Listing,
+                                   allowed_conditions: Optional[list[dict]],
+                                   add) -> None:
+    """The condition has to be one the CATEGORY offers, not just one eBay has.
+
+    eBay publishes a different ladder per category — Very Good / Good /
+    Acceptable only in media, the pre-owned grades only in apparel, one plain
+    "Used" across most of the rest — and rejects anything else with error
+    25021 ("condition id is invalid for the selected primary category"). That
+    rejection costs a whole publish and names nothing the seller can act on,
+    so it is worth catching here, where the fix is a dropdown away.
+
+    `allowed_conditions` is eBay's own answer for this category
+    ([{enum, id, label}]) or None when we could not ask — and None means the
+    check is skipped, never that the category allows everything.
+    """
+    if not allowed_conditions:
+        return
+    cond = (listing.condition or "").strip().upper()
+    if any(cond == (c.get("enum") or "").upper() for c in allowed_conditions):
+        return
+    names = ", ".join(c.get("label") or condition_label(c.get("enum", ""))
+                      for c in allowed_conditions[:8])
+    add("condition",
+        f"eBay doesn't offer “{condition_label(cond)}” in this category",
+        f"Pick one of the conditions this category takes: {names}. "
+        "(Categories differ — clothing has its own pre-owned grades, and "
+        "Very Good / Good / Acceptable exist only for media.)")
+
+
 def validate(listing: Listing, mode: str, *,
              has_fulfillment: bool, has_payment: bool, has_return: bool,
              has_location: bool, connected: bool,
              policy_services: Optional[list[dict]] = None,
-             required_aspects: Optional[list[str]] = None) -> list[dict]:
+             required_aspects: Optional[list[str]] = None,
+             allowed_conditions: Optional[list[dict]] = None) -> list[dict]:
     """Everything eBay will reject at publish time, as UI-ready issues.
 
     Draft mode checks only what createOrReplaceInventoryItem needs (title,
@@ -176,6 +214,8 @@ def validate(listing: Listing, mode: str, *,
             f"Shorten the title to {TITLE_MAX_CHARS} characters or fewer.")
     if not (listing.condition or "").strip():
         add("condition", "A condition is required", "Pick a condition on the Pricing card.")
+    else:
+        _check_condition_fits_category(listing, allowed_conditions, add)
 
     if mode not in ("live", "revise"):
         return issues

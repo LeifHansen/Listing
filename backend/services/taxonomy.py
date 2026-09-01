@@ -176,10 +176,87 @@ CONDITION_ID_TO_ENUM = {
     "2000": "CERTIFIED_REFURBISHED", "2010": "CERTIFIED_REFURBISHED",
     "2020": "SELLER_REFURBISHED", "2030": "SELLER_REFURBISHED",
     "2500": "SELLER_REFURBISHED", "2750": "LIKE_NEW",
-    "3000": "USED_EXCELLENT", "4000": "USED_VERY_GOOD",
+    # 2990/3000/3010 are the pre-owned grades eBay rolled out across the
+    # Pre-loved Apparel categories (Excellent / Good / Fair). Without them
+    # here, `item_conditions` DROPPED them from a clothing category's allowed
+    # list, so the editor offered a used seller three "New" options and one
+    # "Used" — and any grade the AI picked below that came back from eBay as
+    # error 25021.
+    "2990": "PRE_OWNED_EXCELLENT",
+    "3000": "USED_EXCELLENT",  # "Used" everywhere else, "Pre-owned - Good" in apparel
+    "3010": "PRE_OWNED_FAIR",
+    "4000": "USED_VERY_GOOD",
     "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
     "7000": "FOR_PARTS_OR_NOT_WORKING",
 }
+
+# How much wear each grade promises a buyer, all on ONE scale so grades from
+# different category families can be compared. eBay does not offer the same
+# ladder everywhere: 4000/5000/6000 (Very Good / Good / Acceptable) exist only
+# in media categories, 2990/3010 only in apparel, and most of the rest of the
+# site offers a bare "Used" (3000). A number per grade is what lets a
+# condition a category refuses be replaced with the CLOSEST one it allows,
+# instead of the first one in eBay's list — which is "New", and putting a worn
+# t-shirt up as New is worse than the publish error it replaced.
+CONDITION_QUALITY = {
+    "NEW": 100,
+    "NEW_OTHER": 90,
+    "NEW_WITH_DEFECTS": 80,
+    "CERTIFIED_REFURBISHED": 75,
+    "SELLER_REFURBISHED": 70,
+    "LIKE_NEW": 65,
+    "PRE_OWNED_EXCELLENT": 60,
+    "USED_EXCELLENT": 55,
+    "USED_VERY_GOOD": 48,
+    "USED_GOOD": 40,
+    "PRE_OWNED_FAIR": 20,
+    "USED_ACCEPTABLE": 20,
+    "FOR_PARTS_OR_NOT_WORKING": 0,
+}
+
+# Which side of the new/used line each grade sits on. A substitution never
+# crosses it: a used item silently relabelled "New" is a buyer complaint and a
+# return, and a new one relabelled "Used" is money off the price. When the
+# category allows nothing in the item's own family, there is no honest
+# substitute and the answer is "we can't fit this" — which the preflight
+# reports rather than the code guessing.
+CONDITION_FAMILY = {
+    "NEW": "new", "NEW_OTHER": "new", "NEW_WITH_DEFECTS": "new",
+    "CERTIFIED_REFURBISHED": "refurbished", "SELLER_REFURBISHED": "refurbished",
+    "LIKE_NEW": "used", "PRE_OWNED_EXCELLENT": "used", "USED_EXCELLENT": "used",
+    "USED_VERY_GOOD": "used", "USED_GOOD": "used", "PRE_OWNED_FAIR": "used",
+    "USED_ACCEPTABLE": "used", "FOR_PARTS_OR_NOT_WORKING": "used",
+}
+
+
+def nearest_allowed_condition(current: str, allowed) -> Optional[str]:
+    """The condition to use when `current` isn't one the category accepts.
+
+    Returns `current` when it is already allowed, the closest allowed grade in
+    the same family when it isn't, and None when the category allows nothing
+    in that family — a "new only" category has no honest home for a used item,
+    and picking one anyway is how a listing goes live lying about what it is.
+
+    Ties go to the LOWER grade: understating wear costs a few dollars,
+    overstating it costs the sale and the feedback.
+    """
+    cur = (current or "").strip().upper()
+    allowed = [str(c or "").strip().upper() for c in (allowed or [])]
+    allowed = [c for c in allowed if c]
+    if not allowed or not cur or cur in allowed:
+        return cur or None
+    family = CONDITION_FAMILY.get(cur)
+    want = CONDITION_QUALITY.get(cur)
+    if family is None or want is None:
+        return None
+    pool = [c for c in allowed
+            if CONDITION_FAMILY.get(c) == family and c in CONDITION_QUALITY]
+    if not pool:
+        return None
+    # abs(distance) first, then the lower grade — sorting on the grade itself
+    # ascending makes the second key do exactly that.
+    return min(pool, key=lambda c: (abs(CONDITION_QUALITY[c] - want),
+                                    CONDITION_QUALITY[c]))
 
 
 def item_conditions(category_id: str, access_token: Optional[str] = None,
@@ -212,11 +289,21 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
     policies = data.get("itemConditionPolicies") or []
     conditions = []
     seen = set()
+    unknown = []
     for pol in policies:
         for c in pol.get("itemConditions", []) or []:
             cid = str(c.get("conditionId", ""))
             enum = CONDITION_ID_TO_ENUM.get(cid)
-            if not enum or enum in seen:
+            if not enum:
+                # A grade eBay has and this app cannot name. Said out loud
+                # rather than dropped in silence: an id missing from the map
+                # shrinks the seller's choices and can make a condition that
+                # IS allowed look forbidden, and the only way anyone finds out
+                # is a log line naming the id to add.
+                if cid:
+                    unknown.append(cid)
+                continue
+            if enum in seen:
                 continue
             seen.add(enum)
             conditions.append({
@@ -224,9 +311,22 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
                 "id": cid,
                 "label": c.get("conditionDescription", "") or enum.replace("_", " ").title(),
             })
+    if unknown:
+        log.info("item-conditions(cat=%s): eBay offers condition id(s) %s "
+                 "that CONDITION_ID_TO_ENUM doesn't name", category_id,
+                 ", ".join(sorted(set(unknown))))
     result = {"conditions": conditions}
     _cache_put(_CONDITIONS_CACHE, cache_key, result)
     return result
+
+
+def allowed_condition_enums(category_id: str, access_token: Optional[str] = None,
+                            marketplace_id: Optional[str] = None) -> list[str]:
+    """Just the enums from `item_conditions` — what a caller fitting a stored
+    condition to a category needs, without the labels the dropdown wants."""
+    got = item_conditions(category_id, access_token=access_token,
+                          marketplace_id=marketplace_id)
+    return [c["enum"] for c in got.get("conditions", []) if c.get("enum")]
 
 
 # Aspects rarely change, but they're fetched on every preflight AND every

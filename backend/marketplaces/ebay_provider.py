@@ -422,6 +422,51 @@ def has_stored_connection(uid: Optional[str]) -> bool:
     return bool(acct and acct.get("refresh_token"))
 
 
+def allowed_conditions_for(listing: Listing,
+                           creds: Optional[dict] = None) -> Optional[list[dict]]:
+    """The conditions eBay offers for this listing's category, or None when we
+    could not ask. None is not "no restriction": every caller here treats the
+    difference as the difference between checking and guessing."""
+    cid = (listing.category_id or "").strip()
+    if not cid.isdigit() or not config.taxonomy_ready():
+        return None
+    try:
+        got = taxonomy.item_conditions(
+            cid, access_token=(creds or {}).get("access_token"))
+    except Exception as exc:  # noqa: BLE001 - an optional check, never a blocker
+        log.info("conditions: eBay's list for category %s failed: %s: %s",
+                 cid, type(exc).__name__, exc)
+        return None
+    return got.get("conditions") or None
+
+
+def fit_condition_to_category(listing: Listing,
+                              creds: Optional[dict] = None) -> str:
+    """Move a condition the category doesn't offer onto the closest one it
+    does. Returns the condition it replaced (empty string when nothing
+    changed), so a caller can say what it did.
+
+    The substitution never crosses the new/used line — see
+    taxonomy.nearest_allowed_condition. Where the category offers nothing in
+    the item's family, the listing keeps what it has and the preflight blocks
+    the publish, because there is no honest grade to move it to.
+    """
+    current = (listing.condition or "").strip().upper()
+    allowed = allowed_conditions_for(listing, creds)
+    if not current or not allowed:
+        return ""
+    enums = [c["enum"] for c in allowed if c.get("enum")]
+    if current in enums:
+        return ""
+    fitted = taxonomy.nearest_allowed_condition(current, enums)
+    if not fitted or fitted == current:
+        return ""
+    log.info("condition: %s isn't offered in category %s — publishing as %s",
+             current, listing.category_id, fitted)
+    listing.condition = fitted
+    return current
+
+
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = creds_for(uid)
@@ -465,7 +510,8 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         listing, mode,
         has_fulfillment=bool(fulfillment), has_payment=has_payment,
         has_return=has_return, has_location=has_location, connected=connected,
-        policy_services=services, required_aspects=required)
+        policy_services=services, required_aspects=required,
+        allowed_conditions=allowed_conditions_for(listing, creds))
     # A slot still empty after the sync above means eBay has none of that kind
     # -- there is nothing to sync from, and no dropdown in this app can fix it.
     # Saying "choose one in Settings" here sends the seller to an empty list;
@@ -680,6 +726,13 @@ class EbayProvider:
         session_id, listing, mode = ctx.session_id, ctx.listing, ctx.mode
         prev_rec = ctx.prev_record
         already_live = prev_rec.get("status") in ("published", "live")
+        # eBay decides which conditions a category offers, and a draft made
+        # before this app asked (or before the seller changed the category)
+        # can be carrying one it doesn't — which eBay answers with 25021 and
+        # no listing. Move it onto the nearest grade the category does offer
+        # first; anything that can't be fitted honestly is left alone and the
+        # checklist below reports it.
+        fit_condition_to_category(listing, creds)
         # Which of the three publish routes this request takes is the single
         # most useful thing to know when a publish "does nothing" — create,
         # revise, or the Inventory fallback, and what decided it. One line,

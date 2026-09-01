@@ -21,17 +21,6 @@ export function once(key, fn) {
   };
 }
 
-export const CONDITIONS = [
-  "NEW", "NEW_OTHER", "NEW_WITH_DEFECTS", "CERTIFIED_REFURBISHED",
-  "SELLER_REFURBISHED", "USED_EXCELLENT", "USED_VERY_GOOD", "USED_GOOD",
-  "USED_ACCEPTABLE", "FOR_PARTS_OR_NOT_WORKING",
-];
-
-export function conditionLabel(c) {
-  return String(c || "").replaceAll("_", " ").toLowerCase()
-    .replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
 export function mediaUrl(sessionId, name, bust) {
   // bust === true → always refetch; any other truthy value → stable version
   // key (cache holds until the value changes, e.g. a listing's updated_at).

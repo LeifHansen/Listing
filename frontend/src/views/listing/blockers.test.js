@@ -143,6 +143,34 @@ describe("required item specifics", () => {
   });
 });
 
+describe("a condition the category doesn't offer", () => {
+  // eBay publishes a different condition ladder per category and refuses
+  // anything else with error 25021, after the whole publish. "Used - Good"
+  // (5000) exists in media categories and almost nowhere else — which is
+  // exactly the grade an AI reaches for on a worn item.
+  const conditions = [{ enum: "NEW", label: "New" },
+    { enum: "NEW_OTHER", label: "New other" },
+    { enum: "USED_EXCELLENT", label: "Used" }];
+
+  it("blocks, and names what the category does take", () => {
+    const blockers = ebayBlockers(draft(), { conditions });
+    expect(blockers.map((b) => b.key)).toEqual(["condition"]);
+    expect(blockers[0].why).toContain("Used");
+  });
+
+  it("passes a condition the category offers", () => {
+    expect(ebayBlockers(draft({ condition: "USED_EXCELLENT" }), { conditions }))
+      .toEqual([]);
+  });
+
+  it("stays quiet when nobody asked eBay", () => {
+    // A card with no taxonomy loaded, or a lookup that failed. Blocking on a
+    // list we never fetched would strand every draft on a network blip.
+    expect(ebayBlockers(draft(), { conditions: null })).toEqual([]);
+    expect(ebayBlockers(draft(), { conditions: [] })).toEqual([]);
+  });
+});
+
 describe("marketplaces other than eBay", () => {
   it("doesn't gate an Etsy-only publish on eBay-only fields", () => {
     const l = draft({ category_id: "", package_weight_lb: 0 });
