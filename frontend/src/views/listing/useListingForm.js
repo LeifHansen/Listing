@@ -588,7 +588,17 @@ export function useListingForm() {
       // Reflect the outcome on the card immediately. loadListings is the
       // authority and lands a moment later, but a listing that just went
       // live must never still be sitting under Drafts while it does.
-      if (result.published) patchListing(sessionId, { status: "published" });
+      //
+      // The open SESSION carries a status too, and it was the one thing here
+      // that never moved: it stayed "draft" for the rest of the visit, so the
+      // dashboard went on offering "Continue <title>" for a listing that was
+      // already live — the one screen that reads the session rather than the
+      // listings cache. Both are updated, or neither should be.
+      if (result.published) {
+        patchListing(sessionId, { status: "published" });
+        setSession((s) => (s && s.sessionId === sessionId
+          ? { ...s, status: "published" } : s));
+      }
       // The listing went live but our own record of it didn't move. Say it
       // plainly — the danger here is the seller publishing a second time.
       const recordWarning = result.record_warning

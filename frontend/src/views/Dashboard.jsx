@@ -561,9 +561,16 @@ export function Dashboard() {
   // An in-memory session resumes directly — but NOT once it's gone live (or
   // otherwise left the draft stage): there's nothing to "continue" on a
   // published listing, so fall through to the newest actual draft instead.
+  //
+  // EITHER record saying it is done ends it. `session.status || item.status`
+  // read only the session's, because a session that has one at all (any
+  // listing opened from Drafts carries "draft") short-circuited the fallback
+  // — so a draft opened, published and left behind kept its "Continue" button
+  // for the rest of the visit, pointing at a live listing.
   const sessionItem = session ? items.find((i) => i.id === session.sessionId) : null;
-  const sessionDone = ["published", "live", "sold", "ended"].includes(
-    session?.status || sessionItem?.status);
+  const DONE = ["published", "live", "sold", "ended"];
+  const sessionDone = DONE.includes(session?.status)
+    || DONE.includes(sessionItem?.status);
   const lastOpen = (session && !sessionDone)
     ? { title: session.listing?.title, go: () => setView("new") }
     : (drafts[0] && {
