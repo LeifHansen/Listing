@@ -107,6 +107,28 @@ def test_an_ordinary_rejection_still_reaches_its_field():
     assert issue["target"] == "specifics"
 
 
+def test_the_refusal_names_the_aspect_it_is_about():
+    """"specifics" points at a card holding forty inputs. The NAME is what
+    lets the editor ring the one eBay actually refused, instead of leaving the
+    seller to match a sentence against the grid."""
+    issue = ebay_errors.from_response(json.dumps({"errors": [
+        {"errorId": 25002,
+         "message": "The item specific Sleeve Length is missing.",
+         "parameters": [{"name": "0", "value": "Sleeve Length"}]}]}))[0]
+    assert issue["target"] == "specifics"
+    assert issue["fields"] == ["Sleeve Length"]
+    assert "Sleeve Length" in issue["title"]
+
+
+def test_a_rejection_that_names_no_aspect_claims_none():
+    """An empty list, never a guess: a ring on the wrong field is worse than
+    no ring at all."""
+    issue = ebay_errors.from_response(json.dumps({"errors": [
+        {"errorId": 25002, "message": "Please add the required item specifics."}]}))[0]
+    assert issue["target"] == "specifics"
+    assert issue["fields"] == []
+
+
 # --- helpers ----------------------------------------------------------------
 
 def _error(*, code: str, long: str):

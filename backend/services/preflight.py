@@ -161,7 +161,7 @@ def validate(listing: Listing, mode: str, *,
     issues: list[dict] = []
 
     def add(target: str, title: str, fix: str, level: str = "error",
-            field: str = "") -> None:
+            field: str = "", fields: Optional[list[str]] = None) -> None:
         """One checklist entry.
 
         `blocking` is the whole point of the list: True means eBay refuses
@@ -172,10 +172,16 @@ def validate(listing: Listing, mode: str, *,
 
         `field` is the short name of the thing to fix ("Title", "Package
         weight") — what the publish bar's jump chips are labelled with.
+
+        `fields` is different, and only some checks can fill it: the NAMES of
+        the individual inputs at fault ("Sleeve Length", "Size Type"), which
+        the editor rings so a seller isn't left comparing a sentence against
+        forty item specifics to work out which one it means.
         """
         issues.append({"target": target, "level": level,
                        "blocking": level != "warn",
                        "field": field or FIELD_LABELS.get(target, ""),
+                       "fields": list(fields or []),
                        "title": title, "fix": fix})
 
     # A listing with eBay variations, and nothing else. This app has no
@@ -298,7 +304,8 @@ def validate(listing: Listing, mode: str, *,
             add("specifics",
                 "Missing required item specifics: " + ", ".join(missing[:6])
                 + ("…" if len(missing) > 6 else ""),
-                "Fill these on the Item specifics card — eBay requires them for this category.")
+                "Fill these on the Item specifics card — eBay requires them for this category.",
+                fields=missing)
     return issues
 
 
