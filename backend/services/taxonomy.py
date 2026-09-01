@@ -21,6 +21,7 @@ import httpx
 
 from .. import config
 from ..config import log
+from ..models import ItemSpecific
 
 # Simple in-process caches (token + per-marketplace tree id).
 _token_cache: dict = {"token": None, "expires_at": 0.0}
@@ -436,20 +437,77 @@ _VALUE_SYNONYMS = {
     "-1/2": ".5", "-1/4": ".25", "-3/4": ".75",
 }
 
+# Waist-by-inseam, the way a jeans tag prints it versus the way eBay spells
+# it. A tag says "W33 L34"; eBay's Size list says "33x34" — and the two never
+# matched, so the value went out verbatim and came back as "\"W33 L34\" is not
+# a valid value for Size. Select a value from the available options", which is
+# a rejected listing, not a warning.
+#
+# Every pattern must match the WHOLE value. A pair found loose inside a longer
+# string is not a size: "50/50 Cotton Poly" is a blend, and rewriting it to
+# "50x50" would corrupt a Material that had nothing wrong with it.
+_SIZE_PAIR_RES = (
+    # "W33 L34", "W33L34", "W33xL34"
+    re.compile(r"W\s*(\d{1,2})\s*[X/]?\s*L\s*(\d{1,2})"),
+    # "33W 34L", "33W x 34L"
+    re.compile(r"(\d{1,2})\s*W\s*[X/]?\s*(\d{1,2})\s*L"),
+    # "Waist 33 Inseam 34" / "Waist 33 Length 34"
+    re.compile(r"WAIST\s*(\d{1,2})\s*(?:INSEAM|LENGTH|L)?\s*(\d{1,2})"),
+    # "33x34", "33 x 34", "33/34"
+    re.compile(r"(\d{1,2})\s*[X/]\s*(\d{1,2})"),
+)
+
+# Units a tag tacks on the end and eBay's value never carries.
+_SIZE_UNIT_RE = re.compile(r"\s*(?:IN|INCH|INCHES|\"|”)\.?$")
+
+
+def size_pair(s: str) -> Optional[tuple[str, str]]:
+    """(waist, inseam) when `s` is a waist-by-inseam size in ANY of the ways a
+    tag or a marketplace spells one, else None. Whole-value match only — see
+    the note above _SIZE_PAIR_RES."""
+    v = _SIZE_UNIT_RE.sub("", (s or "").strip().upper())
+    if not v:
+        return None
+    for pattern in _SIZE_PAIR_RES:
+        m = pattern.fullmatch(v)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
 
 def _norm_value(s: str) -> str:
+    # A waist-by-inseam size collapses to one spelling FIRST, so that both
+    # sides of a comparison reach it from wherever they started: the tag's
+    # "W33 L34" and eBay's "33x34" are the same size and now normalize alike.
+    # (Where eBay's Size is the WAIST ALONE — which is the usual shape for
+    # men's bottoms — split_size_pair below has already reduced the value to
+    # the waist before anything gets here.)
+    pair = size_pair(s)
+    if pair:
+        return "x".join(pair)
     s = s.lower()
     for k, v in _VALUE_SYNONYMS.items():
         s = s.replace(k, v)
     return "".join(ch for ch in s if ch.isalnum() or ch == ".")
 
 
-def match_selection_value(value: str, allowed: list[str]) -> Optional[str]:
+def match_selection_value(value: str, allowed: list[str],
+                          allow_partial: bool = True) -> Optional[str]:
     """Map a value onto eBay's exact allowed value for a fixed-choice
     (SELECTION_ONLY) aspect. Returns the canonical allowed string or None.
     Conservative order: exact > normalized-equal > unambiguous containment
     (only when exactly one allowed value overlaps), so it never silently picks
-    between rivals like Cotton vs Cotton Blend."""
+    between rivals like Cotton vs Cotton Blend.
+
+    `allow_partial=False` stops before that last step, leaving only the two
+    steps that mean "this IS that value, spelled differently". Containment is
+    the right call for a fixed-choice aspect, where the alternative to an
+    imperfect match is dropping the value entirely — but on a free-text
+    aspect, where the value survives either way, it is pure loss: the
+    suggestion list holds "Nike", the seller wrote "Nike Air", and one
+    contains the other. Nothing is gained by trading what they wrote for
+    something shorter.
+    """
     v = (value or "").strip()
     if not v:
         return None
@@ -462,6 +520,8 @@ def match_selection_value(value: str, allowed: list[str]) -> Optional[str]:
     for a in allowed:
         if _norm_value(a) == nv:
             return a
+    if not allow_partial:
+        return None
     hits = [a for a in allowed
             if _norm_value(a) and (_norm_value(a) in nv or nv in _norm_value(a))]
     return hits[0] if len(hits) == 1 else None
@@ -476,6 +536,8 @@ def coerce_aspect_value(value: str, aspect: dict) -> Optional[str]:
     - DATE/year formats: keep a plausible 4-digit year ("1980s vintage" ->
       "1980"); drop otherwise.
     - SELECTION_ONLY: map onto the allowed list; drop when nothing matches.
+    - Any OTHER aspect that still ships a value list: map onto it where the
+      value fits, and keep the seller's own wording where it doesn't.
     - N/A sentinels survive only where they're legal (free-text STRING).
     - Length: clip to the aspect's own max (eBay rejects over-long values).
     """
@@ -501,13 +563,349 @@ def coerce_aspect_value(value: str, aspect: dict) -> Optional[str]:
         # eBay's "up to 1 number after the decimal".
         v = str(int(number)) if "int" in fmt or number == int(number) \
             else str(round(number, 1))
-    elif aspect.get("mode") == "SELECTION_ONLY" and aspect.get("values"):
-        matched = match_selection_value(v, aspect["values"])
-        if matched is None:
+    elif aspect.get("values"):
+        fixed = aspect.get("mode") == "SELECTION_ONLY"
+        matched = match_selection_value(v, aspect["values"],
+                                        allow_partial=fixed)
+        if matched is not None:
+            v = matched
+        elif fixed:
+            # A fixed-choice aspect takes one of eBay's strings or nothing.
             return None
-        v = matched
+        # Otherwise the value list is only a set of SUGGESTIONS, and a value
+        # that isn't on it can still be perfectly legal — a brand eBay hasn't
+        # heard of, a seller's own wording. Canonicalizing to eBay's spelling
+        # when we CAN is still worth doing, though, and this used to be the
+        # SELECTION_ONLY branch alone: an aspect eBay reported as free text
+        # was never compared against its own list at all. eBay's publish
+        # validation does not always agree with the mode its Taxonomy API
+        # reports — a jeans "Size" came back FREE_TEXT and then rejected the
+        # listing with "Select a value from the available options" — so the
+        # tag's "W33 L34" went out verbatim against a list that spelled the
+        # same size "33x34". Matching here is what turns that into a listing.
     max_len = int(aspect.get("max_length") or 0) or 65
     return v[:max_len]
+
+
+# --- the Size aspect ---------------------------------------------------------
+# eBay's Size for men's bottoms is the WAIST ALONE: "33". The inseam is its
+# own aspect ("Inseam"), and a fit word like "Regular" is a Size Type, not a
+# size. Send anything else and the listing does not go live —
+#
+#   "W33 L34" is not a valid value for Size. Select a value from the
+#   available options.
+#   "Regular" is not a valid value for Size. Select a value from the
+#   available options.
+#
+# — after the photos have uploaded. Both came straight off the draft: the tag
+# prints "W33 L34" and the vision pass reads it correctly, and "Regular" is
+# the word on the label of nearly every pair of straight-leg jeans made.
+# Neither is wrong about the item; both are in the wrong box.
+#
+# So the Size field is put right before anything is sent, and what is taken
+# out of it is put where it belongs rather than thrown away.
+
+SIZE_ASPECT = "size"
+INSEAM_ASPECTS = ("inseam", "inside leg", "leg length")
+# Where a fit word belongs instead. In eBay's order of preference.
+FIT_ASPECTS = ("size type", "fit", "style")
+
+# Words that describe the CUT, not the measurement. Every one of these is a
+# legal value somewhere on a jeans listing — just never under Size.
+FIT_WORDS = {
+    "regular", "standard", "classic", "slim", "slim fit", "skinny",
+    "relaxed", "relaxed fit", "loose", "straight", "straight leg",
+    "bootcut", "boot cut", "tapered", "athletic", "carpenter",
+    "big", "tall", "big & tall", "big and tall", "husky",
+    "plus", "petite", "juniors", "maternity", "one size", "regular size",
+}
+
+
+def is_fit_word(value: str) -> bool:
+    """Whether a value describes the cut rather than the measurement."""
+    return (value or "").strip().lower() in FIT_WORDS
+
+
+def _aspect_named(aspects: list[dict], *names: str) -> Optional[dict]:
+    """The first of `names` the category actually offers, as its aspect."""
+    by_key = {(a.get("name") or "").strip().lower(): a for a in (aspects or [])}
+    for name in names:
+        if name in by_key:
+            return by_key[name]
+    return None
+
+
+def size_for_aspect(value: str, aspect: Optional[dict]) -> tuple[str, str]:
+    """(what belongs in Size, what belongs in Inseam) for a raw size value.
+
+    A waist-by-inseam value is split, because eBay's Size for bottoms is the
+    waist on its own — "W33 L34" becomes ("33", "34"). The combined spelling
+    is used only where the category's own list actually carries it (some
+    categories do list "33x34"), which is checked against `aspect` and never
+    assumed. Anything that isn't a pair comes back unchanged.
+    """
+    pair = size_pair(value)
+    if not pair:
+        return (value or "").strip(), ""
+    waist, inseam = pair
+    values = [v for v in ((aspect or {}).get("values") or []) if v]
+    if values:
+        # The waist alone is what eBay wants and what it lists; only fall back
+        # to the combined form where THIS category spells it that way.
+        for candidate in (waist, f"{waist}x{inseam}"):
+            matched = match_selection_value(candidate, values,
+                                            allow_partial=False)
+            if matched:
+                return matched, inseam
+        return waist, inseam
+    return waist, inseam
+
+
+def fix_size_specifics(listing, aspects: Optional[list[dict]] = None) -> list[str]:
+    """Put the Size aspect right, in place. Returns what it did, for the log.
+
+    Two corrections, both of which were rejected listings:
+
+    - A waist-by-inseam size ("W33 L34") is reduced to the waist eBay asks
+      for, and the inseam is written to the Inseam aspect rather than
+      discarded — the measurement is real, it just belongs one box over.
+    - A fit word ("Regular", "Slim", "Bootcut") is moved out of Size and into
+      Size Type or Fit where the category offers one and it is still empty.
+      Size is then left blank, which the preflight reports as a required
+      specific to fill — a question the seller can answer in a second, rather
+      than a rejection they get after the upload.
+
+    Best-effort: no aspects, no Size aspect, or nothing to fix all leave the
+    listing untouched.
+    """
+    specifics = list(getattr(listing, "item_specifics", None) or [])
+    if not specifics:
+        return []
+    if aspects is None:
+        cid = (getattr(listing, "category_id", "") or "").strip()
+        if not cid:
+            return []
+        try:
+            aspects = item_aspects(cid).get("aspects", [])
+        except Exception as exc:  # noqa: BLE001 - the fix is best-effort
+            log.info("size fix skipped (cat=%s): %s", cid, exc)
+            return []
+    size_aspect = _aspect_named(aspects, SIZE_ASPECT)
+    if size_aspect is None:
+        return []
+    row = next((s for s in specifics
+                if (s.name or "").strip().lower() == SIZE_ASPECT
+                and (s.value or "").strip()), None)
+    if row is None:
+        return []
+
+    raw = row.value.strip()
+    done: list[str] = []
+
+    # A cut, not a measurement. Move it to the first aspect where it is
+    # actually LEGAL — not merely the first one the category happens to
+    # offer. "Regular" is a Size Type and "Slim" is a Fit; stopping at
+    # whichever aspect came first threw one of them away.
+    if is_fit_word(raw):
+        moved_to = ""
+        for name in FIT_ASPECTS:
+            target = _aspect_named(aspects, name)
+            if target is None:
+                continue
+            legal = coerce_aspect_value(raw, target)
+            if not legal:
+                continue
+            canonical = (target.get("name") or "").strip()
+            held = next((s for s in specifics
+                         if (s.name or "").strip().lower() == canonical.lower()),
+                        None)
+            if held is not None and (held.value or "").strip():
+                continue  # already answered — don't overwrite the seller
+            if held is None:
+                listing.item_specifics = [
+                    *listing.item_specifics,
+                    ItemSpecific(name=canonical, value=legal,
+                                 confidence=row.confidence or "medium"),
+                ]
+            else:
+                held.value = legal
+            moved_to = canonical
+            break
+        row.value = ""
+        done.append(f"Size {raw!r} is a fit, not a measurement — "
+                    + (f"moved to {moved_to}" if moved_to else "cleared"))
+        log.info("size fix: %s", done[-1])
+        return done
+
+    size, inseam = size_for_aspect(raw, size_aspect)
+    if size != raw:
+        row.value = size
+        done.append(f"Size {raw!r} -> {size!r} (eBay's Size is the waist)")
+    if inseam:
+        target = _aspect_named(aspects, *INSEAM_ASPECTS)
+        if target is not None:
+            name = (target.get("name") or "").strip()
+            held = next((s for s in specifics
+                         if (s.name or "").strip().lower() == name.lower()), None)
+            legal = coerce_aspect_value(inseam, target)
+            if legal and (held is None or not (held.value or "").strip()):
+                if held is None:
+                    listing.item_specifics = [
+                        *listing.item_specifics,
+                        ItemSpecific(name=name, value=legal,
+                                     confidence=row.confidence or "medium"),
+                    ]
+                else:
+                    held.value = legal
+                done.append(f"{name} {legal!r} (from the same tag)")
+    for line in done:
+        log.info("size fix: %s", line)
+    return done
+
+
+# --- size type ---------------------------------------------------------------
+# eBay files a men's garment sized past XL under Size Type "Big & Tall", and
+# refuses the pairing it knows is wrong: Size "XXL" with Size Type "Regular"
+# comes back as an item-specifics error and no listing at all. Nothing here
+# ever asked, because the two values arrive from different places — Size is
+# read off the tag, Size Type off whatever the category defaults to — so they
+# disagreed on every big shirt that went out.
+#
+# The rule below is deliberately narrow. It fires only where eBay's OWN aspect
+# list for the category offers a Big & Tall value, which is what tells a men's
+# category from a women's one: there XXL means Size Type "Plus", "Regular" is
+# perfectly legal, and stamping "Big & Tall" on it would be the same mistake
+# in the other direction.
+
+SIZE_TYPE_ASPECT = "size type"
+
+# How the value gets spelled, best first. eBay says "Big & Tall"; the rest are
+# here so a category that punctuates it differently still matches.
+BIG_AND_TALL_VALUES = ("Big & Tall", "Big and Tall", "Big-Tall", "Big/Tall")
+
+# The Size Types this rule may overwrite. "Big", "Tall" and "Big & Tall" are
+# all answers a seller can honestly mean on a 2XL shirt, so they stand as
+# entered; "Regular" is the one eBay refuses, and a blank has nothing to lose.
+_OVERRIDABLE_SIZE_TYPES = {"", "regular", "standard", "regular size"}
+
+# Every way a tag spells a size past XL: "2XL", "XXL", "XXX-Large", "4X",
+# "3XLT". The multiplier is the digit, or the number of X's. Both patterns
+# refuse to start or end mid-word, which is what keeps "XXS", "MAXX" and the
+# waist-by-inseam form "32 X 34" out of a rule about extra-larges.
+_DIGIT_XL_RE = re.compile(r"(?<![\w.])(\d)\s*X(?:\s*-?\s*L(?:ARGE)?)?T?(?!\w)(?!\s*\d)")
+_REPEAT_XL_RE = re.compile(r"(?<!\w)(X{2,6})(?:\s*-?\s*L(?:ARGE)?)?T?(?!\w)")
+
+
+def size_multiplier(value: str) -> int:
+    """How many X's a size carries: 2 for XXL and 2XL, 3 for XXXL and 3XL, 0
+    for XL and everything below it (and for sizes that aren't X-sizes at all).
+
+    Reads the LARGEST answer in the value, because tags and eBay values pair
+    the spellings — "XXL/2XL" is a 2, "XXL (3XL)" a 3.
+    """
+    v = (value or "").strip().upper()
+    if not v:
+        return 0
+    best = 0
+    for m in _DIGIT_XL_RE.finditer(v):
+        best = max(best, int(m.group(1)))
+    for m in _REPEAT_XL_RE.finditer(v):
+        best = max(best, len(m.group(1)))
+    return best
+
+
+def is_big_and_tall_size(value: str) -> bool:
+    """True when the size is XXL or larger — the point past which eBay wants
+    Size Type "Big & Tall" rather than "Regular" on a men's garment."""
+    return size_multiplier(value) >= 2
+
+
+def _is_size_aspect(name: str) -> bool:
+    """Whether an aspect name holds the item's SIZE ("Size", "Men's Size",
+    "Shirt Size", "Size (Men's)") as opposed to describing it ("Size Type").
+    Neighbours like "Neck Size" are in — they never carry an X-size, so
+    reading them costs nothing and missing the real one costs the listing."""
+    n = (name or "").strip().lower()
+    return n != SIZE_TYPE_ASPECT and bool(re.search(r"\bsize\b", n))
+
+
+def offered_big_and_tall(aspect: dict) -> str:
+    """The category's own spelling of Big & Tall for a Size Type `aspect`, or
+    "" when it doesn't offer one.
+
+    That absence is the men's-vs-women's test this rule leans on: eBay lists
+    Big & Tall in men's apparel and Plus / Petite / Maternity in women's, so a
+    category with no Big & Tall value is one where this rule has no business
+    firing. "" is also the answer when the category offers "Big" and "Tall"
+    only separately — there is no way to pick between them honestly.
+    """
+    values = [v for v in (aspect.get("values") or []) if v]
+    if not values:
+        return ""
+    for spelling in BIG_AND_TALL_VALUES:
+        matched = match_selection_value(spelling, values)
+        if matched:
+            return matched
+    return ""
+
+
+def apply_big_and_tall(listing, aspects: Optional[list[dict]] = None) -> str:
+    """Default Size Type to Big & Tall on a listing whose size is XXL or
+    larger, in place. Returns the value written, or "" when nothing changed.
+
+    eBay rejects "Size: XXL" + "Size Type: Regular" outright, so this runs on
+    the draft (the seller sees the answer and can still change it) and again
+    just before publish (where it is the difference between a listing and an
+    error). Only a blank or "Regular" is overwritten — a seller who picked
+    "Big" or "Tall" has already answered the question.
+
+    `aspects` is the category's aspect list when the caller already has it;
+    otherwise it is looked up. Best-effort throughout: no category, no Size
+    Type aspect, or a Taxonomy call that fails all mean the listing passes
+    through untouched.
+    """
+    specifics = list(getattr(listing, "item_specifics", None) or [])
+    if not specifics:
+        return ""
+    if aspects is None:
+        cid = (getattr(listing, "category_id", "") or "").strip()
+        if not cid:
+            return ""
+        try:
+            aspects = item_aspects(cid).get("aspects", [])
+        except Exception as exc:  # noqa: BLE001 - the rule is best-effort
+            log.info("size type skipped (cat=%s): %s", cid, exc)
+            return ""
+    aspect = next((a for a in (aspects or [])
+                   if (a.get("name") or "").strip().lower() == SIZE_TYPE_ASPECT),
+                  None)
+    if aspect is None:
+        return ""
+    big_and_tall = offered_big_and_tall(aspect)
+    if not big_and_tall:
+        return ""
+    size = next((s.value for s in specifics
+                 if _is_size_aspect(s.name) and is_big_and_tall_size(s.value)), "")
+    if not size:
+        return ""
+    canonical = (aspect.get("name") or "Size Type").strip()
+    row = next((s for s in specifics
+                if (s.name or "").strip().lower() == SIZE_TYPE_ASPECT), None)
+    if row is not None:
+        if (row.value or "").strip().lower() not in _OVERRIDABLE_SIZE_TYPES:
+            return ""
+        row.name, row.value = canonical, big_and_tall
+        # "high": this isn't a guess about the item, it's what the size the
+        # seller can read on the tag means in eBay's own vocabulary.
+        row.confidence = "high"
+    else:
+        listing.item_specifics = [
+            *specifics,
+            ItemSpecific(name=canonical, value=big_and_tall, confidence="high"),
+        ]
+    log.info("size type: %r is XXL or larger — %s is %r, not Regular "
+             "(eBay rejects that pairing)", size, canonical, big_and_tall)
+    return big_and_tall
 
 
 def sanitize_specifics(listing) -> None:
@@ -516,7 +914,9 @@ def sanitize_specifics(listing) -> None:
     "Item Height" alias both reject publishes), values coerced to each
     aspect's constraints via coerce_aspect_value, one value per SINGLE-
     cardinality aspect, and unfixable values dropped — a busy specific must
-    never sink the listing. Best-effort: without a category (or with the
+    never sink the listing. Then the size-type rule (apply_big_and_tall), on
+    the cleaned values and last, because this is the final thing that touches
+    a listing before eBay does. Best-effort: without a category (or with the
     Taxonomy API down) the specifics pass through untouched."""
     if not listing.category_id:
         return
@@ -525,6 +925,11 @@ def sanitize_specifics(listing) -> None:
     except Exception as exc:  # noqa: BLE001 - sanitizing is best-effort
         log.info("sanitize_specifics skipped (cat=%s): %s", listing.category_id, exc)
         return
+    # BEFORE the per-aspect pass: get the Size field into the shape eBay
+    # asks for (waist alone, no fit words) so the coercion below is validating
+    # a value that can actually match, and the inseam it splits off lands in
+    # its own aspect and gets validated too.
+    fix_size_specifics(listing, aspects)
     by_key: dict[str, dict] = {}
     for a in aspects:
         name = (a.get("name") or "").strip()
@@ -558,3 +963,7 @@ def sanitize_specifics(listing) -> None:
         spec.name, spec.value = canonical, legal
         cleaned.append(spec)
     listing.item_specifics = cleaned
+    # Last, on the cleaned values: a men's top sized XXL or larger goes out as
+    # Size Type "Big & Tall". eBay rejects the whole listing when that one says
+    # "Regular", and this is the last place before it is sent.
+    apply_big_and_tall(listing, aspects)

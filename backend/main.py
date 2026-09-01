@@ -22,6 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -322,7 +323,21 @@ async def _cache_headers(request: Request, call_next):
     if path.startswith("/assets/"):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     elif path.startswith("/media/"):
-        response.headers.setdefault("Cache-Control", "public, max-age=3600")
+        # "no-cache" is NOT "don't cache" — it is "cache it, but ask before
+        # you use it". A photo is MUTABLE at a stable URL: rotate, crop,
+        # auto-clean and background removal all rewrite the same file in
+        # place. This used to be max-age=3600, which was only safe as long as
+        # the URL changed whenever the bytes did — and it doesn't. The
+        # editor's cache-buster is a per-mount counter that starts at 0 again
+        # every time the editor opens (imageVersions in useListingForm.js), so
+        # a photo rotated at ?v=1 is asked for at ?v=0 on the next open, and
+        # the browser answered that from the copy it took BEFORE the rotate.
+        # The seller rotated a photo, reopened the listing, and watched it
+        # come back sideways -- indistinguishable from a rotation that never
+        # saved, though the file on disk was right the whole time.
+        # Revalidation costs a 304 with no body (see the media route, which
+        # answers them); not revalidating cost the seller their edit.
+        response.headers.setdefault("Cache-Control", "no-cache")
     elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
         response.headers["Cache-Control"] = "no-cache"
     elif path.startswith("/api/"):
@@ -1244,6 +1259,12 @@ def _merge_filled_specifics(listing: Listing, filled: list,
       the first vision pass used to block every further tick, which is why the
       checkbox specifics reached eBay with one box ticked at most.
 
+    Then, on the merged result, the size-type rule: a men's garment sized XXL
+    or larger is Size Type "Big & Tall", never "Regular" — eBay rejects that
+    pairing. It runs here, after the merge, because the merged Size is what
+    decides it, and here rather than only at publish so the seller sees the
+    answer in the editor and can change it.
+
     Returns how many values were added."""
     multi = {a["name"].strip().lower() for a in aspects
              if (a.get("cardinality") or "SINGLE") == "MULTI"}
@@ -1296,6 +1317,15 @@ def _merge_filled_specifics(listing: Listing, filled: list,
             else:
                 listing.item_specifics[blank_at] = f
             added += 1
+    # Never raises: this runs on the identify path OUTSIDE the enrichment's
+    # own try, so an exception here would take the whole draft down over a
+    # convenience. A size type is not worth a listing.
+    try:
+        # Size first — it decides what the size type rule reads.
+        taxonomy.fix_size_specifics(listing, aspects)
+        taxonomy.apply_big_and_tall(listing, aspects)
+    except Exception as exc:  # noqa: BLE001 - a default, never a blocker
+        log.info("size defaults skipped: %s", exc)
     return added
 
 
@@ -1453,6 +1483,21 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
             if found:
                 _apply_maker(listing, found, brand_missing, unfilled)
     return added
+
+
+def _specifics_were_filled(added: Optional[int]) -> bool:
+    """Whether the server-side enrichment actually put specifics on the draft.
+
+    This is the editor's cue to stand its own autofill fallback down, so the
+    same vision passes don't run twice seconds apart and charge the seller for
+    both. It is emphatically NOT "did the enrichment run": `added` is None when
+    it never ran and 0 when it ran and filled nothing — the vision pass came
+    back empty, or every value it proposed was dropped as illegal for its
+    aspect. Reporting that empty pass as "filled" stood the fallback down too,
+    and left the seller with every required specific blank and nothing on
+    either side going back for them.
+    """
+    return bool(added)
 
 
 def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
@@ -4688,9 +4733,13 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # multi-call chain on IDENTIFY_CHAIN=v1.
         added = _enrich_listing(result.listing, [opt_dir / n for n in names],
                                 tags=result.tags, progress=_beat)
-        # Tell the editor the server-side fill already ran, so its own
-        # autofill effect doesn't immediately re-run (and re-charge) it.
-        result.specifics_autofilled = added is not None
+        # Tell the editor whether the server-side fill actually FILLED
+        # anything, so its own autofill effect doesn't re-run (and re-charge)
+        # work that is already done — and does run when the pass came back
+        # empty. This was `added is not None`, which reported an empty pass as
+        # filled and stood the fallback down over a draft with every required
+        # specific still blank.
+        result.specifics_autofilled = _specifics_were_filled(added)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
@@ -6737,14 +6786,57 @@ def pirate_ship_export(request: Request, order_id: str = ""):
         "Content-Disposition": 'attachment; filename="pirate-ship-orders.csv"'})
 
 
+def _file_etag(st: os.stat_result) -> str:
+    """The same ETag Starlette's FileResponse sends, computed up front so the
+    304 check below compares against exactly what the browser was given."""
+    base = f"{st.st_mtime}-{st.st_size}"
+    return f'"{hashlib.md5(base.encode(), usedforsecurity=False).hexdigest()}"'
+
+
+def _is_unmodified(request: Optional[Request], etag: str, mtime: float) -> bool:
+    """Whether the client already holds this exact file.
+
+    /media is served no-cache (see _cache_headers), so browsers revalidate on
+    every view. Starlette sets ETag and Last-Modified on a FileResponse but
+    never answers a conditional request with a 304 — without this, "always
+    revalidate" would mean "always re-download every photo", which on a
+    24-photo listing is the wrong trade. With it, an unchanged photo costs a
+    header round trip and no body.
+    """
+    if request is None:
+        return False
+    if_none_match = request.headers.get("if-none-match", "")
+    if if_none_match:
+        # A list, and possibly weak validators ("W/" prefixed) — a match on
+        # any entry means the client is current.
+        return any(tag.strip().removeprefix("W/") == etag
+                   for tag in if_none_match.split(","))
+    since = request.headers.get("if-modified-since", "")
+    if since:
+        try:
+            # Whole seconds on both sides: HTTP dates have no sub-second
+            # precision, so a raw float mtime always looks newer.
+            return int(mtime) <= int(parsedate_to_datetime(since).timestamp())
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 @app.get("/media/{session_id}/optimized/{name}")
-def media(session_id: str, name: str, v: str = ""):
+def media(session_id: str, name: str, request: Request = None, v: str = ""):
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name` (e.g. "../../etc/passwd").
     if opt_dir not in path.parents:
         raise HTTPException(404, "Not found")
     if path.is_file():
+        st = path.stat()
+        etag = _file_etag(st)
+        if _is_unmodified(request, etag, st.st_mtime):
+            return Response(status_code=304, headers={
+                "etag": etag,
+                "last-modified": formatdate(st.st_mtime, usegmt=True),
+            })
         return FileResponse(path)
     # Local file gone (e.g. freed by the R2 offload) — fall back to R2.
     if objstore.enabled():
