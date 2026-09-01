@@ -20,7 +20,12 @@ class RecordingContext {
   }
 
   _log(op, args) {
-    this.calls.push({ op, args, gco: this.globalCompositeOperation });
+    // fillStyle rides along because one thing a caller can get wrong is the
+    // COLOUR it paints under a photo: a canvas exported as JPEG composites
+    // what it cannot store onto black, so "there is a fill before the draw"
+    // is only half the contract (see lib/api.downscaleForUpload).
+    this.calls.push({ op, args, gco: this.globalCompositeOperation,
+                      fillStyle: this.fillStyle });
   }
 
   save() { this._stack.push(this.globalCompositeOperation); }

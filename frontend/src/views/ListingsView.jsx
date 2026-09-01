@@ -17,7 +17,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
-import { listingsView } from "@/lib/listingsView";
+import { isDraft, listingsView } from "@/lib/listingsView";
+import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -295,6 +296,14 @@ export function ListingsView({ search = "" }) {
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
               metrics={metricsById[item.id]} />
+            {/* Drafts carry their category on the card here too — the "All"
+                tab mixes them in with live listings, and a draft is exactly
+                where the category is still wrong and still free to fix. It
+                also decides which conditions eBay accepts, so it is the one
+                field worth fixing before Publish. */}
+            {isDraft(item) && (
+              <DraftCategoryEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
+            )}
           </motion.div>
         ))}
       </div>

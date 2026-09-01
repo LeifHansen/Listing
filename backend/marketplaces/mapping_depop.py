@@ -27,6 +27,9 @@ CONDITION_MAP = {
     "CERTIFIED_REFURBISHED": "excellent",
     "SELLER_REFURBISHED": "excellent",
     "LIKE_NEW": "like_new",
+    # eBay's apparel grades, which is exactly the stock Depop sells.
+    "PRE_OWNED_EXCELLENT": "excellent",
+    "PRE_OWNED_FAIR": "fair",
     "USED_EXCELLENT": "excellent",
     "USED_VERY_GOOD": "good",
     "USED_GOOD": "good",

@@ -23,6 +23,7 @@
    The publish/preflight response carries those, and the fix-it panel renders
    them from the same {field, title, fix} shape used here. */
 
+import { conditionLabel } from "@/lib/conditions";
 import { specificValue } from "./specifics";
 
 // eBay's own ceilings. Mirrors TITLE_MAX_CHARS / MAX_PHOTOS / EBAY_MIN_PRICE
@@ -73,6 +74,8 @@ function aspectValue(l, name) {
    (the editor has them; a listing card doesn't). Left null, the required-
    specifics rule is skipped rather than guessed at — a blocker list that
    invents blockers is worse than one that admits it can't see them.
+   `conditions` is eBay's condition list for the category, on the same terms:
+   null means nobody asked, never "eBay allows anything here".
 
    `mode` is which publish contract to check against, and it mirrors
    preflight.validate on the server:
@@ -86,9 +89,8 @@ function aspectValue(l, name) {
               eBay itself. Demanding them here blocked sellers out of editing
               listings that were live and selling, which is the whole reason
               the server draws this line. Keep the two in step. */
-export function ebayBlockers(
-  l = {}, { targets = null, aspects = null, mode = "live" } = {},
-) {
+export function ebayBlockers(l = {},
+  { targets = null, aspects = null, conditions = null, mode = "live" } = {}) {
   const revising = mode === "revise";
   const out = [];
   const add = (key, target, label, why) => out.push({ key, target, label, why });
@@ -127,6 +129,16 @@ export function ebayBlockers(
 
   if (!(l.condition || "").trim()) {
     add("condition", "condition", "Condition", "Pick the item's condition.");
+  } else if (conditions && conditions.length
+      && !conditions.some((c) => c.enum === l.condition)) {
+    // eBay offers a different set of conditions per category — "Used - Good"
+    // exists in media and nowhere else, the pre-owned grades only in apparel
+    // — and refuses anything else with error 25021, after the whole publish.
+    // The seller sees it here instead, next to the dropdown that fixes it.
+    add("condition", "condition", "Condition",
+      `eBay doesn't offer “${conditionLabel(l.condition)}” in this category — `
+      + `pick one it does (${conditions.slice(0, 3)
+        .map((c) => c.label || conditionLabel(c.enum)).join(", ")}…).`);
   }
 
   const fmt = String(l.listing_format || "FIXED_PRICE").toUpperCase();

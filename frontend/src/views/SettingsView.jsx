@@ -6,7 +6,7 @@ import {
   Trash2, Clock, LogOut,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
-import { CONDITIONS, conditionLabel } from "@/lib/utils";
+import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";

@@ -13,6 +13,14 @@ EBAY_CONDITIONS = [
     "NEW_WITH_DEFECTS",
     "CERTIFIED_REFURBISHED",
     "SELLER_REFURBISHED",
+    "LIKE_NEW",
+    # eBay's apparel-only grades. The model is not asked to know which
+    # categories take which — it grades the WEAR it can see, and the server
+    # moves that grade onto the ladder the item's category actually offers
+    # (taxonomy.nearest_allowed_condition). They are listed so a refine round
+    # trip can echo one back without it being reset to USED_EXCELLENT.
+    "PRE_OWNED_EXCELLENT",
+    "PRE_OWNED_FAIR",
     "USED_EXCELLENT",
     "USED_VERY_GOOD",
     "USED_GOOD",

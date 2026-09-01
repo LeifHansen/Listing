@@ -5,7 +5,8 @@ import {
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
   Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
 } from "lucide-react";
-import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
+import { cn, formatMoney } from "@/lib/utils";
+import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { useToast } from "@/components/ui/Toaster";

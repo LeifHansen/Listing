@@ -137,6 +137,14 @@ jobs:
       - name: Browser
         run: npx playwright install --with-deps chromium
         working-directory: frontend
+      # Runs against the built dist with its own stubbed API, so it needs the
+      # browser above but not the server below. It answers the one question a
+      # unit test cannot: is the editor's publish button actually under the
+      # seller's finger, or under the toast that a failed publish just put
+      # there. That collision shipped, and looked exactly like a dead button.
+      - name: Publish bar is reachable
+        run: npm run reach
+        working-directory: frontend
       # Installed FROM requirements.txt, minus only the two packages the app
       # imports lazily (rembg pulls onnxruntime and a ~176MB model). A
       # hand-written second list is what put this job in a loop: it was missing
@@ -203,6 +211,7 @@ jobs:
                  backend/tests/test_the_older_listings_can_be_reached.py \
                  backend/tests/test_an_interrupted_import_keeps_what_it_paid_for.py \
                  backend/tests/test_a_fanned_out_unknown_outcome_is_not_a_refusal.py \
+                 backend/tests/test_condition_follows_the_category.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
             echo "::error::API tests skipped in the only job that can run them"

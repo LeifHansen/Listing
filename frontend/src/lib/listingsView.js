@@ -99,3 +99,11 @@ export function storeTotal(kind, value, sub) {
   }
   return { value, sub };
 }
+
+
+/* A listing still in the seller's hands: an AI draft, or a dry-run one made
+   without eBay connected. The cards that offer draft-only controls (the
+   category quick-pick, the publish button) all ask this, so "draft" means the
+   same thing on the Sell screen, the dashboard and the listings manager. */
+export const isDraft = (item) => item?.status === "draft"
+  || item?.status === "dry_run";

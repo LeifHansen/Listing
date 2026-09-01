@@ -21,7 +21,8 @@ import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illus
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
          salesSummary } from "@/lib/sales";
-import { listingsView, storeTotal } from "@/lib/listingsView";
+import { isDraft, listingsView, storeTotal } from "@/lib/listingsView";
+import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
@@ -561,9 +562,16 @@ export function Dashboard() {
   // An in-memory session resumes directly — but NOT once it's gone live (or
   // otherwise left the draft stage): there's nothing to "continue" on a
   // published listing, so fall through to the newest actual draft instead.
+  //
+  // EITHER record saying it is done ends it. `session.status || item.status`
+  // read only the session's, because a session that has one at all (any
+  // listing opened from Drafts carries "draft") short-circuited the fallback
+  // — so a draft opened, published and left behind kept its "Continue" button
+  // for the rest of the visit, pointing at a live listing.
   const sessionItem = session ? items.find((i) => i.id === session.sessionId) : null;
-  const sessionDone = ["published", "live", "sold", "ended"].includes(
-    session?.status || sessionItem?.status);
+  const DONE = ["published", "live", "sold", "ended"];
+  const sessionDone = DONE.includes(session?.status)
+    || DONE.includes(sessionItem?.status);
   const lastOpen = (session && !sessionDone)
     ? { title: session.listing?.title, go: () => setView("new") }
     : (drafts[0] && {
@@ -808,8 +816,17 @@ export function Dashboard() {
         ) : recent.length > 0 ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {recent.map((item) => (
-              <ListingCard key={item.id} className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
-                metrics={metricsById[item.id]} />
+              <div key={item.id} className="flex flex-col">
+                <ListingCard className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
+                  metrics={metricsById[item.id]} />
+                {/* The category, on the face of the card and one tap from
+                    being fixed — the same control the drafts strip and the
+                    bulk queue carry. A wrong category is the AI misfire that
+                    costs most once it's published (and it decides which
+                    conditions eBay will even accept), so it is not something
+                    to find only after opening the full editor. */}
+                {isDraft(item) && <DraftCategoryEdit item={item} className="mt-1.5" />}
+              </div>
             ))}
           </div>
         ) : storeView.kind === "unavailable" ? (

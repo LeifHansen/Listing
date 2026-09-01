@@ -4,6 +4,7 @@ import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
+import { nearestCondition } from "@/lib/conditions";
 import {
   publishListing, usePublishTargets, blockedReason, fixTargetFor,
 } from "./publishShared";
@@ -257,11 +258,19 @@ export function useListingForm() {
     const conditions = cond.conditions || [];
     setCategoryMeta({ conditions, aspects: asp.aspects || [],
                       conditionsChecked: cond.checked !== false });
-    // If the current condition isn't valid for this category, snap to the
-    // first allowed one so we never submit a condition eBay rejects (25021).
+    // If the current condition isn't one this category offers, move it to the
+    // CLOSEST one that is, so we never submit a condition eBay rejects
+    // (25021). Closest, not first: eBay lists "New" first almost everywhere,
+    // and snapping a worn item to it — which is what this did — swaps a
+    // publish error for a listing that lies about the item. nearestCondition
+    // never crosses the new/used line, and returns null when the category
+    // offers nothing honest, in which case the listing keeps what it has and
+    // the Condition card flags it.
     if (conditions.length) {
-      setForm((f) => conditions.some((c) => c.enum === f.condition)
-        ? f : { ...f, condition: conditions[0].enum });
+      setForm((f) => {
+        const fitted = nearestCondition(f.condition, conditions.map((c) => c.enum));
+        return !fitted || fitted === f.condition ? f : { ...f, condition: fitted };
+      });
     }
   }, [form.category_id, health.taxonomy_configured]);
 
@@ -390,6 +399,13 @@ export function useListingForm() {
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
   // server delete fails.
+  //
+  // The SESSION is updated alongside the form, and the server's remaining
+  // list is applied on top. Both matter beyond tidiness: the delete is now
+  // persisted server-side (see /api/delete-image), so its answer is the list
+  // the next reorder is checked against — and a form and session that
+  // disagree about the photos are what made a delete followed by a drag come
+  // back as "this listing's photos changed somewhere else".
   const deleteImage = useCallback(async (name, confirmFn) => {
     const prev = form.images || [];
     if (prev.length <= 1) {
@@ -402,14 +418,21 @@ export function useListingForm() {
       confirmLabel: "Delete",
       danger: true,
     }))) return;
-    setForm((f) => ({ ...f, images: f.images.filter((n) => n !== name) }));
+    const setImages = (imgs) => {
+      setForm((f) => ({ ...f, images: imgs }));
+      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+    };
+    const next = prev.filter((n) => n !== name);
+    setImages(next);
     try {
-      await postJson("/api/delete-image", { session_id: sessionId, name });
+      const res = await postJson("/api/delete-image", { session_id: sessionId, name });
+      const saved = Array.isArray(res?.images) && res.images.length ? res.images : next;
+      if (saved.join("|") !== next.join("|")) setImages(saved);
     } catch (e) {
-      setForm((f) => ({ ...f, images: prev }));
+      setImages(prev);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, toast]);
+  }, [form.images, sessionId, setForm, setSession, toast]);
 
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
@@ -605,7 +628,17 @@ export function useListingForm() {
       // Reflect the outcome on the card immediately. loadListings is the
       // authority and lands a moment later, but a listing that just went
       // live must never still be sitting under Drafts while it does.
-      if (result.published) patchListing(sessionId, { status: "published" });
+      //
+      // The open SESSION carries a status too, and it was the one thing here
+      // that never moved: it stayed "draft" for the rest of the visit, so the
+      // dashboard went on offering "Continue <title>" for a listing that was
+      // already live — the one screen that reads the session rather than the
+      // listings cache. Both are updated, or neither should be.
+      if (result.published) {
+        patchListing(sessionId, { status: "published" });
+        setSession((s) => (s && s.sessionId === sessionId
+          ? { ...s, status: "published" } : s));
+      }
       // The listing went live but our own record of it didn't move. Say it
       // plainly — the danger here is the seller publishing a second time.
       const recordWarning = result.record_warning
@@ -775,9 +808,10 @@ export function useListingForm() {
     () => ebayBlockers(collect(), {
       targets: chipTargets,
       aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
+      conditions: categoryMeta.conditions.length ? categoryMeta.conditions : null,
       mode: isLive ? "revise" : "live",
     }),
-    [collect, categoryMeta.aspects, chipTargets, isLive]);
+    [collect, categoryMeta.aspects, categoryMeta.conditions, chipTargets, isLive]);
 
   // ---------- completion per workflow card ----------
   // Three states, and the distinction between the last two is the whole
