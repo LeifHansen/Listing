@@ -62,10 +62,17 @@ jobs:
       # works from a clean account with nothing typed into a terminal. Every
       # command is safe to re-run: create is skipped when the app is already
       # there, and IPs are only allocated when there are none.
+      # Authentication note: FLY_MARKETING_TOKEN is a deploy token scoped to
+      # thryft-marketing alone. It is preferred over FLY_API_TOKEN because that
+      # one is scoped to the product's app — it cannot touch this one, which is
+      # what made the first two deploys fail with "unauthorized", and widening
+      # it would hand this workflow the ability to deploy the product. Two
+      # narrow tokens beat one broad one. The fallback keeps this working if
+      # only the shared secret is ever set.
       - name: Create the Fly app if it does not exist
         shell: bash
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_MARKETING_TOKEN || secrets.FLY_API_TOKEN }}
         run: |
           app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
           echo "app: $app"
@@ -88,7 +95,7 @@ jobs:
       - name: Give it IPs if it has none
         shell: bash
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_MARKETING_TOKEN || secrets.FLY_API_TOKEN }}
         run: |
           app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
           ips=$(flyctl ips list -a "$app" 2>/dev/null || true)
@@ -105,7 +112,7 @@ jobs:
             --build-arg GIT_SHA="$GITHUB_SHA"
         working-directory: marketing
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_MARKETING_TOKEN || secrets.FLY_API_TOKEN }}
 
       # The DNS records cannot be written until these values exist, so print
       # them where they can be read rather than telling someone to go and run
@@ -114,11 +121,17 @@ jobs:
         if: always()
         shell: bash
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_MARKETING_TOKEN || secrets.FLY_API_TOKEN }}
         run: |
           app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
-          v4=$(flyctl ips list -a "$app" 2>/dev/null | awk '$1=="v4"{print $2; exit}')
-          v6=$(flyctl ips list -a "$app" 2>/dev/null | awk '$1=="v6"{print $2; exit}')
+          # Read once, and survive flyctl failing. `2>/dev/null` hides the
+          # error text but not the exit code, and under `-o pipefail` a failed
+          # flyctl takes the whole command substitution — and the step — down
+          # with it. This step runs `if: always()`, so it is precisely the run
+          # where flyctl is unhappy that it most needs to still report.
+          ips=$(flyctl ips list -a "$app" 2>/dev/null || true)
+          v4=$(printf '%s\n' "$ips" | awk '$1=="v4"{print $2; exit}')
+          v6=$(printf '%s\n' "$ips" | awk '$1=="v6"{print $2; exit}')
           {
             echo "## DNS records for GoDaddy"
             echo

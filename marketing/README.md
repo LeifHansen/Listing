@@ -136,18 +136,31 @@ commit it just shipped** (the image stamps it at `/.build`). A deploy that
 reports success while the old image keeps serving is the failure the app's
 pipeline was built to catch; the same reasoning applies here.
 
-It needs `FLY_API_TOKEN` — already a repository secret, used by `deploy.yml` —
-and the repository variable `MARKETING_SITE_URL`.
+### Tokens
+
+It authenticates with **`FLY_MARKETING_TOKEN`**, a deploy token scoped to
+`thryft-marketing` alone (`fly tokens create deploy -a thryft-marketing`), and
+falls back to `FLY_API_TOKEN` if that secret is not set.
+
+Two narrow tokens rather than one broad one. `FLY_API_TOKEN` is scoped to the
+product's app and *cannot* touch this one — that is what made the first two
+marketing deploys fail with `unauthorized` — and the fix is not to widen it,
+which would hand this workflow the ability to deploy the product.
+
+It also reads the repository variable `MARKETING_SITE_URL`.
 
 ### First-time setup
 
 Once, from `marketing/`:
 
+Already done, and recorded here because the `-a` flag is easy to miss — `fly`
+otherwise looks for a `fly.toml` in the working directory:
+
 ```bash
 fly apps create thryft-marketing
-fly ips allocate-v4 --shared      # free; a dedicated v4 is only needed for non-HTTP
-fly ips allocate-v6
-fly ips list                      # note these — the apex A/AAAA records use them
+fly ips allocate-v4 --shared -a thryft-marketing   # free; dedicated v4 is only for non-HTTP
+fly ips allocate-v6 -a thryft-marketing
+fly ips list -a thryft-marketing
 ```
 
 ## The domain
@@ -162,8 +175,8 @@ In GoDaddy → your domain → DNS → Records:
 
 | Type | Name | Value | Notes |
 |---|---|---|---|
-| `A` | `@` | *(Fly IPv4 from `fly ips list`)* | The apex. An `A` record, so no apex-CNAME problem |
-| `AAAA` | `@` | *(Fly IPv6 from `fly ips list`)* | |
+| `A` | `@` | `66.241.124.158` | The apex. An `A` record, so no apex-CNAME problem. Shared IPv4 — Fly routes by SNI, which is all an HTTPS site needs |
+| `AAAA` | `@` | `2a09:8280:1::180:7b83:0` | Dedicated |
 | `CNAME` | `www` | `thryft-marketing.fly.dev` | Redirected to the apex; this site canonicalizes to the apex |
 | `CNAME` | `app` | `listing-lfwjrg.fly.dev` | The product. Additive — the `.fly.dev` host keeps working |
 
