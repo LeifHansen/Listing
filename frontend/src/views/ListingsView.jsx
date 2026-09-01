@@ -17,7 +17,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
-import { isDraft, listingsView } from "@/lib/listingsView";
+import { ARCHIVED_STATUSES, isDraft, listingsView } from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
@@ -54,7 +54,7 @@ export const TABS = [
     },
   },
   {
-    id: "all", label: "All", statuses: null, hide: ["sold"],
+    id: "all", label: "All", statuses: null, hide: ARCHIVED_STATUSES,
     sub: "A live mirror of your whole eBay store — every status still in play "
       + "(sold items are archived under Inactive)",
     empty: {
@@ -68,7 +68,9 @@ export const TABS = [
 // Which items a tab shows. `statuses` is a whitelist; `hide` subtracts from
 // the everything-tab. Sold items are hidden outside Inactive on purpose — a
 // finished sale is not something the seller can still act on, and leaving it
-// among the live listings is what made a sold item look publishable.
+// among the live listings is what made a sold item look publishable. The list
+// it subtracts is ARCHIVED_STATUSES, shared with the dashboard's "Recent
+// listings" strip so a sale leaves both screens at once.
 export const inTab = (tab, item) => (tab.statuses
   ? tab.statuses.includes(item.status)
   : !(tab.hide || []).includes(item.status));

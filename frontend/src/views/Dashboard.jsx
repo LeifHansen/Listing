@@ -23,7 +23,8 @@ import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illus
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
          salesSummary } from "@/lib/sales";
-import { isDraft, listingsView, storeTotal } from "@/lib/listingsView";
+import { isDraft, listingsView, recentListings, storeTotal }
+  from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { storeMirrorView } from "@/lib/storeMirror";
 
@@ -692,9 +693,13 @@ export function Dashboard() {
         go: () => openListing(drafts[0].id),
       });
 
-  const recent = [...items]
-    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
-    .slice(0, 4);
+  // The four newest listings the seller can still act on. Sold ones are left
+  // out, the same way the Sell screen's tabs leave them out: a sale is
+  // archived under Inactive there, but this strip sorted the whole store by
+  // `updated_at` and a sale is the last thing that touches a row — so the
+  // item that had just left the Sell screen went straight to the top of the
+  // dashboard, took a quarter of the strip, and pushed a live listing off it.
+  const recent = recentListings(items);
 
   const quickActions = [
     { label: "Take Photos", icon: Camera, onClick: startNew, tone: "bg-blue-soft text-blue" },
@@ -932,8 +937,12 @@ export function Dashboard() {
         <SectionHeader
           icon={Tags}
           title="Recent listings"
+          // Where the strip's contents actually live. "All" hides sold, so a
+          // seller whose whole store has sold would otherwise be sent from an
+          // empty strip to an empty tab reading "No listings yet".
           action={items.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={() => openListings("all")}>
+            <Button variant="ghost" size="sm"
+              onClick={() => openListings(recent.length > 0 ? "all" : "inactive")}>
               View all <ArrowRight aria-hidden />
             </Button>
           )}
@@ -970,6 +979,29 @@ export function Dashboard() {
               onClick={() => loadListings()}>
               Try again
             </Button>
+          </Card>
+        ) : items.length > 0 ? (
+          // A store whose every listing has sold. Same rule as the failed
+          // read above: "No listings yet", with a button to create a first
+          // one, is the wrong thing to say to a seller who sold the lot.
+          // Point them at the archive their listings actually went to.
+          <Card className="p-0">
+            <EmptyState
+              illustration={ListingsIllustration}
+              title="Everything's sold"
+              message={"Nothing is waiting on you right now — every listing you "
+                + "have is a finished sale, filed under Inactive."}
+              action={
+                <div className="flex flex-wrap gap-2 justify-center">
+                  <Button variant="primary" size="lg" onClick={startNew}>
+                    <PlusCircle aria-hidden /> Create Listing
+                  </Button>
+                  <Button variant="soft" size="lg" onClick={() => openListings("inactive")}>
+                    View sales <ArrowRight aria-hidden />
+                  </Button>
+                </div>
+              }
+            />
           </Card>
         ) : (
           <Card className="p-0">
