@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -1979,6 +1979,7 @@ def _ebay_creds_for(request: Request):
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
 NATIVE_RETURN_COOKIE = "thryft_oauth_return"  # "app" when the flow started in the shell
+RETURN_ORIGIN_COOKIE = "thryft_oauth_origin"  # the app origin the flow started on
 
 
 @app.post("/api/auth/connect-ticket")
@@ -2008,6 +2009,55 @@ def _mark_native_flow(resp, request: Request, native: str) -> None:
                         samesite="lax", secure=request.url.scheme == "https")
 
 
+def _request_origin(request: Request) -> str:
+    """The origin this request was addressed to, as scheme://host[:port]."""
+    return f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+
+
+def _offsite_connect(request: Request, uid: str, path: str, native: str):
+    """Send a connect flow to the origin the marketplace will return it to.
+
+    A marketplace callback URL names ONE origin (config.OAUTH_ORIGIN). A flow
+    started anywhere else sets its CSRF nonce cookie on a host the callback
+    never reaches, so it can only ever fail — and fail as "expired", which
+    reads like the seller's fault. Rather than let that happen, start the flow
+    on the right origin in the first place and remember where to put the seller
+    back afterwards.
+
+    The hop carries a 60-second connect ticket because the session cookie is
+    host-only and will not cross. Returns None when there is nothing to do:
+    OAUTH_ORIGIN unset, already on it, or an origin this app does not claim.
+    """
+    here = _request_origin(request)
+    if not config.OAUTH_ORIGIN or here == config.OAUTH_ORIGIN:
+        return None
+    # Host is client-controlled — Fly forwards whatever it is handed — so an
+    # unrecognised one is never worth a redirect, let alone a return trip.
+    if not config.oauth_return_ok(here):
+        return None
+    params = {"ticket": auth.make_ticket(uid, "connect"), "return_to": here}
+    if str(native).lower() in ("1", "true", "yes"):
+        params["native"] = "1"
+    log.info("connect: bouncing %s to the OAuth origin, returning to %s",
+             path, here)
+    return RedirectResponse(
+        f"{config.OAUTH_ORIGIN}{path}?{urlencode(params)}")
+
+
+def _mark_return_origin(resp, request: Request, return_to: str) -> None:
+    """Remember which of this app's origins to hand the seller back to.
+
+    Validated on the way IN, never on the way out: the value is only ever one
+    of config.APP_ORIGINS, so the redirect _finish_connect builds from it
+    cannot be pointed at someone else's site.
+    """
+    origin = (return_to or "").strip().rstrip("/")
+    if origin and origin != _request_origin(request) and config.oauth_return_ok(origin):
+        resp.set_cookie(RETURN_ORIGIN_COOKIE, origin, max_age=600,
+                        httponly=True, samesite="lax",
+                        secure=request.url.scheme == "https")
+
+
 def _finish_connect(request: Request, path: str):
     """End an OAuth flow: plain redirect on the web; when the flow started in
     the native shell, an interstitial that navigates the webview back to the
@@ -2015,6 +2065,17 @@ def _finish_connect(request: Request, path: str):
     of a bare 302 to a custom scheme because WKWebView handles an in-page
     navigation to capacitor:// more reliably than a server redirect."""
     if request.cookies.get(NATIVE_RETURN_COOKIE) != "app":
+        # A flow that began on another of this app's origins goes home to it,
+        # rather than leaving the seller on the callback host — where their
+        # session cookie does not exist, so they would appear logged out on a
+        # hostname they never chose. Re-checked against APP_ORIGINS because a
+        # cookie is the one thing here the browser could have been given
+        # elsewhere.
+        origin = request.cookies.get(RETURN_ORIGIN_COOKIE, "")
+        if config.oauth_return_ok(origin):
+            resp = RedirectResponse(f"{origin}{path}")
+            resp.delete_cookie(RETURN_ORIGIN_COOKIE)
+            return resp
         return RedirectResponse(path)
     target = f"{config.NATIVE_APP_ORIGIN}{path}"
     resp = HTMLResponse(f"""<!doctype html><html><head>
@@ -2026,16 +2087,23 @@ def _finish_connect(request: Request, path: str):
 <script>location.replace({json.dumps(target)});</script>
 </body></html>""")
     resp.delete_cookie(NATIVE_RETURN_COOKIE)
+    resp.delete_cookie(RETURN_ORIGIN_COOKIE)
     return resp
 
 
 @app.get("/api/ebay/connect")
-def ebay_connect(request: Request, ticket: str = "", native: str = ""):
+def ebay_connect(request: Request, ticket: str = "", native: str = "",
+                 return_to: str = ""):
     if not config.ebay_oauth_ready():
         raise HTTPException(400, "eBay OAuth not configured (EBAY_CLIENT_ID/SECRET/RUNAME).")
     uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
+    # eBay resolves EBAY_RUNAME to ONE accepted URL, so the callback lands on
+    # one origin whatever this request was addressed to. Start the flow there.
+    offsite = _offsite_connect(request, uid, "/api/ebay/connect", native)
+    if offsite is not None:
+        return offsite
     import secrets as _secrets
     nonce = _secrets.token_urlsafe(24)
     resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
@@ -2045,6 +2113,7 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
     resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
                     samesite="lax", secure=request.url.scheme == "https")
     _mark_native_flow(resp, request, native)
+    _mark_return_origin(resp, request, return_to)
     return resp
 
 
@@ -7026,7 +7095,8 @@ def _marketplace_or_404(marketplace: str):
 
 @app.get("/api/{marketplace}/connect")
 def marketplace_connect(marketplace: str, request: Request,
-                        ticket: str = "", native: str = ""):
+                        ticket: str = "", native: str = "",
+                        return_to: str = ""):
     provider = _marketplace_or_404(marketplace)
     if not provider.oauth_ready():
         raise HTTPException(400, f"{provider.label} OAuth not configured "
@@ -7046,6 +7116,11 @@ def marketplace_connect(marketplace: str, request: Request,
     pending, _ = marketplaces.access_pending(provider, uid)
     if pending:
         return _finish_connect(request, f"/?connect_pending={marketplace}")
+    # Etsy and Depop match redirect_uri exactly, so — like eBay's RuName — the
+    # callback comes back to one origin. Start the flow on it, not here.
+    offsite = _offsite_connect(request, uid, f"/api/{marketplace}/connect", native)
+    if offsite is not None:
+        return offsite
     import secrets as _secrets
     nonce = _secrets.token_urlsafe(24)
     url, flow = provider.authorize_url(auth.make_state(uid, nonce))
@@ -7059,6 +7134,7 @@ def marketplace_connect(marketplace: str, request: Request,
                     max_age=600, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https")
     _mark_native_flow(resp, request, native)
+    _mark_return_origin(resp, request, return_to)
     return resp
 
 

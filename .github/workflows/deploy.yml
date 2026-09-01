@@ -95,6 +95,55 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      # DNS for app.thryftshop.com is a CNAME to listing-lfwjrg.fly.dev and has
+      # resolved for weeks, but a Fly app only answers for a hostname it has
+      # been TOLD about: with no certificate the handshake fails at Fly's edge
+      # and the browser shows a certificate interstitial rather than anything
+      # this app served. The apex sends HSTS with includeSubDomains, so there
+      # is not even a "proceed anyway" to click.
+      #
+      # This existed only as a line in marketing/README.md for someone to run
+      # by hand, and nobody ever did -- which is precisely why the hostname was
+      # broken while its DNS record worked. `certs add` is idempotent and
+      # `certs show` is machine-checkable, so it belongs here with the rest of
+      # the bootstrap the pipeline already does for itself (marketing-deploy.yml
+      # creates its app and allocates its IPs on the same reasoning).
+      #
+      # Deliberately never fails the run. FLY_API_TOKEN is a deploy token; if it
+      # cannot mint certificates that must not hold up a release, and
+      # listing-lfwjrg.fly.dev keeps working either way.
+      - name: The app answers for app.thryftshop.com
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CERT_HOST: app.thryftshop.com
+        run: |
+          app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
+          status() { flyctl certs show "$CERT_HOST" -a "$app" 2>/dev/null || true; }
+
+          if [ -n "$(status)" ]; then
+            echo "$CERT_HOST is already registered on $app"
+          else
+            echo "Registering $CERT_HOST on $app"
+            if ! flyctl certs add "$CERT_HOST" -a "$app" 2>&1; then
+              echo "::warning::Could not register $CERT_HOST on $app. Run 'fly certs add $CERT_HOST -a $app' once by hand; https://$app.fly.dev is unaffected."
+              exit 0
+            fi
+          fi
+
+          # Issuance is asynchronous, so "asked for" is not "works". Poll, and
+          # report which of the two this run actually achieved.
+          for i in $(seq 1 12); do
+            out=$(status)
+            if printf '%s' "$out" | grep -qi "not been issued\|awaiting\|pending"; then
+              echo "attempt $i: not issued yet"
+            elif printf '%s' "$out" | grep -qi "been issued\|ready"; then
+              echo "OK: https://$CERT_HOST is serving a valid certificate"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::$CERT_HOST is registered on $app but no certificate had been issued after two minutes. Check 'fly certs show $CERT_HOST -a $app' -- issuance needs the DNS record to resolve."
+
       - name: Deploy to Fly
         run: |
           flyctl deploy --remote-only --no-cache \
