@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
-               objstore, ratelimit, storage)
+               objstore, ratelimit, redact, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
@@ -1129,6 +1129,92 @@ def admin_audit_view(request: Request, before: str = "",
 # as "not ready" is what lets a deploy or a load balancer act on it before a
 # seller loses a batch.
 READY_MIN_DISK_MB = int(os.getenv("READY_MIN_DISK_MB", "200") or 200)
+
+
+# A browser crash report. Everything about this route is shaped by one fact:
+# it cannot require a session. A throw inside the app shell means there may be
+# no session to authenticate with, and the crashes worth hearing about are
+# exactly the ones that stop the app working — so an authenticated ingest
+# would miss them. That makes it the only unauthenticated WRITE the app has,
+# and the guards below are what pay for it.
+CLIENT_ERROR_MAX_BYTES = 16 * 1024
+# A ceiling across ALL clients, not just each one. The per-IP limit stops one
+# broken browser; this stops a spray from many.
+CLIENT_ERROR_GLOBAL_MAX = 600
+
+
+@app.post("/api/client-errors", status_code=202)
+async def client_error(request: Request) -> dict:
+    """Record a crash the browser saw. Always answers 202, tells you nothing.
+
+    The frontend had no error reporting at all: no boundary, no window.onerror,
+    no ingest. A React render crash was a white screen that reached nobody.
+
+    It answers 202 and an empty ok whether it recorded the report, threw it
+    away for rate limiting, or could not parse it — deliberately. A 429 would
+    tell a prober where the limit is, and the client treats any answer as
+    final, which is what stops a failed report becoming the next report. The
+    client is never told whether it was heard; it is not a channel.
+
+    Nothing from the body is echoed back, and every field is truncated here as
+    well as in the browser — the browser's caps are a courtesy, not a control.
+    """
+    ok = {"ok": True}
+    try:
+        raw = request.headers.get("content-length")
+        if raw and int(raw) > CLIENT_ERROR_MAX_BYTES:
+            return ok
+    except (TypeError, ValueError):
+        return ok
+
+    ip = _client_ip(request)
+    if not ratelimit.check(f"clienterr:{ip}",
+                           max_attempts=config.CLIENT_ERROR_MAX_PER_WINDOW):
+        return ok
+    if not ratelimit.check("clienterr:_all",
+                           max_attempts=CLIENT_ERROR_GLOBAL_MAX):
+        return ok
+
+    try:
+        body = await request.body()
+        if len(body) > CLIENT_ERROR_MAX_BYTES:
+            return ok
+        payload = json.loads(body or b"{}")
+        if not isinstance(payload, dict):
+            return ok
+    except Exception:  # noqa: BLE001 - a malformed report is not an incident
+        return ok
+
+    def _text(key: str, cap: int) -> str:
+        value = payload.get(key)
+        return (value if isinstance(value, str) else "")[:cap]
+
+    message = _text("message", 500)
+    if not message:
+        return ok
+    stack = _text("stack", 8000)
+    component = _text("component_stack", 4000)
+    # Fingerprinted on the message and the component stack, never on the URL:
+    # /listing/abc and /listing/def are the same bug. The minified frame is
+    # useless for reading but stable within a build, so it separates two
+    # different crashes carrying the same message.
+    errorlog.record(
+        kind="frontend",
+        level="ERROR",
+        message=message,
+        template=f"{_text('name', 120)}: {message}",
+        module="browser",
+        func=(component.split("\n")[1].strip() if "\n" in component
+              else _text("kind", 40)) or "unknown",
+        route=_text("url", 200),
+        method="CLIENT",
+        reference=_text("request_id", 16),
+        sample={"stack": redact.scrub(stack, max_len=8000),
+                "component_stack": redact.scrub(component, max_len=4000),
+                "build": _text("build", 40),
+                "reported_as": _text("kind", 40)},
+    )
+    return ok
 
 
 @app.get("/api/ready")

@@ -6,6 +6,12 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend ./
+# Vite bakes VITE_* in at build time. A crash reported from the browser sends
+# a MINIFIED stack (no source maps are emitted), so the only way to resolve it
+# later is to know which bundle it came from. Same sha stage 2 stamps on
+# /api/health, so the two agree about what is running.
+ARG GIT_SHA=""
+ENV VITE_BUILD_SHA=$GIT_SHA
 RUN npm run build
 
 # Stage 2: the Python backend serves the API + the built frontend.
