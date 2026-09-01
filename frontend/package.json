@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "lint": "eslint src vitest.config.js eslint.config.js",
     "smoke": "node scripts/smoke.mjs",
+    "reach": "node scripts/reach.mjs",
     "brand:assets": "node scripts/brand-icon.mjs"
   },
   "dependencies": {
