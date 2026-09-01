@@ -49,20 +49,30 @@ function json(body) {
 }
 
 // The API this screen talks to, plus a recorder for the calls under test.
-function server(calls, { jobResult } = {}) {
+// `bulkCaps` is what the server says one run of a group's button reaches
+// (/api/insights); `running` is the job's own report of the split; `statuses`
+// are polls to serve before the finished one, for the live progress line.
+function server(calls, { jobResult, recs, bulkCaps, running, statuses } = {}) {
+  let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
     if (path === "/api/listings/enrich") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
-      return json({ job_id: "job-1", running: true, total: 2, deferred: 0 });
+      return json(running
+        || { job_id: "job-1", running: true, total: 2, deferred: 0 });
     }
     if (path.startsWith("/api/bulk/status/")) {
+      const pending = statuses && polls < statuses.length ? statuses[polls] : null;
+      polls += 1;
+      if (pending) return json(pending);
       return json({ id: "job-1", done: true, phase: "done",
                     result: jobResult || { changed: 2, skipped: 0, failed: 0,
                                            total: 2, filled: 7, deferred: 0,
                                            stopped: "" } });
     }
-    if (path.startsWith("/api/insights")) return json({ recommendations: RECS });
+    if (path.startsWith("/api/insights")) {
+      return json({ recommendations: recs || RECS, bulk_caps: bulkCaps || {} });
+    }
     if (path.startsWith("/api/listings")) {
       return json({ authed: true, db: { configured: true, connected: true },
                     listings: [] });
@@ -157,6 +167,72 @@ describe("filling in a whole group at once", () => {
     await click(byText("Fill them in"));
     expect(text()).toContain("1 need you");
     expect(text()).toContain("4 left — run it again to finish");
+    await act(async () => { root.unmount(); });
+  });
+});
+
+/* A group can be bigger than one run. The server fills a capped number of
+ * listings per pass and hands the rest back as `deferred` — so a 3-listing
+ * group under a cap of 2 asked the seller to confirm 3, quoted the AI cost of
+ * 3, then filled 2 and reported "1 of 2" underneath a badge reading 3. The
+ * number of listings is the whole content of that dialog; it has to be the
+ * one that will actually happen. */
+describe("a group bigger than one run", () => {
+  const THREE = [
+    ...RECS,
+    { listing_id: "c", listing_title: "Levi's 501", type: "specifics",
+      label: "Fill in details", reason: "Some fields buyers filter by are still blank.",
+      action: "open", priority: 45, rate: null },
+  ];
+  const CAPPED = { recs: THREE, bulkCaps: { specifics: 2 },
+                   running: { job_id: "job-1", running: true, total: 2, deferred: 1 } };
+
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("asks for the listings this pass will really fill, not the whole group", async () => {
+    const { root, text } = await mount([], CAPPED);
+    await click(byText("Enrich all"));
+    expect(text()).toContain("Fill in details on 2 of 3 listings?");
+    expect(text()).toContain("the other 1 stays on the list for a second run");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("still sends the whole group — the server counts what is left over", async () => {
+    // Trimming the list here would cost the seller the "1 left" report: the
+    // remainder is counted from what the request NAMED.
+    const calls = [];
+    const { root } = await mount(calls, CAPPED);
+    await click(byText("Enrich all"));
+    await click(byText("Fill them in"));
+    expect(calls[0].body).toEqual({ listing_ids: ["a", "b", "c"] });
+    await act(async () => { root.unmount(); });
+  });
+
+  it("accounts for the rest of the group while it runs", async () => {
+    const { root, text } = await mount([], {
+      ...CAPPED,
+      statuses: [{ id: "job-1", done: false, phase: "enriching", current: 0,
+                   total_items: 2, current_title: "Nike hoodie" }],
+    });
+    await click(byText("Enrich all"));
+    await click(byText("Fill them in"));
+    // "1 of 2" alone, under a badge reading 3, is the contradiction that
+    // started this. The line carries the whole group's arithmetic.
+    expect(text()).toContain("1 of 2 · 1 more after this run");
+
+    // Let the poll come back done so nothing is left running past the test.
+    await act(async () => { await new Promise((r) => setTimeout(r, 1600)); });
+    await act(async () => { root.unmount(); });
+  });
+
+  it("promises the whole group when one run covers it", async () => {
+    // No cap published (an older server, or a failed insights fetch) reads as
+    // "no limit known" — the group says what it has always said.
+    const { root, text } = await mount();
+    await click(byText("Enrich all"));
+    expect(text()).toContain("Fill in details on 2 listings?");
+    expect(text()).not.toContain("second run");
     await act(async () => { root.unmount(); });
   });
 });

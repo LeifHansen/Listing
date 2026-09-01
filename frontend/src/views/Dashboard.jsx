@@ -32,6 +32,22 @@ import { storeMirrorView } from "@/lib/storeMirror";
 // it during render is a no-op state write when it is already empty, instead of
 // a fresh [] that re-renders the whole dashboard. Never mutated.
 const NO_INSIGHTS = Object.freeze([]);
+// Per-run caps from /api/insights, keyed by rec type (see main._bulk_caps).
+// Empty until the fetch lands, and empty is "no cap known" — the group then
+// reads as it always did rather than inventing a limit.
+const NO_CAPS = Object.freeze({});
+
+// How many of a group ONE tap actually reaches. Both bulk actions fill a
+// capped number of listings per run and defer the rest, so the group must not
+// promise the whole badge: it asked to confirm 46, quoted the AI cost of 46,
+// then ran 25 and reported "1 of 25".
+const runSize = (n, cap) => (cap > 0 ? Math.min(n, cap) : n);
+// The count a seller is actually agreeing to, with its noun: "46 listings"
+// when the run covers the group, "25 of 46 listings" when it doesn't. The
+// noun agrees with the number in front of it — "1 of 3 listings", but "1
+// listing".
+const runCount = (n, total, noun) =>
+  `${n < total ? `${n} of ${total}` : n} ${noun}${Math.max(n, total) === 1 ? "" : "s"}`;
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
@@ -123,7 +139,7 @@ const BULK_ACTIONS = {
   specifics: {
     verb: "Enrich all",
     icon: Sparkles,
-    run: (ctx) => ctx.enrichAll(ctx.group),
+    run: (ctx) => ctx.enrichAll(ctx.group, ctx.cap),
   },
   lower_price: {
     verb: "Lower all…",
@@ -131,7 +147,8 @@ const BULK_ACTIONS = {
     amount: {
       unit: "%", initial: 10, min: 1, max: 75, step: 1,
       label: "Lower every price in this group by",
-      submit: (n, value) => `Lower ${n} price${n === 1 ? "" : "s"} by ${value}%`,
+      submit: (n, value, total) =>
+        `Lower ${runCount(n, total, "price")} by ${value}%`,
       note: "New prices go straight to eBay. Anything that has sold or ended is skipped.",
     },
     run: (ctx, value) => ctx.lowerAll(ctx.group, value),
@@ -142,7 +159,7 @@ const BULK_ACTIONS = {
 // before it can run, with its own submit. Rendered in normal flow under the
 // group header rather than as a floating panel: the suggestions Card clips
 // overflow, so anything absolutely positioned inside it gets cut off.
-function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
+function BulkAmountPanel({ amount, count, total, busy, onSubmit, onCancel }) {
   const { unit, initial, min, max, step, label, submit, note } = amount;
   const [value, setValue] = useState(initial);
   const valid = Number(value) >= min && Number(value) <= max;
@@ -178,6 +195,15 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
           </span>
         </label>
         <p className="mt-2 text-[12px] text-ink-secondary">{note}</p>
+        {/* The server reprices a capped number per run and defers the rest.
+            Said here, next to the button that spends it, rather than only in
+            the toast that arrives once it is already too late to plan. */}
+        {count < total && (
+          <p className="mt-1 text-[12px] text-ink-secondary">
+            One run covers {count} of them — the other {total - count}{" "}
+            {total - count === 1 ? "stays" : "stay"} on the list for a second run.
+          </p>
+        )}
         {!valid && (
           <p className="mt-1 text-[12px] font-semibold text-error">
             Enter a number between {min} and {max}.
@@ -186,7 +212,7 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="primary" size="sm" loading={busy}
             disabled={busy || !valid} onClick={apply}>
-            {submit(count, value)}
+            {submit(count, value, total)}
           </Button>
           <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
             Cancel
@@ -200,7 +226,7 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
+function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
                     lowerAll, enrichAll, onDismiss, busy, progress }) {
   const [open, setOpen] = useState(false);
   const [amountOpen, setAmountOpen] = useState(false);
@@ -213,6 +239,9 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
   // would have gone busy because a promote was running elsewhere.
   const actionBusy = action?.shared ? !!promoting : busy;
   const ActionIcon = action?.icon;
+  // What one tap on this group's button reaches. The badge above it is the
+  // whole group; this is the part of it a single run touches.
+  const perRun = runSize(group.recs.length, cap);
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
@@ -249,7 +278,7 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
             aria-expanded={action.amount ? amountOpen : undefined}
             onClick={() => (action.amount
               ? setAmountOpen((o) => !o)
-              : action.run({ group, promoteAll, lowerAll, enrichAll }))}>
+              : action.run({ group, cap, promoteAll, lowerAll, enrichAll }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
@@ -264,17 +293,23 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
           <span className="truncate">
             {progress.title ? `“${progress.title}” · ` : ""}
             {Math.min(progress.done + 1, progress.total)} of {progress.total}
+            {/* One run is capped, so "2 of 25" under a badge reading 46 is a
+                contradiction unless the rest of the group is accounted for
+                right here. */}
+            {progress.deferred > 0
+              ? ` · ${progress.deferred} more after this run` : ""}
           </span>
         </p>
       )}
       <AnimatePresence initial={false}>
         {action?.amount && amountOpen && (
           <BulkAmountPanel
-            amount={action.amount} count={group.recs.length} busy={busy}
+            amount={action.amount} count={perRun} total={group.recs.length}
+            busy={busy}
             onCancel={() => setAmountOpen(false)}
             onSubmit={(value) => {
               setAmountOpen(false);
-              action.run({ group, promoteAll, lowerAll, enrichAll }, value);
+              action.run({ group, cap, promoteAll, lowerAll, enrichAll }, value);
             }} />
         )}
       </AnimatePresence>
@@ -466,6 +501,10 @@ export function Dashboard() {
 
   // "What to do next" — ranked actions across the user's listings.
   const [insights, setInsights] = useState(NO_INSIGHTS);
+  // How many listings one run of each group's bulk action reaches, straight
+  // from the server that enforces it — the dashboard cannot guess it, and
+  // guessing wrong is how the group came to promise 46 and deliver 25.
+  const [bulkCaps, setBulkCaps] = useState(NO_CAPS);
   const [promoting, setPromoting] = useState(null); // listing id, or "all"
   // Signing out throws the suggestions away — they are one account's to-do
   // list, and eBay actions fire straight off them. That reset used to sit at
@@ -490,7 +529,10 @@ export function Dashboard() {
   const refreshInsights = useCallback(() => {
     if (!user) return;
     api("/api/insights")
-      .then((r) => setInsights(r.recommendations || NO_INSIGHTS))
+      .then((r) => {
+        setInsights(r.recommendations || NO_INSIGHTS);
+        setBulkCaps(r.bulk_caps || NO_CAPS);
+      })
       .catch(() => {});
   }, [user]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, items.length]);
@@ -584,31 +626,51 @@ export function Dashboard() {
   // (or the proxy in front of the server) will hold a connection open for.
   // `bulkProgress` is what the job reports as it goes, rendered on the group.
   const [bulkProgress, setBulkProgress] = useState(null);
-  const enrichAll = async (group) => {
+  const enrichAll = async (group, cap) => {
+    // The WHOLE group is sent: the server enriches up to its own cap and
+    // counts the remainder for us (a client that pre-trimmed the list would
+    // be told nothing was left over). The cap it publishes on /api/insights is
+    // only for what this dialog SAYS — which is the bug it fixes. The group
+    // used to ask for 46 and quote the AI cost of 46, then fill 25.
     const ids = group.recs.map((r) => r.listing_id);
-    const n = ids.length;
+    const total = ids.length;
+    let run = runSize(total, cap);
+    let left = total - run;
     // Every listing this touches spends AI credits, and this button reaches a
     // whole group from one tap. Say what it will do — and what it will cost —
     // before it does it, the same way promoting the store does.
     const cost = tokens.enabled && tokens.costs?.specifics
-      ? ` It uses ${tokens.costs.specifics * n} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
+      ? ` It uses ${tokens.costs.specifics * run} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
+      : "";
+    const rest = left
+      ? ` One run fills in ${run} of them; the other ${left} ${left === 1 ? "stays" : "stay"} on the list for a second run.`
       : "";
     if (!(await confirm({
-      title: `Fill in details on ${n} listing${n === 1 ? "" : "s"}?`,
+      title: `Fill in details on ${runCount(run, total, "listing")}?`,
       message: "The AI reads each listing's own photos and fills in eBay's "
         + "recommended item specifics — the fields buyers filter by — then "
         + "pushes them to the live listing. Anything you've already written "
-        + `is left exactly as it is.${cost}`,
+        + `is left exactly as it is.${rest}${cost}`,
       confirmLabel: "Fill them in",
     }))) return;
     setBulkBusy(group.type);
-    setBulkProgress({ type: group.type, done: 0, total: n, title: "" });
+    setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
     try {
       const start = await postJson("/api/listings/enrich", { listing_ids: ids });
+      // The server's own split is the authoritative one — ids that have since
+      // been deleted never make the run, and the cap is its to enforce. A
+      // handed-back job that is already running reports total 0; that one
+      // keeps the estimate above, and the poll below corrects it.
+      if (start.total) {
+        run = start.total;
+        left = start.deferred || 0;
+        setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
+      }
       const res = await pollJob(start.job_id, {
         onUpdate: (j) => setBulkProgress({
           type: group.type, done: j.current || 0,
-          total: j.total_items || n, title: j.current_title || "",
+          total: j.total_items || run, deferred: left,
+          title: j.current_title || "",
         }),
       });
       const parts = [];
@@ -920,7 +982,8 @@ export function Dashboard() {
                 byType[rec.type].recs.push(rec);
               }
               return groups.map((g) => (
-                <RecGroup key={g.type} group={g} promoting={promoting}
+                <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
+                  promoting={promoting}
                   promoteAll={promoteAll} promoteOne={promoteOne}
                   openListing={openListing} lowerAll={lowerAll}
                   enrichAll={enrichAll} onDismiss={dismissOne}

@@ -5277,7 +5277,7 @@ def insights(request: Request) -> dict:
     list for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
-        return {"recommendations": []}
+        return {"recommendations": [], "bulk_caps": _bulk_caps()}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
         creds = _ebay_creds_for(request)
@@ -5289,10 +5289,13 @@ def insights(request: Request) -> dict:
         return {"recommendations": recommender.recommendations(
             items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
             promoted_ids=promoted_ids, promotion_known=promotion_known,
-            limit=50)}
+            limit=50),
+            # What one tap on a group can actually reach in a single run — the
+            # group renders its button, so it has to know. See _bulk_caps.
+            "bulk_caps": _bulk_caps()}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
-        return {"recommendations": []}
+        return {"recommendations": [], "bulk_caps": _bulk_caps()}
 
 
 @app.post("/api/ebay/promote")
@@ -5463,6 +5466,22 @@ def lower_prices(payload: dict, request: Request) -> dict:
 # download of those photos first) and then an eBay revise. Whatever is left
 # over comes back as `deferred` for the seller to run again.
 BULK_ENRICH_CAP = int(os.getenv("BULK_ENRICH_CAP", "25") or "25")
+
+
+def _bulk_caps() -> dict:
+    """How many listings ONE tap on a suggestion group's bulk button reaches,
+    keyed by the recommendation type that carries the button.
+
+    Both bulk actions cap a single run and hand the remainder back as
+    `deferred` (see the two constants above). The dashboard had no way to know
+    that, so it promised the whole group: a 46-listing "Fill in details" asked
+    the seller to confirm 46, quoted the AI cost of 46 — and then ran 25 and
+    reported "1 of 25" against a group badge reading 46. The caps ride along
+    with the recommendations so the group can say what this pass will actually
+    do before the seller agrees to spend anything on it.
+    """
+    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP}
+
 
 # The enrichment runs as a background job, one per account at a time: it
 # spends AI credits per listing, and two tabs firing it at the same store

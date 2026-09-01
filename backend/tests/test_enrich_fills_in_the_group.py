@@ -411,6 +411,40 @@ def test_more_ids_than_one_run_can_hold_are_deferred(seller, monkeypatch):
     assert _finish(client, body["job_id"])["deferred"] == 3
 
 
+def test_the_dashboard_is_told_what_one_run_holds(seller, monkeypatch):
+    """The cap is enforced here and rendered there, so it has to travel.
+
+    Without it the dashboard promised the whole group: a 46-listing "Fill in
+    details" asked the seller to confirm 46 and quoted the AI cost of 46, then
+    filled BULK_ENRICH_CAP of them and reported "1 of 25" under a badge still
+    reading 46. What /api/insights publishes is the number this route will
+    actually run — asserted against the run itself, not against the constant.
+    """
+    client, dbmod, uid = seller
+    monkeypatch.setattr(main, "BULK_ENRICH_CAP", 2)
+    # The suggestion engine's own eBay lookups are not what this is about.
+    monkeypatch.setattr(main, "_metrics_by_record_id", lambda creds, items: {})
+    monkeypatch.setattr(main, "_rates_by_record_id", lambda creds, items: {})
+    monkeypatch.setattr(main, "_promoted_record_ids", lambda creds, items: (set(), True))
+    ids = []
+    for i in range(5):
+        rid = f"capped-{i}"
+        ids.append(rid)
+        assert dbmod.upsert_listing(rid, _listing(rid), status="published",
+                                    user_id=uid)
+        _with_photo(rid)
+    monkeypatch.setattr(main, "_enrich_listing", _enriched([]))
+    monkeypatch.setattr(main.marketplaces, "get", lambda name: _AcceptingEbay())
+
+    caps = client.get("/api/insights").json()["bulk_caps"]
+    assert caps["lower_price"] == main.BULK_PRICE_CAP
+
+    body = client.post("/api/listings/enrich", json={"listing_ids": ids}).json()
+    assert body["total"] == caps["specifics"] == 2
+    assert body["deferred"] == 3
+    _finish(client, body["job_id"])
+
+
 def test_a_logged_out_caller_gets_nothing(dbmod, monkeypatch):
     monkeypatch.setattr(main, "db", dbmod)
     ratelimit.reset()
