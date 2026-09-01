@@ -5272,7 +5272,7 @@ def duplicate_listings(request: Request) -> dict:
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, relist ended items, promote/reprice stale live ones. Folds in
+    finish drafts, promote/reprice stale live ones. Folds in
     eBay views/watchers and recommended ad rates when available. Returns an empty
     list for logged-out users. Never raises."""
     user = auth.current_user(request)

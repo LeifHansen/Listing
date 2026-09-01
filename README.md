@@ -671,8 +671,9 @@ one listing, behind a confirm, through the usual `/api/ebay/end-listing`.
 The Dashboard's **Suggested actions** card is `services/recommender.py` over the
 signals the app already has — listing status, age, price, photo count, promotion
 state, plus eBay views/watchers when the scope is granted. Rules turn a store
-into a short ranked list: finish a draft, relist an ended item, promote a live
-one, drop a stale price, add photos, fill in specifics. Suggestions are grouped
+into a short ranked list: finish a draft, promote a live one, drop a stale
+price, add photos, fill in specifics. An ended listing earns nothing: relisting
+is done by hand, and the ended bucket picks up sold items. Suggestions are grouped
 by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
 listing so the list spans the portfolio instead of piling onto one item.
 
