@@ -5,6 +5,14 @@ the client swallowed the failure. So a drag could overwrite a field edited
 elsewhere with a stale copy, and a rejected save left the new order on screen
 and nowhere else -- the seller drags their main photo into place, and a reload
 puts it back.
+
+The permutation guard that replaced it then read the DATABASE ROW as the only
+record of what a listing holds. A database is optional (README: set
+DATABASE_URL "to persist every listing"), and even where one is configured a
+row can be missing because an earlier upsert never landed -- so on those
+listings "no row" read as "no photos", and every single drag came back as
+"this listing's photos changed somewhere else" about a listing nothing had
+touched. The tests at the bottom hold that shut.
 """
 from __future__ import annotations
 
@@ -100,3 +108,63 @@ def test_a_live_listing_stays_published_after_a_reorder(client, monkeypatch):
     client.row["status"] = "published"
     _patch(client, ["img_2.jpg", "img_1.jpg", "img_3.jpg"])
     assert client.row["status"] == "published"
+
+
+# ---------- a listing the database doesn't have ----------
+# The disk copy is what the app runs on with DATABASE_URL unset, and what is
+# left when a row was never written. A reorder there has to work like any
+# other -- and, above all, must not tell the seller their photos changed
+# somewhere else when nothing has changed anywhere.
+
+
+@pytest.fixture()
+def diskonly(monkeypatch):
+    """No row anywhere; a saved listing.json and photos on the volume."""
+    draft = {"title": "A jacket", "images": list(PHOTOS)}
+    saved: list[list[str]] = []
+
+    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(db, "get_listing", lambda sid: None)
+    monkeypatch.setattr(db, "mutate_listing_data", lambda *a, **k: None)
+    monkeypatch.setattr(main.storage, "load_listing",
+                        lambda sid: dict(draft) if sid == "s1" else None)
+    monkeypatch.setattr(main.storage, "list_optimized", lambda sid: list(PHOTOS))
+
+    def _save(sid, listing):
+        draft["images"] = list(listing.images)
+        saved.append(list(listing.images))
+
+    monkeypatch.setattr(main.storage, "save_listing", _save)
+    client = TestClient(main.app)
+    client.draft, client.saved = draft, saved
+    return client
+
+
+def test_a_listing_with_no_database_row_still_reorders(diskonly):
+    res = _patch(diskonly, ["img_3.jpg", "img_1.jpg", "img_2.jpg"])
+    assert res.status_code == 200, res.text
+    assert res.json()["images"] == ["img_3.jpg", "img_1.jpg", "img_2.jpg"]
+    assert diskonly.draft["images"] == ["img_3.jpg", "img_1.jpg", "img_2.jpg"]
+
+
+def test_the_disk_draft_is_still_only_reordered(diskonly):
+    _patch(diskonly, ["img_2.jpg", "img_1.jpg", "img_3.jpg"])
+    assert diskonly.draft["title"] == "A jacket"
+
+
+def test_a_stale_list_is_still_refused_without_a_row(diskonly):
+    """The guard that matters does not soften just because the record moved
+    to disk: obeying a short list would DELETE the photos missing from it."""
+    assert _patch(diskonly, ["img_1.jpg", "img_2.jpg"]).status_code == 409
+    assert diskonly.draft["images"] == PHOTOS
+
+
+def test_a_reorder_that_reached_nothing_is_not_reported_as_saved(
+        diskonly, monkeypatch):
+    """No row and no draft to write: the seller is told, rather than left
+    with an order on screen that a reload will undo."""
+    monkeypatch.setattr(main.storage, "load_listing", lambda sid: None)
+    res = _patch(diskonly, ["img_3.jpg", "img_1.jpg", "img_2.jpg"])
+    assert res.status_code == 503
+    assert not diskonly.saved

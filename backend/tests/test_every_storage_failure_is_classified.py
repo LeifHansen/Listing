@@ -239,6 +239,9 @@ WHY_A_BLANK_IS_SAFE = {
         "same, and an unpruned history costs disk rather than correctness",
     "prune_exports":
         "same; an export left behind is regenerated on demand anyway",
+    "load_listing":
+        "None means 'no draft here', and the writer that reads it refuses rather "
+        "than saving into a listing it could not read",
     "session_touched_at":
         "an unknown mtime makes the orphan sweep skip the dir rather than delete it",
     "sweep_orphan_sessions":
