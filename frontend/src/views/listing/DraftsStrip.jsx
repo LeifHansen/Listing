@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
@@ -18,6 +18,10 @@ import {
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
+import {
+  liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
+  withCelebrating,
+} from "./publishCelebration";
 import { isDraft } from "@/lib/listingsView";
 
 /* The drafts experience on the merged Sell screen: every draft one click
@@ -93,6 +97,11 @@ export function DraftsStrip({ search = "" }) {
   const [sel, setSel] = useState({});
   const [publishing, setPublishing] = useState({});   // id -> bool
   const [startingOver, setStartingOver] = useState(null);
+  // The send-off a card gets on its way live (see publishCelebration): a
+  // burst of confetti, then it lifts off the grid. What is left when a batch
+  // finishes is exactly the drafts that still need the seller.
+  const { celebrating, celebrate } = usePublishCelebration();
+  const reduced = useReducedMotion();
   // Bulk publish runs one listing at a time (eBay's API is per-item), which on
   // a big selection is a long wait — so the button counts it off out loud.
   const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
@@ -106,7 +115,14 @@ export function DraftsStrip({ search = "" }) {
       || (i.listing?.description || "").toLowerCase().includes(q))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
 
-  if (!drafts.length) return null;
+  // What the grid actually renders. A published card is out of `drafts` the
+  // instant the server confirms it (publishItem patches the record), so its
+  // snapshot is spliced back at the position it held for as long as the
+  // animation runs — including when it was the last one, which is why the
+  // strip is kept mounted on `cards` rather than on `drafts`.
+  const cards = withCelebrating(drafts, celebrating);
+
+  if (!cards.length) return null;
 
   // Both bulk actions work on the drafts you can actually see: narrowing the
   // search after selecting must not publish or delete something off-screen.
@@ -140,7 +156,12 @@ export function DraftsStrip({ search = "" }) {
       const res = await publishListing(item.id, item.listing || {}, effectiveTargets);
       // Move the card out of Drafts on the spot — the refresh below confirms
       // it, but a live listing must never linger under Drafts waiting for one.
-      if (res.published) patchListing(item.id, { status: "published" });
+      // The send-off is purely visual and runs alongside: it holds the card's
+      // PLACE in the grid for a beat, never its draft status.
+      if (res.published) {
+        celebrate(item.id, item, drafts.findIndex((d) => d.id === item.id));
+        patchListing(item.id, { status: "published" });
+      }
       // The same three-way read the batch queue uses. An outcome the server
       // could not establish stays a draft here (it may not be one on eBay,
       // which is exactly why the seller is sent to look) but it is never
@@ -315,7 +336,10 @@ export function DraftsStrip({ search = "" }) {
     <div className="flex flex-col gap-3">
       <SectionHeader
         icon={FilePen}
-        title={`Drafts (${drafts.length})`}
+        // Counts what the grid is SHOWING: a card mid-send-off is still on
+        // screen, and a count that dropped a second before the card did read
+        // as a miscount rather than as the animation it is.
+        title={`Drafts (${cards.length})`}
         action={
           <div className="flex flex-wrap items-center justify-end gap-2">
             <MarketTargetChips selected={selected} toggle={toggle}
@@ -374,15 +398,30 @@ export function DraftsStrip({ search = "" }) {
       <div className={cn(list
         ? "flex flex-col gap-3"
         : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4")}>
-        {drafts.map((item, i) => {
+        {cards.map((item, i) => {
           const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
+          // Live, and on its way off the grid. Its controls come off with it:
+          // a click landing on a departing card would open, publish or delete
+          // a listing the seller never chose.
+          const leaving = celebrating[item.id];
+          const motionProps = publishedCardMotion(
+            leaving?.phase, { reduced: !!reduced, index: i });
           return (
             <motion.div
               key={item.id}
+              /* Position only. A full layout animation scales the card's
+                 CONTENTS while the grid closes the gap, which smears the
+                 title and the price of every card that moves up. */
+              layout="position"
+              className={cn("relative", leaving && "pointer-events-none")}
               initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
+              animate={motionProps.animate}
+              transition={motionProps.transition}
             >
+              {leaving && (
+                <PublishedBurst label={liveLabel(effectiveTargets)}
+                  reduced={!!reduced} />
+              )}
               {/* Delete lives in the labeled row below, not as another tiny
                   icon in the card's corner cluster. */}
               <ListingCard item={item} layout={listingsLayout} onOpen={openListing}
@@ -391,10 +430,10 @@ export function DraftsStrip({ search = "" }) {
                 onSkip={() => toggleSkipDraft(item.id)}
                 skipped={skippedDraftIds.has(item.id)}
                 metrics={metricsById[item.id]}
-                selectable={selecting}
+                selectable={selecting && !leaving}
                 selected={!!sel[item.id]}
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
-              {!selecting && (
+              {!selecting && !leaving && (
                 <div className={cn(list
                   ? "mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 pl-1"
                   : "contents")}>
