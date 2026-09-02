@@ -495,7 +495,7 @@ def stamp_sale(data: dict, sale: Optional[dict] = None,
 
 def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
                   on_progress: Optional[Callable[[str, int, int], None]] = None,
-                  account: str = "") -> dict:
+                  account: str | dict = "") -> dict:
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently ENDED (unsold → status 'ended', the Inactive
     tab) and SOLD listings (status 'sold'), each capped at
@@ -507,12 +507,25 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     this as a background job so the seller watches a count instead of a
     request that never answers.
 
-    `account` is the connected eBay username. Everything this run writes is
-    stamped with it, and records belonging to a DIFFERENT account are left
-    strictly alone — they're another seller's listings, and merging this
-    account's store into them (or matching item ids across the two) is how a
-    seller who connected a second account ended up with the first one's items.
+    `account` is the connected eBay account — the whole creds bundle, so that
+    eBay's IMMUTABLE user id is available and not just the username. Records
+    belonging to a DIFFERENT account are left strictly alone: they're another
+    seller's listings, and merging this account's store into them (or matching
+    item ids across the two) is how a seller who connected a second account
+    ended up with the first one's items.
+
+    A bare username is still accepted, and it is a WEAKER argument than it
+    looks. `owns` decides on the immutable id whenever the record carries one,
+    with no username fallback — so a caller who passes only a name matches no
+    record that has an id, which is every listing this app has published (the
+    publish stamps it). This route passed a name, so the dedupe below could not
+    see the app's own records at all, and every one of them came back as a
+    second "ebay-<item>" card on every sync: the Thryft/eBay duplicate pairs
+    sellers were looking at.
     """
+    # Both halves, once: `owns` needs the id to match on, `ebay_account` is
+    # stamped with the name, and the log lines want something readable.
+    account_id, account_name = _identity(account)
     def _tick(phase: str, done: int, total: int) -> None:
         if not on_progress:
             return
@@ -560,7 +573,7 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     if foreign:
         log.info("sync: user=%s skipping %d record(s) from another eBay "
                  "account (connected=%s)", user_id, foreign,
-                 _identity(account)[1] or _identity(account)[0] or "?")
+                 account_name or account_id or "?")
     if len(all_known) >= _KNOWN_LIMIT:
         # Never silently: past this the dedupe is working from a partial view.
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
@@ -697,7 +710,13 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         data = _reconcile(prior.get("listing") if prior else None, data, fresh)
         # Whose store this item is in. Written on every sync, so a record made
         # before the field existed is labelled the first time it's seen again.
-        data["ebay_account"] = account
+        # The item came back from THIS account's own selling lists, so that is
+        # a fact about it, not a guess — and the immutable id is stamped for
+        # the same reason: it is what every later ownership check reads, and a
+        # mirror without one can only ever be matched by a renameable handle.
+        data["ebay_account"] = account_name
+        if account_id:
+            data["ebay_account_id"] = account_id
         if status == "sold":
             # What it went for, not what it was listed at. mark_now only for a
             # record we watched flip — backfilling an old sale must not date it
