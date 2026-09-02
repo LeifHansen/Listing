@@ -1215,7 +1215,11 @@ class EbayProvider:
             listing, urls,
             policies={"fulfillment_policy_id": config.EBAY_FULFILLMENT_POLICY_ID,
                       "payment_policy_id": config.EBAY_PAYMENT_POLICY_ID,
-                      "return_policy_id": config.EBAY_RETURN_POLICY_ID})
+                      "return_policy_id": config.EBAY_RETURN_POLICY_ID},
+            # The seller's "Allow offers" switch reaches the preview too. A
+            # dry run whose whole job is to show the request a publish would
+            # make cannot leave out a field the real publish sends.
+            best_offer=listing_sync.offers_enabled(ctx.uid))
         # No postal code: a dry run has no connected account to read a
         # ship-from ZIP from, and build_add_item omits the element rather than
         # inventing one. create_listing is what refuses a real publish without

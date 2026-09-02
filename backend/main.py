@@ -3160,6 +3160,12 @@ _PREF_FIELDS = {
     # "Missing = ON", which is what the code did before P1-06 — left here it is
     # an invitation to restore it.
     "auto_promote": (int, 0, 1),
+    # Accept Best Offer on every new listing, with no minimum: eBay sends the
+    # seller every offer to accept or decline. OFF unless explicitly saved on
+    # — see services/listing_sync.offers_enabled, which is where the decision
+    # is actually made, and which also explains why it never touches a listing
+    # that is already live.
+    "allow_offers": (int, 0, 1),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 
