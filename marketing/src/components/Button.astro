@@ -1,0 +1,38 @@
+---
+/**
+ * The marketing button.
+ *
+ * Variant and size names — and their class lists — are copied from the app's
+ * `frontend/src/components/ui/Button.jsx` so a button here and a button in the
+ * product are the same button. The app animates the hover lift with
+ * framer-motion; this does it in CSS, because a marketing page should not ship
+ * an animation runtime to move something 1px.
+ */
+import { cn } from "../lib/utils.js";
+
+const { href, variant = "secondary", size = "md", class: className, ...rest } = Astro.props;
+
+const base =
+  "inline-flex items-center justify-center gap-2 font-semibold select-none whitespace-nowrap " +
+  "transition-all duration-150 cursor-pointer hover:-translate-y-px active:translate-y-0 " +
+  "active:scale-[0.97] [&_svg]:size-[1.1em] [&_svg]:shrink-0 motion-reduce:transform-none";
+
+const variants = {
+  primary: "bg-blue text-on-accent rounded-full shadow-card hover:shadow-card-hover hover:bg-blue-strong",
+  secondary: "bg-card text-ink border border-line rounded-button shadow-card hover:shadow-card-hover hover:border-line-strong",
+  ghost: "text-ink-secondary rounded-button hover:bg-bg-sunken hover:text-ink",
+  soft: "bg-blue-soft text-blue-ink rounded-button hover:shadow-card",
+  success: "bg-green text-on-accent rounded-full shadow-card hover:shadow-card-hover",
+};
+
+const sizes = {
+  sm: "h-9 px-3.5 text-[13px]",
+  md: "h-11 px-5 text-sm",
+  lg: "h-12 px-6 text-[15px]",
+  xl: "h-14 px-7 text-base",
+};
+
+const cls = cn(base, variants[variant], sizes[size], className);
+const Tag = href ? "a" : "button";
+---
+<Tag href={href} class={cls} {...rest}><slot /></Tag>

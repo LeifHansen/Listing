@@ -73,6 +73,27 @@ function StaleChip({ className }) {
   );
 }
 
+// What the amber card means, in words — for the tooltip and the accessible
+// name, so the state is never carried by colour alone.
+const NEEDS_INFO_LABEL =
+  "Needs info before it can go on eBay — open it to finish the listing.";
+
+// The amber card's own chip. Colour reads at a glance across a grid; this is
+// what says the same thing to a screen reader, to anyone who can't separate
+// amber from cream, and to the seller who wants it named rather than implied.
+function NeedsInfoChip({ className, title }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full bg-card border border-warning/50",
+        "px-2 py-0.5 text-[11px] font-bold text-warning", className)}
+      title={title || NEEDS_INFO_LABEL}
+    >
+      <AlertTriangle size={11} aria-hidden /> needs info
+    </span>
+  );
+}
+
 function ReviewChip({ count, className }) {
   return (
     <span
@@ -149,6 +170,8 @@ function CtaHint({ status, className }) {
 // `metrics` (optional) shows eBay views/watchers for a live listing.
 // In select mode (`selectable`), clicking toggles `selected` via `onSelect`
 // instead of opening — powers mass actions like delete-selected in Drafts.
+// `needsInfo` paints the whole card amber: this listing will not reach eBay
+// until something on it is filled in. See the cardClass comment below.
 // memo'd, and it earns it: the app context holds the 60s notification poll, so
 // every unread-count refresh re-rendered the whole tree -- one framer-motion
 // card per listing, reconciled once a minute for a bell badge, and once every
@@ -156,7 +179,8 @@ function CtaHint({ status, className }) {
 // parents already keep stable.
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
-  stale, metrics, selectable, selected, onSelect, layout = "grid", className,
+  stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  layout = "grid", className,
 }) {
   const list = layout === "list";
   const l = item.listing || {};
@@ -324,6 +348,16 @@ export const ListingCard = memo(function ListingCard({
     "flex cursor-pointer",
     list ? "flex-row items-center gap-3 p-2.5 sm:p-3" : "flex-col",
     selectable && selected ? "border-blue ring-2 ring-blue/60" : "border-line",
+    // A listing eBay won't take, or has already refused, over something the
+    // seller has to fill in. The warning line under the card says WHICH
+    // field, but that line is one small row among many on a grid of twenty
+    // cards -- easy to publish straight past, and easy to miss entirely when
+    // the refusal came from a toast that has since gone. The card itself
+    // carries the state instead: amber card, amber edge, readable across the
+    // whole grid at a glance. Warning, not error -- nothing is broken and
+    // nothing is lost; the listing needs updating before it can be posted.
+    // (cn is tailwind-merge, so this wins over bg-card/border-line above.)
+    needsInfo && "bg-warning-soft border-warning/45",
     // A skipped draft stays fully usable — just visibly set aside.
     skipped && !selectable && "opacity-60",
   );
@@ -332,6 +366,10 @@ export const ListingCard = memo(function ListingCard({
     type: "button",
     onClick: () => (selectable ? onSelect?.() : onOpen(item.id)),
     "aria-pressed": selectable ? !!selected : undefined,
+    // Colour alone is never the whole message: it can't be read by a screen
+    // reader and it isn't there for anyone who can't tell amber from cream.
+    // The same fact reaches the accessible name and the hover tooltip.
+    title: needsInfo ? (needsInfoWhy || NEEDS_INFO_LABEL) : undefined,
     whileHover: { y: -2, boxShadow: "var(--shadow-card-hover)" },
     whileTap: { scale: 0.985 },
     transition: { duration: 0.18, ease: "easeOut" },
@@ -355,7 +393,12 @@ export const ListingCard = memo(function ListingCard({
           <StatusBadge status={item.status} />
           {showOrigin && <OriginBadge item={item} />}
           {stale && <StaleChip />}
-          {reviewCount > 0 && <ReviewChip count={reviewCount} />}
+          {/* One or the other, never both: "3 to review" is advice, and it
+              must not sit next to (or in place of) the reason eBay is
+              refusing the listing outright. */}
+          {needsInfo
+            ? <NeedsInfoChip title={needsInfoWhy} />
+            : reviewCount > 0 && <ReviewChip count={reviewCount} />}
           <MarketplaceChips listing={l} />
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
@@ -382,7 +425,10 @@ export const ListingCard = memo(function ListingCard({
         {photo}
         <StatusBadge status={item.status} className="absolute top-3 left-3 shadow-card" />
         {stale && <StaleChip className="absolute bottom-3 left-3 shadow-card" />}
-        {reviewCount > 0 && (
+        {needsInfo ? (
+          <NeedsInfoChip title={needsInfoWhy}
+            className="absolute bottom-3 left-3 shadow-card" />
+        ) : reviewCount > 0 && (
           <ReviewChip count={reviewCount} className="absolute bottom-3 left-3 shadow-card" />
         )}
         {showOrigin && (

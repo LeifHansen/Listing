@@ -20,37 +20,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The same lint + unit tests CI runs on pull requests, repeated here as a
-  # deploy gate. ci.yml only triggers on `pull_request`, so a direct push to
-  # the deploy branch (or a manual dispatch) previously shipped to production
-  # with no check having run at all.
-  checks:
-    name: Lint + unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      # Keep in sync with ci.yml's `checks` job install list — these two gates
-      # run the same suite and drift apart silently. cryptography is not
-      # optional here despite the name: backend/db.py imports backend/crypto.py
-      # at module scope, so without it every test that touches the DB fails at
-      # COLLECTION, which is what took this job down.
-      - name: Install
-        run: pip install ruff pytest python-dotenv pydantic boto3 SQLAlchemy bcrypt PyJWT fastapi httpx cryptography
-      - name: Ruff
-        run: ruff check backend
-      - name: Tests
-        run: pytest backend/tests -q
+  # THE gate, and the same one ci.yml runs on a pull request. ci.yml triggers
+  # only on `pull_request`, so a direct push to the deploy branch (or a manual
+  # dispatch) previously shipped with no check having run at all.
+  #
+  # This used to be a local copy of the lint + unit job ALONE, which meant
+  # production was gated on the fast unit tests and nothing else: the
+  # cutout-safety suite (does the background remover eat the product), the
+  # frontend build (the only thing that type-checks the JSX) and the smoke
+  # test (the only thing that catches a screen a seller cannot open) never
+  # gated a deploy. Calling the shared workflow runs all four, on this exact
+  # commit, and removes the copy that this file's own comment already warned
+  # had to be kept in sync by hand.
+  gates:
+    name: Gates
+    uses: ./.github/workflows/gates.yml
 
   deploy:
     name: Deploy app
-    needs: checks
+    needs: gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned, not @master: this step runs in the job holding
+      # FLY_API_TOKEN, so following a moving branch means whatever
+      # superfly pushed most recently gets that token. v1.5 is the
+      # current release tag; a commit sha would be stronger still and is
+      # tracked in REMEDIATION_STATUS.md with the other actions.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       # --no-cache and an immediate replace, because a deploy that reports
       # success while production keeps serving the previous image is the
       # failure this pipeline actually had: on 2026-08-26 six consecutive
@@ -58,6 +55,111 @@ jobs:
       # emitted a new bundle hash) and the app went on answering with a build
       # from days earlier. A slower deploy is worth far less than a deploy you
       # cannot trust.
+      # Before shipping, not after. The account-deletion endpoint answers
+      # eBay's validation challenge with a hash of EBAY_VERIFICATION_TOKEN and
+      # 503s without it -- and eBay disables a Production keyset's
+      # notification subscription when that endpoint keeps failing. A deploy
+      # that silently ships it unset is how the subscription goes away
+      # quietly, so this refuses to deploy instead.
+      #
+      # `secrets list` prints NAMES, never values, so nothing sensitive
+      # reaches the log. Tolerant about the key's casing because flyctl has
+      # used both, and a check that crashes on an output change would block
+      # every deploy for the wrong reason. ADMIN_TOKEN is only a warning:
+      # unset means /api/admin/diagnostics stays closed, which is its
+      # deliberate fail-closed default rather than a broken deploy.
+      - name: Required secrets are set
+        run: |
+          flyctl secrets list --json > /tmp/secrets.json
+          python3 - <<'CHECK'
+          import json, sys
+          rows = json.load(open("/tmp/secrets.json"))
+          names = {str(r.get("Name") or r.get("name") or "") for r in rows}
+          print("secrets present:", " ".join(sorted(n for n in names if n)))
+          if "EBAY_VERIFICATION_TOKEN" not in names:
+              print("::error::EBAY_VERIFICATION_TOKEN is not set on this app. "
+                    "eBay's account-deletion challenge answers 503 without it, and "
+                    "eBay disables the subscription when that keeps failing. Set it "
+                    "with `flyctl secrets set EBAY_VERIFICATION_TOKEN=...`, using the "
+                    "SAME value registered on developer.ebay.com under Alerts & "
+                    "Notifications.")
+              sys.exit(1)
+          print("OK: EBAY_VERIFICATION_TOKEN is set")
+          if "ADMIN_TOKEN" not in names:
+              print("::warning::ADMIN_TOKEN is not set, so /api/admin/diagnostics "
+                    "stays closed (by design). The deletion backlog and "
+                    "owed-refunds counters cannot be read until it is.")
+          else:
+              print("OK: ADMIN_TOKEN is set")
+          CHECK
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # DNS for app.thryftshop.com is a CNAME to listing-lfwjrg.fly.dev and has
+      # resolved for weeks, but a Fly app only answers for a hostname it has
+      # been TOLD about: with no certificate the handshake fails at Fly's edge
+      # and the browser shows a certificate interstitial rather than anything
+      # this app served. The apex sends HSTS with includeSubDomains, so there
+      # is not even a "proceed anyway" to click.
+      #
+      # This existed only as a line in marketing/README.md for someone to run
+      # by hand, and nobody ever did -- which is precisely why the hostname was
+      # broken while its DNS record worked. `certs add` is idempotent and
+      # `certs show` is machine-checkable, so it belongs here with the rest of
+      # the bootstrap the pipeline already does for itself (marketing-deploy.yml
+      # creates its app and allocates its IPs on the same reasoning).
+      #
+      # Deliberately never fails the run. FLY_API_TOKEN is a deploy token; if it
+      # cannot mint certificates that must not hold up a release, and
+      # listing-lfwjrg.fly.dev keeps working either way.
+      - name: The app answers for app.thryftshop.com
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CERT_HOST: app.thryftshop.com
+        run: |
+          app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
+
+          # 2>&1, not 2>/dev/null. The first version of this step hid stderr
+          # and then grepped the result for wording guessed at without ever
+          # running flyctl: on 2026-09-01 it polled twelve times in silence,
+          # matched neither branch, and reported "no certificate had been
+          # issued" when what had actually happened is that it never found
+          # out. A check that cannot tell "bad" from "no answer" is worse than
+          # none, because it is believed.
+          check() { flyctl certs check "$CERT_HOST" -a "$app" 2>&1 || true; }
+
+          if ! flyctl certs show "$CERT_HOST" -a "$app" >/dev/null 2>&1; then
+            echo "Registering $CERT_HOST on $app"
+            if ! flyctl certs add "$CERT_HOST" -a "$app" 2>&1; then
+              echo "::warning::Could not register $CERT_HOST on $app. Run 'fly certs add $CERT_HOST -a $app' once by hand; https://$app.fly.dev is unaffected."
+              exit 0
+            fi
+          else
+            echo "$CERT_HOST is already registered on $app"
+          fi
+
+          # Issuance is asynchronous, so "asked for" is not "works". Whatever
+          # Fly says is ECHOED every round: the pattern below is a convenience
+          # for the exit code, never the only record. If it stops matching a
+          # future flyctl, the log still shows a human the real answer.
+          for i in $(seq 1 18); do
+            out=$(check)
+            echo "--- attempt $i ---"
+            printf '%s\n' "$out" | sed 's/^/    /'
+            # Matched against flyctl's REAL output, captured from the
+            # 2026-09-01 22:10 deploy, not from memory: `fly certs check`
+            # prints "Status = Issued" and "✓ Certificate is verified and
+            # active". Two earlier versions of this line guessed at the wording
+            # ("been issued", "Status = Ready") and matched neither, so the step
+            # warned on a certificate that was perfectly healthy.
+            if printf '%s' "$out" | grep -qiE 'Status *= *Issued|verified and active'; then
+              echo "OK: https://$CERT_HOST is serving a valid certificate"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::$CERT_HOST is registered on $app but issuance was not confirmed after three minutes. The full output of each 'fly certs check' is above -- read it rather than trusting this line, and see https://fly.io/docs/networking/custom-domain/"
+
       - name: Deploy to Fly
         run: |
           flyctl deploy --remote-only --no-cache \

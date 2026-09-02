@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw, Truck,
+  PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle,
 } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -17,6 +17,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
+import { ARCHIVED_STATUSES, isDraft, listingsView } from "@/lib/listingsView";
+import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -52,7 +54,7 @@ export const TABS = [
     },
   },
   {
-    id: "all", label: "All", statuses: null, hide: ["sold"],
+    id: "all", label: "All", statuses: null, hide: ARCHIVED_STATUSES,
     sub: "A live mirror of your whole eBay store — every status still in play "
       + "(sold items are archived under Inactive)",
     empty: {
@@ -66,7 +68,9 @@ export const TABS = [
 // Which items a tab shows. `statuses` is a whitelist; `hide` subtracts from
 // the everything-tab. Sold items are hidden outside Inactive on purpose — a
 // finished sale is not something the seller can still act on, and leaving it
-// among the live listings is what made a sold item look publishable.
+// among the live listings is what made a sold item look publishable. The list
+// it subtracts is ARCHIVED_STATUSES, shared with the dashboard's "Recent
+// listings" strip so a sale leaves both screens at once.
 export const inTab = (tab, item) => (tab.statuses
   ? tab.statuses.includes(item.status)
   : !(tab.hide || []).includes(item.status));
@@ -84,7 +88,8 @@ const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
 export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
-    ebay, loadListings, metricsById, skippedDraftIds, storeSync, syncStore,
+    ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
+    storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
   } = useApp();
   const { confirm, toast } = useToast();
@@ -113,6 +118,21 @@ export function ListingsView({ search = "" }) {
     if (!r) return;
     if (r.error) {
       toast(`Couldn't sync with eBay: ${r.error}`, { kind: "error" });
+      return;
+    }
+    // eBay stopped the pass part-way, so the counts describe a fraction of
+    // the store. Saying "synced 400 listings" here — or worse, "everything's
+    // already in sync" when nothing got through — reports a store that was
+    // never read as one that was.
+    if (r.rateLimited) {
+      const wait = r.retryAfter
+        ? ` Try again in about ${r.retryAfter} second${r.retryAfter === 1 ? "" : "s"}.`
+        : " Try again shortly.";
+      toast(
+        `eBay limited how fast we could read your store, so this sync is `
+        + `incomplete — ${r.imported || 0} new and ${r.updated || 0} updated so `
+        + `far.${wait}`,
+        { kind: "warning" });
       return;
     }
     const fresh = r.imported || 0;
@@ -195,6 +215,10 @@ export function ListingsView({ search = "" }) {
     } catch (e) { window.scrollTo(0, 0); }
   };
 
+  const view = listingsView({
+    ...listingsState, user, count: listingsState.items.length,
+  });
+
   let body;
   if (listingsState.loading && !listingsState.loaded) {
     body = (
@@ -223,6 +247,21 @@ export function ListingsView({ search = "" }) {
             </Button>
           }
         />
+      </Card>
+    );
+  } else if (view.kind === "unavailable") {
+    // Not the empty state. "No listings yet" is a claim about the seller's
+    // account, and a read that failed is not evidence for it.
+    body = (
+      <Card>
+        <p className="text-sm text-ink flex gap-2">
+          <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+          <span>{view.message}</span>
+        </p>
+        <Button variant="soft" size="sm" className="mt-3"
+          onClick={() => loadListings()}>
+          Try again
+        </Button>
       </Card>
     );
   } else if (items.length === 0) {
@@ -259,6 +298,14 @@ export function ListingsView({ search = "" }) {
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
               metrics={metricsById[item.id]} />
+            {/* Drafts carry their category on the card here too — the "All"
+                tab mixes them in with live listings, and a draft is exactly
+                where the category is still wrong and still free to fix. It
+                also decides which conditions eBay accepts, so it is the one
+                field worth fixing before Publish. */}
+            {isDraft(item) && (
+              <DraftCategoryEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
+            )}
           </motion.div>
         ))}
       </div>
@@ -317,7 +364,12 @@ export function ListingsView({ search = "" }) {
               "font-display tabular-nums text-[11px] font-bold rounded-full px-1.5 min-w-5 h-5 grid place-items-center",
               tabId === t.id ? "bg-white/20" : "bg-bg-sunken",
             )}>
-              {counts[t.id]}
+              {/* Same rule as the card below and the dashboard tiles: these
+                  are counted off a page that a failed read left empty, so
+                  during an outage every tab would badge a confident 0 --
+                  directly above a card explaining that the listings could
+                  not be loaded. A number nobody could measure is a dash. */}
+              {view.kind === "unavailable" ? "—" : counts[t.id]}
             </span>
           </button>
         ))}
@@ -363,6 +415,23 @@ export function ListingsView({ search = "" }) {
           </div>
         );
       })()}
+      {view.notice && (
+        <p className="text-sm rounded-tile border border-warning/30 bg-warning-soft p-3 text-ink flex flex-wrap items-center gap-2">
+          <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+          <span>{view.notice}</span>
+          {/* The way through. Without it the notice is honest and useless:
+              the older listings are not on the page, not in the tab counts,
+              and not findable by the search box, which filters what is
+              loaded. Appending, so everything above keeps working and only
+              ever sees more. */}
+          {listingsState.nextCursor && (
+            <Button size="sm" variant="soft" loading={listingsState.loadingMore}
+                    onClick={loadMoreListings}>
+              Load older listings
+            </Button>
+          )}
+        </p>
+      )}
       {body}
     </div>
   );

@@ -107,10 +107,22 @@ class DepopProvider:
             except Exception as exc:  # noqa: BLE001 - dry-run, but log it
                 log.warning(f"depop: token refresh failed for user {uid}: {exc}")
                 return None
+            # Depop ROTATES the refresh token, so a write that fails is a
+            # FAILED REFRESH rather than a detail: the token still in the
+            # database has already been invalidated by this very call, and
+            # carrying on would serve one request and leave the connection
+            # permanently unrecoverable -- with the failure landing hours
+            # later on a publish, far from anything the seller can connect it
+            # to. Better to fail now, loudly, while they are still here. Same
+            # rule the Etsy provider already applies.
             if (fresh.get("refresh_token")
-                    and fresh["refresh_token"] != acct["refresh_token"]):
-                db.save_marketplace_account(uid, "depop",
-                                            refresh_token=fresh["refresh_token"])
+                    and fresh["refresh_token"] != acct["refresh_token"]
+                    and not db.save_marketplace_account(
+                        uid, "depop", refresh_token=fresh["refresh_token"])):
+                log.error("depop: could not store the rotated refresh token "
+                          "for user %s — the connection would break silently, "
+                          "so treating this as a failed refresh.", uid)
+                return None
             if len(_ACCESS_CACHE) > 50:
                 _ACCESS_CACHE.clear()
             _ACCESS_CACHE[uid] = (max(time.time() + 60, fresh["expires_at"] - 90),
@@ -157,12 +169,22 @@ class DepopProvider:
                                 "when you publish live."})
 
         if not creds:
+            # Only `live` reaches here (the draft branch above returns first),
+            # and a live publish that created nothing is not a success — same
+            # rule the eBay provider already applies. Depop has no sandbox, so
+            # unlike eBay there is no environment where this is a legitimate
+            # preview; the payload stays in `raw` for development, but `ok`
+            # tells the truth. The bulk cards and the multi-marketplace fold
+            # read `ok`, and a seller told a publish succeeded closes the app.
+            message = ("Connect your Depop account in Settings to publish. "
+                       "Nothing was listed.")
             return PublishOutcome(
-                ok=True, dry_run=True,
-                message="Depop dry run — connect Depop in Settings to post for real.",
-                raw={"dry_run": True, "mode": mode,
-                     "message": "Depop dry run — connect Depop in Settings to post for real.",
-                     "depop_payload": payload})
+                ok=False, message=message,
+                issues=[{"target": "account", "level": "error",
+                         "title": "Depop isn't connected",
+                         "fix": "Connect Depop in Settings, then publish again."}],
+                raw={"dry_run": False, "error": True, "mode": mode,
+                     "message": message, "depop_payload": payload})
 
         problems = [i for i in mapping_depop.preflight(listing)
                     if i.get("level", "error") == "error"]
@@ -179,6 +201,13 @@ class DepopProvider:
 
         try:
             if existing_id:
+                # Same known gap as the Etsy revise, for the same reasons —
+                # see the comment at etsy_provider's `patch = dict(payload)`.
+                # This sends the whole payload, so an edit made on Depop
+                # itself is replaced by this app's copy. Closing it needs a
+                # Depop read to build a shadow from and per-marketplace dirty
+                # tracking; neither exists, and Depop has no sandbox to prove
+                # a change against.
                 res = depop.update_product(creds["access_token"], existing_id,
                                            payload)
                 message = "Your Depop listing has been updated."
@@ -191,7 +220,13 @@ class DepopProvider:
                  "title": "Depop rejected the listing", "fix": str(exc)}]
             log.warning("depop publish failed: session=%s: %s",
                         ctx.session_id, exc)
-            return PublishOutcome(ok=False, message=str(exc), issues=issues)
+            # Same question as everywhere else a write leaves this app: was
+            # this a refusal, or an answer that never came back? See
+            # PublishOutcome; services/depop raises UnknownOutcome for the
+            # second.
+            return PublishOutcome(
+                ok=False, message=str(exc), issues=issues,
+                outcome_unknown=bool(getattr(exc, "outcome_unknown", False)))
 
         listing_id = res.get("listing_id") or existing_id
         log.info("depop publish ok: session=%s product=%s",

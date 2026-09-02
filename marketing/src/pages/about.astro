@@ -1,0 +1,83 @@
+---
+import Base from "../layouts/Base.astro";
+import Container from "../components/Container.astro";
+import Section from "../components/Section.astro";
+import CTA from "../components/CTA.astro";
+import { site } from "../lib/site.js";
+---
+<Base
+  title="About"
+  description="Why Thryft Shop exists: listing is the bottleneck between owning something and selling it, and it should not take twenty minutes an item."
+>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="max-w-3xl py-16 sm:py-20">
+        <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+          About
+        </p>
+        <h1 class="mt-4 text-4xl sm:text-5xl">Listing is the bottleneck</h1>
+        <p class="mt-6 text-lg text-ink-secondary">
+          Not sourcing, not shipping, not pricing. The reason there is a pile of
+          sellable things in the corner of your room is that turning each one
+          into a listing takes twenty minutes of typing you don't want to do.
+        </p>
+      </div>
+    </Container>
+  </div>
+
+  <Container>
+    <div class="prose max-w-3xl py-14 sm:py-16">
+      <p>
+        Thryft Shop exists to collapse that twenty minutes into a photo. Take the
+        picture; the app identifies the item, writes the title and description,
+        fills in the item specifics marketplace search actually filters on,
+        resolves a real category, suggests a price, cleans up the images to the
+        marketplace's own recommendations — and then hands the whole thing back
+        to you to check before anything goes live.
+      </p>
+
+      <h2>Who it's for</h2>
+      <p>
+        Resellers running a real store, thrifters who source faster than they can
+        list, and anyone clearing out a closet who would rather not type out
+        listings by hand. The single-item case is easy. What makes the difference
+        is volume: a pile of photos becoming a pile of drafts, a store that syncs
+        both ways, duplicates found and merged, and a ranked list of what to fix
+        next across everything you have live.
+      </p>
+
+      <h2>What we won't do</h2>
+      <p>
+        Publish without you. Every draft is reviewable and every field is
+        editable, and the app tells you what it was unsure about rather than
+        presenting a guess as a fact. You are the seller — what goes live is
+        your name on it, so it is your decision.
+      </p>
+      <p>
+        We also don't sell your data, use your photos for advertising, or hold
+        your account hostage. Deletion is a button in Settings that works
+        immediately, not a support ticket.
+      </p>
+
+      <h2>How it's built</h2>
+      <p>
+        Claude's vision models do the identification and the writing. The photo
+        pipeline is our own, tuned against the failure that actually costs
+        sellers money — a background cutout that quietly removes part of the
+        product. Publishing goes through each marketplace's real API, with every
+        marketplace succeeding or failing independently so one rejection never
+        takes the rest down with it.
+      </p>
+    </div>
+  </Container>
+
+  <Section tone="sunken" align="left" title="Get in touch">
+    <p class="mt-4 max-w-2xl text-ink-secondary">
+      Feature requests, bug reports, and "why did it do that" questions are all
+      welcome at
+      <a class="font-semibold text-blue-ink hover:underline" href={`mailto:${site.supportEmail}`}>{site.supportEmail}</a>.
+    </p>
+  </Section>
+
+  <CTA />
+</Base>

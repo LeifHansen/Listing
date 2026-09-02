@@ -5,20 +5,23 @@ import {
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
   Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
 } from "lucide-react";
-import { cn, CONDITIONS, conditionLabel, formatMoney } from "@/lib/utils";
+import { cn, formatMoney } from "@/lib/utils";
+import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
+import { priceView } from "@/lib/priceLookup";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
-import { reviewAspectCount } from "./specifics";
+import { reviewAspectCount, specificRowIndex } from "./specifics";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
 import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
 import { TITLE_MAX } from "./blockers";
+import { issuesFor } from "./publishShared";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
@@ -230,8 +233,19 @@ export function TitleCard({ w }) {
           />
         </Field>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Subtitle" hint="(optional)">
+          {/* Until now this was collected and thrown away — the Trading
+              request never emitted a SubTitle, so a seller who typed one got
+              no subtitle and no explanation. It goes to eBay now, and a
+              subtitle is a paid listing upgrade there (eBay's SubtitleFee),
+              so the field says so rather than a charge turning up on their
+              eBay invoice for something they were never told about. */}
+          <Field label="Subtitle"
+            hint="(optional · eBay charges a small fee for this)"
+            help="Shown under your title in search results. eBay bills its
+                  subtitle fee when the listing goes live; leave it empty to
+                  avoid the charge.">
             <Input
+              maxLength={55}
               value={w.form.subtitle}
               onChange={(e) => w.set("subtitle", e.target.value)}
             />
@@ -478,10 +492,31 @@ export function SpecificsCard({ w }) {
     (a) => !a.required && DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
   const recommendedAll = aspects.filter(
     (a) => !a.required && !DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
+  // What the last publish attempt was REFUSED over, in this card's own
+  // fields. A failed listing is the moment these matter most, and it was the
+  // moment they were hardest to find: the card could be sitting collapsed,
+  // the aspect eBay named could be one of the unfilled recommended ones
+  // hidden behind "Show all", and the only pointer to any of it was one
+  // sentence in the publish banner at the bottom of the page. So the card
+  // opens itself, stops hiding fields, repeats what eBay said where the
+  // inputs are, and rings the ones it named.
+  //
+  // It opens via `expand` rather than `flagged` because eBay can name a field
+  // in here while the FIRST error it returned points at another card, and
+  // only one card may own the scroll. See WorkflowCard.
+  const refused = issuesFor(w.publishResult, "specifics");
+  const refusedNames = new Set(refused.flatMap((i) => i.fields || [])
+    .map((n) => (n || "").trim().toLowerCase()).filter(Boolean));
+  // The pre-publish check raises the same issues in the same shape, and it is
+  // worth showing them the same way — but eBay has not answered yet, so the
+  // field must not claim it refused anything.
+  const saidByEbay = !w.publishResult?.preflight;
   // Every filled recommended aspect is always visible (a hidden ⚠ would be an
-  // un-reviewable flag); unfilled ones show the first 8 until "Show all".
+  // un-reviewable flag); unfilled ones show the first 8 until "Show all" —
+  // except after a refusal, when nothing in here stays hidden.
   const [showAll, setShowAll] = useState(false);
-  const recommended = showAll ? recommendedAll
+  const showEvery = showAll || refused.length > 0;
+  const recommended = showEvery ? recommendedAll
     : recommendedAll.filter((a, i) => i < 8 || w.getSpecific(a.name));
   const hiddenCount = recommendedAll.length - recommended.length;
   const aspectNames = new Set(
@@ -523,14 +558,18 @@ export function SpecificsCard({ w }) {
     if (a.mode === "SELECTION_ONLY" && a.cardinality === "MULTI" && a.values?.length) {
       return <AspectChecklist key={a.name} w={w} a={a} />;
     }
-    const row = w.getSpecificRow(a.name);
+    // The aspect's answer row — the first one with a VALUE (specifics.js),
+    // which is not always the first row carrying the name.
+    const rowIndex = specificRowIndex(w.form.item_specifics, a.name);
+    const row = rowIndex >= 0 ? w.form.item_specifics[rowIndex] : null;
     // MULTI-value aspects (Season, Features, Theme...) can hold several
-    // values; the field edits the first and the rest show as removable chips
-    // — without this they'd be invisible (hidden from freeRows by name).
+    // values; the field edits the answer row and the rest show as removable
+    // chips — without this they'd be invisible (hidden from freeRows by
+    // name). Empty leftovers are not values and get no chip.
     const extras = w.form.item_specifics
       .map((s, i) => ({ ...s, i }))
-      .filter((s) => s.name.trim().toLowerCase() === a.name.toLowerCase())
-      .slice(1);
+      .filter((s) => s.name.trim().toLowerCase() === a.name.toLowerCase()
+        && s.i !== rowIndex && (s.value || "").trim());
     // Brand lives on the listing itself (Title card, AI identify, the maker
     // double-check) — mirror it here so the Brand aspect never LOOKS empty
     // when the listing has one, and edits flow back to the brand field.
@@ -549,7 +588,12 @@ export function SpecificsCard({ w }) {
     // row was pure noise — and a "Recommended" pill on twenty rows made the
     // two rows that actually needed attention impossible to spot.
     const missing = a.required && !shown.trim();
-    const ringCls = missing ? "ring-2 ring-warning/60" : undefined;
+    // eBay named THIS field in the refusal. Red beats the amber "required and
+    // empty" ring: one is a rule we are predicting, the other is the answer
+    // the marketplace already gave about this listing.
+    const refusedHere = refusedNames.has(a.name.trim().toLowerCase());
+    const ringCls = refusedHere ? "ring-2 ring-error/70"
+      : missing ? "ring-2 ring-warning/60" : undefined;
     // An inference the seller hasn't looked at yet. This is the one thing in
     // the card that can put a WRONG value on a live listing, so it gets the
     // only interactive affordance on a field label: read it, tap ✓, done.
@@ -567,7 +611,11 @@ export function SpecificsCard({ w }) {
             <Check size={10} aria-hidden /> Looks right
           </button>
         )}
-        {missing && (
+        {refusedHere ? (
+          <span className="text-[12px] font-semibold text-error">
+            {saidByEbay ? "eBay refused this" : "Fix this to publish"}
+          </span>
+        ) : missing && (
           <span className="text-[12px] font-semibold text-warning">Required</span>
         )}
       </span>
@@ -615,13 +663,52 @@ export function SpecificsCard({ w }) {
       id="specifics" icon={ListChecks} title="Item specifics"
       hint={catAspects.length
         ? `${filledCount} of ${catAspects.length} filled by the AI`
-          + (missingRequired ? ` · ${missingRequired} required still empty — eBay blocks the publish until they're filled` : "")
+          + (missingRequired
+            ? ` · ${missingRequired} required still empty — `
+              + (w.isLive
+                // A listing eBay is already showing: the update goes through
+                // either way (a revise doesn't resend the category's aspect
+                // list), so claiming it is blocked is simply untrue — and
+                // telling a seller their live listing is missing a required
+                // field is how they conclude the app is broken.
+                ? "worth filling so buyers' filters find it"
+                : "eBay blocks the publish until they're filled")
+            : "")
           + (reviewCount ? ` · ${reviewCount} AI guess${reviewCount === 1 ? "" : "es"} to check (doesn't block publishing)` : "")
           + ". A wrong specific is worse than a missing one, so check anything flagged."
         : "Details buyers filter by — only the required ones gate publishing"}
       state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
+      expand={refused.length > 0}
     >
       <div className="flex flex-col gap-6">
+        {/* What eBay said, on the card that holds the fields it said it
+            about. The publish banner has the same words, but it sits at the
+            bottom of a long page and names an aspect among forty inputs; this
+            is the one place a seller can read the complaint and fix it
+            without looking away. */}
+        {refused.length > 0 && (
+          <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
+            {refused.map((issue, i) => (
+              <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
+                <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
+                <span className="text-[13px] text-ink flex-1 min-w-0">
+                  <strong className="font-bold">{issue.title}</strong>
+                  {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
+                  {(issue.fields || []).length > 0 && (
+                    <span className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                      {issue.fields.map((name) => (
+                        <span key={name}
+                          className="inline-flex items-center rounded-full border border-error/40 bg-card px-2 py-0.5 text-[12px] font-bold text-error">
+                          {name}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         {/* What still needs a human, in two banners rather than one.
 
             These are the card's two jobs and they are NOT the same job: an
@@ -639,8 +726,12 @@ export function SpecificsCard({ w }) {
               <strong className="font-bold">
                 {missingRequired} required {missingRequired === 1 ? "specific is" : "specifics are"} empty
               </strong>
-              {" — eBay won't accept the listing until "}
-              {missingRequired === 1 ? "it's filled in" : "they're filled in"}
+              {w.isLive
+                ? " — your update still goes through; filling "
+                  + (missingRequired === 1 ? "it" : "them")
+                  + " puts the listing in more buyers' filters"
+                : " — eBay won't accept the listing until "
+                  + (missingRequired === 1 ? "it's filled in" : "they're filled in")}
             </span>
           </div>
         )}
@@ -780,7 +871,7 @@ const LISTING_FORMATS = [
 ];
 const AUCTION_DURATIONS = [
   ["DAYS_1", "1 day"], ["DAYS_3", "3 days"], ["DAYS_5", "5 days"],
-  ["DAYS_7", "7 days"], ["DAYS_10", "10 days"],
+  ["DAYS_7", "7 days"], ["DAYS_10", "10 days (eBay charges extra)"],
 ];
 
 export function PricingCard({ w }) {
@@ -847,8 +938,15 @@ export function PricingCard({ w }) {
               />
             </Field>
           )}
+          {/* The chosen duration used to be discarded: every auction went out
+              as Days_7 whatever this said. It is sent now — and eBay charges
+              an auction-length fee for the 10-day option, so the one choice
+              that costs money says so. */}
           {isAuction ? (
-            <Field label="Duration">
+            <Field label="Duration"
+              help={w.form.auction_duration === "DAYS_10"
+                ? "eBay charges an extra fee for a 10-day auction."
+                : undefined}>
               <Select value={w.form.auction_duration}
                 onChange={(e) => w.set("auction_duration", e.target.value)}>
                 {AUCTION_DURATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -894,7 +992,17 @@ export function PricingCard({ w }) {
         {/* Condition gets its own labeled row (not the last cell of the price
             grid, where it was easy to miss) paired with its description. */}
         <div className="grid sm:grid-cols-[minmax(200px,260px)_1fr] gap-4 pt-1 border-t border-line">
-          <Field label="Condition">
+          <Field
+            label="Condition"
+            /* When the lookup could not run, the list below is the generic
+               one, not eBay's for this category — so a pick that looks fine
+               here can still come back as error 25021 at publish. Saying so
+               beats letting the seller find out then. */
+            help={w.categoryMeta.conditionsChecked === false
+              ? "We couldn’t check which conditions eBay allows in this "
+                + "category, so these are the general ones."
+              : undefined}
+          >
             <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </Select>
@@ -917,10 +1025,11 @@ export function PricingCard({ w }) {
         {p?.loading && <AIStatusInline message="Finding comparable listings…" />}
         {p?.error && <p className="text-sm text-ink-secondary">{p.error}</p>}
         {p && !p.loading && !p.error && (
-          !p.suggestion ? (
-            <p className="text-sm text-ink-secondary">
-              No comparable listings found — try a simpler title or set a category first.
-            </p>
+          priceView(p).kind !== "estimate" ? (
+            // "We couldn't check" and "the market has nothing like this" are
+            // different answers; the second one also tells the seller to
+            // rewrite a title that was never the problem. See lib/priceLookup.
+            <p className="text-sm text-ink-secondary">{priceView(p).message}</p>
           ) : (
             <div className="flex flex-col gap-2">
               {(p.sources || []).map((src) => (
@@ -1118,8 +1227,11 @@ export function DescriptionCard({ w }) {
       hint="The story buyers read before they commit"
       state={w.completion.description} flagged={w.fixTarget === "description"}
     >
+      {/* The AI now drafts a full SEO body — several hundred words in
+          labelled sections — so a 7-row box showed a tenth of it at a time
+          and made every edit a scroll hunt. It is still resize-y. */}
       <Textarea
-        rows={7}
+        rows={18}
         value={w.form.description}
         needsFix={w.fixTarget === "description"}
         onChange={(e) => w.set("description", e.target.value)}
@@ -1143,6 +1255,10 @@ export function PromoteCard({ w }) {
   const rate = Number(w.form.ad_rate_percent) || 0;
   const price = Number(w.form.price) || 0;
   const fee = price > 0 && rate > 0 ? (price * rate) / 100 : 0;
+  // The fee is a percentage of THIS listing's price, so it is in this
+  // listing's money. The price fields two panels up already label themselves
+  // with it; this one was formatting a pound fee with a dollar sign.
+  const currency = w.form.currency || "USD";
 
   const toggle = () => {
     if (on) { w.set("promote", false); return; }
@@ -1201,7 +1317,7 @@ export function PromoteCard({ w }) {
                 {fee > 0 ? (
                   <>
                     <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
-                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee)}</p>
+                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee, currency)}</p>
                   </>
                 ) : (
                   <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>

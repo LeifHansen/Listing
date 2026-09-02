@@ -307,6 +307,10 @@ def test_new_account_first_concurrent_spends_do_not_fall_through_to_fail_open(
 def test_get_listing_distinguishes_absent_from_unavailable(tokens_db, monkeypatch):
     """The ownership guard reads through this: 'no such listing' must never be
     confused with 'the database is down', or one blip disables the check."""
+    import pytest as _pytest
+
+    from backend import errors
+
     assert tokens_db.get_listing_strict("nope") is None      # genuinely absent
 
     def boom(*a, **kw):
@@ -314,9 +318,17 @@ def test_get_listing_distinguishes_absent_from_unavailable(tokens_db, monkeypatc
 
     monkeypatch.setattr(tokens_db, "_get_engine", boom)
     assert tokens_db.get_listing_strict("nope") is tokens_db.UNAVAILABLE
-    # The lenient wrapper keeps its old contract for callers that just want
-    # the record.
-    assert tokens_db.get_listing("nope") is None
+
+    # `get_listing` used to collapse the two back into None, and the comment
+    # here called that "the lenient wrapper ... for callers that just want the
+    # record". Ten route handlers were not those callers: they turned None
+    # into `404 "Listing not found"`, so an unreadable store told the seller
+    # their listing did not exist. It raises now, and the tolerance moved to
+    # an explicitly-named twin for the two callers that really do want a
+    # blank. See test_a_listing_we_cannot_read_is_not_missing.py.
+    with _pytest.raises(errors.StorageUnavailable):
+        tokens_db.get_listing("nope")
+    assert tokens_db.get_listing_best_effort("nope") is None
 
 
 # --- purchase reversal (refunds & chargebacks) ------------------------------

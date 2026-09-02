@@ -23,6 +23,9 @@
    The publish/preflight response carries those, and the fix-it panel renders
    them from the same {field, title, fix} shape used here. */
 
+import { conditionLabel } from "@/lib/conditions";
+import { specificValue } from "./specifics";
+
 // eBay's own ceilings. Mirrors TITLE_MAX_CHARS / MAX_PHOTOS / EBAY_MIN_PRICE
 // in the backend — keep the two in step.
 export const TITLE_MAX = 80;
@@ -45,15 +48,18 @@ export function weightOz(l = {}) {
     + (parseFloat(l.package_weight_oz) || 0);
 }
 
-function specificValue(l, name) {
-  const want = String(name || "").trim().toLowerCase();
-  const row = (l.item_specifics || []).find(
-    (s) => String(s.name || "").trim().toLowerCase() === want);
-  const value = (row?.value || "").trim();
+function aspectValue(l, name) {
+  // ANY row for the aspect that carries a value, not merely the first row
+  // with the name (specifics.js explains why the difference matters, and
+  // which bug it caused). The server counts the aspect filled on exactly the
+  // same rule, so this is the browser agreeing with the authority.
+  const value = specificValue(l.item_specifics || [], name);
   // Brand mirrors the listing's own brand field (the Title card, the AI
   // identify pass and the maker check all write it there), so a required
   // Brand aspect isn't empty just because no specifics row exists for it.
-  if (!value && want === "brand") return (l.brand || "").trim();
+  if (!value && String(name || "").trim().toLowerCase() === "brand") {
+    return (l.brand || "").trim();
+  }
   return value;
 }
 
@@ -67,11 +73,42 @@ function specificValue(l, name) {
    `aspects` is the category's item-specific aspects when they're loaded
    (the editor has them; a listing card doesn't). Left null, the required-
    specifics rule is skipped rather than guessed at — a blocker list that
-   invents blockers is worse than one that admits it can't see them. */
-export function ebayBlockers(l = {}, { targets = null, aspects = null } = {}) {
+   invents blockers is worse than one that admits it can't see them.
+   `conditions` is eBay's condition list for the category, on the same terms:
+   null means nobody asked, never "eBay allows anything here".
+
+   `mode` is which publish contract to check against, and it mirrors
+   preflight.validate on the server:
+
+     "live"   a NEW listing (or a relist, which is the same create call) —
+              everything eBay demands before it will accept one.
+     "revise" an edit to a listing eBay is ALREADY showing. Only the content
+              this app is about to send has to be valid; the package weight
+              and the category's required aspects are not resent and were
+              settled when the listing went live — often years ago, often on
+              eBay itself. Demanding them here blocked sellers out of editing
+              listings that were live and selling, which is the whole reason
+              the server draws this line. Keep the two in step. */
+export function ebayBlockers(l = {},
+  { targets = null, aspects = null, conditions = null, mode = "live" } = {}) {
+  const revising = mode === "revise";
   const out = [];
   const add = (key, target, label, why) => out.push({ key, target, label, why });
   const ebay = wantsEbay(targets);
+
+  // A listing with size/colour variations. This app has no variation model,
+  // so it imported as one flat record with a single price and quantity — and
+  // a revise would have sent an item-level Quantity into a structure eBay
+  // says ReviseItem cannot revise, where a variation reaching zero is removed
+  // from the listing. Flagged first and on its own: it is not a field to go
+  // and fix, and letting the seller fill in the whole form before the server
+  // refuses is the wrong order to find out.
+  if (ebay && l.has_variations) {
+    add("variations", null, "Variations",
+      "This listing has size or colour variations. Thryft Shop can't edit "
+      + "those yet — change it on eBay in Seller Hub instead.");
+    return out;
+  }
 
   const photos = (l.images || []).length || (l.image_urls || []).length;
   if (!photos) {
@@ -92,6 +129,16 @@ export function ebayBlockers(l = {}, { targets = null, aspects = null } = {}) {
 
   if (!(l.condition || "").trim()) {
     add("condition", "condition", "Condition", "Pick the item's condition.");
+  } else if (conditions && conditions.length
+      && !conditions.some((c) => c.enum === l.condition)) {
+    // eBay offers a different set of conditions per category — "Used - Good"
+    // exists in media and nowhere else, the pre-owned grades only in apparel
+    // — and refuses anything else with error 25021, after the whole publish.
+    // The seller sees it here instead, next to the dropdown that fixes it.
+    add("condition", "condition", "Condition",
+      `eBay doesn't offer “${conditionLabel(l.condition)}” in this category — `
+      + `pick one it does (${conditions.slice(0, 3)
+        .map((c) => c.label || conditionLabel(c.enum)).join(", ")}…).`);
   }
 
   const fmt = String(l.listing_format || "FIXED_PRICE").toUpperCase();
@@ -124,13 +171,13 @@ export function ebayBlockers(l = {}, { targets = null, aspects = null } = {}) {
       add("category", "category", "eBay category",
         "Pick one from the suggestions — the ID fills itself in.");
     }
-    if (!(weightOz(l) > 0)) {
+    if (!revising && !(weightOz(l) > 0)) {
       add("weight", "weight", "Package weight",
         "eBay prices shipping from the package weight.");
     }
-    if (aspects) {
+    if (aspects && !revising) {
       const missing = aspects.filter(
-        (a) => a.required && !specificValue(l, a.name));
+        (a) => a.required && !aspectValue(l, a.name));
       if (missing.length) {
         const named = missing.slice(0, 3).map((a) => a.name).join(", ");
         add("specifics", "specifics", "Required item specifics",

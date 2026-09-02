@@ -2,13 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Coins, Lightbulb, Megaphone, TrendingDown, RotateCcw,
+  Tags, Coins, Lightbulb, Megaphone, TrendingDown,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign,
+  ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
-import { api, postJson } from "@/lib/api";
+import { api, pollJob, postJson } from "@/lib/api";
+import { readLocal, writeLocal } from "@/lib/localPrefs";
+import { dismiss as dismissRec, readDismissed, restoreAll,
+         withoutDismissed } from "@/lib/dismissedRecs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -18,22 +21,43 @@ import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
-import { DEFAULT_SOLD_RANGE, SOLD_RANGES, salesSummary } from "@/lib/sales";
+import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
+         salesSummary } from "@/lib/sales";
+import { isDraft, listingsView, recentListings, storeTotal }
+  from "@/lib/listingsView";
+import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
+import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
 // it during render is a no-op state write when it is already empty, instead of
 // a fresh [] that re-renders the whole dashboard. Never mutated.
 const NO_INSIGHTS = Object.freeze([]);
+// Per-run caps from /api/insights, keyed by rec type (see main._bulk_caps).
+// Empty until the fetch lands, and empty is "no cap known" — the group then
+// reads as it always did rather than inventing a limit.
+const NO_CAPS = Object.freeze({});
+
+// How many of a group ONE tap actually reaches. Both bulk actions fill a
+// capped number of listings per run and defer the rest, so the group must not
+// promise the whole badge: it asked to confirm 46, quoted the AI cost of 46,
+// then ran 25 and reported "1 of 25".
+const runSize = (n, cap) => (cap > 0 ? Math.min(n, cap) : n);
+// The count a seller is actually agreeing to, with its noun: "46 listings"
+// when the run covers the group, "25 of 46 listings" when it doesn't. The
+// noun agrees with the number in front of it — "1 of 3 listings", but "1
+// listing".
+const runCount = (n, total, noun) =>
+  `${n < total ? `${n} of ${total}` : n} ${noun}${Math.max(n, total) === 1 ? "" : "s"}`;
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
   promote: Megaphone, lower_price: TrendingDown,
-  finish: PlusCircle, relist: RotateCcw, photos: Camera, specifics: ListChecks,
+  finish: PlusCircle, photos: Camera, specifics: ListChecks,
 };
 const REC_TONE = {
   promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
   finish: "bg-blue-soft text-blue",
-  relist: "bg-red-soft text-error", photos: "bg-blue-soft text-blue",
+  photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
@@ -42,13 +66,17 @@ const REC_GROUP_LABEL = {
   promote: "Promote listings",
   lower_price: "Lower prices",
   finish: "Finish & list",
-  relist: "Relist ended items",
   photos: "Add more photos",
   specifics: "Fill in details",
 };
 
-// One suggestion row — the pre-grouping list item, unchanged.
-function RecRow({ rec, promoting, promoteOne, openListing }) {
+// One suggestion row. Every row carries a dismiss control, because this list
+// is rebuilt from scratch on every load: advice the seller has considered and
+// decided against otherwise comes back for good, and a to-do list that will
+// not shrink stops being read. See lib/dismissedRecs — and the "Restore
+// dismissed" control on the section header, which is what keeps a mis-tapped
+// X from being a one-way door.
+function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
   const Icon = REC_ICON[rec.type] || Lightbulb;
   const isPromote = rec.type === "promote";
   return (
@@ -75,6 +103,12 @@ function RecRow({ rec, promoting, promoteOne, openListing }) {
           {rec.label} <ArrowRight aria-hidden />
         </Button>
       )}
+      <Button variant="ghost" size="iconSm" className="shrink-0 -mr-1"
+        aria-label={`Dismiss: ${rec.label} — ${rec.listing_title}`}
+        title="Dismiss this suggestion"
+        onClick={() => onDismiss(rec)}>
+        <X aria-hidden />
+      </Button>
     </div>
   );
 }
@@ -82,16 +116,29 @@ function RecRow({ rec, promoting, promoteOne, openListing }) {
 // The group-level verbs. A suggestion category earns an entry here when the
 // same edit makes sense across every listing in it — repeating one edit a dozen
 // times by hand is the whole problem. `amount` marks the ones that need a
-// number first (lower prices by HOW much); the rest fire on click.
+// number first (lower prices by HOW much); the rest fire on click. `shared`
+// marks the one whose spinner is the per-listing `promoting` latch, because
+// its rows fire the very same action.
 //
-// Photos, specifics, finish and relist are deliberately absent: the first two
-// need a human looking at each item, and the last two create listings, which is
-// not something to hand a single button.
+// Photos and finish are deliberately absent: photos need a human holding the
+// item, and finishing a draft creates a listing, which is not something to hand
+// a single button.
 const BULK_ACTIONS = {
   promote: {
     verb: "Promote all",
     icon: Megaphone,
+    shared: true,
     run: (ctx) => ctx.promoteAll((ctx.group?.recs || []).length),
+  },
+  // "Fill in details" used to be a prompt to go and do it: open each listing,
+  // wait for the AI to read its photos, save, repeat. It is the same edit
+  // every time and the AI already knows how to make it, so it is a button —
+  // one pass over the whole group, filling eBay's recommended item specifics
+  // on each listing from its own photos and pushing them to the live listing.
+  specifics: {
+    verb: "Enrich all",
+    icon: Sparkles,
+    run: (ctx) => ctx.enrichAll(ctx.group, ctx.cap),
   },
   lower_price: {
     verb: "Lower all…",
@@ -99,7 +146,8 @@ const BULK_ACTIONS = {
     amount: {
       unit: "%", initial: 10, min: 1, max: 75, step: 1,
       label: "Lower every price in this group by",
-      submit: (n, value) => `Lower ${n} price${n === 1 ? "" : "s"} by ${value}%`,
+      submit: (n, value, total) =>
+        `Lower ${runCount(n, total, "price")} by ${value}%`,
       note: "New prices go straight to eBay. Anything that has sold or ended is skipped.",
     },
     run: (ctx, value) => ctx.lowerAll(ctx.group, value),
@@ -110,7 +158,7 @@ const BULK_ACTIONS = {
 // before it can run, with its own submit. Rendered in normal flow under the
 // group header rather than as a floating panel: the suggestions Card clips
 // overflow, so anything absolutely positioned inside it gets cut off.
-function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
+function BulkAmountPanel({ amount, count, total, busy, onSubmit, onCancel }) {
   const { unit, initial, min, max, step, label, submit, note } = amount;
   const [value, setValue] = useState(initial);
   const valid = Number(value) >= min && Number(value) <= max;
@@ -146,6 +194,15 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
           </span>
         </label>
         <p className="mt-2 text-[12px] text-ink-secondary">{note}</p>
+        {/* The server reprices a capped number per run and defers the rest.
+            Said here, next to the button that spends it, rather than only in
+            the toast that arrives once it is already too late to plan. */}
+        {count < total && (
+          <p className="mt-1 text-[12px] text-ink-secondary">
+            One run covers {count} of them — the other {total - count}{" "}
+            {total - count === 1 ? "stays" : "stay"} on the list for a second run.
+          </p>
+        )}
         {!valid && (
           <p className="mt-1 text-[12px] font-semibold text-error">
             Enter a number between {min} and {max}.
@@ -154,7 +211,7 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="primary" size="sm" loading={busy}
             disabled={busy || !valid} onClick={apply}>
-            {submit(count, value)}
+            {submit(count, value, total)}
           </Button>
           <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
             Cancel
@@ -168,16 +225,22 @@ function BulkAmountPanel({ amount, count, busy, onSubmit, onCancel }) {
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
-                    lowerAll, busy }) {
+function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
+                    lowerAll, enrichAll, onDismiss, busy, progress }) {
   const [open, setOpen] = useState(false);
   const [amountOpen, setAmountOpen] = useState(false);
   const Icon = REC_ICON[group.type] || Lightbulb;
   const action = BULK_ACTIONS[group.type];
-  // Promote's spinner is the shared `promoting` latch (its rows share it);
-  // parameterized actions get the per-group one.
-  const actionBusy = action?.amount ? busy : !!promoting;
+  // Promote's spinner is the shared `promoting` latch, because its rows fire
+  // the same action; every other group gets its own. Keyed off the action
+  // rather than off "does it take an amount" — that read left a group whose
+  // action needs no number spinning on the promote latch, so "Enrich all"
+  // would have gone busy because a promote was running elsewhere.
+  const actionBusy = action?.shared ? !!promoting : busy;
   const ActionIcon = action?.icon;
+  // What one tap on this group's button reaches. The badge above it is the
+  // whole group; this is the part of it a single run touches.
+  const perRun = runSize(group.recs.length, cap);
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
@@ -214,19 +277,38 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
             aria-expanded={action.amount ? amountOpen : undefined}
             onClick={() => (action.amount
               ? setAmountOpen((o) => !o)
-              : action.run({ group, promoteAll, lowerAll }))}>
+              : action.run({ group, cap, promoteAll, lowerAll, enrichAll }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
       </div>
+      {/* What a long run is actually doing. "Enrich all" is minutes of AI
+          reading photos, one listing at a time, and a spinner with no end in
+          sight is the shape of a hang — so the group says which listing it is
+          on and how far through it is. */}
+      {progress && (
+        <p className="px-4 pb-3.5 -mt-1 text-[13px] text-ink-secondary flex items-center gap-1.5">
+          <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
+          <span className="truncate">
+            {progress.title ? `“${progress.title}” · ` : ""}
+            {Math.min(progress.done + 1, progress.total)} of {progress.total}
+            {/* One run is capped, so "2 of 25" under a badge reading 46 is a
+                contradiction unless the rest of the group is accounted for
+                right here. */}
+            {progress.deferred > 0
+              ? ` · ${progress.deferred} more after this run` : ""}
+          </span>
+        </p>
+      )}
       <AnimatePresence initial={false}>
         {action?.amount && amountOpen && (
           <BulkAmountPanel
-            amount={action.amount} count={group.recs.length} busy={busy}
+            amount={action.amount} count={perRun} total={group.recs.length}
+            busy={busy}
             onCancel={() => setAmountOpen(false)}
             onSubmit={(value) => {
               setAmountOpen(false);
-              action.run({ group, promoteAll, lowerAll }, value);
+              action.run({ group, cap, promoteAll, lowerAll, enrichAll }, value);
             }} />
         )}
       </AnimatePresence>
@@ -243,7 +325,7 @@ function RecGroup({ group, promoting, promoteAll, promoteOne, openListing,
               {group.recs.map((rec) => (
                 <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
                   promoting={promoting} promoteOne={promoteOne}
-                  openListing={openListing} />
+                  openListing={openListing} onDismiss={onDismiss} />
               ))}
             </div>
           </motion.div>
@@ -283,8 +365,11 @@ const rise = {
 // in the hero so "is this my real store?" is answered before anything else.
 function MirrorStatus() {
   const { user, ebay, storeSync, setView } = useApp();
-  if (!user) return null;
-  if (!ebay.connected) {
+  const mirror = storeMirrorView({
+    user, connected: ebay.connected, ...storeSync,
+  });
+  if (mirror.kind === "hidden") return null;
+  if (mirror.kind === "not-connected") {
     return (
       <button
         type="button"
@@ -295,15 +380,17 @@ function MirrorStatus() {
       </button>
     );
   }
-  if (storeSync.syncing) {
+  if (mirror.kind === "syncing") {
     // A store of any size takes minutes (one eBay call per listing), so the
     // line carries the count the background job reports — a bare spinner with
     // no end in sight reads as broken.
+    // One count, because it is now one pass: each listing is fetched from
+    // eBay and written down as a single unit, so there is no longer a
+    // "fetching" stage followed by a "saving" one to tell apart. The number
+    // is how many of the seller's listings are actually here.
     const p = storeSync.progress;
     const detail = p && p.total
-      ? (p.phase === "saving"
-        ? ` saving ${Math.min(p.done, p.total)} of ${p.total}`
-        : ` ${Math.min(p.done, p.total)} of ${p.total} listings`)
+      ? ` ${Math.min(p.done, p.total)} of ${p.total} listings`
       : "";
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary">
@@ -312,17 +399,23 @@ function MirrorStatus() {
       </span>
     );
   }
-  if (storeSync.error) {
+  if (mirror.kind === "error") {
     return (
       <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warning">
         <RefreshCw size={14} aria-hidden /> Store sync hit a snag — retry from Listings
       </span>
     );
   }
+  // A partial pass is not a failure and must not read as one — the records
+  // below are real, they are just not all of them and not all freshly
+  // checked. Same icon in a quieter colour, and the certainty removed from
+  // both the line and its tooltip. See lib/storeMirror.
   return (
     <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-secondary"
-      title="Everything below reflects your actual eBay store — created here or not.">
-      <CheckCircle2 size={14} className="text-success" aria-hidden /> Live mirror of your eBay store
+      title={mirror.title}>
+      <CheckCircle2 size={14}
+        className={mirror.kind === "partial" ? "text-ink-faint" : "text-success"}
+        aria-hidden /> {mirror.text}
     </span>
   );
 }
@@ -331,11 +424,11 @@ function MirrorStatus() {
 // months shouldn't have to re-pick every morning. Rendered as a plain select:
 // it lives in the tile's corner as a sibling of the tile button (see
 // StatCard's `action`), so it has to be a real control, not a nested one.
-const SOLD_RANGE_KEY = "quickflip-sold-range";
+const SOLD_RANGE_KEY = "sold-range";   // see lib/localPrefs
 
 function readSoldRange() {
   try {
-    const saved = localStorage.getItem(SOLD_RANGE_KEY);
+    const saved = readLocal(SOLD_RANGE_KEY);
     if (SOLD_RANGES.some((r) => r.id === saved)) return saved;
   } catch (e) { /* private mode — the default is fine */ }
   return DEFAULT_SOLD_RANGE;
@@ -358,10 +451,15 @@ function soldSub(sales, soldEnded) {
   // The window itself is named by the picker in the corner, so this line
   // spends its width on what the total is made of instead of repeating it.
   const parts = [`${sales.count} sale${sales.count === 1 ? "" : "s"}`];
-  if (sales.profit != null) {
+  // Only when there is one currency to name it in. Profit summed across
+  // currencies is a number with no meaning, and printing it with a default
+  // dollar sign is how a seller on eBay.co.uk was told their £45 item sold
+  // "for $45.00" -- fixed once, at the sold notification, and still here.
+  if (sales.profit != null && sales.currency) {
     const sign = sales.profit >= 0 ? "+" : "−";
-    parts.push(`${sign}${formatMoney(Math.abs(sales.profit))} profit`);
+    parts.push(`${sign}${formatMoney(Math.abs(sales.profit), sales.currency)} profit`);
   }
+  if (sales.mixedCurrency) parts.push("more than one currency");
   // Say when the total is leaning on asking prices rather than reported sale
   // amounts, instead of presenting a guess as the takings.
   if (sales.approx) parts.push(`${sales.approx} estimated`);
@@ -393,12 +491,19 @@ function SoldRangePicker({ value, onChange }) {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay, tokens, loadTokens } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
+  const storeView = listingsView({
+    ...listingsState, user, count: items.length,
+  });
 
   // "What to do next" — ranked actions across the user's listings.
   const [insights, setInsights] = useState(NO_INSIGHTS);
+  // How many listings one run of each group's bulk action reaches, straight
+  // from the server that enforces it — the dashboard cannot guess it, and
+  // guessing wrong is how the group came to promise 46 and deliver 25.
+  const [bulkCaps, setBulkCaps] = useState(NO_CAPS);
   const [promoting, setPromoting] = useState(null); // listing id, or "all"
   // Signing out throws the suggestions away — they are one account's to-do
   // list, and eBay actions fire straight off them. That reset used to sit at
@@ -423,10 +528,22 @@ export function Dashboard() {
   const refreshInsights = useCallback(() => {
     if (!user) return;
     api("/api/insights")
-      .then((r) => setInsights(r.recommendations || NO_INSIGHTS))
+      .then((r) => {
+        setInsights(r.recommendations || NO_INSIGHTS);
+        setBulkCaps(r.bulk_caps || NO_CAPS);
+      })
       .catch(() => {});
   }, [user]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, items.length]);
+
+  // The suggestions this seller has waved away. Read once, from this browser
+  // (see lib/dismissedRecs); the API has no idea and rebuilds the full list
+  // every time, so the filtering happens here.
+  const [dismissed, setDismissed] = useState(readDismissed);
+  const visibleInsights = withoutDismissed(insights, dismissed);
+  const hiddenCount = insights.length - visibleInsights.length;
+  const dismissOne = (rec) => setDismissed((d) => dismissRec(d, rec));
+  const restoreDismissed = () => setDismissed(restoreAll());
 
   const afterPromote = (res) => {
     if (res.needs_reconnect) {
@@ -496,6 +613,88 @@ export function Dashboard() {
     } finally { setBulkBusy(null); }
   };
 
+  // "Enrich all" — the whole "Fill in details" group filled in at once.
+  //
+  // This is what the suggestion used to ask the seller to do by hand: open a
+  // listing, wait for the AI to read its photos, let it fill eBay's
+  // recommended item specifics, save, push, repeat. The edit is the same one
+  // every time and nothing about it needs a human, so the group does it.
+  //
+  // It runs as a background JOB rather than one long request: a vision pass
+  // per listing over a dozen listings is minutes of work, which no browser
+  // (or the proxy in front of the server) will hold a connection open for.
+  // `bulkProgress` is what the job reports as it goes, rendered on the group.
+  const [bulkProgress, setBulkProgress] = useState(null);
+  const enrichAll = async (group, cap) => {
+    // The WHOLE group is sent: the server enriches up to its own cap and
+    // counts the remainder for us (a client that pre-trimmed the list would
+    // be told nothing was left over). The cap it publishes on /api/insights is
+    // only for what this dialog SAYS — which is the bug it fixes. The group
+    // used to ask for 46 and quote the AI cost of 46, then fill 25.
+    const ids = group.recs.map((r) => r.listing_id);
+    const total = ids.length;
+    let run = runSize(total, cap);
+    let left = total - run;
+    // Every listing this touches spends AI credits, and this button reaches a
+    // whole group from one tap. Say what it will do — and what it will cost —
+    // before it does it, the same way promoting the store does.
+    const cost = tokens.enabled && tokens.costs?.specifics
+      ? ` It uses ${tokens.costs.specifics * run} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
+      : "";
+    const rest = left
+      ? ` One run fills in ${run} of them; the other ${left} ${left === 1 ? "stays" : "stay"} on the list for a second run.`
+      : "";
+    if (!(await confirm({
+      title: `Fill in details on ${runCount(run, total, "listing")}?`,
+      message: "The AI reads each listing's own photos and fills in eBay's "
+        + "recommended item specifics — the fields buyers filter by — then "
+        + "pushes them to the live listing. Anything you've already written "
+        + `is left exactly as it is.${rest}${cost}`,
+      confirmLabel: "Fill them in",
+    }))) return;
+    setBulkBusy(group.type);
+    setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
+    try {
+      const start = await postJson("/api/listings/enrich", { listing_ids: ids });
+      // The server's own split is the authoritative one — ids that have since
+      // been deleted never make the run, and the cap is its to enforce. A
+      // handed-back job that is already running reports total 0; that one
+      // keeps the estimate above, and the poll below corrects it.
+      if (start.total) {
+        run = start.total;
+        left = start.deferred || 0;
+        setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
+      }
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setBulkProgress({
+          type: group.type, done: j.current || 0,
+          total: j.total_items || run, deferred: left,
+          title: j.current_title || "",
+        }),
+      });
+      const parts = [];
+      if (res.changed) {
+        parts.push(`Filled in ${res.changed} listing${res.changed === 1 ? "" : "s"}`
+          + (res.filled ? ` · ${res.filled} detail${res.filled === 1 ? "" : "s"} added` : ""));
+      }
+      // Skipped is the honest half: a listing with no category, no photos left
+      // on the server, or nothing its photos could answer is not a failure and
+      // is not done either.
+      if (res.skipped) parts.push(`${res.skipped} need you`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
+      if (res.stopped) parts.push(res.stopped);
+      toast(parts.join(" · ") || "Nothing to fill in.", {
+        kind: res.changed ? "success" : res.failed ? "error" : "info",
+      });
+      refreshInsights();
+      loadListings({ quiet: true });
+      loadTokens();
+    } catch (e) {
+      toast(`Couldn't fill these in: ${e.message}`, { kind: "error" });
+    } finally { setBulkBusy(null); setBulkProgress(null); }
+  };
+
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     if (await confirm({
@@ -523,9 +722,12 @@ export function Dashboard() {
   const sales = salesSummary(items, soldRangeId);
   const pickSoldRange = (id) => {
     setSoldRangeId(id);
-    try { localStorage.setItem(SOLD_RANGE_KEY, id); } catch (e) { /* private mode */ }
+    writeLocal(SOLD_RANGE_KEY, id);
   };
   const revenue = live.reduce((sum, i) => sum + (Number(i.listing?.price) || 0), 0);
+  // The same question for the live listings: one currency, or a sum that
+  // cannot be shown as money at all.
+  const liveMoney = currencyOf(live);
   const watcherTotal = live.reduce((sum, i) => {
     const m = metricsById[i.id];
     const w = m?.watchers ?? i.listing?.watch_count ?? 0;
@@ -535,9 +737,16 @@ export function Dashboard() {
   // An in-memory session resumes directly — but NOT once it's gone live (or
   // otherwise left the draft stage): there's nothing to "continue" on a
   // published listing, so fall through to the newest actual draft instead.
+  //
+  // EITHER record saying it is done ends it. `session.status || item.status`
+  // read only the session's, because a session that has one at all (any
+  // listing opened from Drafts carries "draft") short-circuited the fallback
+  // — so a draft opened, published and left behind kept its "Continue" button
+  // for the rest of the visit, pointing at a live listing.
   const sessionItem = session ? items.find((i) => i.id === session.sessionId) : null;
-  const sessionDone = ["published", "live", "sold", "ended"].includes(
-    session?.status || sessionItem?.status);
+  const DONE = ["published", "live", "sold", "ended"];
+  const sessionDone = DONE.includes(session?.status)
+    || DONE.includes(sessionItem?.status);
   const lastOpen = (session && !sessionDone)
     ? { title: session.listing?.title, go: () => setView("new") }
     : (drafts[0] && {
@@ -545,9 +754,13 @@ export function Dashboard() {
         go: () => openListing(drafts[0].id),
       });
 
-  const recent = [...items]
-    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
-    .slice(0, 4);
+  // The four newest listings the seller can still act on. Sold ones are left
+  // out, the same way the Sell screen's tabs leave them out: a sale is
+  // archived under Inactive there, but this strip sorted the whole store by
+  // `updated_at` and a sale is the last thing that touches a row — so the
+  // item that had just left the Sell screen went straight to the top of the
+  // dashboard, took a quarter of the strip, and pushed a live listing off it.
+  const recent = recentListings(items);
 
   const quickActions = [
     { label: "Take Photos", icon: Camera, onClick: startNew, tone: "bg-blue-soft text-blue" },
@@ -623,26 +836,39 @@ export function Dashboard() {
       {/* Your store, mirrored — the tiles are the seller's REAL numbers and
           each one jumps to the matching view. */}
       <motion.div variants={rise} className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Every one of these is counted off `items`, so when the store read
+            fails they all count zero and say so as a fact -- on the same
+            screen, at the same moment, as the card below explaining that the
+            listings could not be loaded. storeTotal is what stops that. */}
         <StatCard icon={Coins} tone="green" label="Active on eBay"
-          value={live.length}
-          sub={revenue > 0
-            ? `${formatMoney(revenue)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
-            : "everything currently live"}
+          {...storeTotal(storeView.kind, live.length,
+            revenue > 0 && liveMoney.currency
+              ? `${formatMoney(revenue, liveMoney.currency)} listed${watcherTotal ? ` · ${watcherTotal} watcher${watcherTotal === 1 ? "" : "s"}` : ""}`
+              : "everything currently live")}
           onClick={() => openListings("active")} />
         <StatCard icon={FileText} tone="yellow" label="Drafts in progress"
-          value={drafts.length}
-          sub={inventory.length
+          {...storeTotal(storeView.kind, drafts.length, inventory.length
             ? `+ ${inventory.length} unlisted find${inventory.length === 1 ? "" : "s"} from Shop Mode`
-            : "open one to finish & publish"}
+            : "open one to finish & publish")}
           onClick={() => openListings("drafts")} />
         <StatCard icon={DollarSign} tone="blue" label="Sold"
-          value={formatMoney(sales.total) || "$0.00"}
-          sub={soldSub(sales, soldEnded)}
+          {...storeTotal(storeView.kind,
+                         // A dash for a total that spans currencies, the same
+                         // answer this tile gives for one it could not
+                         // measure -- because a mixed sum is not a figure the
+                         // seller can act on whatever symbol goes in front.
+                         sales.mixedCurrency
+                           ? "—"
+                           : formatMoney(sales.total,
+                                         sales.currency || DEFAULT_CURRENCY)
+                             || "$0.00",
+                         soldSub(sales, soldEnded))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
-          value={todays.length}
-          sub={todays.length ? "keep the streak going" : "photos in, listing out — ~30s"}
+          {...storeTotal(storeView.kind, todays.length,
+                         todays.length ? "keep the streak going"
+                                       : "photos in, listing out — ~30s")}
           onClick={startNew} />
       </motion.div>
 
@@ -723,17 +949,31 @@ export function Dashboard() {
       </motion.div>
 
       {/* Suggested actions — the recommendation engine's picks, one collapsed
-          group per category (expand for the per-listing rows). */}
+          group per category (expand for the per-listing rows), minus whatever
+          the seller has dismissed.
+
+          The section is gated on the WHOLE list rather than the visible one,
+          so dismissing the last row leaves the "Restore dismissed" control on
+          screen instead of taking it away with the thing it undoes. */}
       {insights.length > 0 && (
         <motion.div variants={rise}>
-          <SectionHeader icon={Lightbulb} title="Suggested actions" />
+          <SectionHeader icon={Lightbulb} title="Suggested actions"
+            action={hiddenCount > 0 && (
+              <Button variant="ghost" size="sm" onClick={restoreDismissed}>
+                <Undo2 aria-hidden /> Restore {hiddenCount} dismissed
+              </Button>
+            )} />
           <Card className="p-0 divide-y divide-line overflow-hidden">
-            {(() => {
+            {visibleInsights.length === 0 ? (
+              <p className="p-4 text-[13px] text-ink-secondary">
+                Nothing left here — every suggestion is dismissed.
+              </p>
+            ) : (() => {
               // Group by type, preserving arrival order: the API sorts by
               // priority desc, so groups order by their strongest rec.
               const groups = [];
               const byType = {};
-              for (const rec of insights) {
+              for (const rec of visibleInsights) {
                 if (!byType[rec.type]) {
                   byType[rec.type] = { type: rec.type, recs: [] };
                   groups.push(byType[rec.type]);
@@ -741,10 +981,13 @@ export function Dashboard() {
                 byType[rec.type].recs.push(rec);
               }
               return groups.map((g) => (
-                <RecGroup key={g.type} group={g} promoting={promoting}
+                <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
+                  promoting={promoting}
                   promoteAll={promoteAll} promoteOne={promoteOne}
                   openListing={openListing} lowerAll={lowerAll}
-                  busy={bulkBusy === g.type} />
+                  enrichAll={enrichAll} onDismiss={dismissOne}
+                  busy={bulkBusy === g.type}
+                  progress={bulkProgress?.type === g.type ? bulkProgress : null} />
               ));
             })()}
           </Card>
@@ -756,8 +999,12 @@ export function Dashboard() {
         <SectionHeader
           icon={Tags}
           title="Recent listings"
+          // Where the strip's contents actually live. "All" hides sold, so a
+          // seller whose whole store has sold would otherwise be sent from an
+          // empty strip to an empty tab reading "No listings yet".
           action={items.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={() => openListings("all")}>
+            <Button variant="ghost" size="sm"
+              onClick={() => openListings(recent.length > 0 ? "all" : "inactive")}>
               View all <ArrowRight aria-hidden />
             </Button>
           )}
@@ -769,10 +1016,55 @@ export function Dashboard() {
         ) : recent.length > 0 ? (
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
             {recent.map((item) => (
-              <ListingCard key={item.id} className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
-                metrics={metricsById[item.id]} />
+              <div key={item.id} className="flex flex-col">
+                <ListingCard className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
+                  metrics={metricsById[item.id]} />
+                {/* The category, on the face of the card and one tap from
+                    being fixed — the same control the drafts strip and the
+                    bulk queue carry. A wrong category is the AI misfire that
+                    costs most once it's published (and it decides which
+                    conditions eBay will even accept), so it is not something
+                    to find only after opening the full editor. */}
+                {isDraft(item) && <DraftCategoryEdit item={item} className="mt-1.5" />}
+              </div>
             ))}
           </div>
+        ) : storeView.kind === "unavailable" ? (
+          // Not the empty state: a read that failed is not evidence that the
+          // seller has no listings, and this panel is the first thing they see.
+          <Card>
+            <p className="text-sm text-ink flex gap-2">
+              <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" aria-hidden />
+              <span>{storeView.message}</span>
+            </p>
+            <Button variant="soft" size="sm" className="mt-3"
+              onClick={() => loadListings()}>
+              Try again
+            </Button>
+          </Card>
+        ) : items.length > 0 ? (
+          // A store whose every listing has sold. Same rule as the failed
+          // read above: "No listings yet", with a button to create a first
+          // one, is the wrong thing to say to a seller who sold the lot.
+          // Point them at the archive their listings actually went to.
+          <Card className="p-0">
+            <EmptyState
+              illustration={ListingsIllustration}
+              title="Everything's sold"
+              message={"Nothing is waiting on you right now — every listing you "
+                + "have is a finished sale, filed under Inactive."}
+              action={
+                <div className="flex flex-wrap gap-2 justify-center">
+                  <Button variant="primary" size="lg" onClick={startNew}>
+                    <PlusCircle aria-hidden /> Create Listing
+                  </Button>
+                  <Button variant="soft" size="lg" onClick={() => openListings("inactive")}>
+                    View sales <ArrowRight aria-hidden />
+                  </Button>
+                </div>
+              }
+            />
+          </Card>
         ) : (
           <Card className="p-0">
             <EmptyState

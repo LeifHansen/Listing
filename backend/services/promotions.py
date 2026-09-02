@@ -43,6 +43,14 @@ _RATE_TTL = 300
 # not just ours), cached briefly.
 _ADS_CACHE: dict[str, tuple[float, dict]] = {}
 _ADS_TTL = 180
+# eBay's maximum page size for the Marketing API collections we read (its
+# default is 10, so the size is never left up to eBay).
+_PAGE = 500
+# Stop after this many pages of one collection. 10,000 ads is well past the
+# 3,000-listing store the rest of the app is capped at; beyond it we say we
+# could not read the ads rather than hand back most of them as though it were
+# all of them.
+_MAX_PAGES = 20
 
 
 class _ScopeError(Exception):
@@ -273,35 +281,97 @@ def suggested_ad_rates(creds: dict | None, listing_ids: list[str]) -> dict[str, 
 
 
 def active_ads(creds: dict | None) -> dict[str, dict]:
-    """Every listing that currently has an ACTIVE Promoted Listings ad, across
+    """active_ads_status's map alone, for callers that only want the ads.
+
+    Anything DECIDING something on the strength of an empty answer should use
+    active_ads_status instead — an empty map means "no ads" and "we could not
+    ask" here, and those lead to different decisions.
+    """
+    return active_ads_status(creds)[0]
+
+
+def _collect(client: httpx.Client, url: str, token: str, key: str) -> list[dict]:
+    """Every page of an eBay Marketing API collection under `key`.
+
+    getCampaigns and getAds both cap `limit` at 500 and report the full size
+    in `total`. Asking once and keeping the first page is how a seller with
+    more than 500 ads had everything past the 500th read as unpromoted — and
+    then invited to buy a second ad for listings that were already running one.
+
+    Raises rather than returning a short list. Every caller here decides
+    something on the strength of a listing being ABSENT, so a half-read
+    collection has to reach them as "we could not ask" — the same rule
+    active_ads_status states for a failed lookup, applied to a lookup that
+    only partly succeeded.
+    """
+    out: list[dict] = []
+    offset = 0
+    for _ in range(_MAX_PAGES):
+        r = client.get(url, headers=_headers(token),
+                       params={"limit": str(_PAGE), "offset": str(offset)})
+        if r.status_code != 200:
+            raise RuntimeError(f"{key} at offset {offset}: {r.status_code}")
+        body = r.json() or {}
+        page = body.get(key) or []
+        out.extend(row for row in page if isinstance(row, dict))
+        offset += len(page)
+        try:
+            total = int(body.get("total"))
+        except (TypeError, ValueError):
+            total = None
+        # A short page is the last one, and so is reaching the reported total.
+        if len(page) < _PAGE or (total is not None and offset >= total):
+            return out
+    raise RuntimeError(f"{key}: more than {_MAX_PAGES * _PAGE} to read")
+
+
+def active_ads_status(creds: dict | None) -> tuple[dict[str, dict], bool]:
+    """(ads, did eBay actually answer).
+
+    Every listing that currently has an ACTIVE Promoted Listings ad, across
     ALL of the seller's campaigns (not just ours) — so we correctly see items
     promoted directly in eBay Seller Hub too. Keyed by BOTH the eBay listing id
     and the inventory reference (SKU), since ads can be created either way:
-    {key: {'rate': '8.5', 'status': 'RUNNING'}}. Best-effort, cached."""
+    {key: {'rate': '8.5', 'status': 'RUNNING'}}. Cached.
+
+    The flag is the point. This used to answer `{}` for both "eBay says this
+    seller has no ads" and "the lookup failed", and the insights panel read
+    the empty map as "not promoted yet" — so during an ads-API blip a seller
+    who promotes in Seller Hub was invited to pay for a SECOND ad on listings
+    that were already running one. A fee must not be recommended on the
+    strength of a question nobody managed to ask.
+
+    The map is COMPLETE or the flag is False; there is no third state. Both
+    collections are read to the last page (see _collect), because a partly
+    read one is a question only partly asked and lands the seller in exactly
+    that spot: a store with more than 500 ads had every listing past the
+    500th reported as unpromoted, with the answer marked as reliable.
+    """
     token = (creds or {}).get("access_token")
     if not token:
-        return {}
+        return {}, False
     cache_key = token[-16:]
     hit = _ADS_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < _ADS_TTL:
-        return hit[1]
+        return hit[1], True
     base = config.EBAY_API_BASE
     out: dict[str, dict] = {}
     try:
         with httpx.Client(timeout=30) as client:
-            rc = client.get(f"{base}{_MARKETING}/ad_campaign",
-                            headers=_headers(token), params={"limit": "500"})
-            if rc.status_code != 200:
-                raise RuntimeError(f"getCampaigns {rc.status_code}")
-            for camp in (rc.json().get("campaigns") or []):
+            campaigns = _collect(client, f"{base}{_MARKETING}/ad_campaign",
+                                 token, "campaigns")
+            for camp in campaigns:
                 cid = camp.get("campaignId")
                 if not cid or str(camp.get("campaignStatus", "")).upper() == "ENDED":
                     continue
-                ra = client.get(f"{base}{_MARKETING}/ad_campaign/{cid}/ad",
-                                headers=_headers(token), params={"limit": "500"})
-                if ra.status_code != 200:
-                    continue
-                for ad in (ra.json().get("ads") or []):
+                # A campaign whose ads we cannot read is not a campaign with no
+                # ads: skipping it used to leave the seller's OTHER campaigns in
+                # the map and still report the answer as complete, so every
+                # listing promoted in the unread one was invited to buy a second
+                # ad. _collect raises, and the handler below turns the whole
+                # lookup into "we could not ask".
+                for ad in _collect(client, f"{base}{_MARKETING}/ad_campaign/{cid}/ad",
+                                   token, "ads"):
                     status = str(ad.get("adStatus") or "").upper()
                     if status in ("ENDED", "ARCHIVED", "PAUSED"):
                         continue
@@ -309,10 +379,12 @@ def active_ads(creds: dict | None) -> dict[str, dict]:
                     for key in (ad.get("listingId"), ad.get("inventoryReferenceId")):
                         if key:
                             out[str(key)] = entry
-    except Exception as exc:  # noqa: BLE001 - ad status is an optional overlay
+    except Exception as exc:  # noqa: BLE001 - reported via the flag, not raised
+        # Deliberately NOT cached: an outage must not be remembered as "this
+        # seller has no ads" for the whole TTL.
         log.info("active ads unavailable: %s", exc)
-        return {}
+        return {}, False
     if len(_ADS_CACHE) > 100:
         _ADS_CACHE.clear()
     _ADS_CACHE[cache_key] = (time.time(), out)
-    return out
+    return out, True

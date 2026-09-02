@@ -2,6 +2,7 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
 import { api, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -17,6 +18,16 @@ const AppContext = createContext(null);
 const NO_METRICS = {};
 const NO_METRICS_STATUS = { trafficOk: false, needsReconnect: false };
 
+// How long a freshly loaded page of listings is trusted without asking for
+// it again. Only the passive refreshes read it (coming back to a tab that has
+// been open a while); every WRITE goes through invalidateListings, which
+// refetches regardless of how recent the last load was.
+const LISTINGS_FRESH_MS = 60000;
+// How long invalidateListings waits before refetching, so a burst of small
+// writes (drag three photos, then save) costs one /api/listings instead of
+// four. Short enough that a card is corrected before anyone looks away.
+const INVALIDATE_DEBOUNCE_MS = 350;
+
 // The rest of "nobody is signed in": the shapes each per-account cache starts
 // at, and the shapes logout() puts them back to. They are the same values, so
 // they are written once — a signed-out app has to look identical whether it
@@ -27,13 +38,18 @@ const NO_EBAY = {
   foreign_listings: 0,
   unowned_listings: 0,
 };
-const NO_NOTIFICATIONS = { items: [], unread: 0 };
+const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_MESSAGES = {
   conversations: [], unread: 0, sources: [], available: false, reason: "",
   message: "", loaded: false,
 };
 const NO_STORE_SYNC = {
   syncing: false, lastSynced: null, error: null, progress: null,
+  // Whether the last sweep actually covered the store — it SAMPLES on a
+  // big one, and the list it samples is a capped read, so the oldest live
+  // listings may never reach it. The Dashboard's green tick is a
+  // completeness claim and needs this to be honest. See lib/storeMirror.
+  partial: false,
 };
 // `authed` starts true and only logout sets it false: on boot we have not
 // asked yet, and guessing "signed out" there would flash the logged-out empty
@@ -46,6 +62,44 @@ const NO_LISTINGS = {
 // backend picks the bucket from eBay's own error code; "eBay connection
 // failed. Please try again." was the whole message before, which is advice
 // that cannot work for two of these three.
+// How long a mirror rebuild stays good enough to skip.
+//
+// An import is one eBay GetItem per listing, against a default allowance of
+// 5,000 Trading calls a DAY. Rebuilding on every app session spent that on
+// second tabs, phones and reloads; six hours means an unattended day of
+// ordinary use costs a handful of rebuilds instead of one per visit, while a
+// seller who wants it now presses "Sync with eBay".
+const AUTO_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_SYNC_KEY = "last-store-sync";   // see lib/localPrefs
+
+// Per user, so connecting a different eBay account (or a different person on
+// a shared device) still gets the first-run import rather than inheriting
+// someone else's "recently synced".
+function autoSyncKey(userId) {
+  return `${AUTO_SYNC_KEY}:${userId || "anon"}`;
+}
+
+/** Is an AUTOMATIC mirror rebuild worth its eBay quota right now? */
+export function autoSyncDue(userId, now = Date.now()) {
+  try {
+    const last = Number(readLocal(autoSyncKey(userId)) || 0);
+    // No record at all is the first load after connecting: without this run
+    // the seller sees an empty app, so it is the one automatic rebuild that
+    // earns its cost. A corrupt or future value reads as due for the same
+    // reason -- erring toward showing the store.
+    if (!Number.isFinite(last) || last <= 0 || last > now) return true;
+    return now - last >= AUTO_SYNC_INTERVAL_MS;
+  } catch (e) {
+    // Storage unavailable (private mode, blocked cookies). Falling back to
+    // "due" keeps the app working rather than leaving it permanently empty.
+    return true;
+  }
+}
+
+export function markAutoSynced(userId, now = Date.now()) {
+  writeLocal(autoSyncKey(userId), String(now));
+}
+
 const EBAY_CONNECT_ERRORS = {
   expired: "That eBay connection link expired or was already used. Start it again from Settings.",
   config: "eBay rejected this app's credentials, so this isn't something you can fix by retrying — the app's eBay setup needs attention.",
@@ -63,7 +117,7 @@ export function AppProvider({ children }) {
     setDark((d) => {
       const next = !d;
       document.documentElement.classList.toggle("dark", next);
-      try { localStorage.setItem("quickflip-theme", next ? "dark" : "light"); } catch (e) {}
+      writeLocal("theme", next ? "dark" : "light");
       return next;
     });
   }, []);
@@ -81,14 +135,14 @@ export function AppProvider({ children }) {
   // localStorage next to the theme rather than the server.
   const [listingsLayout, setLayout] = useState(() => {
     try {
-      return localStorage.getItem("quickflip-listings-layout") === "list"
+      return readLocal("listings-layout") === "list"
         ? "list" : "grid";
     } catch (e) { return "grid"; }
   });
   const setListingsLayout = useCallback((next) => {
     const mode = next === "list" ? "list" : "grid";
     setLayout(mode);
-    try { localStorage.setItem("quickflip-listings-layout", mode); } catch (e) {}
+    writeLocal("listings-layout", mode);
   }, []);
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
@@ -150,20 +204,73 @@ export function AppProvider({ children }) {
   // ---------- auth ----------
   const [user, setUser] = useState(null);
   const [authOpen, setAuthOpen] = useState(false);
+  // Which tab the auth dialog opens on. Lifted out of AuthDialog so arriving
+  // from the marketing site's "Sign up" can choose it before the dialog mounts.
+  const [authMode, setAuthMode] = useState("login");
+  // The marketing site's Sign up links land on /?signup=1. Read once, at the
+  // first render, because loadAuth removes it from the URL once it has acted.
+  const signupIntent = useRef(
+    typeof window !== "undefined"
+    && new URLSearchParams(window.location.search).get("signup") === "1",
+  );
   // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
   const afterLogin = useRef(null);
 
   const loadAuth = useCallback(async () => {
+    let signedIn = false;
     try {
       const res = await api("/api/auth/me");
       setUser(res.user);
-    } catch (e) { setUser(null); }
+      signedIn = !!res.user;
+    } catch (e) {
+      // A server that cannot ANSWER is not a server saying "not signed in".
+      // /api/auth/me is 503 when the session lookup itself fails (a database
+      // blip used to make that lookup answer "anonymous" instead), and a
+      // dropped request is the same kind of silence. Clearing `user` on
+      // either dropped a seller mid-session into the logged-out app and took
+      // everything gated on it — the listings, the bell, the eBay state, the
+      // token balance — with it, for one bad poll.
+      //
+      // Only a definitive answer clears the session: a 4xx, or the ordinary
+      // expiry, which is a 200 with a null user and never reaches here. On a
+      // cold load there is nothing to keep, so a first-time visitor still
+      // lands on the signed-out app.
+      if (e.status && e.status < 500) setUser(null);
+    } finally {
+      // Someone who clicked "Sign up" on the marketing site should land in the
+      // signup form, not on a signed-out app with nothing open.
+      //
+      // This lives here, after the answer, rather than in an effect watching
+      // `user`: `user` is null both before /api/auth/me replies and when it
+      // says nobody is signed in, so an effect cannot tell those apart without
+      // a second state to track it — and a seller who is ALREADY signed in and
+      // follows the same link (a bookmark, a pasted URL) must never get a
+      // signup box thrown over their own dashboard while the request is still
+      // in flight. The param is then dropped, so a refresh does not reopen it
+      // forever.
+      if (signupIntent.current) {
+        signupIntent.current = false;
+        if (!signedIn) {
+          setAuthMode("signup");
+          setAuthOpen(true);
+        }
+        const url = new URL(window.location.href);
+        url.searchParams.delete("signup");
+        window.history.replaceState({}, "", url.toString());
+      }
+    }
   }, []);
 
   const openAuth = useCallback((resume) => {
     afterLogin.current = resume || null;
     setAuthOpen(true);
   }, []);
+
+  // The operator console gate, for RENDERING only (the Admin nav entry and
+  // the admin view). The server re-checks the role on every /api/admin call,
+  // so this can never grant anything — and because /api/auth/me re-reads the
+  // role from the database, a revoked admin loses the nav on the next poll.
+  const isSuperadmin = user?.role === "superadmin";
 
   // ---------- AI tokens (monetization) ----------
   // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
@@ -200,7 +307,12 @@ export function AppProvider({ children }) {
     if (!user) { setNotifications(NO_NOTIFICATIONS); return; }
     try {
       const res = await api("/api/notifications");
-      setNotifications({ items: res.notifications || [], unread: res.unread || 0 });
+      // `checked` distinguishes "nothing has sold" from "we couldn't read
+      // the notifications" — the bell states the first as fact.
+      setNotifications({
+        items: res.notifications || [], unread: res.unread || 0,
+        checked: res.checked !== false,
+      });
     } catch (e) { /* keep previous */ }
   }, [user]);
   useEffect(() => {
@@ -219,6 +331,7 @@ export function AppProvider({ children }) {
   const markNotificationsRead = useCallback(async (ids) => {
     // Optimistic: the badge clears instantly, the server catches up.
     setNotifications((n) => ({
+      ...n,
       items: n.items.map((i) => (
         !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
       unread: ids ? Math.max(0, n.unread - ids.length) : 0,
@@ -366,8 +479,14 @@ export function AppProvider({ children }) {
   const closeShipping = useCallback(() => setShipping(null), []);
 
   // ---------- saved listings cache ----------
+  // `error` separates a store with nothing in it from a store we could not
+  // read: without it a failed load rendered as "No listings yet", the app
+  // stating something about the seller's account on the strength of having
+  // failed to find out. See lib/listingsView.js; it is the same distinction
+  // metricsStatus makes below for eBay's traffic numbers.
   const [listingsState, setListingsState] = useState({
-    loaded: false, loading: false, authed: true, dbConfigured: true, items: [],
+    loaded: false, loading: false, authed: true, dbConfigured: true,
+    error: "", items: [],
   });
   // eBay views/watchers per live listing, keyed by our listing record id.
   const [metricsById, setMetricsById] = useState(NO_METRICS);
@@ -399,6 +518,9 @@ export function AppProvider({ children }) {
     setMetricsStatus(NO_METRICS_STATUS);
   }
 
+  // When the copy we hold stops being worth trusting. 0 = stale right now.
+  const listingsFreshUntil = useRef(0);
+
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     // `quiet` suppresses the spinner for background refreshes — but the FIRST
     // load is quiet too (the boot effect), and suppressing it there meant the
@@ -411,13 +533,37 @@ export function AppProvider({ children }) {
       setListingsState({
         loaded: true,
         loading: false,
+        error: "",
         authed: !!res.authed,
         dbConfigured: !!(res.db && res.db.configured),
         dbConnected: !!(res.db && res.db.connected),
         items: res.listings || [],
+        // The server says when the page is not the whole store. Every count,
+        // tab, dashboard group and bulk checkbox below is built on `items`,
+        // so this is what stops them reading as complete. See
+        // lib/listingsView.
+        truncated: !!res.truncated,
+        // How many there are, when the server was able to count. Only sent
+        // for a page that WAS cut, and null when the count itself failed --
+        // `listingsView` names it only if it arrived. See lib/listingsView.
+        total: Number.isFinite(res.total) ? res.total : null,
+        // Where the next page starts. Keyset, so it names the last row rather
+        // than counting rows -- see db.list_listings. Absent on a complete
+        // page, which is what stops `loadMoreListings` looping.
+        nextCursor: res.next_cursor || null,
+        loadingMore: false,
       });
+      listingsFreshUntil.current = Date.now() + LISTINGS_FRESH_MS;
     } catch (e) {
-      setListingsState((s) => ({ ...s, loading: false, loaded: true }));
+      // Recorded, not just toasted: the toast is gone in seconds, the view
+      // stays, and without this it goes on saying the store is empty.
+      // Read off `e` here rather than inside the updater — capturing the
+      // caught binding in the callback makes the React compiler give up on
+      // this component, which quietly retires every set-state-in-effect
+      // suppression in the file.
+      const failure = e.message || "we couldn’t reach the server";
+      setListingsState((s) => ({ ...s, loading: false, loaded: true,
+                                 error: failure }));
       if (!quiet) toast(`Couldn't load listings: ${e.message}`, { kind: "error" });
     }
   }, [toast]);
@@ -436,12 +582,74 @@ export function AppProvider({ children }) {
     });
   }, []);
 
+  // ---------- keeping the cache honest ----------
+  // Every screen — Dashboard, Listings, the drafts strip, the tab counts —
+  // renders from `listingsState.items`, and nothing else re-reads the store
+  // on its own. So a write that isn't followed by a refetch leaves the app
+  // showing what the store USED to be: a photo still sideways on its card
+  // after a rotate, a draft under the title it had before it was renamed, a
+  // listing just created missing from Drafts entirely until something
+  // unrelated happened to refresh.
+  //
+  // The rule here is the ordinary one every data-backed site follows: a
+  // mutation invalidates the cache. Callers say "this changed" and this owns
+  // the refetch — coalesced, because a burst of small writes (drag three
+  // photos, then save) is one change as far as any card is concerned and one
+  // /api/listings shows all of it.
+  //
+  // patchListing above is the other half and not a substitute: it applies one
+  // change we already know the answer to, so a card doesn't wait on a round
+  // trip. This is what makes the record itself authoritative again.
+  const invalidateTimer = useRef(null);
+  const invalidateListings = useCallback(() => {
+    listingsFreshUntil.current = 0;
+    if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
+    invalidateTimer.current = setTimeout(() => {
+      invalidateTimer.current = null;
+      loadListings({ quiet: true });
+    }, INVALIDATE_DEBOUNCE_MS);
+  }, [loadListings]);
+  useEffect(() => () => {
+    if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
+  }, []);
+
+  // The passive half: a tab (or the native shell) can sit in the background
+  // for hours while the seller edits on their phone, and what it holds is a
+  // snapshot from whenever it was last looked at. Coming back re-reads it
+  // once it has gone stale — the refresh-on-focus every list-backed app does.
+  // Gated on freshness so flicking between tabs isn't a fetch each time, and
+  // on `user` because signed out there is nothing of theirs to load.
+  useEffect(() => {
+    if (!user) return undefined;
+    const refreshIfStale = () => {
+      if (document.hidden) return;
+      if (Date.now() < listingsFreshUntil.current) return;
+      loadListings({ quiet: true });
+    };
+    document.addEventListener("visibilitychange", refreshIfStale);
+    window.addEventListener("focus", refreshIfStale);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfStale);
+      window.removeEventListener("focus", refreshIfStale);
+    };
+  }, [user, loadListings]);
+
   // ---------- eBay store mirror ----------
-  // The app mirrors the seller's WHOLE eBay store, not just what it created:
-  // once eBay is connected, the first load imports every active listing and
-  // reconciles live statuses — so the dashboard and Listings ARE the store.
-  // Runs once per app session; `syncStore({ force: true })` re-runs it (the
-  // "Sync with eBay" button).
+  // The app mirrors the seller's WHOLE eBay store, not just what it created,
+  // so the dashboard and Listings ARE the store.
+  //
+  // The mirror is DURABLE — it lives in the database — so showing it costs
+  // nothing. Rebuilding it does: an import is one eBay GetItem per listing,
+  // and this used to rebuild on every app session. A second tab, a phone, a
+  // reload, a redeploy each spent up to 2,500 calls against a default
+  // allowance of 5,000 a DAY, plus a concurrent forced status sweep, and none
+  // of it was asked for.
+  //
+  // So an automatic sync now runs only when it would otherwise show the
+  // seller nothing or something stale: no record of ever having synced (the
+  // first load after connecting), or the last one was long enough ago to be
+  // worth redoing. Everything else waits for "Sync with eBay", which is the
+  // button that already exists for exactly this.
   const [storeSync, setStoreSync] = useState(NO_STORE_SYNC);
   const syncedOnce = useRef(false);
   const lastReconcile = useRef(0); // ms — throttles the quiet status re-checks
@@ -490,6 +698,11 @@ export function AppProvider({ children }) {
           found: job.found || 0, imported: job.imported || 0,
           updated: job.updated || 0, deduped: job.deduped || 0,
           failed: job.failed || 0,
+          // eBay's per-seller call limits are windowed, so a big store can
+          // run into one part-way. Carried through because the counts alone
+          // read as a complete sync of a store that was only half read.
+          rateLimited: !!job.rate_limited,
+          retryAfter: job.retry_after ?? null,
         };
       }
     }
@@ -497,25 +710,40 @@ export function AppProvider({ children }) {
   const syncStore = useCallback(async ({ force = false } = {}) => {
     if (!user || !ebay.connected) return null;
     if (syncedOnce.current && !force) return null;
+    // An automatic run that isn't due does nothing. `force` is the seller
+    // pressing the button, and always runs.
+    if (!force && !autoSyncDue(user.id)) return null;
     syncedOnce.current = true;
     setStoreSync((s) => ({ ...s, syncing: true, error: null, progress: null }));
     try {
       const started = await postJson("/api/ebay/import-listings", {});
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
-      // force: this is the deliberate "Sync with eBay" path (or first load),
-      // so it may run the full per-item sweep; the background heartbeat below
-      // deliberately does not.
+      // The full per-item sweep is reserved for the deliberate "Sync with
+      // eBay" press: it is a second per-listing pass over the store, and
+      // running it alongside an automatic import doubled the quota an
+      // unattended app load could spend.
       lastReconcile.current = Date.now();
-      postJson("/api/ebay/sync-listings", { force: true })
-        .then((r) => { if (r.changed) loadListings({ quiet: true }); })
+      postJson("/api/ebay/sync-listings", { force })
+        .then((r) => {
+          setStoreSync((s) => ({ ...s, partial: !!r.partial }));
+          if (r.changed) loadListings({ quiet: true });
+        })
         .catch(() => {});
       // job_id: the import runs in the background and we watch it. A body with
       // the counts already in it is a server that still imports inline.
       const res = started?.job_id ? await watchImport(started.job_id) : started;
       await loadListings({ quiet: true });
-      setStoreSync({
-        syncing: false, lastSynced: Date.now(), error: null, progress: null,
-      });
+      // A pass eBay cut short has NOT rebuilt the mirror, so it must not
+      // latch "synced" for the next six hours — that would leave the rest of
+      // the store missing until the window expired twice over.
+      if (!res?.rateLimited) markAutoSynced(user.id);
+      // `partial` is left alone: the sweep above answers asynchronously and
+      // may well land after this, and overwriting it here would reset an
+      // honest "we couldn't cover it all" back to a clean tick.
+      setStoreSync((s) => ({
+        ...s, syncing: false, lastSynced: Date.now(), error: null,
+        progress: null,
+      }));
       return res;
     } catch (e) {
       setStoreSync({
@@ -527,11 +755,12 @@ export function AppProvider({ children }) {
       return { error: e.message };
     }
   }, [user, ebay.connected, loadListings, watchImport]);
-  // Kick the once-per-session mirror import off as soon as we have a user and
-  // a connected eBay account. syncStore bails out immediately in every other
-  // case, and latches `syncedOnce` so re-running this effect is a no-op — the
-  // spinner state it sets synchronously happens once per session, on the run
-  // that actually starts the job, and the deps it reads are not ones it writes.
+  // Offer the mirror an automatic rebuild as soon as we have a user and a
+  // connected eBay account — syncStore decides whether one is actually DUE,
+  // and bails out immediately in every other case (including no user, no
+  // connection, and already run this session). The listings already on screen
+  // come from the database either way, so skipping the rebuild costs the
+  // seller nothing except freshness they can restore with one press.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { syncStore(); }, [syncStore]);
 
@@ -556,6 +785,7 @@ export function AppProvider({ children }) {
     lastReconcile.current = Date.now();
     try {
       const r = await postJson("/api/ebay/sync-listings", {});
+      setStoreSync((s) => ({ ...s, partial: !!r.partial }));
       if (r.changed) loadListings({ quiet: true });
     } catch (e) { /* best-effort — the next pass tries again */ }
   }, [user, ebay.connected, loadListings]);
@@ -588,6 +818,52 @@ export function AppProvider({ children }) {
     });
   }, []);
 
+  // The rest of the store, a page at a time. Appending rather than replacing:
+  // everything on that screen -- the tab counts, the search box, the bulk
+  // checkboxes -- reads `items`, so loading more only ever makes the view more
+  // complete, and no other code has to learn that paging exists.
+  //
+  // Without this a seller past the cap could not reach their older listings at
+  // all: the page stops, the search filters only what was loaded, so those
+  // records were not on the page, not in the tabs, not findable and not
+  // openable. The notice was honest about it and offered no way through.
+  const loadMoreListings = useCallback(async () => {
+    let cursor = null;
+    setListingsState((s) => {
+      // Guarded here, where the current state is: two clicks (or a click
+      // during the fetch) would otherwise ask for the same page twice and
+      // append it twice.
+      if (s.loadingMore || !s.nextCursor) return s;
+      cursor = s.nextCursor;
+      return { ...s, loadingMore: true };
+    });
+    if (!cursor) return;
+    try {
+      const res = await api(`/api/listings?before=${encodeURIComponent(cursor)}`);
+      setListingsState((s) => {
+        // Belt and braces against a double append: a page that arrives twice
+        // would put every id on screen twice, and the checkboxes a bulk
+        // reprice runs over are keyed by id.
+        const have = new Set(s.items.map((i) => i.id));
+        const fresh = (res.listings || []).filter((i) => !have.has(i.id));
+        return {
+          ...s,
+          items: [...s.items, ...fresh],
+          truncated: !!res.truncated,
+          total: Number.isFinite(res.total) ? res.total : s.total,
+          nextCursor: res.next_cursor || null,
+          loadingMore: false,
+        };
+      });
+    } catch (e) {
+      // Not recorded as `error`: that field means "there is nothing on
+      // screen", and here there is a whole page of listings the seller can
+      // still work with. The toast says what failed; the button stays.
+      setListingsState((s) => ({ ...s, loadingMore: false }));
+      toast(`Couldn't load more listings: ${e.message}`, { kind: "error" });
+    }
+  }, [toast]);
+
   const startNew = useCallback(() => {
     setSession(null);
     setView("new");
@@ -595,10 +871,33 @@ export function AppProvider({ children }) {
 
   const openListing = useCallback(async (id) => {
     try {
-      const rec = await api(`/api/listings/${id}`);
+      let rec = await api(`/api/listings/${id}`);
+      // An imported listing's photos live on eBay, and the editor only works
+      // on images the app owns. Copying them used to happen invisibly inside
+      // the GET above, which made a plain read download up to 24 files and
+      // write the record — so a prefetch or a double-click paid for it too.
+      // Opening the EDITOR is the moment that work is actually wanted, so it
+      // is asked for here. Idempotent server-side; a failure is not fatal,
+      // the listing still opens against eBay's own photo strip.
+      const l = rec.listing || {};
+      if (l.source === "ebay" && !(l.images || []).length
+          && (l.image_urls || []).length && rec.status !== "sold") {
+        try {
+          const prepared = await api(`/api/listings/${id}/prepare-for-editing`,
+                                     { method: "POST" });
+          if (prepared?.listing) rec = { ...rec, listing: prepared.listing };
+        } catch {
+          // Non-fatal: the editor falls back to the read-only eBay photos.
+        }
+      }
       // status rides along so the workflow knows a live listing is being
       // REVISED (Update Live Listing / End listing) rather than published.
-      setSession({ sessionId: rec.id, listing: rec.listing, confidence: null, status: rec.status });
+      // `conflicts` is the described form: fields the seller and eBay both
+      // changed, which the sync deliberately sends NEITHER way. Carried into
+      // the session because an unanswered one is an edit that will never
+      // reach eBay, and the editor is where the question gets asked.
+      setSession({ sessionId: rec.id, listing: rec.listing, confidence: null,
+                   status: rec.status, conflicts: rec.conflicts || [] });
       setView("new");
     } catch (e) {
       toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
@@ -639,14 +938,14 @@ export function AppProvider({ children }) {
   // never strands a running batch. Completed items also auto-save to Drafts.
   const [activeBulk, setActiveBulk] = useState(() => {
     try {
-      const raw = localStorage.getItem("quickflip-bulk");
+      const raw = readLocal("bulk");
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   });
   const startBulk = useCallback((jobId) => {
     const b = { jobId };
     setActiveBulk(b);
-    try { localStorage.setItem("quickflip-bulk", JSON.stringify(b)); } catch (e) {}
+    writeLocal("bulk", JSON.stringify(b));
     setView("new");
   }, []);
   // A batch begins when the seller hits the button, not when the server hands
@@ -674,11 +973,11 @@ export function AppProvider({ children }) {
   // seller reopened the queue and exited it.
   const bulkSettled = useCallback(() => {
     setActiveBulk((b) => (b && !b.done ? { ...b, done: true } : b));
-    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    clearLocal("bulk");
   }, []);
   const clearBulk = useCallback(() => {
     setActiveBulk(null);
-    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    clearLocal("bulk");
   }, []);
   // A running batch is watched from the SHELL, not only from the queue screen.
   // The queue polls the full status while it's open, but a seller who walks
@@ -772,8 +1071,13 @@ export function AppProvider({ children }) {
   // stopped being checked for cascading setState. Keep it below the state it
   // resets; it is wired into the context at the bottom like everything else,
   // so its position in the file costs nothing.
-  const logout = useCallback(async () => {
-    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+  // The local half of signing out: every cache that belongs to one account.
+  //
+  // Split out because there are two ways a session ends and only one of them
+  // has a server to tell. `logout` below asks first; the session-expiry
+  // handler cannot, because the session it would be ending is the one that
+  // just refused a request.
+  const clearSignedInState = useCallback(() => {
     storeToken(null); // native shell's bearer token — no-op on the web
     setUser(null);
     afterLogin.current = null; // nothing to resume into a session that ended
@@ -804,7 +1108,7 @@ export function AppProvider({ children }) {
     setShipping(null);
     setBulkRetry(null);
     setActiveBulk(null);
-    try { localStorage.removeItem("quickflip-bulk"); } catch (e) {}
+    clearLocal("bulk");
     setListingsTab("active");
     listingsJumpRef.current = null;
 
@@ -819,6 +1123,35 @@ export function AppProvider({ children }) {
 
     loadEbayStatus();
   }, [loadEbayStatus]);
+
+  const logout = useCallback(async () => {
+    // Best effort, and first: the cookie is the server's to clear, and once
+    // the state below is gone there is nothing left to send it with.
+    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+    clearSignedInState();
+  }, [clearSignedInState]);
+
+  // A request refused because the session is gone — expired, or cancelled
+  // from another device by "Sign out everywhere" (see lib/api.js, which
+  // dispatches this from the one place every request passes through).
+  //
+  // Without it the revocation worked and the app never noticed: the cached
+  // account stayed on screen above a store that would not load, with no
+  // prompt to sign in and nothing saying why. On a shared machine that is
+  // also someone else's data still rendered.
+  useEffect(() => {
+    const onExpired = () => {
+      // A dashboard fires half a dozen requests at once and every one of them
+      // 401s. Guarded on `user` so the clear runs once and the seller gets
+      // one sentence rather than six.
+      if (!user) return;
+      clearSignedInState();
+      toast("You’ve been signed out — sign in again to pick up where you "
+            + "left off.", { kind: "warning" });
+    };
+    window.addEventListener("auth:expired", onExpired);
+    return () => window.removeEventListener("auth:expired", onExpired);
+  }, [user, clearSignedInState, toast]);
 
   // ---------- OAuth redirect landing (eBay + generic marketplaces) ----------
   useEffect(() => {
@@ -836,9 +1169,13 @@ export function AppProvider({ children }) {
         { kind: "success" });
     }
     else if (e === "error") toast(EBAY_CONNECT_ERRORS[params.get("why")] || EBAY_CONNECT_ERRORS.unknown, { kind: "error" });
-    // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy.
+    // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy, or
+    // ?connect_pending=etsy when the marketplace hasn't cleared this seller's
+    // shop yet (Etsy's app-tier wall) and we turned them back at the door
+    // rather than letting the marketplace refuse them off-site.
     const ok = params.get("connected");
     const bad = params.get("connect_error");
+    const pending = params.get("connect_pending");
     const label = (k) => k ? k.charAt(0).toUpperCase() + k.slice(1) : "";
     if (ok) {
       toast(`${label(ok)} connected! You can now cross-post listings there.`, { kind: "success" });
@@ -847,10 +1184,21 @@ export function AppProvider({ children }) {
       // fetch resolves, and this effect reads the URL once on mount.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMarketplaces();
+    } else if (pending) {
+      // Not "try again" — trying again cannot work until they clear the shop.
+      // Deliberately vaguer than the roster's per-marketplace note, which is
+      // the one that knows whether the app is unapproved or approved with the
+      // seats already taken: this line has only the marketplace's name.
+      toast(`${label(pending)} hasn't opened this app up to your shop yet. `
+        + `Cross-posting switches on as soon as they do — nothing for you to do.`,
+        { kind: "warning" });
+      // The roster is what disables the button; this landing means theirs was
+      // stale, so refresh it before they click again.
+      loadMarketplaces();
     } else if (bad) {
       toast(`${label(bad)} connection failed. Please try again.`, { kind: "error" });
     }
-    if (e || ok || bad) history.replaceState({}, "", window.location.pathname);
+    if (e || ok || bad || pending) history.replaceState({}, "", window.location.pathname);
   }, [toast, loadMarketplaces]);
 
   // ---------- token purchase redirect landing ----------
@@ -948,7 +1296,8 @@ export function AppProvider({ children }) {
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     listingsLayout, setListingsLayout,
     health, loadHealth,
-    user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
+    user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
+    isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -958,14 +1307,17 @@ export function AppProvider({ children }) {
     markConversationRead, messageSource, setMessageSource,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
-    listingsState, loadListings, patchListing, metricsById, metricsStatus,
+    listingsState, loadListings, loadMoreListings, patchListing,
+    invalidateListings,
+    metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
   }), [
-    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
+    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
+    isSuperadmin,
     listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     marketplaces, loadMarketplaces, connectedMarketplaces,
@@ -975,7 +1327,9 @@ export function AppProvider({ children }) {
     activeConversationId, openConversation, openMessages,
     markConversationRead, messageSource,
     shipping, openShipping, closeShipping,
-    listingsState, loadListings, patchListing, metricsById, metricsStatus,
+    listingsState, loadListings, loadMoreListings, patchListing,
+    invalidateListings,
+    metricsById, metricsStatus,
     storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,

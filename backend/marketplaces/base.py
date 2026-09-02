@@ -42,6 +42,17 @@ class PublishOutcome:
     `raw` carries the exact legacy JSON body for single-eBay publishes so the
     orchestrator can return it verbatim — old clients (BulkMode, the iOS
     wrapper) keep seeing byte-identical responses.
+
+    `outcome_unknown` separates the two ways ok=False happens, and they need
+    different words: the marketplace REFUSED this listing (a field to fix,
+    the seller's move), or the request reached the marketplace and the answer
+    never came back (nothing to fix, and the listing may well be live). The
+    clients each raise their own UnknownOutcome carrying a flag by that name
+    — see services/ebay_trading — and ebay_errors already writes the right
+    sentence from it. What was missing is the machine-readable half: without
+    it every surface downstream sees an ordinary failure, and the bulk queues
+    counted an unanswered publish under "refused" — directly above the one
+    action that turns one item into two live listings.
     """
     ok: bool
     listing_id: str = ""
@@ -51,6 +62,7 @@ class PublishOutcome:
     status: str = ""             # "" | "draft" | "published" | "ended"
     issues: list = field(default_factory=list)   # {target, level, title, fix} dicts
     raw: dict = field(default_factory=dict)
+    outcome_unknown: bool = False
 
 
 @runtime_checkable
@@ -64,6 +76,16 @@ class MarketplaceProvider(Protocol):
     # a partner-API application still under review. The roster passes both to
     # the UI, which then says "coming soon" instead of showing the operator's
     # missing-credentials explainer. Ignored once oauth_ready() is true.
+
+    # Also optional, and the mirror image of the above: an access_pending(uid)
+    # method (plus an access_pending_note) for when the credentials ARE in
+    # place and the marketplace still refuses THIS seller — Etsy's app tiers,
+    # which seat a fixed number of shops until Commercial Access is granted.
+    # Per-user precisely because some accounts CAN connect while others
+    # cannot, and checked before the redirect: the refusal happens on the
+    # marketplace's own page, so there is no callback to turn into an error.
+    # The note may be a property, since which wait a seller is in can change
+    # without the code changing.
 
     # --- configuration / connection ---
     def oauth_ready(self) -> bool:

@@ -64,6 +64,10 @@ export function ShippingDialog() {
 
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // One page is not necessarily the pile. Saying so beats a seller
+  // reading fifty orders as everything and leaving thirty unshipped —
+  // eBay scores late dispatch.
+  const [notice, setNotice] = useState("");
   const [orders, setOrders] = useState([]);       // generic mode: the pick list
   const [order, setOrder] = useState(null);       // the order being shipped
   const [pkg, setPkg] = useState(emptyPkg);
@@ -88,7 +92,7 @@ export function ShippingDialog() {
   const reset = useCallback(() => {
     setOrders([]); setOrder(null); setPkg(emptyPkg); setQuote(null);
     setRateId(""); setLabel(null); setTracking(""); setShipped(false);
-    setLoadError("");
+    setLoadError(""); setNotice("");
   }, []);
 
   const pickOrder = useCallback((o) => {
@@ -136,6 +140,16 @@ export function ShippingDialog() {
           setOrders(list);
           if (list.length === 1) pickOrder(list[0]);
           else if (list.length === 0) setLoadError("No orders are waiting to ship. 🎉");
+          // One page, not necessarily the pile. Saying so beats a seller
+          // reading fifty as everything and leaving thirty unshipped — eBay
+          // scores late dispatch.
+          // Its own channel, not loadError: this is not a failure, and
+          // overloading the error state with a notice is how the next bug
+          // gets written.
+          else if (res.partial) {
+            setNotice(`Showing the first ${list.length} of ${res.total} orders `
+              + "waiting to ship — ship these and reopen this for the rest.");
+          }
         }
       } catch (e) {
         setLoadError(e.message);
@@ -218,6 +232,10 @@ export function ShippingDialog() {
 
       {!loading && loadError && !order && (
         <p className="py-6 text-center text-sm text-ink-secondary">{loadError}</p>
+      )}
+
+      {!loading && notice && !order && (
+        <p className="pb-3 text-[13px] text-ink-secondary">{notice}</p>
       )}
 
       {/* Generic mode: several awaiting orders — pick one. */}

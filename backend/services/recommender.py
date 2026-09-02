@@ -2,8 +2,8 @@
 
 Rules over the signals we already have (listing status, age, price, photos,
 promotion, missing details) turn a pile of listings into a short, ranked list
-of concrete next actions: finish a draft, relist an ended item, promote a live
-one, drop a stale price, add a sale, add photos.
+of concrete next actions: finish a draft, promote a live one, drop a stale
+price, add photos, fill in missing details.
 
 eBay traffic (views/watchers), when available, sharpens these: a listing with
 lots of views but no watchers is priced too high; one with watchers but no sale
@@ -33,12 +33,21 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
 
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
-                  rate: Optional[float] = None, promoted: bool = False) -> list[dict]:
+                  rate: Optional[float] = None, promoted: bool = False,
+                  promotion_known: bool = True) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
     {listing_id, listing_title, type, label, reason, action, priority, rate}.
     `rate` is eBay's recommended Promoted Listings ad rate (%) for this listing,
     carried on promote recs so the UI can one-click promote at that rate.
-    Higher priority = surface sooner."""
+    Higher priority = surface sooner.
+
+    `promotion_known` is whether eBay actually answered when asked which
+    listings already have ads. When it did not, no promote recommendation is
+    made at all: promoting costs the seller a percentage of the sale, and
+    `promoted=False` from an unanswered lookup is not evidence that a listing
+    is unpromoted — it is the absence of evidence either way. Defaults True so
+    a caller that does not pass it keeps its recommendations.
+    """
     listing = item.get("listing") or {}
     status = item.get("status")
     lid = item.get("id")
@@ -55,10 +64,12 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
         add("finish", "Finish & list",
             "Ready to sell — just a few fields from going live.", 60)
         return recs
-    if status == "ended":
-        add("relist", "Relist",
-            "Ended without selling — relist it to give it another run.", 55)
-        return recs
+    # (No "Relist" nudge on an ended listing — removed on request: relisting is
+    # done by hand, and the ended bucket picks up SOLD items too, because the
+    # sync reconciles finished listings from eBay's unsold list and settles on
+    # "ended" whenever a sale is missed. Offering to relist something already
+    # sold is worse than offering nothing. An ended record now falls through to
+    # the guard below and earns no recommendation at all.)
     if status not in ("published", "live"):
         return recs
 
@@ -76,13 +87,14 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     if views is not None and views >= 30 and not watchers:
         add("lower_price", "Lower the price",
             f"{views} views but no watchers — buyers are looking; the price may be high.", 92)
-    if views is not None and views < 5 and age and age >= 7:
+    if (promotion_known and views is not None and views < 5
+            and age and age >= 7):
         add("promote", "Promote",
             f"Only {views} views in {age} days — promote it to reach more buyers.", 90,
             rate_=rate)
 
     # Heuristics that need no eBay metrics.
-    if not promoted:
+    if promotion_known and not promoted:
         add("promote", "Promote",
             "Not promoted yet — promoted listings show up far more often.", 70,
             rate_=rate)
@@ -101,7 +113,8 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
 
 def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
                     rates_by_id: Optional[dict] = None,
-                    promoted_ids: Optional[set] = None, limit: int = 8) -> list[dict]:
+                    promoted_ids: Optional[set] = None,
+                    promotion_known: bool = True, limit: int = 8) -> list[dict]:
     """Ranked recommendations across many listing records (best first). Keeps
     the single strongest action per listing so the list spans the whole
     portfolio instead of piling onto one item."""
@@ -121,7 +134,8 @@ def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
         for r in recommend_for(
                 it, metrics=metrics_by_id.get(it.get("id")),
                 rate=rates_by_id.get(it.get("id")),
-                promoted=it.get("id") in promoted_ids):
+                promoted=it.get("id") in promoted_ids,
+                promotion_known=promotion_known):
             held = best.get(r["listing_id"])
             if held is None or r["priority"] > held["priority"]:
                 best[r["listing_id"]] = r

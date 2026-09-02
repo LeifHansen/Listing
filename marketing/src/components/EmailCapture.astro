@@ -1,0 +1,65 @@
+---
+/**
+ * Notify-me capture.
+ *
+ * A static site has no backend, so the transport is configurable rather than
+ * baked in: set PUBLIC_SIGNUP_ENDPOINT (a HubSpot form endpoint, a Pages
+ * Function, anything that accepts a POST) and the form posts to it. With
+ * nothing configured it degrades to a mailto link rather than rendering a
+ * form that silently drops what people type into it.
+ */
+import Button from "./Button.astro";
+import { site } from "../lib/site.js";
+
+const { label = "Get notified", note = "", source = "site" } = Astro.props;
+const endpoint = import.meta.env.PUBLIC_SIGNUP_ENDPOINT || "";
+---
+{endpoint ? (
+  <form
+    class="signup-form mt-6 flex w-full max-w-md flex-col gap-3 sm:flex-row"
+    action={endpoint}
+    method="post"
+    data-source={source}
+  >
+    <label class="sr-only" for={`email-${source}`}>Email address</label>
+    <input
+      id={`email-${source}`}
+      type="email"
+      name="email"
+      required
+      autocomplete="email"
+      placeholder="you@example.com"
+      class="h-12 flex-1 rounded-input border border-line bg-card px-4 text-sm text-ink shadow-card outline-none placeholder:text-ink-secondary focus-visible:border-blue"
+    />
+    <input type="hidden" name="source" value={source} />
+    <Button variant="primary" size="lg" type="submit">{label}</Button>
+  </form>
+) : (
+  <div class="mt-6">
+    <Button href={`mailto:${site.supportEmail}?subject=Notify%20me&body=Let%20me%20know%20when%20this%20is%20available.`} variant="primary" size="lg">
+      {label}
+    </Button>
+  </div>
+)}
+{note && <p class="mt-3 text-sm text-ink-secondary">{note}</p>}
+<p class="signup-done mt-3 hidden text-sm font-semibold text-green-ink">
+  You're on the list — we'll be in touch.
+</p>
+
+<script is:inline>
+  // Progressive enhancement: post in the background so the visitor stays on
+  // the page. Without JS the form still submits normally.
+  document.querySelectorAll(".signup-form").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const done = form.parentElement?.querySelector(".signup-done");
+      try {
+        await fetch(form.action, { method: "POST", body: new FormData(form) });
+      } catch (e) {
+        /* the address is captured or it is not; nothing useful to say here */
+      }
+      form.reset();
+      done?.classList.remove("hidden");
+    });
+  });
+</script>

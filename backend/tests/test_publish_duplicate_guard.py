@@ -84,17 +84,27 @@ def test_one_listings_publishes_are_serialized():
     lock = publish_guard.session_lock("sess-1")
     overlapped = []
     inside = threading.Event()
+    tried = threading.Event()
 
     def hold():
         with publish_guard.session_lock("sess-1"):
             inside.set()
-            # Long enough that a second thread WOULD get in if the lock didn't
-            # hold it out.
-            threading.Event().wait(0.15)
+            # Held until the other thread has actually TRIED, rather than for
+            # a fixed 0.15s. The sleep was a bet that the contending thread
+            # gets scheduled inside that window: miss it on a loaded runner
+            # and the lock is already free, the acquire succeeds, and the test
+            # reports "the second publish got in while the first ran" — the
+            # exact opposite of what happened. Waiting on the attempt itself
+            # proves the lock was held ACROSS it, with no timing assumption.
+            assert tried.wait(5), "the contending thread never ran"
 
     def contend():
-        inside.wait(1)
-        overlapped.append(lock.acquire(blocking=False))
+        inside.wait(5)
+        got = lock.acquire(blocking=False)
+        overlapped.append(got)
+        if got:                 # only on the failure below; keep it clean
+            lock.release()
+        tried.set()
 
     t1, t2 = threading.Thread(target=hold), threading.Thread(target=contend)
     t1.start()
@@ -127,10 +137,27 @@ def test_the_same_listing_gets_the_same_lock():
     ("Inventory tracking number already exists.", ""),
     ("The InventoryTrackingNumber is not unique.", ""),
     ("Duplicate UUID supplied.", ""),
-    ("anything at all", "21916884"),
+    # eBay's real duplicate-UUID code, which used to be missing from the set.
+    ("Duplicate UUID used.", "488"),
+    ("The specified UUID has already been used; item ID=110040602158.", "488"),
 ])
 def test_ebays_ways_of_saying_already_listed_are_recognized(message, code):
     assert ebay_trading._is_duplicate_rejection(
+        ebay_trading.TradingError(message, code=code))
+
+
+@pytest.mark.parametrize("message, code", [
+    # 21916884/21916885 used to be in _DUPLICATE_CODES and are NOT idempotency
+    # signals -- they belong to eBay's item-CONDITION family (21916885 is
+    # "Dropped condition from Item specifics", 21916886 is "Item condition
+    # definitions have changed"). Reporting one as "already published" told the
+    # seller their listing was live and swallowed the message saying what to
+    # fix.
+    ("Condition is required for this category.", "21916884"),
+    ("Dropped condition from Item specifics.", "21916885"),
+])
+def test_a_condition_rejection_is_not_an_idempotency_signal(message, code):
+    assert not ebay_trading._is_duplicate_rejection(
         ebay_trading.TradingError(message, code=code))
 
 
@@ -220,11 +247,23 @@ def sent(monkeypatch):
 
 
 def test_the_create_carries_both_forms_of_the_key(sent, listing):
+    """This asserted <InventoryTrackingNumber>, which is not an element of
+    eBay's ItemType at all: AddFixedPriceItem ignores it, so the second guard
+    it was supposed to provide never existed and the GetItem lookup built on
+    it could never succeed. eBay's documented pairing for recovering a lost
+    AddFixedPriceItem response is Item.SKU plus
+    Item.InventoryTrackingMethod=SKU, both set on the CREATE (a later revise
+    drops the method, so it cannot be added afterwards).
+
+    https://developer.ebay.com/support/kb-article?KBid=1462
+    """
     ebay_trading.create_listing("tok", listing, ["https://x/1.jpg"],
                                 postal_code="97201",
                                 idempotency_key="qf-abc123")
     body = sent[0]
-    assert "<InventoryTrackingNumber>qf-abc123</InventoryTrackingNumber>" in body
+    assert "<InventoryTrackingNumber>" not in body
+    assert "<SKU>qf-abc123</SKU>" in body
+    assert "<InventoryTrackingMethod>SKU</InventoryTrackingMethod>" in body
     assert f"<UUID>{ebay_trading._uuid_form('qf-abc123')}</UUID>" in body
 
 
@@ -296,7 +335,7 @@ class _RefusingTrading:
             "This listing was already published to eBay.",
             item_id=self.named_item)
 
-    def item_id_for_tracking_number(self, token, key):
+    def item_id_for_sku(self, token, key):
         return self.by_tracking
 
 

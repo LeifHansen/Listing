@@ -86,8 +86,14 @@ export function NotificationsBell() {
             </div>
 
             {items.length === 0 ? (
+              // "Nothing yet" is a claim about the seller's SALES, on the
+              // surface they check to find out whether they owe a buyer a
+              // parcel. A read that failed underneath a 200 must not make it.
               <p className="px-4 py-8 text-center text-[13px] text-ink-secondary">
-                Nothing yet — when an item sells, it lands here so you can ship it fast.
+                {notifications.checked === false
+                  ? "We couldn’t load your notifications just now — this doesn’t "
+                    + "mean nothing has sold. We’ll try again in a moment."
+                  : "Nothing yet — when an item sells, it lands here so you can ship it fast."}
               </p>
             ) : (
               <ul className="max-h-[24rem] overflow-y-auto divide-y divide-line">

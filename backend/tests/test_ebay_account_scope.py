@@ -28,11 +28,18 @@ class FakeDb:
     def list_listings(self, limit=50, user_id=None):
         return [r for r in self.records.values() if r.get("user_id") == user_id]
 
+    def enabled(self):
+        return True
+
     def upsert_listing(self, listing_id, listing, status="draft", user_id=None,
                        when=None):
         rec = self.records.get(listing_id) or {"id": listing_id, "user_id": user_id}
         rec.update({"listing": listing, "status": status})
         self.records[listing_id] = rec
+        # True, like the real one: callers check it before destroying anything
+        # (see listing_sync.refresh_statuses), so a double that answers None
+        # makes every one of those look like a failed write.
+        return True
 
     def delete_listing(self, listing_id, user_id=None):
         if listing_id in self.records:

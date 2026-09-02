@@ -1,0 +1,24 @@
+---
+import { pipeline } from "../lib/site.js";
+const { limit = pipeline.length } = Astro.props;
+const steps = pipeline.slice(0, limit);
+---
+<ol class="mt-14 space-y-4">
+  {steps.map((stage) => (
+    <li class="relative grid gap-5 rounded-card border border-line bg-card p-6 shadow-card sm:grid-cols-[auto_1fr] sm:p-8">
+      <div class="flex sm:block">
+        <span
+          class="grid size-12 place-items-center rounded-tile bg-blue-soft font-display text-lg font-semibold text-blue-strong"
+          aria-hidden="true"
+        >
+          {stage.step}
+        </span>
+      </div>
+      <div>
+        <h3 class="text-xl">{stage.title}</h3>
+        <p class="mt-2 text-ink-secondary">{stage.blurb}</p>
+        <p class="mt-3 text-sm font-semibold text-ink-secondary">{stage.detail}</p>
+      </div>
+    </li>
+  ))}
+</ol>

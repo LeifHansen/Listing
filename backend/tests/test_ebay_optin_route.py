@@ -108,6 +108,12 @@ def test_a_disconnected_account_is_told_to_connect(monkeypatch):
 # One policy eBay won't make must not cost the other two: the most common
 # reason is the account not being opted in yet, which is a different button on
 # the same screen, and an all-or-nothing failure hides which part worked.
+#
+# These posted `{}` when the route created policies unasked. It now requires
+# the seller to have seen the terms (see test_policy_terms_consent.py), so the
+# payload carries that acknowledgement -- these two tests are about what the
+# route REPORTS and what it saves, both of which are past the gate. The gate
+# itself is asserted there, including that `{}` creates nothing.
 
 def test_a_partial_failure_still_reports_what_was_created(connected, monkeypatch):
     monkeypatch.setattr(main.ebay_auth, "ensure_service_policy",
@@ -122,7 +128,8 @@ def test_a_partial_failure_still_reports_what_was_created(connected, monkeypatch
     monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: None)
     monkeypatch.setattr(main.ebay_account, "note_verified", lambda uid: None)
 
-    body = connected.post("/api/ebay/ensure-all-policies", json={}).json()
+    body = connected.post("/api/ebay/ensure-all-policies",
+                   json={"accept_terms": True}).json()
     assert body["ok"] is False
     assert body["created"] == ["fulfillment"]
     assert "not opted in" in body["errors"]["return"]
@@ -145,7 +152,8 @@ def test_a_policy_the_seller_already_chose_is_not_overwritten(connected, monkeyp
                         lambda uid, **kw: saved.update(kw))
     monkeypatch.setattr(main.ebay_account, "note_verified", lambda uid: None)
 
-    connected.post("/api/ebay/ensure-all-policies", json={})
+    connected.post("/api/ebay/ensure-all-policies",
+                   json={"accept_terms": True})
     assert "fulfillment_policy_id" not in saved
     assert saved == {"payment_policy_id": "PP-1", "return_policy_id": "RP-1"}
 

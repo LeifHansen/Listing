@@ -1,0 +1,11 @@
+---
+/** Matches the app's Card: cream surface, hairline border, near-invisible shadow. */
+const { class: className = "", hover = false } = Astro.props;
+---
+<div
+  class={`rounded-card border border-line bg-card p-6 shadow-card ${
+    hover ? "transition-shadow duration-200 hover:shadow-card-hover" : ""
+  } ${className}`}
+>
+  <slot />
+</div>

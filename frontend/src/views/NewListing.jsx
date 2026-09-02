@@ -19,7 +19,9 @@ import { BulkQueue } from "./listing/BulkMode";
 import { DraftsStrip } from "./listing/DraftsStrip";
 import { ImageEditor } from "./listing/ImageEditor";
 import { SoldArchive } from "./listing/SoldArchive";
+import { ConflictBanner } from "./listing/ConflictBanner";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
+import { FinishUpCard } from "./listing/FinishUpCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard, PromoteCard, EtsyCard, DepopCard,
@@ -394,6 +396,20 @@ function Workflow() {
           so feedback is visible no matter where the page is scrolled. */}
       {w.aiBusy && <LoadingOverlay messages={w.aiBusy} />}
 
+      {/* Above everything: an unanswered conflict is an edit that will never
+          reach eBay, so it is not something to scroll past. */}
+      {(session?.conflicts || []).length > 0 && (
+        <motion.div variants={rise}>
+          <ConflictBanner
+            conflicts={session.conflicts}
+            sessionId={session.sessionId}
+            onResolved={(r) => setSession((cur) => (cur ? {
+              ...cur, listing: r.listing, conflicts: r.conflicts,
+            } : cur))}
+          />
+        </motion.div>
+      )}
+
       <motion.div variants={rise}>
         <RefineBar w={w} />
       </motion.div>
@@ -424,6 +440,10 @@ function Workflow() {
           <ShippingCard w={w} />
           <PromoteCard w={w} />
         </MoreDetails>
+        {/* The last step before Publish: one pass that fills in everything
+            the photos can still answer. (A sold record never reaches here —
+            it returns as a SoldArchive well above.) */}
+        <FinishUpCard w={w} />
         <PublishCard w={w} />
       </motion.div>
 

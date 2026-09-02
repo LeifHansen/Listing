@@ -11,12 +11,14 @@
  * and the listings layout rather than the server. Every accessor is guarded:
  * private mode and storage-blocked browsers throw on read.
  */
-const KEY = "quickflip-remove-bg";
+import { readLocal, writeLocal } from "./localPrefs";
+
+const KEY = "remove-bg";   // see lib/localPrefs
 
 export function lastRemoveBg() {
-  try { return localStorage.getItem(KEY) === "yes"; } catch (e) { return false; }
+  return readLocal(KEY) === "yes";
 }
 
 export function rememberRemoveBg(on) {
-  try { localStorage.setItem(KEY, on ? "yes" : "no"); } catch (e) {}
+  writeLocal(KEY, on ? "yes" : "no");
 }

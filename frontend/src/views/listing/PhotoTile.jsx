@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Trash2, Pencil, RotateCw, Star, ChevronLeft, ChevronRight,
 } from "lucide-react";
@@ -19,7 +19,25 @@ import { cn, mediaUrl } from "@/lib/utils";
  * spinning the <img> 90 degrees in its square frame is exactly what the saved
  * photo will look like — no distortion, no guess. The CSS rotation holds until
  * the re-encoded file has loaded, so there is no flash of the old orientation.
+ *
+ * "Until the re-encoded file has loaded" is the whole trick, and it is not the
+ * same moment as "until `version` changes". The version bumps the instant the
+ * server answers, which only points the <img> at a new URL; the browser keeps
+ * painting the OLD bytes until that fetch comes back. So the spin is tracked
+ * against the version it was applied to and cleared by the load event of a
+ * LATER one — never by the version prop on its own, which fires a frame after
+ * the rotate lands and produced the exact flash described above on every
+ * single rotate: turned, snapped back, turned again.
  */
+
+// The `?v=` an <img> actually painted, read off the element's own src. React
+// state has by then moved on to the version being fetched, and asking it
+// instead is the confusion this component exists to avoid.
+function loadedVersion(src) {
+  const m = /[?&]v=(\d+)/.exec(src || "");
+  return m ? Number(m[1]) : null;
+}
+
 export function PhotoTile({
   sessionId, name, version, index, total, onDelete, onRotate, onEdit,
   onMakeMain, onMove, reorderable,
@@ -27,33 +45,60 @@ export function PhotoTile({
   const [rotating, setRotating] = useState(false);
   // Degrees applied optimistically, ahead of the server.
   const [spin, setSpin] = useState(0);
+  // The photo version those degrees sit ON TOP OF — i.e. the bytes the spin
+  // is correcting. `settle` below compares the version that actually painted
+  // against this one, which is what makes "the turn is in the file now" a
+  // fact rather than a guess about timing.
+  const spunOn = useRef(version);
   const isMain = index === 0;
 
-  // Belt and braces: if a load event is ever missed, a version bump still
-  // clears the optimistic spin rather than leaving the tile turned twice.
-  //
-  // This deliberately stays in an effect rather than becoming a render-phase
-  // derivation. The primary reset is the <img>'s onLoad below, timed to the
-  // moment the re-encoded file is actually on screen — a version bump only
-  // changes `src`, and the browser keeps painting the OLD bytes until the new
-  // ones arrive. Clearing during render would drop the CSS rotation a frame
-  // sooner, i.e. off the image still being displayed, which is exactly the
-  // flash of the old orientation this component is built to avoid. It cannot
-  // cascade: it reads `version` and never writes it.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { setSpin(0); }, [version]);
+  // Belt and braces: if the load event never arrives — a decode failure, the
+  // new file 404ing, a load the browser coalesces away — the CSS turn still
+  // has to come off, or the tile sits at 180 degrees for a 90 degree rotate.
+  // Armed only while a spin is outstanding against a version that has already
+  // been superseded, so in the normal case (onLoad settles it a few hundred
+  // milliseconds later) this arms and clears without ever firing.
+  useEffect(() => {
+    if (!spin || version === spunOn.current) return undefined;
+    const timer = setTimeout(() => {
+      spunOn.current = version;
+      setSpin(0);
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [spin, version]);
 
   const rotate = async () => {
     if (rotating || !onRotate) return;
     setRotating(true);
+    // Restored on failure along with the degrees: a spin that is taken back
+    // must leave the tile pointing at the same bytes it was before, or the
+    // next load settles the wrong turn against the wrong file.
+    const before = spunOn.current;
+    spunOn.current = version;
     setSpin((deg) => deg + 90);
     try {
       await onRotate();
     } catch (e) {
+      // The saved photo did not turn, so neither should the tile. This is
+      // only reachable because rotateImage rethrows after its toast.
+      spunOn.current = before;
       setSpin((deg) => deg - 90);
     } finally {
       setRotating(false);
     }
+  };
+
+  // The re-encoded file is on screen, so the turn is in the pixels and the
+  // CSS one comes off. Guarded on the version that ACTUALLY loaded: the
+  // tile's first load, and any reload of the version the spin was applied
+  // to, is still the un-turned photo, and clearing there is the flash this
+  // is built to avoid. onError settles too — a turn held over a broken image
+  // is meaningless, and would otherwise never be cleared.
+  const settle = (e) => {
+    const loaded = loadedVersion(e?.currentTarget?.src);
+    if (loaded === null || loaded === spunOn.current) return;
+    spunOn.current = loaded;
+    setSpin(0);
   };
 
   const corner = "z-10 grid place-items-center size-8 rounded-full "
@@ -70,7 +115,8 @@ export function PhotoTile({
         src={`${mediaUrl(sessionId, name)}?v=${version}`}
         alt=""
         draggable={false}
-        onLoad={() => setSpin(0)}
+        onLoad={settle}
+        onError={settle}
         style={spin ? { transform: `rotate(${spin}deg)` } : undefined}
         className="size-full object-cover"
       />

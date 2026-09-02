@@ -39,7 +39,7 @@ jobs:
       # the alarm into noise that trains the operator to ignore it.
       # fetch-depth: the build-drift step below needs recent history to decide
       # whether the commit production reports is one of ours.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 50
 
@@ -69,6 +69,9 @@ jobs:
         # about disk, storage or the database to explain it.
         if: always()
         run: |
+          # Liveness first, and on its own, so "the app is not answering at
+          # all" stays its own message rather than arriving as "/api/ready did
+          # not return JSON".
           code=$(curl -sS -m 20 -o /tmp/health.json -w '%{http_code}' "$SITE/api/health" || echo 000)
           echo "HTTP $code"
           cat /tmp/health.json 2>/dev/null | tr ',' '\n' || true
@@ -76,7 +79,17 @@ jobs:
             echo "::error::/api/health returned $code - the app is not answering"
             exit 1
           fi
-          python3 .github/scripts/check_health.py /tmp/health.json "$MIN_FREE_MB"
+          # The NUMBERS come from /api/ready (fetched by the step above), not
+          # from /api/health. /api/health is liveness plus the UI's capability
+          # flags and carries no disk, storage or database state at all -- it
+          # stopped publishing them when they moved behind the admin token.
+          # Reading them there anyway is what left this alarm failing on every
+          # schedule from 2026-08-31 against a healthy production, and an
+          # alarm that is always red cannot report a real problem.
+          #
+          # /api/ready is public too, so this workflow still needs no
+          # credential and still survives a token rotation.
+          python3 .github/scripts/check_health.py /tmp/ready.json "$MIN_FREE_MB"
 
       - name: Build drift (is production running what we shipped?)
         # always(): a machine serving old code often looks perfectly healthy,

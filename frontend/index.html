@@ -18,8 +18,16 @@
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@600;700&family=Nunito+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script>
     // Apply the saved theme before first paint to avoid a light-mode flash.
+    // This runs before the bundle exists, so it cannot call readLocal() -- it
+    // repeats that new-key-then-legacy-key read by hand, and src/lib/
+    // localPrefs.js has to keep matching it (src/theme-before-paint.test.js
+    // asserts they do). It is also the ONLY reader of the stored theme: the
+    // store seeds its state from the class set here, so a key this misses is
+    // a preference the whole app misses, not just a flash. No migration
+    // write -- a legacy key is carried forward by the next theme toggle.
     try {
-      const t = localStorage.getItem("quickflip-theme");
+      const t = localStorage.getItem("thryft-theme")
+        || localStorage.getItem("quickflip-theme");
       if (t === "dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches)) {
         document.documentElement.classList.add("dark");
       }

@@ -1,0 +1,136 @@
+/* ---------------------------------------------------------------------------
+   Thryft Shop marketing site — styles
+
+   The brand is NOT redefined here. This imports the app's own token file, so
+   the palette, type pairing, radii, shadows, dark mode, focus ring and
+   reduced-motion guard are literally the same declarations the product ships.
+   Change a token in frontend/src/styles/tokens.css and this site restyles with
+   it — there is no second copy of the brand to drift.
+
+   tokens.css begins with `@import "tailwindcss"`, so that comes along too.
+--------------------------------------------------------------------------- */
+@import "../../../frontend/src/styles/tokens.css";
+
+/* Tailwind v4 detects sources relative to the CSS file it is imported from —
+   which is the app's directory, not this one. Point it at the marketing
+   sources explicitly, and exclude the app so the marketing bundle is not
+   carrying utilities for a codebase it does not render. */
+@source "../";
+@source not "../../../frontend";
+@source not "../../../backend";
+
+/* ---------------------------------------------------------------------------
+   Text-safe accent inks.
+
+   The app's palette deepens its cornflower into `--brand-blue-strong` for
+   exactly one stated reason: so white button text meets WCAG contrast. The
+   same problem exists for the other three accents, and the app does not solve
+   it because a product UI mostly uses them as fills and borders. A marketing
+   page uses them as *small text* — eyebrows, pills, badges — where the logo
+   values land between 3.2:1 and 3.4:1 against cream and fail AA.
+
+   So these are the same four hues, darkened until they clear 4.5:1 on both the
+   cream canvas and the card surface. They are not new brand colors; they are
+   the read-at-12px versions of the existing ones, following the precedent
+   `--brand-blue-strong` already set.
+
+   In dark mode the problem inverts — a deep ink on navy is unreadable — so
+   each maps back to the light accent the dark theme already ships.
+
+   Worth upstreaming into frontend/src/styles/tokens.css if the app ever needs
+   accent text at small sizes.
+--------------------------------------------------------------------------- */
+:root {
+  --accent-blue-ink: var(--brand-blue-strong); /* 6.1:1 on blue-soft */
+  --accent-green-ink: #12705f;                 /* 5.4:1 on cream, 5.9:1 on card */
+  --accent-yellow-ink: #8a5a06;                /* 5.1:1 on yellow-soft */
+  --accent-red-ink: #b3341f;                   /* 5.2:1 on red-soft */
+}
+
+.dark {
+  --accent-blue-ink: var(--brand-blue);
+  --accent-green-ink: var(--brand-green);
+  --accent-yellow-ink: var(--brand-yellow);
+  --accent-red-ink: var(--brand-red);
+}
+
+@theme inline {
+  --color-blue-ink: var(--accent-blue-ink);
+  --color-green-ink: var(--accent-green-ink);
+  --color-yellow-ink: var(--accent-yellow-ink);
+  --color-red-ink: var(--accent-red-ink);
+}
+
+/* ---------------------------------------------------------------------------
+   Marketing-only additions. Everything above is shared with the app; these are
+   the page-level primitives a product UI never needs.
+--------------------------------------------------------------------------- */
+
+html {
+  scroll-behavior: smooth;
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+/* Anchor targets clear the sticky header instead of hiding behind it. */
+:target {
+  scroll-margin-top: 6rem;
+}
+
+/* The hero's warm wash — the cream canvas lifted with a breath of each brand
+   accent, so the top of the page reads as the logo without printing it twice.
+   Sits under content at low opacity, and is defined per theme rather than
+   hardcoded so dark mode gets the navy version. */
+.brand-wash {
+  background:
+    radial-gradient(60rem 30rem at 15% -10%, color-mix(in srgb, var(--brand-yellow) 18%, transparent), transparent 70%),
+    radial-gradient(50rem 28rem at 85% 0%, color-mix(in srgb, var(--brand-blue) 16%, transparent), transparent 70%),
+    radial-gradient(40rem 24rem at 50% 20%, color-mix(in srgb, var(--brand-green) 10%, transparent), transparent 70%);
+}
+
+/* Section rule that fades out at both ends rather than stopping dead. */
+.rule-fade {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+
+/* Long-form copy (legal pages, blog posts). Scoped to .prose so it cannot
+   reach the marketing layouts, which style their own headings. */
+.prose { color: var(--text-secondary); }
+.prose > * + * { margin-top: 1.1em; }
+.prose h2 {
+  color: var(--text);
+  font-size: 1.375rem;
+  margin-top: 2.25em;
+  margin-bottom: 0.6em;
+}
+.prose h3 {
+  color: var(--text);
+  font-size: 1.0625rem;
+  margin-top: 1.75em;
+  margin-bottom: 0.4em;
+}
+.prose ul, .prose ol { padding-left: 1.35em; }
+.prose li + li { margin-top: 0.4em; }
+.prose ul { list-style: disc; }
+.prose ol { list-style: decimal; }
+.prose strong { color: var(--text); font-weight: 600; }
+.prose a {
+  color: var(--brand-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose code {
+  font-size: 0.9em;
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  padding: 0.15em 0.4em;
+}
+.prose table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; }
+.prose th, .prose td {
+  text-align: left;
+  padding: 0.6em 0.8em;
+  border-bottom: 1px solid var(--border);
+}
+.prose th { color: var(--text); font-weight: 600; }

@@ -7,20 +7,25 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
+import base64
 import errno
 import hashlib
 import json
 import logging
 import os
 import random
+import re
+import secrets
 import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -30,22 +35,27 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import (auth, config, db, ebay_auth, etsy_auth, marketplaces, objstore,
-               ratelimit, storage)
+from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
+               objstore, ratelimit, redact, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
-from .models import (ImageOrderRequest, ItemSpecific, Listing,
-                     MarketplaceState, PublishRequest,
+from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
+                     Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, duplicates, ebay, ebay_account,
-                       ebay_orders, ebay_trading, image_import, images, jobstore,
+from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
+                       ebay_account, ebay_deletion, ebay_notify, ebay_orders,
+                       ebay_trading, image_import, images, jobstore,
                        listing_merge, listing_sync, messages as messages_service,
-                       metrics, notifications, orient, preflight, pricing,
-                       promotions, recommender, sync_guard, taxonomy, tokens)
+                       metrics, notifications, orient, owed_refunds, preflight,
+                       pricing, promotions, recommender, sync_guard, sync_merge,
+                       taxonomy, tokens)
 from .services import etsy as etsy_service
+from .services import deletion_queue
+from .services import policy_terms as ebay_policy_terms
+from .services import errorlog
 from .services.background import run_in_background
 
 
@@ -66,6 +76,16 @@ async def _lifespan(_app: FastAPI):
     """
     _warm_models()
     _adopt_job_mirrors()
+    # Erasures an earlier process promised and did not finish. Started here
+    # rather than run inline: a backlog is a pass over object storage, and it
+    # must not hold up serving. It is a thread rather than a durable worker
+    # (that is still open), but the OBLIGATION is durable now, so a process
+    # that dies mid-pass leaves the remaining rows for the next one.
+    _in_background(_finish_pending_deletions, what="deletion backlog")
+    # Money a seller is owed for AI that did not work. Same shape as the
+    # deletion backlog above: the obligation outlived the process, so the next
+    # one settles it.
+    _in_background(_settle_owed_refunds, what="owed refunds")
     yield
 
 
@@ -81,8 +101,255 @@ app.add_middleware(
                    "https://localhost", "http://localhost"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the Capacitor shell cannot READ the header, so a crash
+    # reported from the native app would carry no reference and could not be
+    # joined to the request that caused it.
+    expose_headers=["X-Request-Id"],
     max_age=86400,
 )
+
+
+FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
+
+# An inline <script>…</script>. The lookahead excludes anything with a src=,
+# which is an EXTERNAL script covered by 'self' — hashing its empty body would
+# add a meaningless entry to the policy.
+_INLINE_SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+                               re.S | re.I)
+
+
+def _inline_script_hashes(html: str) -> list[str]:
+    """A CSP sha256 source for every inline script in `html`.
+
+    The bytes hashed are exactly what sits between the tags — leading
+    newline, indentation and all — because that is what a browser hashes. A
+    stripped or re-indented body yields a hash that simply never matches, and
+    nothing but a browser will say so.
+    """
+    out = []
+    for match in _INLINE_SCRIPT_RE.finditer(html):
+        body = match.group(1)
+        if not body:
+            continue
+        digest = hashlib.sha256(body.encode("utf-8")).digest()
+        out.append(f"'sha256-{base64.b64encode(digest).decode()}'")
+    return out
+
+
+def build_csp(index_html: Path) -> str:
+    """The Content-Security-Policy, with script-src derived from what the app
+    actually serves.
+
+    script-src used to carry 'unsafe-inline', which is the allowance that
+    matters: with it, an injected `<script>` runs. It was there for one honest
+    reason — index.html applies the saved theme before first paint to avoid a
+    light-mode flash, and a policy that blanks the app is worse than a partial
+    one.
+
+    So the hashes are read from the built index.html AT STARTUP rather than
+    written into this file. A hardcoded hash goes stale the first time anyone
+    edits that snippet, and the symptom is a white screen in production, for
+    everyone, after a green deploy. Reading the served file cannot drift from
+    it.
+
+    With no readable index.html there is no frontend to protect and no hash
+    that could be right — a dev checkout, or a container where the build has
+    not run — so script-src falls back to what it was.
+
+    style-src still allows inline: React sets element styles directly and
+    Tailwind emits them, so there is nothing to hash. CSS injection is a real
+    but far narrower problem than script execution, and leaving it open
+    knowingly beats leaving script-src open to avoid saying so.
+
+    img-src allows https: because listings legitimately show eBay-hosted
+    photos (i.ebayimg.com), and data:/blob: because the photo editor works on
+    canvas output before anything is uploaded.
+    """
+    try:
+        hashes = _inline_script_hashes(index_html.read_text(encoding="utf-8"))
+        script_src = " ".join(["script-src 'self'", *hashes])
+    except OSError:
+        script_src = "script-src 'self' 'unsafe-inline'"
+    return "; ".join((
+        "default-src 'self'",
+        script_src,
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com data:",
+        "img-src 'self' https: data: blob:",
+        "connect-src 'self' https:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        # Clickjacking: the app has publish and delete buttons, so being framed
+        # by another site is never legitimate. X-Frame-Options below says the
+        # same thing for browsers that predate frame-ancestors.
+        "frame-ancestors 'none'",
+    ))
+
+
+# The response headers a browser needs in order to defend the seller, none of
+# which were being sent. Assembled once — they are the same on every response.
+_CSP = build_csp(FRONTEND_DIR / "index.html")
+
+# An inbound X-Request-Id is echoed back and written into logs, so its shape
+# is checked before it is trusted with either: 8-32 hex characters, which is
+# what this app mints and nothing else.
+_REFERENCE_RE = re.compile(r"[0-9a-fA-F]{8,32}")
+
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": _CSP,
+    "X-Frame-Options": "DENY",
+    # Stops a browser guessing that an uploaded file is HTML and running it.
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    # Nothing here needs these. `camera=(self)` rather than `()` because the
+    # upload buttons use <input capture="environment">, which some browsers
+    # gate on the camera policy even though it is only a file picker.
+    "Permissions-Policy": ("camera=(self), microphone=(), geolocation=(), "
+                           "payment=(), usb=(), interest-cohort=()"),
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Attach the security headers to every response.
+
+    HSTS is added only when the request actually arrived over HTTPS: sending
+    it on a plain-HTTP local run would pin developers' browsers to https://
+    localhost, which nothing here serves.
+    """
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if request.url.scheme == "https" or forwarded == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains")
+    return response
+
+
+@app.exception_handler(errors.InvalidSessionId)
+async def _invalid_session_id(request: Request, exc: errors.InvalidSessionId):
+    """A session id outside the accepted form answers 400, not 500.
+
+    Making safe_session_name REJECT rather than rewrite (the fix for the
+    ownership bypass) meant a malformed id raised out of whatever handler
+    touched storage, and every one of them returned "Internal Server Error".
+    Wrong on both counts: the caller sent something bad, which is a 400, and
+    dressing it as a server fault buries real 500s under scanner noise —
+    these routes need no login, so junk ids arrive constantly.
+
+    Handled centrally for the same reason as StorageUnavailable: a route
+    added later cannot forget to.
+    """
+    log.info("rejected an invalid session id on %s %s",
+             request.method, request.url.path)
+    return JSONResponse(status_code=400,
+                        content={"detail": "That listing id isn't valid."})
+
+
+@app.exception_handler(errors.StorageUnavailable)
+async def _storage_unavailable(request: Request, exc: errors.StorageUnavailable):
+    """A write that did not commit answers 503, everywhere, automatically.
+
+    Handled once here rather than at each call site so a command added later
+    cannot forget to — the failure mode this replaces was precisely a route
+    that reported success because nobody remembered to check.
+
+    503 and not 4xx: the seller did nothing wrong and retrying is the right
+    next move. A 404 would send them to reconnect an account that is fine.
+    """
+    log.warning("storage unavailable on %s %s: %s",
+                request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc) or "Storage is unavailable right now — "
+                                       "please try again in a moment."},
+    )
+
+
+# The errnos that mean "the volume would not take the write". Everything else
+# an OSError can carry is a bug or a genuine I/O fault and keeps its 500.
+_OUT_OF_SPACE = {errno.ENOSPC, errno.EDQUOT, errno.EROFS}
+
+
+@app.exception_handler(OSError)
+async def _out_of_space(request: Request, exc: OSError):
+    """A full volume answers 507 with a next step, everywhere, automatically.
+
+    Five upload paths already recognised ENOSPC and said so. Every other write
+    — the editor's save, both PATCH routes, anything else that reaches
+    storage.save_listing — let the OSError out as "Internal Server Error".
+    That is wrong the same two ways the invalid-session-id handler above
+    documents: the seller is shown a fault with no next step, and a real 500
+    gets buried under a condition that is merely operational. It is also the
+    failure this deployment is most likely to hit, since one small Fly volume
+    holds every seller's photos.
+
+    The message is the one the upload paths already use, and it deliberately
+    does not carry `str(exc)` — that names the server's own filesystem.
+    """
+    if getattr(exc, "errno", None) not in _OUT_OF_SPACE:
+        raise exc
+    log.error("out of storage on %s %s (errno=%s)",
+              request.method, request.url.path, getattr(exc, "errno", None))
+    return JSONResponse(
+        status_code=507,
+        content={"detail": "The server is out of storage space — try again "
+                           "shortly."},
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """The last resort: a crash answers with a reference somebody can quote.
+
+    Until this existed, anything nobody handled fell through to Starlette's
+    default and became a bare "Internal Server Error" — no reference, no
+    record, and nothing tying the seller's report to the traceback uvicorn
+    printed. The seller was shown a fault with no next step, which is the same
+    complaint the two handlers above were written for.
+
+    Two things about this are easy to get wrong.
+
+    It does NOT swallow. Starlette's ServerErrorMiddleware calls this handler
+    to build the response and then re-raises, so uvicorn still logs the
+    traceback and TestClient(raise_server_exceptions=True) still raises. The
+    handler is additive; no existing test changes behaviour because of it.
+
+    It runs OUTSIDE every @app.middleware("http"), including _security_headers
+    — ServerErrorMiddleware is the outermost layer Starlette installs. So the
+    headers have to be applied here by hand, or the one response an attacker
+    can most easily steer the app into would be the only one served without a
+    CSP. test_security_headers.py::test_an_error_response_is_protected_too
+    passes today only because a 404 is raised INSIDE the middleware stack.
+    """
+    reference = errorlog.current_reference() or errorlog.new_reference()
+    # error, not exception: ServerErrorMiddleware re-raises after this, so
+    # uvicorn prints the traceback anyway and log.exception would put a
+    # second copy of it in the Fly window. The row below keeps its own.
+    #
+    # errorlog_skip stops the capture handler recording this line as well:
+    # it would fingerprint on THIS function, so every unhandled error in the
+    # app would collapse into one row called "_unhandled". The explicit
+    # record() below fingerprints at the innermost frame instead — the place
+    # that actually broke.
+    log.error("unhandled error on %s %s [%s]: %s", request.method,
+              request.url.path, reference, exc,
+              extra={"errorlog_skip": True})
+    errorlog.record(kind="backend", level="ERROR", exc=exc, status=500,
+                    route=request.url.path, method=request.method,
+                    reference=reference)
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Something went wrong on our end. If you need "
+                           f"help, quote {reference}."},
+    )
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    response.headers.setdefault("X-Request-Id", reference)
+    return response
 
 
 class _DropDeletionAcks(logging.Filter):
@@ -104,11 +371,17 @@ class _DropDeletionAcks(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_DropDeletionAcks())
 
+# Mirror WARNING-and-above into error_events, so the Errors tab and the daily
+# triage job have something to read. Installed here, beside the other log
+# wiring, rather than in config.py — importing config must never start a
+# thread or open a database connection, since every test and every script
+# does it. See services/errorlog for why capture is at the handler and not at
+# the 400-odd call sites. This only fills an in-memory queue; the thread that
+# drains it into Postgres starts with the other daemons in _warm_models.
+errorlog.install()
+
 # The frontend is a Vite/React app; serve its build output. (The Dockerfile
 # builds it in a node stage; run.sh builds it for local dev.)
-FRONTEND_DIR = config.ROOT_DIR / "frontend" / "dist"
-
-
 @app.middleware("http")
 async def _cache_headers(request: Request, call_next):
     """Cache policy: index.html must always revalidate so a deploy is visible
@@ -121,7 +394,21 @@ async def _cache_headers(request: Request, call_next):
     if path.startswith("/assets/"):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     elif path.startswith("/media/"):
-        response.headers.setdefault("Cache-Control", "public, max-age=3600")
+        # "no-cache" is NOT "don't cache" — it is "cache it, but ask before
+        # you use it". A photo is MUTABLE at a stable URL: rotate, crop,
+        # auto-clean and background removal all rewrite the same file in
+        # place. This used to be max-age=3600, which was only safe as long as
+        # the URL changed whenever the bytes did — and it doesn't. The
+        # editor's cache-buster is a per-mount counter that starts at 0 again
+        # every time the editor opens (imageVersions in useListingForm.js), so
+        # a photo rotated at ?v=1 is asked for at ?v=0 on the next open, and
+        # the browser answered that from the copy it took BEFORE the rotate.
+        # The seller rotated a photo, reopened the listing, and watched it
+        # come back sideways -- indistinguishable from a rotation that never
+        # saved, though the file on disk was right the whole time.
+        # Revalidation costs a 304 with no body (see the media route, which
+        # answers them); not revalidating cost the seller their edit.
+        response.headers.setdefault("Cache-Control", "no-cache")
     elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
         response.headers["Cache-Control"] = "no-cache"
     elif path.startswith("/api/"):
@@ -132,6 +419,36 @@ async def _cache_headers(request: Request, call_next):
         # debugging an account switch against yesterday's answer. no-store,
         # not no-cache: there is nothing here worth revalidating.
         response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.middleware("http")
+async def _request_context(request: Request, call_next):
+    """Give every request an id, and publish it as X-Request-Id.
+
+    Registered LAST on purpose. With @app.middleware("http") the last one
+    registered runs OUTERMOST, so this opens the context before
+    _cache_headers, _security_headers or any route can log a line — which is
+    the whole point, since a line logged before the context exists carries no
+    reference and joins to nothing.
+
+    The id is the same 8 hex characters _support_reference() has always
+    minted, and it is now the SAME VALUE the seller is shown. Before this,
+    each failure site minted its own, so the reference in a toast joined to
+    exactly one log line; it now joins to every line that request emitted,
+    plus its row in error_events.
+
+    An inbound X-Request-Id is honoured so the native shell (or a future
+    proxy) can carry one end to end. It is not a trusted value and never
+    reaches a query — it is a label, validated for shape only.
+    """
+    inbound = (request.headers.get("x-request-id") or "").strip()
+    reference = inbound if _REFERENCE_RE.fullmatch(inbound) else \
+        errorlog.new_reference()
+    errorlog.begin_request(method=request.method, path=request.url.path,
+                           reference=reference)
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-Id", reference)
     return response
 
 
@@ -305,6 +622,14 @@ def _reclaim_loop() -> None:
                 log.warning(
                     "reclaim: volume low (%d MB free) and nothing left to "
                     "reclaim - the volume needs more room", round(free / 1e6))
+            # Retried here as well as at startup: an R2 outage during an
+            # account deletion would otherwise leave the photos in the bucket
+            # until someone happened to redeploy. It also genuinely frees
+            # space, which is what this loop is for.
+            _finish_pending_deletions()
+            # Not about space, but it is the only recurring pass there is and
+            # a refund the seller is owed should not wait for a redeploy.
+            _settle_owed_refunds()
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
         time.sleep(delay)
@@ -348,6 +673,10 @@ def _warm_models() -> None:
     threading.Thread(target=objstore.probe, daemon=True).start()
     threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
+    # Drains the error queue into the database. Started here rather than at
+    # import, so a pytest run or a one-off script does not get a thread
+    # racing whatever it was about to assert.
+    errorlog.start_writer()
 
 
 def _base_url(request: Request) -> str:
@@ -373,6 +702,43 @@ def _rate_limit_auth(request: Request, bucket: str) -> None:
 
 @app.get("/api/health")
 def health() -> dict:
+    """Liveness, and nothing else.
+
+    This is anonymous and unrate-limited, so what it returns is published to
+    anyone who asks. It used to answer with 26 operator-diagnostic keys: the
+    running commit, the NAMES of unset environment variables, the R2 bucket
+    and URL mode, free disk, which Stripe mode the keys were in, config
+    warnings naming near-miss secret names, and the raw exception text from
+    the database and object store -- which carries the Neon host and role on
+    an auth failure and the R2 account id in its endpoint.
+
+    What stays is liveness plus the handful of FEATURE-availability booleans
+    the UI genuinely reads (it hides the AI banner and the category lookups on
+    them). Those say what the app can do, which a seller is entitled to know;
+    they name no secret, no host, no bucket and no environment variable. The
+    rest moved to /api/admin/diagnostics, which is the same data behind a
+    token.
+    """
+    return {
+        "ok": True,
+        # The commit this image was built from. Deliberately kept public: the
+        # deploy gate, deploy.sh and the health-watch alarm all poll it to
+        # prove production is running what was shipped (a poisoned builder
+        # cache has served an older image here before), and on a public repo
+        # a commit sha is not a secret. It is the one operator-ish field whose
+        # value outweighs its exposure.
+        "build": config.BUILD_SHA or "unknown",
+        # Read by the UI: App.jsx's setup banner, useListingForm's category
+        # lookups, ShopMode. Capability, not configuration.
+        "anthropic_configured": config.anthropic_ready(),
+        "ebay_configured": config.ebay_ready(),
+        "taxonomy_configured": config.taxonomy_ready(),
+    }
+
+
+def _diagnostics() -> dict:
+    """Everything an operator needs to tell "not configured" apart from
+    "misconfigured". Served only from the admin route above."""
     return {
         "ok": True,
         # The commit actually running. A deploy can report success while the
@@ -387,6 +753,19 @@ def health() -> dict:
         "ebay_env": config.EBAY_ENV,
         "ebay_oauth_ready": config.ebay_oauth_ready(),
         "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
+        # Etsy, where "configured" is only half the answer: which of Etsy's
+        # three access tiers the app is on decides how many shops may connect
+        # at all, and the roster is how the operator seats them. Counts, never
+        # the addresses — this is a diagnostics endpoint, not a place to hand
+        # out the beta's email list to anyone holding the admin token.
+        # `etsy_seats: 0` means no ceiling (Commercial Access); a roster
+        # larger than the ceiling also gets its own config_warnings() line,
+        # because the overflow is refused on Etsy's page rather than here.
+        "etsy_configured": config.etsy_oauth_ready(),
+        "etsy_access_tier": config.etsy_access_tier(),
+        "etsy_seats": config.etsy_seat_ceiling(),
+        "etsy_roster": len(config.ETSY_OWNER_EMAILS),
+        "etsy_gate_active": config.etsy_gate_active(),
         # adobe_configured = credentials present; adobe_ready = pipeline can
         # actually run (Adobe's APIs need R2 as presigned-URL hand-off storage).
         "adobe_configured": config.adobe_configured(),
@@ -422,13 +801,519 @@ def health() -> dict:
         # visibly deployed. [] means nothing adjacent was found.
         "config_warnings": config.config_warnings(),
         "db": db.db_status(),
+        # Erasures this deployment still owes: photos whose account is already
+        # deleted, and eBay account-deletion notices acknowledged but not yet
+        # carried out. Both are promises already made to somebody, so a number
+        # here that does not come back down is the alert. Counts only — the
+        # ids belong to people who asked to be forgotten.
+        "deletion_backlog": deletion_queue.backlog(),
+        # Refunds that did not commit and are still owed. Like the deletion
+        # backlog, a number here that does not come back down is a promise
+        # already made to somebody — in this case, their money.
+        "owed_refunds": owed_refunds.backlog(),
     }
+
+
+def _require_admin(request: Request) -> None:
+    """Fail CLOSED: an unset ADMIN_TOKEN denies rather than admits.
+
+    An absent secret reading as "no check required" is exactly how this
+    endpoint would end up public again on a deploy that forgot to set it --
+    which is the state it is being moved out of.
+    """
+    expected = (config.ADMIN_TOKEN or "").strip()
+    supplied = (request.headers.get("x-admin-token") or "").strip()
+    if not expected or not supplied or not secrets.compare_digest(supplied,
+                                                                 expected):
+        raise HTTPException(401, "Not authorised.")
+
+
+@app.get("/api/admin/diagnostics")
+def admin_diagnostics(request: Request) -> dict:
+    """The deployment detail /api/health used to hand out anonymously."""
+    _require_admin(request)
+    return _diagnostics()
+
+
+# --- superadmin console ------------------------------------------------------
+#
+# The operator console: cross-user reads and a handful of account actions,
+# gated by users.role rather than the shared header token above. The two
+# doors deliberately coexist: /api/admin/diagnostics keeps working with the
+# database down (curl/CI), while everything below authenticates a PERSON,
+# so every action can be written down with a name on it.
+#
+# These handlers live in THIS module on purpose. The ownership guardrail
+# (tests/test_every_scoped_route_checks_the_owner.py) AST-scans main.py and
+# nothing else — an admin route in a separate module would silently leave
+# that scan, which is exactly how the next cross-user read ships unreviewed.
+# If main.py is ever split, extend that test's MAIN/FUNCS first.
+
+def _require_superadmin(request: Request) -> dict:
+    """The signed-in superadmin, or 404. Fail CLOSED.
+
+    404 rather than 401/403, on purpose: (a) it does not confirm an admin
+    surface exists to whoever is probing for one; (b) lib/api.js treats any
+    401 as "session expired" and signs the caller out client-side — the
+    wrong outcome for a curious logged-in seller who typed /api/admin into
+    devtools. A database outage propagates as StorageUnavailable → 503, like
+    every other authenticated route: "cannot check" is never "not an admin".
+    The role is re-read from the user row on every request (current_user's
+    per-request read), so revoking it takes effect immediately — there is no
+    role claim inside the 30-day JWT to wait out.
+    """
+    user = auth.current_user(request)
+    if not user or (user.get("role") or "") != "superadmin":
+        raise HTTPException(404, "Not found")
+    return user
+
+
+def _audit_admin(admin: dict, request: Request, action: str,
+                 target_type: str = "", target_id: str = "",
+                 data: Optional[dict] = None) -> str:
+    """Write the audit row for an admin action, BEFORE the action runs.
+
+    Raises (→ 503) when it cannot: an admin action that cannot be written
+    down does not run. Returns the row id — token grants carry it in their
+    ledger `ref`, so the two trails reconcile mechanically.
+    """
+    return db.admin_audit(admin, action, target_type=target_type,
+                          target_id=target_id, ip=_client_ip(request),
+                          data=data)
+
+
+def _admin_cursor(stamp: Optional[str], row_id: Optional[str]) -> Optional[str]:
+    """The same opaque "<stamp>|<id>" token _cursor_for mints, for admin
+    pages keyed on their own timestamp columns. None when the row cannot
+    name a place in the order — the page then honestly offers no button."""
+    if not stamp or not row_id:
+        return None
+    raw = f"{stamp}|{row_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+@app.get("/api/admin/system")
+def admin_system(request: Request) -> dict:
+    """_diagnostics(), for the console's System tab. Same payload as
+    /api/admin/diagnostics behind the session gate instead of the header."""
+    _require_superadmin(request)
+    return _diagnostics()
+
+
+@app.get("/api/admin/overview")
+def admin_overview(request: Request, days: int = 30) -> dict:
+    """The platform KPIs plus the two obligation backlogs. Reads raise
+    rather than answering zeros — the console renders "couldn't check"."""
+    _require_superadmin(request)
+    if days not in (7, 30, 90):
+        days = 30
+    kpis = db.admin_platform_kpis(days)
+    kpis["deletion_backlog"] = deletion_queue.backlog()
+    kpis["owed_refunds"] = owed_refunds.backlog()
+    return kpis
+
+
+@app.get("/api/admin/users")
+def admin_users(request: Request, q: str = "", before: str = "",
+                limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 100))
+    cursor = _cursor_from(before) if before else None
+    # One row more than will be returned, so the answer can say whether it
+    # is the whole list — same probe-row trade as /api/listings.
+    rows = db.admin_list_users(limit=limit + 1, before=cursor, q=q)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    out = {"users": rows,
+           "rollups": db.admin_user_rollups([u["id"] for u in rows]),
+           "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
+                                         rows[-1].get("id"))
+                           if truncated and rows else None)}
+    try:
+        out["total"] = db.admin_count_users()
+    except errors.StorageUnavailable:
+        # The page is honest without it; a total must never be invented.
+        pass
+    return out
+
+
+@app.get("/api/admin/users/{user_id}")
+def admin_user_detail(user_id: str, request: Request) -> dict:
+    _require_superadmin(request)
+    detail = db.admin_get_user(user_id)
+    if detail is None:
+        raise HTTPException(404, "No such account.")
+    return {"user": detail}
+
+
+# The most an admin can hand out in one grant. Not a product limit — a
+# typo guard: 1000000 where 1000 was meant is a real balance someone
+# spends, and there is no undo that claws back what was already used.
+_ADMIN_GRANT_CAP = 100_000
+
+
+@app.post("/api/admin/users/{user_id}/grant-tokens")
+def admin_grant_tokens(user_id: str, request: Request,
+                       payload: Optional[dict] = None) -> dict:
+    """Credit an account (a support goodwill, a refund made right). The
+    ledger row's ref carries the audit row's id, and token_credit's unique
+    ref makes a retried grant a no-op rather than a double credit."""
+    admin = _require_superadmin(request)
+    body = payload or {}
+    try:
+        amount = int(body.get("tokens"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "How many tokens? Send a whole number.")
+    if not 1 <= amount <= _ADMIN_GRANT_CAP:
+        raise HTTPException(
+            400, f"Grants are 1 to {_ADMIN_GRANT_CAP} tokens.")
+    note = str(body.get("note") or "").strip()[:200]
+    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
+    if not target:
+        raise HTTPException(404, "No such account.")
+    audit_id = _audit_admin(admin, request, "grant_tokens", "user", user_id,
+                            data={"tokens": amount, "note": note})
+    res = db.token_credit(user_id, amount, ref=f"admin:{audit_id}",
+                          kind="grant",
+                          note=note or f"granted by {admin['email']}")
+    if res is None:
+        raise HTTPException(
+            503, "The grant was recorded but could not be applied — it was "
+                 "NOT credited. Try again in a moment.")
+    return {"ok": True, "granted": amount,
+            "already": bool(res.get("already"))}
+
+
+@app.post("/api/admin/users/{user_id}/revoke-sessions")
+def admin_revoke_sessions(user_id: str, request: Request) -> dict:
+    """Force-sign-out one account everywhere (a stolen token, a support
+    request). db.revoke_sessions is strict, so success here means the write
+    landed."""
+    admin = _require_superadmin(request)
+    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
+    if not target:
+        raise HTTPException(404, "No such account.")
+    _audit_admin(admin, request, "revoke_sessions", "user", user_id)
+    db.revoke_sessions(user_id)
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{user_id}/disable")
+def admin_set_disabled(user_id: str, request: Request,
+                       payload: Optional[dict] = None) -> dict:
+    """Lock an account out ({"disabled": true}) or back in (false).
+
+    Two refusals: your own account (locking yourself out of the console
+    that unlocks accounts), and another superadmin (demote them with
+    scripts/grant_superadmin.py --revoke first, so removing an operator is
+    a deliberate, audited, out-of-band step rather than a console click).
+    Disabling also revokes sessions: the lockout must reach tokens that are
+    already minted, not just the next login.
+    """
+    admin = _require_superadmin(request)
+    body = payload or {}
+    disabled = body.get("disabled")
+    if not isinstance(disabled, bool):
+        raise HTTPException(400, 'Send {"disabled": true} or false.')
+    if user_id == admin["id"]:
+        raise HTTPException(400, "You can't disable your own account.")
+    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
+    if not target:
+        raise HTTPException(404, "No such account.")
+    if (target.get("role") or "") == "superadmin":
+        raise HTTPException(
+            400, "That account is a superadmin — revoke its role first "
+                 "(scripts/grant_superadmin.py --revoke).")
+    _audit_admin(admin, request,
+                 "disable_account" if disabled else "enable_account",
+                 "user", user_id)
+    updated = db.set_user_disabled(user_id, disabled)
+    if updated is None:
+        raise HTTPException(404, "No such account.")
+    if disabled:
+        db.revoke_sessions(user_id)
+    return {"ok": True, "disabled_at": updated.get("disabled_at")}
+
+
+@app.get("/api/admin/listings")
+def admin_listings(request: Request, q: str = "", status: str = "",
+                   user_id: str = "", before: str = "",
+                   limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 100))
+    cursor = _cursor_from(before) if before else None
+    rows = db.admin_list_listings(limit=limit + 1, before=cursor, q=q,
+                                  status=status, user_id=user_id)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"listings": rows,
+            "next_cursor": (_admin_cursor(rows[-1].get("updated_at"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/listings/{listing_id}")
+def admin_get_listing(listing_id: str, request: Request) -> dict:
+    """One listing in full, whoever owns it — the read-only detail behind a
+    row in the console's cross-user browse. See the ownership test's EXEMPT
+    entry: cross-user is the point here, and the gate above is the check."""
+    _require_superadmin(request)
+    rec = db.get_listing_strict(listing_id)
+    if rec is db.UNAVAILABLE:
+        raise HTTPException(
+            503, "Couldn't read that listing just now. Try again in a "
+                 "moment.")
+    if rec is None:
+        raise HTTPException(404, "Listing not found")
+    return rec
+
+
+@app.get("/api/admin/ledger")
+def admin_ledger_view(request: Request, kind: str = "", user_id: str = "",
+                      before: str = "", limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.admin_ledger(limit=limit + 1, before=cursor, kind=kind,
+                           user_id=user_id)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"entries": rows,
+            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/compliance")
+def admin_compliance(request: Request) -> dict:
+    """The two obligation queues. The counts raise on a read failure (a zero
+    here is a claim that nothing is owed), so an outage 503s the tab rather
+    than rendering 'Nothing owed' over queue rows nobody could read."""
+    _require_superadmin(request)
+    return {
+        "deletion_backlog": db.count_pending_deletion_notices(),
+        "media_purge_backlog": db.count_pending_media_purges(),
+        "deletion_notices": db.pending_deletion_notices(100),
+        "media_purges": db.pending_media_purges(100),
+    }
+
+
+@app.post("/api/admin/compliance/run")
+def admin_run_compliance(request: Request) -> dict:
+    """Kick the recovery passes now instead of waiting for the next boot —
+    the button an operator presses when the backlog number is not coming
+    down. Inline rather than backgrounded so the response can say what
+    actually happened."""
+    admin = _require_superadmin(request)
+    _audit_admin(admin, request, "run_compliance_queue", "system")
+    finished = _finish_pending_deletions()
+    refunds = _settle_owed_refunds()
+    return {"ok": True, "deletions": finished, "refunds_settled": refunds}
+
+
+def _require_error_feed(request: Request) -> None:
+    """The triage job's door. Fails CLOSED, like _require_admin.
+
+    A twin of _require_admin rather than a reuse of it, reading its own
+    ERROR_FEED_TOKEN. The distinction is the point: ADMIN_TOKEN also opens
+    /api/admin/diagnostics, which reports raw database and object-store
+    exception text — the Neon host, the role, the R2 account. A scheduled job
+    that reads which bugs are open has no business holding that, and a
+    credential in CI is the one most likely to leak.
+    """
+    expected = (config.ERROR_FEED_TOKEN or "").strip()
+    supplied = (request.headers.get("x-error-feed-token") or "").strip()
+    if not expected or not supplied or not secrets.compare_digest(supplied,
+                                                                 expected):
+        raise HTTPException(401, "Not authorised.")
+
+
+def _error_report(before: str = "", limit: int = 50, since_hours: int = 0,
+                  min_severity: str = "", include_resolved: bool = True
+                  ) -> dict:
+    """The distinct failures, newest-seen first. Shared by both doors below.
+
+    `sink` rides along because a queue that is dropping rows would otherwise
+    look exactly like a quiet day — the most dangerous thing a monitor can
+    do. It is the lesson check_health.py's docstring records, one layer down:
+    an alarm that cannot tell "nothing happened" from "I could not see" is
+    worse than no alarm.
+    """
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.error_events_list(limit=limit + 1, before=cursor,
+                                since_hours=since_hours,
+                                min_severity=min_severity,
+                                include_resolved=include_resolved)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"errors": rows,
+            "sink": errorlog.stats(),
+            "next_cursor": (_admin_cursor(rows[-1].get("last_seen"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/errors")
+def admin_errors(request: Request, before: str = "", limit: int = 50,
+                 since_hours: int = 0, severity: str = "",
+                 include_resolved: bool = True) -> dict:
+    """The console's Errors tab. Session-gated, like the rest of the console."""
+    _require_superadmin(request)
+    return _error_report(before=before, limit=limit, since_hours=since_hours,
+                         min_severity=severity,
+                         include_resolved=include_resolved)
+
+
+@app.get("/api/ops/error-feed")
+def ops_error_feed(request: Request, limit: int = 50, since_hours: int = 36,
+                   severity: str = "") -> dict:
+    """The same report, for the daily triage job. Token-gated.
+
+    Two doors onto one payload, exactly as /api/admin/system and
+    /api/admin/diagnostics already coexist: the session door authenticates a
+    PERSON, which is right for the console and wrong for a robot that would
+    have to hold a human's long-lived session to use it.
+
+    Under /api/ops rather than /api/admin, and that is not cosmetic.
+    test_every_console_route_is_gated walks app.routes and requires EVERY
+    /api/admin/ path to answer 404 to a non-superadmin — "the next admin route
+    is born tested". It carries exactly one exception, /api/admin/diagnostics,
+    described in its own docstring as the older door. Adding two more would
+    turn a guardrail that cannot be forgotten into a list somebody maintains,
+    which is how the next unreviewed cross-user read ships. Machine doors get
+    their own prefix instead, and the console's guarantee stays absolute.
+
+    Defaults to a 36-hour window rather than 24: the job runs on a daily cron,
+    and a calendar-day read drops anything that happened in the seam between
+    one run and the next. Overlap costs nothing, because the fingerprint
+    dedupes.
+    """
+    _require_error_feed(request)
+    return _error_report(limit=limit, since_hours=since_hours,
+                         min_severity=severity, include_resolved=False)
+
+
+@app.post("/api/ops/errors/{fingerprint}/fixed")
+def ops_error_fixed(fingerprint: str, request: Request,
+                    payload: Optional[dict] = None) -> dict:
+    """Mark a failure as having a fix proposed, so the job stops proposing one.
+
+    Token-gated, and under /api/ops for the reason the feed above gives. It
+    is never cleared automatically — if the bug returns, `last_seen` moves and
+    the row surfaces again on its own, which is a fact rather than a guess
+    about whether the fix worked.
+    """
+    _require_error_feed(request)
+    pr = str((payload or {}).get("pr") or "")[:200]
+    return {"ok": db.mark_error_fixed(fingerprint, pr)}
+
+
+@app.get("/api/admin/audit")
+def admin_audit_view(request: Request, before: str = "",
+                     limit: int = 50) -> dict:
+    _require_superadmin(request)
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.admin_audit_list(limit=limit + 1, before=cursor)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"entries": rows,
+            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
 
 
 # Disk below this and photo work will start failing mid-upload. Reporting it
 # as "not ready" is what lets a deploy or a load balancer act on it before a
 # seller loses a batch.
 READY_MIN_DISK_MB = int(os.getenv("READY_MIN_DISK_MB", "200") or 200)
+
+
+# A browser crash report. Everything about this route is shaped by one fact:
+# it cannot require a session. A throw inside the app shell means there may be
+# no session to authenticate with, and the crashes worth hearing about are
+# exactly the ones that stop the app working — so an authenticated ingest
+# would miss them. That makes it the only unauthenticated WRITE the app has,
+# and the guards below are what pay for it.
+CLIENT_ERROR_MAX_BYTES = 16 * 1024
+# A ceiling across ALL clients, not just each one. The per-IP limit stops one
+# broken browser; this stops a spray from many.
+CLIENT_ERROR_GLOBAL_MAX = 600
+
+
+@app.post("/api/client-errors", status_code=202)
+async def client_error(request: Request) -> dict:
+    """Record a crash the browser saw. Always answers 202, tells you nothing.
+
+    The frontend had no error reporting at all: no boundary, no window.onerror,
+    no ingest. A React render crash was a white screen that reached nobody.
+
+    It answers 202 and an empty ok whether it recorded the report, threw it
+    away for rate limiting, or could not parse it — deliberately. A 429 would
+    tell a prober where the limit is, and the client treats any answer as
+    final, which is what stops a failed report becoming the next report. The
+    client is never told whether it was heard; it is not a channel.
+
+    Nothing from the body is echoed back, and every field is truncated here as
+    well as in the browser — the browser's caps are a courtesy, not a control.
+    """
+    ok = {"ok": True}
+    try:
+        raw = request.headers.get("content-length")
+        if raw and int(raw) > CLIENT_ERROR_MAX_BYTES:
+            return ok
+    except (TypeError, ValueError):
+        return ok
+
+    ip = _client_ip(request)
+    if not ratelimit.check(f"clienterr:{ip}",
+                           max_attempts=config.CLIENT_ERROR_MAX_PER_WINDOW):
+        return ok
+    if not ratelimit.check("clienterr:_all",
+                           max_attempts=CLIENT_ERROR_GLOBAL_MAX):
+        return ok
+
+    try:
+        body = await request.body()
+        if len(body) > CLIENT_ERROR_MAX_BYTES:
+            return ok
+        payload = json.loads(body or b"{}")
+        if not isinstance(payload, dict):
+            return ok
+    except Exception:  # noqa: BLE001 - a malformed report is not an incident
+        return ok
+
+    def _text(key: str, cap: int) -> str:
+        value = payload.get(key)
+        return (value if isinstance(value, str) else "")[:cap]
+
+    message = _text("message", 500)
+    if not message:
+        return ok
+    stack = _text("stack", 8000)
+    component = _text("component_stack", 4000)
+    # Fingerprinted on the message and the component stack, never on the URL:
+    # /listing/abc and /listing/def are the same bug. The minified frame is
+    # useless for reading but stable within a build, so it separates two
+    # different crashes carrying the same message.
+    errorlog.record(
+        kind="frontend",
+        level="ERROR",
+        message=message,
+        template=f"{_text('name', 120)}: {message}",
+        module="browser",
+        func=(component.split("\n")[1].strip() if "\n" in component
+              else _text("kind", 40)) or "unknown",
+        route=_text("url", 200),
+        method="CLIENT",
+        reference=_text("request_id", 16),
+        sample={"stack": redact.scrub(stack, max_len=8000),
+                "component_stack": redact.scrub(component, max_len=4000),
+                "build": _text("build", 40),
+                "reported_as": _text("kind", 40)},
+    )
+    return ok
 
 
 @app.get("/api/ready")
@@ -445,6 +1330,13 @@ def ready(response: Response) -> dict:
     Deliberately cheap and side-effect free — no model load, no inference, no
     outbound call. A probe that does real work is a probe that falls over
     under the load it is meant to detect.
+
+    This is also the only PUBLIC payload carrying operational numbers, which
+    is deliberate: /api/health went back to liveness plus capability flags so
+    it stops publishing the deployment's internals to anyone who asks, and the
+    health-watch alarm reads its thresholds from here instead. Everything
+    added here has to earn that — a number or a boolean an operator acts on,
+    never a name, a host, a bucket or an exception's text.
     """
     free_mb = round(storage.disk_free_bytes() / 1e6)
     database = db.db_status()
@@ -457,11 +1349,36 @@ def ready(response: Response) -> dict:
         "database": (not database.get("configured")) or bool(database.get("connected")),
     }
     engine = images.engine_state()
+    # Photo offload, reported OUTSIDE `checks` on purpose.
+    #
+    # R2 failing is invisible from everywhere else: the module latches itself
+    # off, every photo quietly stays on the volume, the volume then cannot be
+    # reclaimed, and publishes start failing later for what looks like an
+    # unrelated reason. So it has to be visible to the alarm.
+    #
+    # But it must not flip the 503. Photos still land on the volume and the
+    # app is still serving; taking the only machine out of the load balancer
+    # over a Cloudflare blip would turn a degradation into an outage.
+    #
+    # Booleans only. The bucket name, the URL mode, the missing variables'
+    # NAMES and the raw error (whose endpoint carries the R2 account id) stay
+    # on /api/admin/diagnostics, behind the token.
+    objstore_state = {
+        # Credentials present. Deliberately NOT objstore.enabled(), which also
+        # goes false for the 600s latch: read through enabled(), "nobody ever
+        # set this up" and "it broke ten minutes ago" arrive as the same
+        # answer, which is what used to send an operator hunting for variables
+        # that were all set. This stays true through the latch; `degraded`
+        # below owns that case.
+        "configured": config.r2_configured(),
+        # The latch is tripped right now: photos are not reaching the bucket.
+        "degraded": objstore.last_error() is not None,
+    }
     ok = all(checks.values())
     if not ok:
         response.status_code = 503
     return {"ready": ok, "checks": checks, "disk_free_mb": free_mb,
-            "image_engine": engine}
+            "object_storage": objstore_state, "image_engine": engine}
 
 
 def _category_query(listing) -> str:
@@ -506,7 +1423,7 @@ def _resolve_category(listing: Listing) -> None:
     opposite fixes.
     """
     if listing.category_id:
-        return
+        return _fit_condition_to_category(listing)
     if not config.taxonomy_ready():
         log.warning("category: no id resolved — the Taxonomy API needs "
                     "EBAY_CLIENT_ID/EBAY_CLIENT_SECRET, which aren't set")
@@ -522,12 +1439,61 @@ def _resolve_category(listing: Listing) -> None:
             listing.category_id = best["category_id"]
             if best.get("path"):
                 listing.category_suggestion = best["path"]
-            return
+            return _fit_condition_to_category(listing)
         log.info("category: no eBay match for %r", query[:120])
     log.warning("category: eBay matched no category for %r — the draft goes "
                 "out without an id and can't publish until one is picked",
                 (listing.title or "")[:80])
     _needs_a_category(listing)
+
+
+def _fit_condition_to_category(listing: Listing) -> None:
+    """The category decides which conditions exist — so pick the condition
+    AFTER the category, not before it.
+
+    The AI grades what it can see in the photos ("used, some wear" -> Used -
+    Good) with no idea where the item will be filed, and eBay offers a
+    different ladder in nearly every part of the site: Very Good / Good /
+    Acceptable exist only in media, the pre-owned grades only in apparel, and
+    most of the rest of eBay has one plain "Used". A grade the category
+    doesn't offer is not a warning at publish time — it is error 25021 and no
+    listing, which is what took out three of the seller's last four.
+
+    So the draft leaves identify carrying a condition its own category
+    accepts: the same grade where it exists, the closest one in the same
+    new/used family where it doesn't. Best-effort — a lookup that fails leaves
+    the AI's grade alone and the preflight says so before anything reaches
+    eBay.
+    """
+    cid = (listing.category_id or "").strip()
+    current = (listing.condition or "").strip().upper()
+    if not cid.isdigit() or not current or not config.taxonomy_ready():
+        return
+    try:
+        allowed = taxonomy.allowed_condition_enums(cid)
+    except Exception as exc:  # noqa: BLE001 - never block identify on this
+        log.warning("condition: eBay's condition list for category %s failed: "
+                    "%s: %s — leaving %s as it is", cid, type(exc).__name__,
+                    exc, current)
+        return
+    if not allowed or current in allowed:
+        return
+    fitted = taxonomy.nearest_allowed_condition(current, allowed)
+    if fitted and fitted != current:
+        log.info("condition: %s isn't offered in category %s (%s) — using %s",
+                 current, cid, ", ".join(allowed), fitted)
+        listing.condition = fitted
+        return
+    # Nothing in the item's own family is on offer — a used item in a
+    # new-only category. There is no honest substitute to make, so say it on
+    # the draft instead of inventing one; the preflight blocks the publish
+    # with the same news, and the Condition dropdown shows what eBay allows.
+    log.info("condition: %s isn't offered in category %s and nothing there "
+             "substitutes for it (%s)", current, cid, ", ".join(allowed))
+    note = ("item condition — eBay doesn't offer that condition in this "
+            "category; pick one from the Condition list")
+    if not any("item condition" in m.lower() for m in listing.missing_info):
+        listing.missing_info = [*listing.missing_info, note]
 
 
 def _needs_a_category(listing: Listing) -> None:
@@ -582,16 +1548,33 @@ def _merge_filled_specifics(listing: Listing, filled: list,
       the first vision pass used to block every further tick, which is why the
       checkbox specifics reached eBay with one box ticked at most.
 
+    Then, on the merged result, the size-type rule: a men's garment sized XXL
+    or larger is Size Type "Big & Tall", never "Regular" — eBay rejects that
+    pairing. It runs here, after the merge, because the merged Size is what
+    decides it, and here rather than only at publish so the seller sees the
+    answer in the editor and can change it.
+
     Returns how many values were added."""
     multi = {a["name"].strip().lower() for a in aspects
              if (a.get("cardinality") or "SINGLE") == "MULTI"}
     have: dict[str, set[str]] = {}
     seller_owned: set[str] = set()
-    for s in listing.item_specifics:
+    # Rows that carry a NAME but no value — an identify pass that returned the
+    # aspect empty, a value the seller cleared. The fill below reuses them
+    # instead of appending a second row for the same aspect: a listing left
+    # holding ["Color" = "", "Color" = "Multi-Color"] reads as answered to
+    # anything that scans every row (this server) and as EMPTY to anything
+    # that stops at the first (the browser's blocker list did), which is how a
+    # seller ended up locked out of publishing over a Color they could see
+    # filled in. Same aspect, one row.
+    blanks: dict[str, int] = {}
+    for i, s in enumerate(listing.item_specifics):
         value = (s.value or "").strip()
-        if not value:
-            continue
         k = s.name.strip().lower()
+        if not value:
+            if k:
+                blanks.setdefault(k, i)
+            continue
         have.setdefault(k, set()).add(value.lower())
         if not (s.confidence or "").strip():
             seller_owned.add(k)
@@ -617,8 +1600,21 @@ def _merge_filled_specifics(listing: Listing, filled: list,
                 continue
             held.add(value.lower())
             have[k] = held
-            listing.item_specifics.append(f)
+            blank_at = blanks.pop(k, None)
+            if blank_at is None:
+                listing.item_specifics.append(f)
+            else:
+                listing.item_specifics[blank_at] = f
             added += 1
+    # Never raises: this runs on the identify path OUTSIDE the enrichment's
+    # own try, so an exception here would take the whole draft down over a
+    # convenience. A size type is not worth a listing.
+    try:
+        # Size first — it decides what the size type rule reads.
+        taxonomy.fix_size_specifics(listing, aspects)
+        taxonomy.apply_big_and_tall(listing, aspects)
+    except Exception as exc:  # noqa: BLE001 - a default, never a blocker
+        log.info("size defaults skipped: %s", exc)
     return added
 
 
@@ -651,6 +1647,7 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[in
     added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    _pair_aspects(listing, aspects)
     return added
 
 
@@ -728,6 +1725,17 @@ def _identify_chain() -> str:
     return os.getenv("IDENTIFY_CHAIN", "v2").strip().lower() or "v2"
 
 
+def _pair_aspects(listing: Listing, aspects: list[dict]) -> None:
+    """Make the specifics eBay pairs with each other agree. Never raises —
+    the draft is worth more than the tidy-up."""
+    try:
+        for name, was, now in taxonomy.fit_paired_aspects(listing, aspects):
+            log.info("aspect pairing: %s %s -> %s (cat=%s)",
+                     name, was or "(blank)", now, listing.category_id)
+    except Exception as exc:  # noqa: BLE001 - a convenience, never a blocker
+        log.info("aspect pairing skipped (cat=%s): %s", listing.category_id, exc)
+
+
 def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
                        progress=None) -> Optional[int]:
     """Chain v2 enrichment: ONE consolidated vision call fills the category's
@@ -758,6 +1766,11 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
     added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    # eBay pairs some aspects with others — a Size Type has to be one it
+    # publishes beside the Size on the tag. Done here, on the draft, so the
+    # seller reads the answer in the editor and can still change it; the
+    # publish path applies the same rule again for drafts made before this.
+    _pair_aspects(listing, aspects)
     if candidate:
         # Re-check what's still missing AFTER the merge — "Brand" is itself an
         # aspect, so the fill above may have just answered it, and the verify
@@ -778,6 +1791,21 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
     return added
 
 
+def _specifics_were_filled(added: Optional[int]) -> bool:
+    """Whether the server-side enrichment actually put specifics on the draft.
+
+    This is the editor's cue to stand its own autofill fallback down, so the
+    same vision passes don't run twice seconds apart and charge the seller for
+    both. It is emphatically NOT "did the enrichment run": `added` is None when
+    it never ran and 0 when it ran and filled nothing — the vision pass came
+    back empty, or every value it proposed was dropped as illegal for its
+    aspect. Reporting that empty pass as "filled" stood the fallback down too,
+    and left the seller with every required specific blank and nothing on
+    either side going back for them.
+    """
+    return bool(added)
+
+
 def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
                     progress=None) -> Optional[int]:
     """Post-identify enrichment (item specifics + maker), routed by
@@ -796,6 +1824,12 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
 
 def _uid(request: Request):
     user = auth.current_user(request)
+    # The one choke point where the seller's id is already resolved. Doing
+    # this in the request middleware instead would add a database read to
+    # every asset fetch — and auth.current_user RAISES StorageUnavailable on
+    # a database blip, which would turn one Neon hiccup into a failing
+    # liveness probe on the only machine.
+    errorlog.note_user(user["id"] if user else "")
     return user["id"] if user else None
 
 
@@ -873,25 +1907,72 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
 
 
 def _purge_session_images(session_id: str) -> None:
-    """Delete a session's photos (local disk + R2) to reclaim storage once the
-    listing is archived (sold) or deleted. Keeps the DB record. Best-effort,
-    never raises; eBay still hosts the images on the sold listing itself.
+    """Delete a session's photos (local disk + R2). RAISES if it could not.
+
+    For ERASURE — the deletion queue and the eBay account-deletion purge. Both
+    decide whether an obligation is finished from whether this returns:
+    `db.finish_media_purge` drops the debt the moment a purge raises nothing,
+    and its docstring says so. This used to catch everything, and
+    `objstore.delete_prefix` under it answered `0` for an unreachable bucket,
+    so an erasure that never happened was recorded as done and the photos
+    stayed in R2 for ever with the account that owned them already gone.
+
+    One function was serving two callers with opposite needs. Cleanup after a
+    merge, a delete or a sale wants the tolerant twin below: there a failed
+    tidy-up must not fail the seller's request, and the sweep will find the
+    objects later anyway.
 
     The R2 side deletes by PREFIX, not by walking the local directory. The
     reclaim pass offloads photos to the bucket and unlinks the local copies
     (see _offload_to_r2), so for any listing older than the offload TTL the
-    local dir is empty and a name-by-name delete removed nothing at all —
-    leaving the photos in the bucket forever, including on account deletion,
-    which promises the opposite.
+    local dir is empty and a name-by-name delete removed nothing at all.
+    """
+    if objstore.enabled():
+        objstore.delete_prefix_strict(objstore.session_prefix(session_id))
+    d = storage.session_dir(session_id)
+    if d.exists():
+        # ignore_errors is deliberate and is NOT the swallow above: the
+        # bucket is the authority on what a session still has stored, and a
+        # local copy that will not unlink is disk to reclaim, not an erasure
+        # obligation -- the object it mirrors is already gone.
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _purge_session_images_best_effort(session_id: str) -> None:
+    """The same cleanup, for callers where failing it would cost more than
+    leaving the photos: after a merge, a delete, a bulk delete, or a sale.
+
+    None of those is an erasure promise. The listing's own row is going or
+    gone, the photos are reclaimable storage rather than something owed, and
+    the orphan sweep reaches them later. Failing the seller's merge over a
+    bucket that blinked would be the worse trade.
     """
     try:
-        if objstore.enabled():
-            objstore.delete_prefix(objstore.session_prefix(session_id))
-        d = storage.session_dir(session_id)
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001 - archiving must never fail on cleanup
-        log.warning("archive: image purge failed for %s: %s", session_id, exc)
+        _purge_session_images(session_id)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not fail the request
+        log.warning("cleanup: image purge failed for %s: %s", session_id, exc)
+
+
+def _finish_pending_deletions() -> dict:
+    """Carry out erasures an earlier run promised and did not finish.
+
+    Both halves — a seller's deleted photos and an acknowledged eBay
+    account-deletion notice — record what is owed BEFORE doing the work, so
+    that a crash in between is recoverable. Nothing was reading those records
+    back. This is what reads them.
+    """
+    return deletion_queue.run_pending(purge_media=_purge_session_images)
+
+
+def _settle_owed_refunds() -> int:
+    """Pay back refunds an earlier attempt could not commit.
+
+    A refund that failed because the database was unreachable used to vanish:
+    the seller was charged, the AI failed, and nothing recorded the debt. The
+    record lives on the volume (see services/owed_refunds for why not the
+    database), and this is what drains it.
+    """
+    return owed_refunds.settle()
 
 
 # --- auth ------------------------------------------------------------------
@@ -938,8 +2019,38 @@ def auth_login(request: Request, response: Response, payload: dict) -> dict:
 
 @app.post("/api/auth/logout")
 def auth_logout(response: Response) -> dict:
+    """Sign out THIS browser. The token itself stays valid until it expires —
+    see /api/auth/logout-everywhere for the one that cancels it."""
     auth.clear_session_cookie(response)
     return {"ok": True}
+
+
+@app.post("/api/auth/logout-everywhere")
+def auth_logout_everywhere(request: Request, response: Response) -> dict:
+    """Cancel every session token this account has, including this one.
+
+    Clearing the cookie ends nothing for anyone else holding a copy of the
+    token: it is self-contained and good for 30 days. A shared or borrowed
+    device, a browser profile left signed in, a token out of a backup or a
+    log — all of them kept working, and the seller had no way to end it. This
+    is that way.
+
+    It raises rather than reporting a failure as success (db.revoke_sessions
+    is strict). Telling someone their other sessions are gone when the write
+    never landed is the worst outcome available: they stop looking, and
+    whoever holds the token keeps it.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    db.revoke_sessions(user["id"])
+    # This browser too. Anything else would leave the seller looking at a
+    # screen that says everything is signed out while it demonstrably is not.
+    auth.clear_session_cookie(response)
+    log.info("sessions revoked: user=%s", user["id"])
+    return {"ok": True,
+            "message": "Signed out everywhere. Sign in again to keep using "
+                       "Thryft Shop on this device."}
 
 
 @app.get("/api/auth/me")
@@ -979,8 +2090,25 @@ def tokens_checkout(request: Request, payload: dict) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - stripe/network problem
-        log.warning("tokens: checkout failed for %s: %s", uid, exc)
-        raise HTTPException(502, f"Couldn't start the purchase: {exc}") from exc
+        # Never Stripe's own words. They are written for whoever integrated
+        # the API, not for the person buying: "No such price: price_1ABC",
+        # "Invalid API Key provided: sk_live_51H4x***". The last of those puts
+        # a fragment of a live secret in a toast, on the screen where someone
+        # is trying to give us money.
+        reference = _support_reference()
+        log.warning("tokens: checkout failed for %s [%s]: %s",
+                    uid, reference, exc)
+        # The reference goes IN the sentence rather than beside it: the
+        # client reads `detail` as a string (lib/api.js), so a structured body
+        # here renders as "[object Object]" in the toast.
+        #
+        # "you have not been charged" is a fact, not a reassurance: creating a
+        # Checkout Session moves no money. It is also the one thing the log
+        # cannot tell them and the thing they will actually be wondering.
+        raise HTTPException(502, (
+            "We couldn't start your purchase just now, and you have not been "
+            "charged. Try again in a moment — if it keeps happening, quote "
+            f"{reference} to support.")) from exc
     return {"url": url}
 
 
@@ -996,8 +2124,17 @@ def tokens_confirm(request: Request, session_id: str = "") -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        log.warning("tokens: confirm failed for %s: %s", uid, exc)
-        raise HTTPException(502, str(exc)) from exc
+        reference = _support_reference()
+        log.warning("tokens: confirm failed for %s [%s]: %s",
+                    uid, reference, exc)
+        # The opposite reassurance from checkout above: here the money may
+        # already have moved, so the honest thing to say is that the tokens
+        # are still coming. They are — the Stripe webhook credits the same
+        # session idempotently, and this route is only the redirect fallback.
+        raise HTTPException(502, (
+            "We couldn't confirm your purchase just now. If the payment went "
+            "through, your tokens will be credited automatically — quote "
+            f"{reference} to support if they don't appear shortly.")) from exc
     res["balance"] = tokens.status(uid)
     return res
 
@@ -1030,26 +2167,37 @@ def account_summary(request: Request) -> dict:
     stay up on eBay after deletion, and a seller must know that before they
     lose the tools to manage them.
 
-    `counted` says whether the numbers can be trusted. list_listings() returns
-    [] on a DB error like every read in db.py, and silently showing "0 live
-    listings" would suppress exactly the warning this endpoint exists to give
-    — so an unreachable DB is reported as unknown, not as zero.
+    `counted` says whether the numbers can be trusted. Silently showing "0
+    live listings" would suppress exactly the warning this endpoint exists to
+    give, so an unreachable database is reported as unknown, not as zero --
+    both when db_status says it is down and when the read itself fails.
     """
     user = auth.current_user(request)
     if not user:
         raise HTTPException(401, "Log in first.")
     counted = db.db_status().get("connected", False)
-    # LIST_CAP, not a number of its own: every other read of the store uses it,
-    # and a lower cap here would quietly under-report the very seller this
-    # dialog exists to warn — someone with more listings than the cap is told
-    # they are about to delete fewer than they have, live ones included.
-    rows = db.list_listings(limit=LIST_CAP, user_id=user["id"]) if counted else []
-    live = sum(1 for r in rows
-               if (r.get("status") or "") in ("published", "live"))
+    # Counted in SQL, not measured off a page. These used to be
+    # `len(db.list_listings(limit=LIST_CAP))` and a Python sum over the same
+    # rows, which fetched every listing's whole JSON blob across a
+    # cross-region link to produce two integers -- and told a seller with more
+    # records than the cap that they were about to erase fewer than they have,
+    # live ones included. No cap fixes that; a count either counts or it is a
+    # floor with nothing saying so.
+    total = live = 0
+    try:
+        if counted:
+            total = db.count_listings(user["id"])
+            live = db.count_listings(user["id"], statuses=("published", "live"))
+    except errors.StorageUnavailable:
+        # db_status said connected and the read still failed. The endpoint's
+        # own contract answers that: unknown, not zero. Zero here would
+        # suppress the "these stay live on eBay after you delete" warning the
+        # dialog exists to give.
+        total, live, counted = 0, 0, False
     return {
         "email": user.get("email", ""),
         "counted": counted,
-        "listings": len(rows),
+        "listings": total,
         "live_listings": live,
         "ebay_connected": bool((db.get_ebay_account(user["id"]) or {}).get("refresh_token")),
     }
@@ -1098,11 +2246,15 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     # sweep for the whole account (a thread per listing would spawn thousands
     # on a synced store and exhaust the 1GB machine), so a slow R2 delete never
     # holds the response or fails a deletion that already happened.
-    def _purge_all() -> None:
-        for lid in listing_ids:
-            _purge_session_images(lid)
-
-    _in_background(_purge_all, what="account-delete cleanup")
+    #
+    # It drains the whole queue rather than just this account's listings, and
+    # that is deliberate. delete_user recorded these listings as owed inside
+    # its own transaction, so they are in the queue either way; running the
+    # queue is what CLEARS them, and picking up anything an earlier run left
+    # behind costs nothing here. If this thread dies part-way, the rows it did
+    # not reach are still owed and the next pass finds them — which is the
+    # whole difference from what this used to be.
+    _in_background(_finish_pending_deletions, what="account-delete cleanup")
 
     auth.clear_session_cookie(response)
     log.info("account deleted: user=%s listings=%d", uid, len(listing_ids))
@@ -1122,6 +2274,7 @@ def _ebay_creds_for(request: Request):
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
 NATIVE_RETURN_COOKIE = "thryft_oauth_return"  # "app" when the flow started in the shell
+RETURN_ORIGIN_COOKIE = "thryft_oauth_origin"  # the app origin the flow started on
 
 
 @app.post("/api/auth/connect-ticket")
@@ -1151,6 +2304,55 @@ def _mark_native_flow(resp, request: Request, native: str) -> None:
                         samesite="lax", secure=request.url.scheme == "https")
 
 
+def _request_origin(request: Request) -> str:
+    """The origin this request was addressed to, as scheme://host[:port]."""
+    return f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+
+
+def _offsite_connect(request: Request, uid: str, path: str, native: str):
+    """Send a connect flow to the origin the marketplace will return it to.
+
+    A marketplace callback URL names ONE origin (config.OAUTH_ORIGIN). A flow
+    started anywhere else sets its CSRF nonce cookie on a host the callback
+    never reaches, so it can only ever fail — and fail as "expired", which
+    reads like the seller's fault. Rather than let that happen, start the flow
+    on the right origin in the first place and remember where to put the seller
+    back afterwards.
+
+    The hop carries a 60-second connect ticket because the session cookie is
+    host-only and will not cross. Returns None when there is nothing to do:
+    OAUTH_ORIGIN unset, already on it, or an origin this app does not claim.
+    """
+    here = _request_origin(request)
+    if not config.OAUTH_ORIGIN or here == config.OAUTH_ORIGIN:
+        return None
+    # Host is client-controlled — Fly forwards whatever it is handed — so an
+    # unrecognised one is never worth a redirect, let alone a return trip.
+    if not config.oauth_return_ok(here):
+        return None
+    params = {"ticket": auth.make_ticket(uid, "connect"), "return_to": here}
+    if str(native).lower() in ("1", "true", "yes"):
+        params["native"] = "1"
+    log.info("connect: bouncing %s to the OAuth origin, returning to %s",
+             path, here)
+    return RedirectResponse(
+        f"{config.OAUTH_ORIGIN}{path}?{urlencode(params)}")
+
+
+def _mark_return_origin(resp, request: Request, return_to: str) -> None:
+    """Remember which of this app's origins to hand the seller back to.
+
+    Validated on the way IN, never on the way out: the value is only ever one
+    of config.APP_ORIGINS, so the redirect _finish_connect builds from it
+    cannot be pointed at someone else's site.
+    """
+    origin = (return_to or "").strip().rstrip("/")
+    if origin and origin != _request_origin(request) and config.oauth_return_ok(origin):
+        resp.set_cookie(RETURN_ORIGIN_COOKIE, origin, max_age=600,
+                        httponly=True, samesite="lax",
+                        secure=request.url.scheme == "https")
+
+
 def _finish_connect(request: Request, path: str):
     """End an OAuth flow: plain redirect on the web; when the flow started in
     the native shell, an interstitial that navigates the webview back to the
@@ -1158,6 +2360,17 @@ def _finish_connect(request: Request, path: str):
     of a bare 302 to a custom scheme because WKWebView handles an in-page
     navigation to capacitor:// more reliably than a server redirect."""
     if request.cookies.get(NATIVE_RETURN_COOKIE) != "app":
+        # A flow that began on another of this app's origins goes home to it,
+        # rather than leaving the seller on the callback host — where their
+        # session cookie does not exist, so they would appear logged out on a
+        # hostname they never chose. Re-checked against APP_ORIGINS because a
+        # cookie is the one thing here the browser could have been given
+        # elsewhere.
+        origin = request.cookies.get(RETURN_ORIGIN_COOKIE, "")
+        if config.oauth_return_ok(origin):
+            resp = RedirectResponse(f"{origin}{path}")
+            resp.delete_cookie(RETURN_ORIGIN_COOKIE)
+            return resp
         return RedirectResponse(path)
     target = f"{config.NATIVE_APP_ORIGIN}{path}"
     resp = HTMLResponse(f"""<!doctype html><html><head>
@@ -1169,16 +2382,23 @@ def _finish_connect(request: Request, path: str):
 <script>location.replace({json.dumps(target)});</script>
 </body></html>""")
     resp.delete_cookie(NATIVE_RETURN_COOKIE)
+    resp.delete_cookie(RETURN_ORIGIN_COOKIE)
     return resp
 
 
 @app.get("/api/ebay/connect")
-def ebay_connect(request: Request, ticket: str = "", native: str = ""):
+def ebay_connect(request: Request, ticket: str = "", native: str = "",
+                 return_to: str = ""):
     if not config.ebay_oauth_ready():
         raise HTTPException(400, "eBay OAuth not configured (EBAY_CLIENT_ID/SECRET/RUNAME).")
     uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
+    # eBay resolves EBAY_RUNAME to ONE accepted URL, so the callback lands on
+    # one origin whatever this request was addressed to. Start the flow there.
+    offsite = _offsite_connect(request, uid, "/api/ebay/connect", native)
+    if offsite is not None:
+        return offsite
     import secrets as _secrets
     nonce = _secrets.token_urlsafe(24)
     resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
@@ -1188,6 +2408,7 @@ def ebay_connect(request: Request, ticket: str = "", native: str = ""):
     resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
                     samesite="lax", secure=request.url.scheme == "https")
     _mark_native_flow(resp, request, native)
+    _mark_return_origin(resp, request, return_to)
     return resp
 
 
@@ -1220,7 +2441,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         policies = ebay_auth.fetch_policies_and_location(access)
         # Record WHICH eBay account this is, so the user can confirm they
         # connected the right one (best-effort — never block connect on it).
-        ident = {"username": "", "email": ""}
+        ident = {"user_id": "", "username": "", "email": ""}
         try:
             ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         except Exception as exc:  # noqa: BLE001
@@ -1242,6 +2463,11 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # is how "leave what's there" is spelled.
         save_kwargs["ebay_username"] = new_user or None
         save_kwargs["ebay_email"] = ident["email"] or None
+        # eBay's immutable account id, under the same "None means leave what's
+        # there" rule as the name above. This is what an account-deletion
+        # notice arrives carrying, and the only identifier that survives a
+        # seller renaming themselves.
+        save_kwargs["ebay_user_id"] = (ident.get("user_id") or "").strip() or None
         # Keep a saved policy/location choice only when it still EXISTS on the
         # account that just connected. Business-policy ids belong to one
         # seller: eBay rejects another's outright, and a listing published with
@@ -1317,6 +2543,16 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
     except httpx.RequestError as exc:
         log.warning("ebay: connect could not reach eBay for uid=%s: %s", uid, exc)
         return _finish_connect(request, "/?ebay=error&why=network")
+    except db.StorageUnavailable as exc:
+        # eBay authorised, but the connection did not commit. Saying
+        # "connected" here is the worst outcome available: the grant is real,
+        # so the seller has no reason to doubt it, and every later publish
+        # fails on a screen that says they are connected. Named separately
+        # from the catch-all below so the UI can say "try again" rather than
+        # "something went wrong".
+        log.warning("ebay: connect authorised but did not persist for uid=%s: %s",
+                    uid, exc)
+        return _finish_connect(request, "/?ebay=error&why=storage")
     except Exception:  # noqa: BLE001
         # Anything left — a DB write, a bug. Without the traceback there is
         # nothing to tell these apart afterwards, and a connect that won't
@@ -1398,27 +2634,41 @@ def release_foreign_listings(request: Request,
     include_unowned = bool((payload or {}).get("include_unowned"))
     acct = db.get_ebay_account(uid) or {}
     connected = (acct.get("ebay_username") or "").strip()
+    # Selected in SQL, OLDEST first, rather than filtered out of the newest
+    # LIST_CAP records. The banner that offers this button counts in SQL over
+    # the whole store (db.count_foreign_listings), and a record from a
+    # previous account is by definition old -- so the page read here was
+    # precisely the wrong end of the store: the seller was told twelve
+    # listings were linked to the old account, pressed the button, and was
+    # told seven were unlinked, every time. One row past the cap, so a run
+    # that did part of the job can say so.
+    candidates = db.list_releasable_listings(uid, connected, include_unowned,
+                                             limit=RELEASE_CAP + 1)
     released = unowned = 0
-    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+    remaining = 0
+    for rec in candidates:
         data = rec.get("listing") or {}
+        # The SQL is a superset; this is still where the decision is made.
         if not ebay_account.releasable(data, connected, include_unowned):
+            continue
+        if released >= RELEASE_CAP:
+            # Each release is a write, and a request that walks an entire
+            # store outlives the gateway. Bounded, and the remainder reported
+            # rather than left looking like a finished run.
+            remaining += 1
             continue
         legacy = not listing_sync.account_of(data)
 
-        def _unlink(d: dict) -> dict:
-            d.update(ebay_account="", ebay_listing_id="", source="",
-                     view_url="", sku="", image_urls=d.get("image_urls") or [])
-            d.pop("marketplaces", None)
-            return d
-
-        if db.mutate_listing_data(rec["id"], _unlink, status="draft",
-                                  user_id=uid) is not None:
+        if db.mutate_listing_data(rec["id"], ebay_account.unlink_ebay,
+                                  status="draft", user_id=uid) is not None:
             released += 1
             if legacy:
                 unowned += 1
     log.info("release-foreign-listings: uid=%s released=%d (unowned=%d, "
-             "connected=%s)", uid, released, unowned, connected or "?")
-    return {"released": released, "released_unowned": unowned}
+             "remaining=%d, connected=%s)", uid, released, unowned, remaining,
+             connected or "?")
+    return {"released": released, "released_unowned": unowned,
+            "remaining": remaining}
 
 
 @app.get("/api/ebay/policies")
@@ -1451,6 +2701,45 @@ def shipping_services() -> dict:
     return {"services": ebay_auth.SHIPPING_SERVICES}
 
 
+_UNREVIEWED = (
+    "Review the policy terms before we create them on your eBay account. "
+    "They are shown to buyers and eBay holds you to them.")
+
+
+def _accepted(payload: Optional[dict]) -> bool:
+    """Did the seller actually say yes to the terms?
+
+    Strictly `True`, not truthiness: a stale client sending `"no"`, a
+    half-filled form sending `0`, or a request with the key missing entirely
+    are all the ABSENCE of an answer, and absence is not consent — least of
+    all to a 30-day return window and a dispatch deadline eBay scores.
+    """
+    return (payload or {}).get("accept_terms") is True
+
+
+@app.get("/api/ebay/policy-preview")
+def ebay_policy_preview(service_code: str = "",
+                        return_days: Optional[int] = None,
+                        return_payer: str = "",
+                        immediate_pay: bool = True) -> dict:
+    """Exactly what "Create my policies" would commit the seller to.
+
+    A business policy is a public promise -- dispatch time, return window, who
+    pays return postage -- attached to every listing that references it, and
+    eBay scores the seller against it. The app chose all of it behind one
+    button and the seller learned the terms by reading them back off eBay.
+
+    Static and side-effect free by construction: it builds the request bodies
+    and describes them, without an access token, a network call or any part of
+    the account's daily quota. That is deliberate. A preview that needed eBay
+    to be reachable would be unavailable exactly when the seller is retrying,
+    and the retry is where the unconsidered "yes" gets clicked.
+    """
+    return ebay_policy_terms.describe(
+        service_code=service_code, return_days=return_days,
+        return_payer=return_payer, immediate_pay=bool(immediate_pay))
+
+
 @app.post("/api/ebay/ensure-policy")
 def ensure_policy(request: Request, payload: dict) -> dict:
     """Find — or create — a fulfillment policy for any catalog shipping
@@ -1461,14 +2750,29 @@ def ensure_policy(request: Request, payload: dict) -> dict:
     svc = ebay_auth.service_by_code(str(payload.get("service_code", "")))
     if not svc:
         raise HTTPException(400, "Unknown shipping service.")
+    # Same commitment as the three-at-once button -- a dispatch deadline eBay
+    # scores the seller on -- so it is gated the same way. Leaving one door
+    # open would just move where the unreviewed policy gets made.
+    if not _accepted(payload):
+        raise HTTPException(400, _UNREVIEWED)
     try:
         pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
+    except ebay_auth.PolicyLookupUnavailable as exc:
+        # eBay could not be asked what the account already has. 503 and not
+        # 502: nothing is wrong with the request, and the seller should retry
+        # rather than be told eBay refused something. Creating anyway is what
+        # left duplicate policies on real accounts.
+        raise HTTPException(503, str(exc)) from exc
     except ebay_auth.AccountApiError as exc:
         raise HTTPException(
             502, f"eBay couldn't create the policy: {exc.description}") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(
-            502, f"Couldn't reach eBay to create the policy: {exc}") from exc
+        # Same rule as the ship-from save below: eBay's own refusals answer
+        # through AccountApiError above with eBay's description, so this arm
+        # is only the transport case — and its str() carries the API base,
+        # the path and a status line.
+        raise _lookup_failed("create that policy on your eBay account",
+                             exc, status=503) from exc
     if pol.get("id") and not creds.get("fulfillment_policy_id"):
         db.save_ebay_account(creds["_uid"], fulfillment_policy_id=pol["id"])
     return pol
@@ -1493,6 +2797,10 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     creds = _ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
+    # Before the account is read and before anything is saved: an unreviewed
+    # request must not be able to leave a half-written trail either.
+    if not _accepted(payload):
+        raise HTTPException(400, _UNREVIEWED)
     token, opts = creds["access_token"], (payload or {})
     svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
            or ebay_auth.service_by_code("USPSGroundAdvantage"))
@@ -1510,10 +2818,17 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     for kind, run in steps.items():
         try:
             pol = run()
-        except (ebay_auth.AccountApiError, httpx.HTTPError) as exc:
+        except (ebay_auth.AccountApiError, ebay_auth.PolicyLookupUnavailable,
+                httpx.HTTPError) as exc:
             # One policy eBay won't make must not cost the other two. The most
             # common reason is the account not being opted in yet, which is a
             # different button on the same screen.
+            #
+            # PolicyLookupUnavailable belongs here rather than aborting the
+            # run: it means this ONE kind could not be checked, and the other
+            # two may still be answerable. It is reported per-kind like any
+            # other failure, so the seller is told to retry that one instead
+            # of silently getting a duplicate.
             detail = getattr(exc, "description", "") or str(exc)
             log.warning("ensure-all-policies: %s failed for uid=%s: %s",
                         kind, _uid(request), detail)
@@ -1772,7 +3087,15 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
         try:
             key = ebay_auth.ensure_inventory_location(creds["access_token"], postal)
-        except Exception as exc:  # noqa: BLE001
+        except httpx.HTTPError as exc:
+            # Not a 400. A 400 is a claim about what the seller typed, and the
+            # UI acts on it: the field goes red and the ZIP is what they will
+            # change. A request that never reached eBay says nothing about the
+            # ZIP — so it is a 503, and the raw error (which carries the API
+            # base, the path and a status line) goes to the log instead.
+            raise _lookup_failed("save your ship-from ZIP with eBay",
+                                 exc, status=503) from exc
+        except Exception as exc:  # noqa: BLE001 - eBay's own refusal
             raise HTTPException(
                 400, f"eBay rejected that ship-from location: {exc}") from exc
         fields["merchant_location_key"] = key
@@ -1835,8 +3158,19 @@ _PREF_FIELDS = {
     # sell fast), "median" (typical market), "long_sale" (high end, patient).
     "pricing_strategy": (str, None, None),
     # Promote every newly published listing at eBay's recommended ad rate.
-    # Missing = ON (see _auto_promote_enabled); 0 turns it off.
+    # OFF unless the seller explicitly saved it on: Promoted Listings Standard
+    # takes a percentage of the sale, and neither silence nor an unreadable
+    # preference is agreement to a fee (see ebay_provider.auto_promote_enabled,
+    # which is where that decision is actually made). This comment used to say
+    # "Missing = ON", which is what the code did before P1-06 — left here it is
+    # an invitation to restore it.
     "auto_promote": (int, 0, 1),
+    # Accept Best Offer on every new listing, with no minimum: eBay sends the
+    # seller every offer to accept or decline. OFF unless explicitly saved on
+    # — see services/listing_sync.offers_enabled, which is where the decision
+    # is actually made, and which also explains why it never touches a listing
+    # that is already live.
+    "allow_offers": (int, 0, 1),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 
@@ -1876,8 +3210,19 @@ def save_prefs(request: Request, payload: dict) -> dict:
     if not clean:
         raise HTTPException(400, "No settings provided.")
     merged = db.save_prefs(uid, clean)
-    if not merged and not db.enabled():
-        raise HTTPException(503, "No database configured — defaults need DATABASE_URL set.")
+    # `clean` is non-empty by the check above, so a merge that landed always
+    # comes back non-empty: `{}` here means the write did not happen. It used
+    # to be reported as `{"ok": true}` unless there was no database AT ALL,
+    # which left one case answering success -- the row gone between the
+    # session check and this write. A failed write now raises from db.py; this
+    # covers the rest.
+    if not merged:
+        raise HTTPException(
+            503,
+            "No database configured — defaults need DATABASE_URL set."
+            if not db.enabled()
+            else "We couldn’t save your defaults just now — nothing was "
+                 "changed. Try again in a moment.")
     return {"ok": True, "prefs": merged}
 
 
@@ -1890,13 +3235,17 @@ _promote = ebay_provider.promote
 def _load_prefs(uid: Optional[str]) -> dict:
     """The user's saved prefs, or {} — fetched once per logical operation and
     passed into the helpers below, so one identify doesn't pay the same
-    Postgres round trip twice (and a bulk batch doesn't pay it per item)."""
+    Postgres round trip twice (and a bulk batch doesn't pay it per item).
+
+    Best-effort deliberately, and the one place it is right to be: these
+    values PRE-FILL a draft the seller is about to edit. Missing them costs
+    them a typed weight, where refusing would fail the identify they are
+    waiting on. `GET /api/prefs` — the screen that REPORTS what is saved —
+    takes the strict read instead.
+    """
     if not uid:
         return {}
-    try:
-        return db.get_prefs(uid) or {}
-    except Exception:  # noqa: BLE001 - prefs are optional
-        return {}
+    return db.get_prefs_best_effort(uid) or {}
 
 
 def _pricing_strategy(uid: Optional[str], prefs: Optional[dict] = None) -> str:
@@ -1910,6 +3259,300 @@ def _pricing_strategy(uid: Optional[str], prefs: Optional[dict] = None) -> str:
         return value if value in _PRICING_STRATEGIES else ""
     except Exception:  # noqa: BLE001 - prefs are optional
         return ""
+
+
+# How far under the market a fresh draft's own price may sit before the comps
+# overrule it. The identify pass prices from the PHOTOS ALONE — it never sees a
+# comparable listing — so its number is a guess, and the guess it makes when it
+# cannot pin the item down is a low one. That is the expensive direction to be
+# wrong in: an underpriced listing sells within the hour at a number nobody can
+# take back, and a hand-signed piece drafted at $85 is gone before the seller
+# reads the draft.
+#
+# 0.6 = "less than 60% of what the cheapest quarter of comparable listings
+# ask". Deliberately not 1.0: comps are ASKING prices on a keyword match, a
+# fair draft often sits under them on purpose (condition, a quick-flip
+# strategy), and overruling every such draft would make the number no more
+# honest, just higher. This fires on the drafts that are wrong by an order of
+# magnitude, not the ones that are merely keen.
+UNDERPRICE_RATIO = float(os.getenv("UNDERPRICE_RATIO", "0.6") or 0.6)
+# The kill switch for the lookup itself: one eBay Browse call per drafted
+# item, which a 50-item bulk batch multiplies. On by default — a draft priced
+# without ever asking the market is the bug this exists to close.
+DRAFT_PRICE_COMPS = (os.getenv("DRAFT_PRICE_COMPS", "1").strip().lower()
+                     not in ("0", "false", "no", "off"))
+# How much of the title the fallback comp search keeps when the whole thing
+# matched nothing. Five words is the identifying head the title rule puts
+# first (brand/artist, model or work, what the thing is) without the specifics
+# that make a search return zero.
+_COMP_QUERY_WORDS = 5
+
+
+# --- research: what the item IS, looked up rather than remembered ----------
+#
+# The identify pass is a memory test over photos. It has now cost this seller
+# two items in the expensive direction: a hand-signed Fanch Ledan lithograph
+# drafted as a "Fanch Ledan style lithograph" at $85, and a genuine Beatles
+# butcher cover called a "replica" that sold for $22 and was worth $7,000+.
+# Both are the same failure — the model half-recognized something, hedged, and
+# the hedge became the listing.
+#
+# So a draft that shows any sign of turning on an identification now gets
+# looked UP (claude_ai.research_item: Claude with the server-side web search
+# tool over the same photos). What comes back is advice under strict rules,
+# below: it may name a work, fill a blank, raise a price and raise a question.
+# It may never downgrade an item, lower a price, or overwrite something the
+# seller can already see is right.
+#
+# OFF unless asked for. The lookup is a second vision call with up to
+# RESEARCH_MAX_SEARCHES web searches inside it, and it runs INSIDE the
+# identify request — the seller (or the whole bulk batch) waits on it. The
+# gate below catches most of a thrift store ("edition", "rare", "book",
+# "record", "glass"...), so the morning it shipped on "auto" every identify
+# went from seconds to a minute or more and the app read as broken. Set
+# RESEARCH_PASS=auto (or always) to turn it on; the fix that lets it run
+# without holding the draft hostage is the one that earns "auto" back.
+RESEARCH_PASS = os.getenv("RESEARCH_PASS", "off").strip().lower() or "off"
+
+# Words in a draft that mean an identification decides the price. Any of them
+# and the item gets looked up: this is the "is this the expensive one?" list.
+_RESEARCH_SIGNALS = (
+    "signed", "signature", "autograph", "inscribed", "numbered", "edition",
+    "limited", "artist proof", "lithograph", "serigraph", "etching",
+    "screenprint", "silkscreen", "giclee", "original painting", "oil on",
+    "acrylic on", "watercolor", "sculpture", "provenance", "authenticity",
+    "coa", "first edition", "first pressing", "first printing",
+    "promo", "misprint", "error", "variant", "rookie", "graded", "psa",
+    "hallmark", "sterling", "14k", "18k", "karat", "antique", "rare",
+)
+# ...and the hedges themselves, which are the model saying "I am not sure"
+# in the one place it costs the most.
+_RESEARCH_HEDGES = (
+    "style of", " style ", "attributed", "manner of", "after ", "replica",
+    "reproduction", "repro", "tribute", "homage", "copy of", "knockoff",
+    "bootleg", "not original", "unauthorized", "unsigned",
+)
+# Categories where the same photo can be a $20 item or a $7,000 one.
+_RESEARCH_CATEGORIES = (
+    "art", "print", "painting", "poster", "sculpture", "collectible",
+    "memorabilia", "autograph", "record", "vinyl", "music", "trading card",
+    "sports card", "coin", "currency", "stamp", "antique", "comic", "book",
+    "jewelry", "watch", "pottery", "glass",
+)
+
+
+def _research_reason(listing: Listing, observations: str = "") -> str:
+    """Why this draft needs looking up, or "" when it doesn't.
+
+    Deliberately NOT "is the price high" — the whole problem is that the
+    valuable items came back cheap. The gate is "does an identification decide
+    what this is worth", which is a property of the item and of how sure the
+    draft sounds, never of the number on it.
+    """
+    if RESEARCH_PASS == "off":
+        return ""
+    if RESEARCH_PASS == "always":
+        return "always"
+    haystack = " ".join([
+        listing.title or "", listing.brand or "", listing.description or "",
+        listing.condition_description or "", observations or "",
+        " ".join(f"{s.name} {s.value}" for s in (listing.item_specifics or [])),
+    ]).lower()
+    for hedge in _RESEARCH_HEDGES:
+        if hedge in haystack:
+            return f"the draft hedged ({hedge.strip()!r})"
+    for signal in _RESEARCH_SIGNALS:
+        if signal in haystack:
+            return f"attribution decides the price ({signal!r})"
+    category = (listing.category_suggestion or "").lower()
+    for landmine in _RESEARCH_CATEGORIES:
+        if landmine in category:
+            return f"category where a variant changes everything ({landmine!r})"
+    return ""
+
+
+def _research_draft(listing: Listing, image_paths: list,
+                    observations: str = "", confidence: str = "") -> Optional[dict]:
+    """Look a drafted item up and fold the findings in, in place.
+
+    What the research may do:
+      * name the item — replace a HEDGED title with the researched one, and
+        fill an empty brand;
+      * raise the price to the bottom of the researched range (never lower it,
+        and never touch a price already above that floor);
+      * add what the seller has to check, including the trap this exists for:
+        the more valuable variant the photos cannot rule out.
+
+    What it may never do: downgrade an item, lower a price, overwrite a title
+    that is already specific, or replace the seller's own words. It is a
+    second opinion with a source list, not an appraiser.
+
+    Returns the research dict when something was applied, else None. Never
+    raises — a draft is worth more than a lookup.
+    """
+    reason = _research_reason(listing, observations)
+    if not reason:
+        return None
+    if not config.anthropic_ready():
+        return None
+    # A first pass that was SURE and hedged nothing has earned its answer;
+    # research still runs on everything else, including "high" confidence on a
+    # landmine category, because that is where a confident wrong answer costs
+    # the most.
+    log.info("research: looking up %r — %s (first pass was %s confidence)",
+             (listing.title or "")[:60], reason, confidence or "unstated")
+    try:
+        paths = [p for p in image_paths if p.is_file()]
+        found = claude_ai.research_item(paths, listing, observations=observations)
+    except Exception as exc:  # noqa: BLE001 - best-effort by contract
+        log.info("research failed: %s", exc)
+        return None
+    if not found:
+        return None
+
+    notes: list[str] = []
+    conf = str(found.get("confidence") or "low").strip().lower()
+    identified = str(found.get("identified") or "").strip()
+    researched_title = str(found.get("title") or "").strip()[:TITLE_MAX_CHARS]
+    hedged = any(h in (listing.title or "").lower() for h in _RESEARCH_HEDGES)
+
+    # The title. A hedged title is the one thing research is allowed to
+    # overwrite outright — "Fanch Ledan style lithograph" is not a title worth
+    # protecting. Anything else only gets a suggestion the seller can take.
+    if researched_title and conf in ("medium", "high"):
+        if hedged:
+            log.info("research: title %r -> %r", listing.title, researched_title)
+            listing.title = researched_title
+        elif researched_title.lower() != (listing.title or "").lower():
+            notes.append(f"The lookup suggests this title: “{researched_title}”.")
+    maker = str(found.get("maker") or "").strip()
+    if maker and not (listing.brand or "").strip() and conf in ("medium", "high"):
+        listing.brand = maker[:65]
+
+    # The price, one direction only.
+    low = found.get("value_low")
+    high = found.get("value_high")
+    try:
+        low = float(low) if low is not None else None
+        high = float(high) if high is not None else None
+    except (TypeError, ValueError):
+        low = high = None
+    if low and low > 0:
+        basis = str(found.get("value_basis") or "researched comparables")[:120]
+        span = f"${_money(low)}" + (f"-${_money(high)}" if high and high > low else "")
+        if listing.price is None or float(listing.price) < low:
+            was = listing.price
+            listing.price = round(low, 2)
+            notes.append(
+                f"Price raised to the bottom of what this looks worth ({span}, "
+                f"{basis})" + (f" — the photos alone suggested ${_money(was)}."
+                               if was is not None else "."))
+        else:
+            notes.append(f"For reference, the lookup puts this at {span} ({basis}).")
+
+    # The trap. This is the whole point of the pass: the version of this item
+    # that is worth 100x, and what would tell it apart.
+    trap = str(found.get("high_value_variant") or "").strip()
+    if trap:
+        notes.append(f"CHECK BEFORE LISTING — {trap}")
+    for item in (found.get("verify") or [])[:3]:
+        text = str(item or "").strip()
+        if text:
+            notes.append(f"Verify: {text}")
+    if identified and conf == "low" and not trap:
+        notes.append(f"The lookup wasn't sure either — its best reading: {identified}")
+    sources = [str(u).strip() for u in (found.get("sources") or [])[:3] if u]
+    if sources and notes:
+        notes.append("Looked up from: " + ", ".join(sources))
+    if notes:
+        listing.missing_info = [*(listing.missing_info or []), *notes]
+    return found if notes else None
+
+
+def _price_against_comps(listing: Listing, uid: Optional[str] = None,
+                         prefs: Optional[dict] = None) -> Optional[dict]:
+    """Check a fresh AI draft's price against live eBay comps, in place.
+
+    Two things this fixes, both of them the same bug from opposite ends:
+
+      * the AI returned no price at all (the prompt now asks for null rather
+        than a guess when the value turns on an attribution it cannot confirm)
+        — the market fills it in; and
+      * the AI returned a price far under what comparable listings ask, which
+        is what "I could not really identify this" looks like in a number.
+
+    It never LOWERS a draft's price: a high number is the seller's to reduce
+    after it fails to sell, and the market only ever gets a vote here on the
+    side that cannot be undone. Whatever it changes is said out loud in
+    missing_info, so the editor flags it for a human instead of quietly
+    swapping one confident-looking number for another.
+
+    Best-effort and silent on failure: no eBay credentials, no comparable
+    listings, or a lookup that errors all leave the draft exactly as drafted.
+    Returns the comp suggestion it used, or None when nothing changed.
+    """
+    if not (DRAFT_PRICE_COMPS and config.taxonomy_ready()):
+        return None
+    title = (listing.title or "").strip()
+    if not title:
+        return None
+    strategy = _pricing_strategy(uid, prefs)
+
+    def _ask(query: str) -> dict:
+        try:
+            data = pricing.suggest(query, category_id=listing.category_id or None,
+                                   condition=listing.condition or None,
+                                   strategy=strategy)
+        except Exception as exc:  # noqa: BLE001 - a draft beats a comp
+            log.info("draft price check skipped for %r: %s", query[:60], exc)
+            return {}
+        return (data or {}).get("suggestion") or {}
+
+    # A good title is a bad search. The title rule packs it with the words that
+    # identify THIS one piece — artist, work, edition, size — and a keyword
+    # search for all of them together matches nothing, which is exactly the
+    # answer a valuable one-off produces. So a full-title miss falls back to
+    # the head of the title, which by that same rule is the maker/artist and
+    # the item itself: "Fanch Ledan hand signed lithograph", not "... Interior
+    # with Matisse 84/250 framed 24x30".
+    best = _ask(title)
+    query = title
+    if not best.get("price"):
+        head = " ".join(title.split()[:_COMP_QUERY_WORDS])
+        if head and head != title:
+            best, query = _ask(head), head
+    market = best.get("price")
+    low = best.get("low")
+    if not market or market <= 0:
+        return None
+    was = listing.price
+    if was is None:
+        note = (f"Confirm the price — the AI wouldn't put a number on this one. "
+                f"Comparable eBay listings ask ${_money(low or market)}-"
+                f"${_money(best.get('high') or market)}.")
+    elif low and float(was) < float(low) * UNDERPRICE_RATIO:
+        note = (f"Confirm the price — the photos alone suggested "
+                f"${_money(was)}, but comparable eBay listings ask "
+                f"${_money(low)}-${_money(best.get('high') or market)}.")
+    else:
+        return None                       # the draft's own number stands
+    listing.price = round(float(market), 2)
+    # In front of the seller, not just in the log: this is a number that
+    # changed under them, on the field where being wrong is unrecoverable.
+    listing.missing_info = [*(listing.missing_info or []), note]
+    log.info("draft price: %r %s -> %.2f from %d comps (%s)", query[:60],
+             "none" if was is None else f"{float(was):.2f}",
+             listing.price, best.get("count") or 0, best.get("basis") or "")
+    return best
+
+
+def _money(value) -> str:
+    """A price for a sentence: no decimals when it doesn't need them."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{number:,.0f}" if number == int(number) else f"{number:,.2f}"
 
 
 def _apply_listing_defaults(listing: Listing, uid: Optional[str],
@@ -1962,6 +3605,8 @@ def sync_profile_from_ebay(request: Request) -> dict:
         ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
         fields["ebay_username"] = ident["username"]
         fields["ebay_email"] = ident["email"]
+        if ident.get("user_id"):
+            fields["ebay_user_id"] = ident["user_id"]
     except Exception as exc:  # noqa: BLE001 - identity scope may be missing
         log.info("profile sync: identity fetch failed for %s: %s", uid, exc)
     # Only fill policy/location gaps — never overwrite explicit selections.
@@ -1993,12 +3638,81 @@ def ebay_disconnect(request: Request) -> dict:
     return {"ok": True}
 
 
+def _support_reference() -> str:
+    """A short id tying what the seller was told to what the logs recorded.
+
+    Short because someone has to read it out or paste it into an email. It is
+    not a secret and identifies nothing on its own — it exists so mapping a
+    failure to a product state does not throw the evidence away.
+
+    It now returns the CURRENT REQUEST's id rather than minting a fresh one
+    per failure. Same alphabet, same width, and every existing call site is
+    unchanged — but the reference a seller quotes now identifies the whole
+    request, so it joins to every line that request logged and to its row in
+    error_events, instead of to the single line at one failure site.
+
+    Falls back to a fresh value off-request (a background sweep, a startup
+    task), where there is no context to belong to.
+    """
+    return errorlog.current_reference() or errorlog.new_reference()
+
+
+def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPException:
+    """A marketplace lookup that failed, said in a sentence a seller can use.
+
+    P2-07's rule, applied to the four lookups the editor makes on nearly every
+    listing. They handed `raise_for_status()`'s own words straight into a
+    toast:
+
+        eBay Taxonomy API error: Client error '401 Unauthorized' for url
+        'https://api.ebay.com/commerce/taxonomy/v1/category_tree/0/
+        get_category_suggestions?q=vintage+levis' For more information check:
+        https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
+
+    — the deployment's API base, the exact call, the seller's own query and an
+    MDN link, in place of anything they could do. It also read identically for
+    a rate limit, an expired application token and a network blip, which are
+    three different waits.
+
+    The detail is not discarded; it goes to the log under `reference`, which
+    comes back in the message so support can join the two. Same shape as the
+    payments check and the token checkout above.
+
+    `doing` names the marketplace on purpose. That is not the implementation
+    detail this exists to remove — a seller listing on eBay knows the app
+    talks to eBay, and knowing whose side the problem is on is most of what
+    they wanted. What goes is the URL, the status line and the MDN link.
+    """
+    reference = _support_reference()
+    log.warning("lookup failed (%s) [%s]: %s", doing, reference, exc)
+    # The reference rides IN the sentence: lib/api.js reads `detail` as a
+    # string, so a structured body renders as "[object Object]".
+    return HTTPException(status, (
+        f"We couldn't {doing} just now. Try again in a moment — if it keeps "
+        f"happening, quote {reference} to support."))
+
+
 @app.get("/api/ebay/payments-status")
 def ebay_payments_status(request: Request) -> dict:
     """Live check of the connected eBay account's payments onboarding.
 
     Answers "did my bank account link actually work?": eBay reports the
     account as OPTED_IN to the payments program once payout setup is done.
+
+    The answer is a product STATE, not eBay's HTTP response. This used to
+    return the deployment's eBay environment, a raw status code and eBay's
+    entire response body, and Settings put all three in a toast:
+
+        Couldn't verify payments setup (production): eBay API error: 500
+        {"errors":[{"errorId":20403,"domain":"ACCESS", ...}]}
+
+    None of which a seller can act on. Worse, it did not distinguish the three
+    answers that lead to three different buttons — wait, finish your bank
+    setup, or reconnect the account — and `production` is deployment
+    configuration on a route any signed-in seller can call.
+
+    The raw detail is not discarded; it goes to the log under `reference`,
+    which comes back to the seller so support can join the two.
     """
     if not _uid(request):
         raise HTTPException(401, "Log in first.")
@@ -2007,20 +3721,56 @@ def ebay_payments_status(request: Request) -> dict:
         raise HTTPException(400, "eBay is not connected for this account.")
     try:
         program = ebay_auth.fetch_payments_program(creds["access_token"])
-    except httpx.HTTPStatusError as exc:
-        return {
-            "env": config.EBAY_ENV,
-            "opted_in": False,
-            "error": f"eBay API error: {exc.response.status_code}",
-            "detail": exc.response.text,
-        }
+    except Exception as exc:  # noqa: BLE001 - mapped below, never re-raised
+        return _payments_failure_state(exc)
+
     status = str(program.get("status", "")).upper()
+    if status == "OPTED_IN":
+        return {"state": "ready", "opted_in": True,
+                "message": "Payouts are set up on eBay — you can publish live "
+                           "listings."}
     return {
-        "env": config.EBAY_ENV,
-        "status": status,
-        "opted_in": status == "OPTED_IN",
-        "program": program,
+        "state": "action_required", "opted_in": False,
+        "message": "eBay hasn't finished setting up your payouts. Finish it "
+                   "in eBay Seller Hub under Payments — bank verification "
+                   "can take a day or two.",
     }
+
+
+def _payments_failure_state(exc: Exception) -> dict:
+    """Map a failed payments check to a state, and log what actually happened.
+
+    The states exist because they lead to different next actions, and telling
+    them apart is the whole value: "reconnect eBay" and "finish payout setup"
+    are different buttons, and sending a seller to the wrong one costs them a
+    support round trip.
+    """
+    reference = _support_reference()
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", 0) or 0
+    log.warning("payments check failed [%s]: status=%s detail=%s",
+                reference, status or type(exc).__name__,
+                (getattr(resp, "text", "") or str(exc))[:600])
+
+    if status in (401, 403):
+        return {"state": "reconnect_required", "opted_in": False,
+                "reference": reference,
+                "message": "eBay wouldn't accept the connection. Reconnect "
+                           "eBay in Settings and check again."}
+    if status == 429 or status >= 500 or resp is None:
+        # `resp is None` is a transport failure — a timeout or a refused
+        # connection — which is the same answer as eBay being down: unknown,
+        # try again. It is deliberately NOT reported as a problem with the
+        # seller's account, which is what a generic error message implies.
+        return {"state": "unavailable", "opted_in": False,
+                "reference": reference,
+                "message": "We couldn't reach eBay to check your payouts. "
+                           "Nothing has changed — try again in a moment."}
+    return {"state": "contact_support", "opted_in": False,
+            "reference": reference,
+            "message": ("eBay gave an answer we don't recognise. Nothing has "
+                        f"changed. If it keeps happening, quote {reference} "
+                        "to support.")}
 
 
 # --- eBay marketplace account deletion notifications ------------------------
@@ -2060,24 +3810,80 @@ def ebay_account_deletion_challenge(request: Request, challenge_code: str = "") 
 
 @app.post("/api/ebay/account-deletion")
 async def ebay_account_deletion_notice(request: Request) -> Response:
-    """Acknowledge an account-deletion notification.
+    """Verify, durably accept, and act on an account-deletion notification.
 
-    We key stored eBay connections by *our* user ids, not eBay usernames, so
-    there is no per-user data to purge here, so an ack is the whole job.
-    These arrive 1-2 times a MINUTE around the clock: the old approach wrote
-    a JSON file per notice (thousands a day churning through a 1GB volume,
-    deleted unread by prune_exports two days later) and let every ack spam the
-    access log. Now they're only visible at LOG_LEVEL=DEBUG — a failing
-    endpoint still surfaces via non-2xx access-log lines and eBay's own
-    delivery alerts.
+    This used to parse the body for a log line and return 200 to anything at
+    all — no signature check, no use of the userId, and no deletion. That is
+    both a compliance failure (eBay requires an app that stores eBay data to
+    process these) and a trap: the moment such a handler starts deleting, an
+    unauthenticated public URL becomes a remote account-wipe primitive. So
+    verification and erasure land together, verification first.
+
+    The order below is the whole design:
+
+      1. Verify the signature over the RAW bytes. 412 if it does not verify —
+         eBay's documented code for a failed validation.
+      2. Record the notice durably. If that write fails, answer 503: eBay
+         resends until it gets a 2xx and stops afterwards, so acknowledging a
+         notice we did not record is a promise with nothing behind it.
+      3. Only then answer 200, and erase.
+
+    A redelivery of a notice already recorded is acknowledged immediately —
+    eBay resends as a matter of routine, and doing the work twice is neither
+    needed nor safe.
     """
+    raw = await request.body()
+    signature = request.headers.get("x-ebay-signature", "")
+
     try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001 - malformed body; ack anyway
-        payload = {}
-    notif_id = ((payload.get("notification") or {}).get("notificationId")
-                or "unknown")
-    log.debug("ebay: account-deletion notice acked (notificationId=%s)", notif_id)
+        if not ebay_notify.verify(raw, signature):
+            log.warning("ebay: rejected an unsigned/invalid account-deletion "
+                        "notice from %s", request.client.host
+                        if request.client else "?")
+            return Response(status_code=412)
+    except ebay_notify.KeyUnavailable as exc:
+        # eBay's key could not be fetched. That is not a forged notice and
+        # must not be refused as one: 503 asks eBay to send it again.
+        log.warning("ebay: cannot verify deletion notice right now: %s", exc)
+        return Response(status_code=503)
+
+    try:
+        payload = json.loads(raw)
+    except Exception:  # noqa: BLE001 - signed but unparseable
+        log.warning("ebay: signed account-deletion notice was not valid JSON")
+        return Response(status_code=400)
+
+    notif_id = ebay_deletion.notification_id_of(payload)
+    subject = ebay_deletion.subject_of(payload)
+    if not notif_id or not subject:
+        # Signed by eBay but missing what identifies it. Refusing is right:
+        # acknowledging would retire a notice we cannot act on.
+        log.warning("ebay: deletion notice missing notificationId or userId")
+        return Response(status_code=400)
+
+    try:
+        seen = db.record_deletion_notice(
+            notif_id, subject, ebay_deletion.payload_digest(raw))
+    except db.StorageUnavailable as exc:
+        log.warning("ebay: could not record deletion notice %s: %s",
+                    notif_id, exc)
+        return Response(status_code=503)
+
+    if seen == "duplicate":
+        log.debug("ebay: deletion notice %s already accepted", notif_id)
+        return Response(status_code=200)
+
+    # Accepted. The erasure runs after the response so eBay is not held on a
+    # multi-listing media purge; the row above is what makes that safe to do
+    # out of band.
+    def _erase() -> None:
+        result = ebay_deletion.purge(subject, purge_media=_purge_session_images)
+        db.finish_deletion_notice(notif_id, result["state"],
+                                  result.get("error", ""))
+        log.info("ebay deletion %s: state=%s users=%d listings=%d",
+                 notif_id, result["state"], result["users"], result["listings"])
+
+    _in_background(_erase, what="eBay account-deletion purge")
     return Response(status_code=200)
 
 
@@ -2615,6 +4421,13 @@ def identify(session_id: str, request: Request) -> dict:
     try:
         result = claude_ai.identify(paths, names,
                                     strategy=_pricing_strategy(_uid(request)))
+    except errors.StorageUnavailable:
+        # Refund first, then let it keep its own name: an AI error message
+        # sends the seller to retry the model or re-shoot their photos, and
+        # neither is the problem. The central handler already says the right
+        # thing about storage.
+        tokens.refund(spent)
+        raise
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         tokens.refund(spent)
         code, message = claude_ai.ai_error_message(exc)
@@ -2622,6 +4435,13 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
     _resolve_category(result.listing)
+    # Research BEFORE comps: it can rewrite a hedged title into the real one,
+    # and the comp search is only as good as the title it searches for.
+    _research_draft(result.listing, paths, result.raw_observations,
+                    result.confidence)
+    # After the category: comps are sharper filtered to it. See
+    # _price_against_comps — the photos alone never see a comparable listing.
+    _price_against_comps(result.listing, _uid(request))
     storage.save_listing(session_id, result.listing)
     db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
     return result.model_dump()
@@ -2645,7 +4465,10 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     try:
         aspects = taxonomy.item_aspects(listing.category_id).get("aspects", [])
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Couldn't load eBay item specifics: {exc}") from exc
+        # The same taxonomy call /api/item-aspects makes, so the same answer:
+        # httpx's words name the API base, the path and the category id.
+        raise _lookup_failed("load eBay's item specifics for that category",
+                             exc) from exc
     opt_dir = storage.optimized_dir(session_id)
     names = listing.images or storage.list_optimized(session_id)
     paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
@@ -2671,15 +4494,121 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # tabs. Autofill also runs by itself when the editor opens
     # (IdentifyResult.specifics_autofilled), so nobody had to click anything.
     db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(db.get_listing(session_id)),
+                      status=_sticky_status(db.get_listing_best_effort(session_id)),
                       user_id=_uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
 
 
+@app.post("/api/enrich/{session_id}")
+def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> dict:
+    """Fill in everything this ONE listing can still be filled in with, from
+    its own photos — the last step before it is published.
+
+    This is "Enrich all" (the dashboard's bulk fill, /api/listings/enrich)
+    applied to a single draft, and deliberately on THIS side of the publish.
+    There, the same work has to land on a listing eBay is already showing:
+    the record has to carry a category eBay agrees with, its photos have to
+    still be on the server (an imported listing's live on eBay and have to be
+    downloaded first), the seller has to be connected, and the fill then has
+    to survive a ReviseItem — every one of which is a way for it to come back
+    "skipped" with the blanks still blank. A draft has none of those
+    problems: nothing is live yet, the photos are right here, and the answer
+    is saved locally.
+
+    What it fills, in one pass:
+      * an eBay category, when the draft has none (specifics are per
+        category, so nothing else can run until this is settled);
+      * every category item specific the photos can answer — required ones
+        first — chosen from eBay's own allowed values;
+      * the maker/brand, double-checked against the photos.
+    Anything the seller already wrote is left exactly as it is: this only
+    ever fills blanks.
+
+    Takes the listing in the request body rather than reading the saved copy,
+    so edits still open in the editor are enriched (and are not overwritten
+    by an older save). Returns the whole listing back for the form to adopt.
+    """
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    _assert_session_owner(session_id, request)
+    listing = req.listing
+    # A missing category is a blocker the seller would otherwise have to go
+    # and clear by hand before this could do anything — and the same
+    # best-effort resolve a fresh draft gets can usually settle it. Done
+    # BEFORE the charge: an enrichment with no category has nothing to fill
+    # and must not be billed for finding that out.
+    if not listing.category_id:
+        _resolve_category(listing)
+    if not listing.category_id:
+        raise HTTPException(
+            400, "Pick an eBay category first — the details eBay asks for "
+                 "depend on it.")
+    opt_dir = storage.optimized_dir(session_id)
+    names = listing.images or storage.list_optimized(session_id)
+    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    if not paths:
+        raise HTTPException(400, "This listing's photos aren't on the server anymore.")
+    spent = _charge_ai(request, "specifics")
+    try:
+        added = _enrich_listing(listing, paths)
+    except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
+        tokens.refund(spent)
+        code, message = claude_ai.ai_error_message(exc)
+        log.warning("enrich failed (session=%s): %s", session_id, exc)
+        raise HTTPException(code, message) from exc
+    if added is None:
+        # Never ran — no taxonomy, no model, or no aspects published for this
+        # category. `_enrich_listing` swallows its own failures, so this is
+        # the return value rather than an exception, and nothing was earned.
+        tokens.refund(spent)
+        raise HTTPException(
+            400, "The AI couldn't read eBay's details for that category — "
+                 "nothing was filled in, and nothing was charged.")
+    # Blanks the fill has now answered stop asking. Same rule the bulk enrich
+    # applies, so a draft filled here and one filled from the dashboard end
+    # up in the same state.
+    settled = _drop_answered_missing_info(listing)
+    # Saved the way every other save saves. _restore_server_state is not
+    # optional bookkeeping here: it keeps the client's copy of the
+    # server-owned publish state from erasing the real one, and it marks what
+    # changed. A listing that is ALREADY live is revised with only its dirty
+    # fields, so specifics filled in here and left unmarked would be saved
+    # locally and never reach eBay when the seller presses Update — the exact
+    # silence _enrich_one had to mark_dirty around, avoided by going through
+    # the same path a save does.
+    prev = _restore_server_state(session_id, listing)
+    storage.save_listing(session_id, listing)
+    db.upsert_listing(session_id, listing.model_dump(),
+                      status=_sticky_status(prev), user_id=_uid(request))
+    log.info("enrich: session=%s added=%d settled=%d", session_id, added, settled)
+    return {"listing": listing.model_dump(), "added": added, "settled": settled}
+
+
+def _taxonomy_guard(request: Request) -> None:
+    """Shared brake on the eBay lookups that need no login.
+
+    Category suggestions, item aspects and price comps all call eBay with the
+    APPLICATION token — that is why they need no seller, and why an
+    unauthenticated flood spends an allowance shared by every seller. The
+    answers are cached, but the cache is bounded, so distinct queries evict it
+    and force a live call each.
+
+    ONE budget across all three: they draw on the same eBay allowance, so
+    metering them separately would let a caller spend it three times over.
+    """
+    ip = _client_ip(request)
+    if not ratelimit.check(f"taxonomy:{ip}",
+                           max_attempts=ratelimit.TAXONOMY_MAX_CALLS):
+        log.warning("taxonomy: rate limited %s", ip)
+        raise HTTPException(
+            429, "Too many lookups at once. Wait a moment and try again.")
+
+
 @app.post("/api/category-suggestions")
-def category_suggestions(payload: dict) -> dict:
+def category_suggestions(payload: dict, request: Request) -> dict:
     """Return ranked eBay category suggestions for a free-text query."""
+    _taxonomy_guard(request)
     if not config.taxonomy_ready():
         raise HTTPException(
             400,
@@ -2692,7 +4621,7 @@ def category_suggestions(payload: dict) -> dict:
     try:
         return taxonomy.suggest(query, limit=int(payload.get("limit", 5)))
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"eBay Taxonomy API error: {exc}") from exc
+        raise _lookup_failed("look up eBay's categories", exc) from exc
 
 
 @app.post("/api/price-suggestions")
@@ -2703,6 +4632,7 @@ def price_suggestions(payload: dict, request: Request) -> dict:
     Sources are pluggable — see services/pricing.py. The headline suggestion
     honors the account's pricing strategy (Quick Flip / Median / Long Sale).
     """
+    _taxonomy_guard(request)
     if not config.taxonomy_ready():
         raise HTTPException(
             400,
@@ -2719,8 +4649,13 @@ def price_suggestions(payload: dict, request: Request) -> dict:
             condition=str(payload.get("condition") or "").strip() or None,
             strategy=_pricing_strategy(_uid(request)),
         )
+    except errors.StorageUnavailable:
+        # eBay was fine. Relabelling this as an eBay failure sends the seller
+        # to look at the wrong thing, and wraps an internal sentence inside a
+        # sentence about eBay — the shape P2-07 exists to stop.
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"eBay price lookup failed: {exc}") from exc
+        raise _lookup_failed("check eBay for comparable prices", exc) from exc
 
 
 
@@ -2769,6 +4704,13 @@ def _restore_server_state(session_id: str, listing: Listing,
     if changed:
         log.info("save: kept server-owned %s for session=%s",
                  ", ".join(changed), session_id)
+    # Record what the SELLER changed, by diffing against the copy just read.
+    # A revise sends only these: every other field this app holds is a
+    # snapshot of eBay taken at the last sync, and re-sending a snapshot
+    # overwrites whatever eBay has now — which may be newer. Done here rather
+    # than at each call site because this runs on every save path, and a save
+    # that skipped it would leave the seller's edit unsent.
+    dirty_fields.accumulate(listing, stored)
     return rec
 
 
@@ -2799,9 +4741,154 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     _assert_session_owner(session_id, request)
     prev = _restore_server_state(session_id, listing)
     storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(prev), user_id=_uid(request))
+    # Checked, like the PATCH route directly below: `db.upsert_listing`
+    # swallows its failures, and "saved" is the one word this route says. A
+    # seller told their work is saved closes the tab. Called unconditionally
+    # and only ENFORCED when there is a database — `db.enabled() and not
+    # db.upsert_listing(...)` short-circuits, so without one the write would
+    # never run at all.
+    landed = db.upsert_listing(session_id, listing.model_dump(),
+                               status=_sticky_status(prev), user_id=_uid(request))
+    if db.enabled() and not landed:
+        raise errors.StorageUnavailable(
+            "Couldn't save your changes just now. They're still on screen — "
+            "try again in a moment.")
     return {"saved": True}
+
+
+# What a card-level control may change without opening the editor. Small on
+# purpose: a patch route that accepts anything is a full replace with extra
+# steps, and the caller can then send every field and reintroduce the very
+# lost update this exists to prevent.
+_PATCHABLE = ("fulfillment_policy_id", "category_id", "category_suggestion",
+              "price", "quantity", "condition")
+
+
+@app.patch("/api/listings/{session_id}")
+def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
+    """Change named fields on a listing, leaving the rest as stored.
+
+    `POST /api/save/{id}` is a full REPLACE and has to be — clearing a
+    subtitle means sending the listing without one. The problem is what got
+    built on top: a card that changes a shipping policy or a category does it
+    by spreading the whole listing it happens to be holding, which came from
+    the last /api/listings load. A title fixed in the editor in another tab,
+    or anything a background sync pulled in since, is overwritten by that
+    older copy the moment somebody picks from a dropdown.
+
+    Same reasoning as PATCH .../images/order above, which exists because "a
+    reorder could overwrite a title edit made in another tab with a stale
+    copy". A patch says what changed and nothing else, so there is no stale
+    copy to send.
+
+    The merged listing comes back so the caller can refresh from the answer
+    rather than from the copy it already had — which is the copy that was
+    stale.
+    """
+    _assert_session_owner(session_id, request)
+    rec = db.get_listing(session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+    changes = {k: v for k, v in (payload or {}).items() if k in _PATCHABLE}
+    if not changes:
+        raise HTTPException(
+            400, "Nothing to change. Send one of: "
+                 + ", ".join(_PATCHABLE) + ".")
+
+    merged = dict(rec.get("listing") or {})
+    merged.update(changes)
+    try:
+        listing = Listing(**merged)
+    except Exception as exc:  # noqa: BLE001 - a bad value is the caller's
+        raise HTTPException(400, f"That value isn't valid: {exc}") from exc
+    # Marked so the next revise actually carries it: a live listing's shipping
+    # policy changed from a card has to reach eBay, and a revise only sends
+    # fields the seller is known to have edited.
+    listing.mark_dirty(*changes)
+
+    storage.save_listing(session_id, listing)
+    data = listing.model_dump()
+    if db.enabled() and not db.upsert_listing(
+            session_id, data, status=_sticky_status(rec),
+            user_id=rec.get("user_id")):
+        raise errors.StorageUnavailable(
+            "Couldn't save that change just now. Try again in a moment.")
+    return {"ok": True, "listing": data}
+
+
+def _listing_image_order(session_id: str,
+                         rec: Optional[dict]) -> Optional[list[str]]:
+    """The photo order this listing is SAVED with, or None when it is saved
+    nowhere yet.
+
+    The database row first, then the on-disk draft. The disk fallback is not
+    belt-and-braces: a database is optional (README: set DATABASE_URL "to
+    persist every listing"), and even where one is configured a row can be
+    absent because an earlier upsert never landed. With the row as the only
+    source, "no row" reads as "this listing has no photos" — which is what
+    turned every reorder on such a listing into the 409 below, telling the
+    seller their photos had "changed somewhere else" when nothing had
+    changed anywhere.
+    """
+    stored = [str(n) for n in ((rec or {}).get("listing") or {}).get("images") or []]
+    if stored:
+        return stored
+    disk = storage.load_listing(session_id)
+    if disk is None:
+        return None
+    return [str(n) for n in (disk.get("images") or [])]
+
+
+def _save_image_order(session_id: str, rec: Optional[dict],
+                      images: list[str], user_id: Optional[str]) -> list[str]:
+    """Persist `images` as the listing's photo order, and nothing else.
+
+    RAISES rather than reporting a save that recorded nothing: the caller's
+    client has already moved (or removed) the photo on screen, so a write
+    that quietly went nowhere is the seller dragging their main photo into
+    place and finding it moved again after a reload.
+    """
+    def _set_order(data: dict) -> dict:
+        data["images"] = list(images)
+        return data
+
+    if rec:
+        # A row exists, so it is the truth. Written under the row lock, like
+        # every other write that shares a listing with publish's background
+        # threads — and a failure is reported, not papered over with the disk
+        # copy, because the row is what the next page load reads.
+        data = db.mutate_listing_data(session_id, _set_order,
+                                      status=_sticky_status(rec), user_id=user_id)
+        if data is None:
+            raise errors.StorageUnavailable(
+                "Couldn't update this listing's photos just now — nothing has "
+                "changed. Try again in a moment.")
+        # Keep the on-disk copy in step; eBay is served photos in this order.
+        try:
+            storage.save_listing(session_id, Listing(**data))
+        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+            log.warning("images: disk mirror not updated for %s: %s",
+                        session_id, exc)
+        return [str(n) for n in (data.get("images") or images)]
+
+    # No row: the on-disk draft is the listing (see _listing_image_order).
+    disk = storage.load_listing(session_id)
+    if disk is None:
+        raise errors.StorageUnavailable(
+            "Couldn't update this listing's photos just now — this listing "
+            "isn't saved yet. Try again in a moment.")
+    data = _set_order(dict(disk))
+    try:
+        storage.save_listing(session_id, Listing(**data))
+    except Exception as exc:  # noqa: BLE001 - nothing was persisted; say so
+        log.warning("images: could not write the order for %s: %s", session_id, exc)
+        raise errors.StorageUnavailable(
+            "Couldn't update this listing's photos just now — nothing has "
+            "changed. Try again in a moment.") from exc
+    return [str(n) for n in (data.get("images") or images)]
 
 
 @app.patch("/api/listings/{session_id}/images/order")
@@ -2820,10 +4907,21 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     DELETE the photos missing from it, and "my photos vanished when I dragged
     one" is a considerably worse bug than the one being fixed. A mismatch is
     409 — the client refetches rather than forcing its stale view through.
+
+    What the guard compares against is the listing as it is SAVED — row,
+    on-disk draft, or (for a session whose draft predates either) the
+    optimized files themselves. Comparing against the database row alone made
+    the guard fire on listings that had drifted from it for reasons that were
+    never the client's doing, and the seller was told their photos had changed
+    somewhere else when they had not changed at all.
     """
     _assert_session_owner(session_id, request)
     rec = db.get_listing(session_id) or {}
-    stored = list((rec.get("listing") or {}).get("images") or [])
+    stored = _listing_image_order(session_id, rec)
+    if not stored:
+        # Never saved with a photo list of its own: the files on the volume
+        # are the only record of what this session holds.
+        stored = storage.list_optimized(session_id)
     wanted = [str(n).strip() for n in req.images if str(n).strip()]
     if sorted(wanted) != sorted(stored):
         log.info("reorder rejected: session=%s sent=%d stored=%d",
@@ -2834,29 +4932,15 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     if wanted == stored:
         return {"images": stored}
 
-    def _set_order(data: dict) -> dict:
-        data["images"] = wanted
-        return data
-
-    # Under the row lock, like every other write that shares a listing with
-    # publish's background threads.
-    data = db.mutate_listing_data(session_id, _set_order,
-                                  status=_sticky_status(rec), user_id=_uid(request))
-    saved = list((data or {}).get("images") or wanted)
-    # Keep the on-disk copy in step; eBay is served photos in this order.
-    if data:
-        try:
-            storage.save_listing(session_id, Listing(**data))
-        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
-            log.warning("reorder: disk mirror not updated for %s: %s",
-                        session_id, exc)
+    saved = _save_image_order(session_id, rec, wanted, _uid(request))
     log.info("reorder: session=%s %d photos", session_id, len(saved))
     return {"images": saved}
 
 
 @app.post("/api/item-aspects")
-def item_aspects(payload: dict) -> dict:
+def item_aspects(payload: dict, request: Request) -> dict:
     """Required + recommended item specifics eBay defines for a category."""
+    _taxonomy_guard(request)
     if not config.taxonomy_ready():
         raise HTTPException(400, "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET not configured.")
     cid = str(payload.get("category_id", "")).strip()
@@ -2865,7 +4949,8 @@ def item_aspects(payload: dict) -> dict:
     try:
         return taxonomy.item_aspects(cid)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"eBay aspects lookup failed: {exc}") from exc
+        raise _lookup_failed("load eBay's item specifics for that category",
+                             exc) from exc
 
 
 @app.post("/api/item-conditions")
@@ -2880,10 +4965,16 @@ def item_conditions(payload: dict, request: Request) -> dict:
     creds = _ebay_creds_for(request)
     token = creds.get("access_token") if creds else None
     try:
-        return taxonomy.item_conditions(cid, access_token=token)
+        return {**taxonomy.item_conditions(cid, access_token=token),
+                "checked": True}
     except Exception as exc:  # noqa: BLE001 - optional enhancement; fail soft
+        # Fail soft, but not silently: an empty list reads as "eBay puts no
+        # condition requirement on this category", which is a claim, and the
+        # editor would then offer conditions eBay will reject at publish time
+        # (error 25021 — the whole reason this lookup exists). `checked` is
+        # the same flag the price lookup and the notifications bell use.
         log.info("item-conditions(cat=%s) failed: %s", cid, exc)
-        return {"conditions": []}
+        return {"conditions": [], "checked": False}
 
 
 @app.post("/api/delete-image")
@@ -2898,6 +4989,25 @@ def delete_image(payload: dict, request: Request) -> dict:
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents:  # path-traversal guard
         raise HTTPException(400, "Invalid image name")
+    # Out of the LISTING first, then off the disk — and if the listing can't
+    # be written, nothing is deleted at all.
+    #
+    # This route used to unlink the file and stop there, which left the photo
+    # in the saved listing forever: a reload brought the deleted tile back
+    # pointing at bytes that no longer existed, a publish handed eBay a photo
+    # that 404s, and — because the editor's list and the stored list could
+    # never agree again — every later reorder was refused as a listing that
+    # "changed somewhere else". Bulk mode already knew this and followed its
+    # delete with a whole-listing save; doing it here means both callers get
+    # it, without a stale full-listing payload riding along (the very thing
+    # PATCH .../images/order exists to avoid).
+    rec = db.get_listing(session_id) or {}
+    stored = _listing_image_order(session_id, rec)
+    images = None
+    if stored is not None:
+        images = [n for n in stored if n != name]
+        if images != stored:
+            images = _save_image_order(session_id, rec, images, _uid(request))
     if path.is_file():
         try:
             path.unlink()
@@ -2909,7 +5019,12 @@ def delete_image(payload: dict, request: Request) -> dict:
         _in_background(objstore.delete, objstore.key_for(session_id, name),
                        what="delete-image R2")
     log.info("delete-image: session=%s name=%s", session_id, name)
-    return {"ok": True, "remaining": storage.list_optimized(session_id)}
+    remaining = storage.list_optimized(session_id)
+    # `images` is the listing's own order with the photo gone — what the
+    # editor should now be holding, and what the next reorder is checked
+    # against. A session with no saved listing has only its files to report.
+    return {"ok": True, "images": images if images is not None else remaining,
+            "remaining": remaining}
 
 
 # ---------- Bulk mode: one photo dump -> many listings ----------
@@ -3119,8 +5234,16 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                       **({"bg_error": reason} if reason else {}))
         if owed_now:
             # Photos that kept their background weren't the AI they paid for.
-            tokens.refund(bg_spent, units=owed_now)
-            bg_refunded += owed_now
+            #
+            # Counted only if it actually LANDED. `bg_refunded` is subtracted
+            # from the final settlement below, so counting a refund that did
+            # not commit would shrink the remainder by money the seller never
+            # got. A failure here is also queued for a later pass (see
+            # services/owed_refunds), and db.token_refund caps every refund at
+            # what the spend has left — so the two paths converge on the right
+            # total and neither can over-pay.
+            if tokens.refund(bg_spent, units=owed_now):
+                bg_refunded += owed_now
         names = storage.list_optimized(staging_id)
         if not names:
             _bulk_set(job_id, done=True, error="No usable photos in the upload.")
@@ -3203,6 +5326,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # first pass — one consolidated call on chain v2.
                 _enrich_listing(listing, [item_dir / n for n in item_names],
                                 tags=result.tags)
+                _research_draft(listing, [item_dir / n for n in item_names],
+                                result.raw_observations, result.confidence)
+                _price_against_comps(listing, uid, prefs)
                 storage.save_listing(sid, listing)
                 db.upsert_listing(sid, listing.model_dump(), status="draft", user_id=uid)
                 item["listing"] = listing.model_dump()
@@ -3396,12 +5522,27 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # multi-call chain on IDENTIFY_CHAIN=v1.
         added = _enrich_listing(result.listing, [opt_dir / n for n in names],
                                 tags=result.tags, progress=_beat)
-        # Tell the editor the server-side fill already ran, so its own
-        # autofill effect doesn't immediately re-run (and re-charge) it.
-        result.specifics_autofilled = added is not None
+        # Tell the editor whether the server-side fill actually FILLED
+        # anything, so its own autofill effect doesn't re-run (and re-charge)
+        # work that is already done — and does run when the pass came back
+        # empty. This was `added is not None`, which reported an empty pass as
+        # filled and stood the fallback down over a draft with every required
+        # specific still blank.
+        result.specifics_autofilled = _specifics_were_filled(added)
+        _beat("research")
+        _research_draft(result.listing, [opt_dir / n for n in names],
+                        result.raw_observations, result.confidence)
+        _price_against_comps(result.listing, uid, prefs)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
+    except errors.StorageUnavailable as exc:
+        # Same as the synchronous route: refund, and report it as what it is
+        # rather than as an AI failure the seller could act on.
+        tokens.refund(spent)
+        log.warning("identify job %s: storage unavailable: %s", job_id, exc)
+        _bulk_set(job_id, done=True, error=str(exc))
+        return
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
         tokens.refund(spent)
         log.warning("identify job %s failed: %s", job_id, exc)
@@ -3412,7 +5553,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # so the photos land in Drafts and Start over can retry the AI.
         try:
             names = storage.list_optimized(session_id)
-            if names and not db.get_listing(session_id):
+            if names and not db.get_listing_best_effort(session_id):
                 stub = Listing(images=names, missing_info=[
                     f"The AI couldn't identify this item ({reason}). "
                     "Your photos are safe — use Start over to retry, or fill "
@@ -3550,8 +5691,16 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
         raise HTTPException(401, "Log in to save items to your inventory.")
     _assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
-    db.upsert_listing(req.session_id, req.listing.model_dump(),
-                      status="unlisted", user_id=uid)
+    # Shop Mode's "Buy" is a decision made in a shop, on this answer: the
+    # seller taps it and then pays for the item. A write that did not land
+    # means the thing they just bought is not in the dashboard they will look
+    # for it in, and `ok: true` gave them no reason to check.
+    landed = db.upsert_listing(req.session_id, req.listing.model_dump(),
+                               status="unlisted", user_id=uid)
+    if db.enabled() and not landed:      # see the note in merge_listings
+        raise errors.StorageUnavailable(
+            "Couldn't save that to your inventory just now. Try again in a "
+            "moment.")
     log.info("inventory add: session=%s user=%s", req.session_id, uid)
     return {"ok": True, "id": req.session_id}
 
@@ -3564,20 +5713,150 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
 # import capped at 300 + 100 sold + 100 ended — a seller with 616 active
 # listings lost the overflow twice over, once on import and again on read.
 LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
+# How many listings one unlink pass may release. Each one is its own
+# write, so an unbounded pass over a switched-account store outlives the
+# gateway; the remainder is reported so a second press finishes the job.
+RELEASE_CAP = int(os.getenv("EBAY_RELEASE_CAP", "500") or "500")
+
+# Fields dropped from each record's `listing` by GET /api/listings ONLY.
+#
+# A realistic record -- description, twelve photos, eighteen item specifics,
+# a synced shadow -- serialises to about 6.2 KB, so a seller at LIST_CAP was
+# downloading ~17.8 MiB on the app's busiest route, on a phone. Just under
+# half of that is `remote_shadow`: a complete second copy of the listing,
+# recording what eBay last said it contained. It is the base the three-way
+# merge reconciles against and nothing outside the server has ever read it.
+# `dirty_fields`, the set of fields edited since that shadow, is the same.
+#
+# Deliberately an omission list rather than an allowlist. An allowlist names
+# what the client may see, so it fails by dropping a field the UI needs, and
+# that failure is silent and looks like missing data. This fails the other
+# way: a new field is merely bigger than it had to be.
+#
+# GET /api/listings/{id} is NOT projected -- opening one listing still answers
+# with everything, which is where the editor and the merge dialog read from.
+# tests/test_the_list_does_not_ship_the_sync_ledger.py holds both halves, and
+# fails if the frontend ever starts referencing one of these names.
+LIST_OMITTED_LISTING_FIELDS = ("remote_shadow", "dirty_fields")
+
+
+def _projected_for_list(rec: dict) -> dict:
+    """`rec` without the sync ledger. Copies rather than mutating: the dict
+    under "listing" belongs to the row it was loaded from."""
+    listing = rec.get("listing")
+    if not isinstance(listing, dict):
+        return rec
+    if not any(k in listing for k in LIST_OMITTED_LISTING_FIELDS):
+        return rec
+    trimmed = {k: v for k, v in listing.items()
+               if k not in LIST_OMITTED_LISTING_FIELDS}
+    return {**rec, "listing": trimmed}
+
+
+def _cursor_for(rec: dict) -> Optional[str]:
+    """The opaque token naming one row, for the page that follows it.
+
+    Base64url of "<updated_at>|<id>" — encoded so the timestamp's colons and
+    offset sign survive a query string untouched, and opaque so nobody starts
+    hand-assembling one. It is the server's own words handed back; the read it
+    feeds is scoped by `user_id` exactly like every other, so a cursor says
+    WHERE to start and never whose store to start in.
+
+    None when the row cannot name a place in the order. The column is
+    non-nullable so this is defensive, but the failure it prevents is the loud
+    kind: a blank half mints a token the next request rejects as malformed —
+    a 400 in the middle of a walk the seller started. No cursor degrades
+    honestly instead: the page still says it was cut, and the button that
+    could not have worked is simply not offered.
+    """
+    stamp, rid = rec.get("updated_at"), rec.get("id")
+    if not stamp or not rid:
+        return None
+    raw = f"{stamp}|{rid}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _cursor_from(token: str) -> tuple[datetime, str]:
+    """Parse one, or raise 400.
+
+    Refused rather than ignored. An ignored cursor answers with page one,
+    which the client reads as the listings that FOLLOW the ones it has — so
+    the store looks like it ends where it began, which is the bug paging
+    exists to fix, arriving through the fix.
+    """
+    try:
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(token + pad).decode()
+        stamp, sep, last_id = raw.partition("|")
+        if not sep or not last_id:
+            raise ValueError("no separator")
+        when = datetime.fromisoformat(stamp)
+        # Same rule as everywhere else a stored timestamp is read: a naive one
+        # is UTC, not local, or the comparison silently moves the page edge.
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when, last_id
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            400, "That listing page link is no longer valid — reload the page "
+                 "to start from the top.") from exc
 
 
 @app.get("/api/listings")
-def listings(request: Request, limit: int = LIST_CAP) -> dict:
+def listings(request: Request, limit: int = LIST_CAP,
+             before: str = "") -> dict:
     """History of the current user's saved listings (most recent first)."""
     user = auth.current_user(request)
     # Clamped like /api/notifications does, and for both of its reasons: a
     # caller-supplied ?limit had no ceiling (so one request could ask for every
     # listing JSON blob the store holds) and no floor (?limit=-1 is a Postgres
-    # error that db.list_listings swallows into [], i.e. an empty store
-    # reported as a 200).
+    # error, which db.list_listings used to swallow into [] -- an empty store
+    # reported as a 200; it now raises, and the clamp keeps it from arising).
     limit = max(1, min(limit, LIST_CAP))
-    items = db.list_listings(limit=limit, user_id=user["id"]) if user else []
-    return {"listings": items, "db": db.db_status(), "authed": bool(user)}
+    # One row more than will be returned, so the answer can say whether it is
+    # the WHOLE store. Without that, a seller past the cap gets a page
+    # indistinguishable from a complete one -- and the counts, the tabs, the
+    # dashboard groups, the duplicate advisory and the checkboxes a bulk
+    # reprice runs over are all built on it, none of them able to tell they
+    # are working from a partial view.
+    #
+    # Same rule as the awaiting-shipment list and the sampled status sweep: an
+    # answer that could not show everything says so. A probe row rather than a
+    # COUNT(*) because this is the busiest route in the app, and because the
+    # question the seller has is "is this all of them?" -- `truncated` answers
+    # that honestly, where a total this endpoint does not have would have to be
+    # invented.
+    # The last row of the previous page, when the client is walking older
+    # ones. Empty means "from the top", which is what a client sends on first
+    # load and is not a malformed cursor.
+    cursor = _cursor_from(before) if before else None
+    rows = (db.list_listings(limit=limit + 1, user_id=user["id"], before=cursor)
+            if user else [])
+    items, truncated = rows[:limit], len(rows) > limit
+    # And, only for the seller who is actually past the cap, how many there
+    # are. The probe row above still decides -- free, on every load -- so
+    # nobody under the cap pays for this; the rare seller over it gets
+    # "3,000 of 4,812" instead of "there are more", which is the difference
+    # between a page that admits it was cut and one that says what from.
+    #
+    # Tolerant on purpose, and the only read on this route that is: the answer
+    # is already honest without a total, so a count that could not be taken
+    # costs the sentence a number rather than costing the seller a truth. A
+    # guessed one would do the opposite.
+    total = None
+    if truncated:
+        try:
+            total = db.count_listings(user["id"])
+        except errors.StorageUnavailable as exc:
+            log.info("listings: couldn't count the store for user=%s: %s",
+                     user["id"], exc)
+    return {"listings": [_projected_for_list(r) for r in items],
+            "db": db.db_status(), "authed": bool(user),
+            "truncated": truncated, "total": total,
+            # Only when there IS a next page. A cursor on the last page is how
+            # a client loops for ever.
+            "next_cursor": _cursor_for(items[-1]) if truncated and items
+                           else None}
 
 
 def _live_ebay_id_map(items: list) -> dict:
@@ -3622,15 +5901,21 @@ def _rates_by_record_id(creds: Optional[dict], items: list) -> dict:
     return {id_by_ebay[eid]: r for eid, r in raw.items() if eid in id_by_ebay}
 
 
-def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
-    """Record ids whose live listing currently has an ACTIVE eBay ad — ours OR
-    one created directly in Seller Hub — so we never suggest promoting an item
-    that's already promoted. Best-effort; empty when the scope isn't granted."""
+def _promoted_record_ids(creds: Optional[dict], items: list) -> tuple[set, bool]:
+    """(record ids with an ACTIVE eBay ad, did eBay actually answer).
+
+    Ours OR ads created directly in Seller Hub, so we never suggest promoting
+    an item that is already promoted. The flag matters because promoting costs
+    the seller a percentage of the sale: an empty set from a failed lookup is
+    not evidence that nothing is promoted, and recommending a purchase on that
+    basis is how a seller who promotes in Seller Hub gets invited to pay for a
+    second ad during an eBay outage.
+    """
     if not creds:
-        return set()
-    ads = promotions.active_ads(creds)
+        return set(), False
+    ads, known = promotions.active_ads_status(creds)
     if not ads:
-        return set()
+        return set(), known
     promoted = set()
     for it in items:
         if it.get("status") not in ("published", "live"):
@@ -3640,7 +5925,7 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> set:
         sku = ebay.sku_for(it["id"])
         if (eid and eid in ads) or (sku and sku in ads):
             promoted.add(it["id"])
-    return promoted
+    return promoted, known
 
 
 @app.get("/api/ebay/listing-metrics")
@@ -3650,7 +5935,13 @@ def listing_metrics_route(request: Request) -> dict:
     user = auth.current_user(request)
     if not user:
         return {"metrics": {}}
-    items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
+    # Best effort: no numbers is a thinner panel, not a wrong statement, and
+    # it decides nothing that gets written. Live only, because
+    # `_live_ebay_id_map` drops everything else -- reading the whole page to
+    # keep the live rows left a big store's older live listings with no
+    # numbers at all.
+    items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"],
+                                         statuses=("published", "live"))
     status: dict = {}
     by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status)
     return {"metrics": by_id,
@@ -3673,8 +5964,11 @@ def duplicate_listings(request: Request) -> dict:
     if not user:
         return {"groups": [], "total": 0}
     try:
+        # duplicates.find skips anything not live on its first line, so ask
+        # for live ones: on a big store the unfiltered page is the wrong rows.
         groups = duplicates.find(
-            db.list_listings(limit=LIST_CAP, user_id=user["id"]))
+            db.list_listings(limit=LIST_CAP, user_id=user["id"],
+                             statuses=duplicates.LIVE_STATUSES))
     except Exception as exc:  # noqa: BLE001 - advisory feature, never fatal
         log.warning("duplicate scan failed for user=%s: %s", user["id"], exc)
         return {"groups": [], "total": 0}
@@ -3685,26 +5979,30 @@ def duplicate_listings(request: Request) -> dict:
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, relist ended items, promote/reprice stale live ones. Folds in
+    finish drafts, promote/reprice stale live ones. Folds in
     eBay views/watchers and recommended ad rates when available. Returns an empty
     list for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
-        return {"recommendations": []}
+        return {"recommendations": [], "bulk_caps": _bulk_caps()}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         rates_by_id = _rates_by_record_id(creds, items)
-        promoted_ids = _promoted_record_ids(creds, items)
+        promoted_ids, promotion_known = _promoted_record_ids(creds, items)
         # limit=50: the dashboard groups these by category now, so each group
         # should show its full membership — the old flat list capped at 8.
         return {"recommendations": recommender.recommendations(
             items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
-            promoted_ids=promoted_ids, limit=50)}
+            promoted_ids=promoted_ids, promotion_known=promotion_known,
+            limit=50),
+            # What one tap on a group can actually reach in a single run — the
+            # group renders its button, so it has to know. See _bulk_caps.
+            "bulk_caps": _bulk_caps()}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
-        return {"recommendations": []}
+        return {"recommendations": [], "bulk_caps": _bulk_caps()}
 
 
 @app.post("/api/ebay/promote")
@@ -3747,9 +6045,9 @@ def promote_all(request: Request) -> dict:
     creds = _ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
-    items = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-             if i.get("status") in ("published", "live")
-             and not (i.get("listing") or {}).get("promote")]
+    items = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"],
+                                        statuses=("published", "live"))
+             if not (i.get("listing") or {}).get("promote")]
     rates = _rates_by_record_id(creds, items)
     promoted = 0
     needs_reconnect = False
@@ -3771,6 +6069,11 @@ def promote_all(request: Request) -> dict:
 # this keeps the request inside the gateway's patience, and whatever is left
 # over comes back as `deferred` for the seller to run again.
 BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
+# How many ids one bulk request may NAME. Above BULK_PRICE_CAP so a
+# selection bigger than one pass is still accepted and deferred rather
+# than refused, and far below anything that makes an `IN (...)` a
+# problem. Same role as the 200 the bulk delete already applies.
+BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
 
 
 @app.post("/api/ebay/lower-prices")
@@ -3793,11 +6096,28 @@ def lower_prices(payload: dict, request: Request) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
     if not ids:
         raise HTTPException(400, "Pick at least one listing to reprice.")
+    # Bounded, because the lookup below is BY id: an unbounded body used to
+    # cost nothing (the store read was capped and this was only a filter) and
+    # now becomes an unbounded `IN (...)`, which is a way to make one request
+    # expensive for everyone. Nothing useful is lost -- a pass reprices at
+    # most BULK_PRICE_CAP of them either way, and the remainder is already
+    # reported as deferred for a second pass.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
     wanted = set(ids)
-    mine = [r for r in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-            if r["id"] in wanted]
+    # The ids, asked for. This used to read the seller's newest LIST_CAP
+    # records and filter -- every one of their JSON blobs across a
+    # cross-region link to keep at most BULK_PRICE_CAP of them, and, worse,
+    # anything outside that window came back to the seller as "Listing not
+    # found." The list is newest-first, so on a store past the cap a ticked
+    # listing only has to be edited past by 3,000 others between opening the
+    # screen and pressing the button. Ownership is enforced inside the read.
+    mine = db.get_listings(ids, user["id"])
     # Each listing is its own revise round-trip to eBay, run one after another.
     # Past this many the request outlives the gateway and the seller sees a
     # timeout instead of a result, so the run is bounded and the remainder is
@@ -3815,6 +6135,12 @@ def lower_prices(payload: dict, request: Request) -> dict:
         listing = Listing(**data)
         was = listing.price
         listing.price = new_price
+        # This edit never passes through a save, so there is no diff for
+        # dirty_fields to find — and a revise only carries fields marked as
+        # changed. Unmarked, this would send eBay an empty revise: the record
+        # would show the new price, the seller would be told it worked, and
+        # the listing would still be at the old one.
+        listing.mark_dirty("price")
         # Through the provider, so each listing takes whichever revise path it
         # belongs to (Trading for store listings, the Inventory API for the
         # older app-published ones) and the record's status is written by the
@@ -3841,6 +6167,304 @@ def lower_prices(payload: dict, request: Request) -> dict:
     return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
 
 
+# How many listings one enrich run touches. Far below the price cap above
+# because the work per listing is a different order of magnitude: a Claude
+# vision pass over that listing's photos (plus, for an imported one, a
+# download of those photos first) and then an eBay revise. Whatever is left
+# over comes back as `deferred` for the seller to run again.
+BULK_ENRICH_CAP = int(os.getenv("BULK_ENRICH_CAP", "25") or "25")
+
+
+def _bulk_caps() -> dict:
+    """How many listings ONE tap on a suggestion group's bulk button reaches,
+    keyed by the recommendation type that carries the button.
+
+    Both bulk actions cap a single run and hand the remainder back as
+    `deferred` (see the two constants above). The dashboard had no way to know
+    that, so it promised the whole group: a 46-listing "Fill in details" asked
+    the seller to confirm 46, quoted the AI cost of 46 — and then ran 25 and
+    reported "1 of 25" against a group badge reading 46. The caps ride along
+    with the recommendations so the group can say what this pass will actually
+    do before the seller agrees to spend anything on it.
+    """
+    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP}
+
+
+# The enrichment runs as a background job, one per account at a time: it
+# spends AI credits per listing, and two tabs firing it at the same store
+# would pay twice to fill the same blanks.
+# user id -> job id of the enrich currently running for them.
+_ENRICH_JOBS: dict[str, str] = {}
+_ENRICH_LOCK = threading.Lock()
+
+
+def _drop_answered_missing_info(listing: Listing) -> int:
+    """Drop the 'a human should check this' notes an enrichment has answered.
+
+    `missing_info` is the whole reason the dashboard says "Fill in details",
+    so a listing whose blanks were just filled has to stop asking — otherwise
+    the button that filled them leaves its own suggestion on screen and reads
+    as a no-op.
+
+    A note is answered when an item specific (or the brand) of that name now
+    holds a value: "exact model number" by a filled Model, "size" by Size.
+    Whole words only — "Type" must not answer "typewriter model" — and a note
+    nothing filled is KEPT, because a blank the AI could not settle is still
+    a real one and silencing it would be the more expensive lie.
+
+    Returns how many notes were settled.
+    """
+    filled = {s.name.strip().lower() for s in listing.item_specifics
+              if (s.value or "").strip() and s.name.strip()}
+    if (listing.brand or "").strip():
+        filled.add("brand")
+    if not filled:
+        return 0
+    kept = [note for note in listing.missing_info
+            if not any(re.search(rf"\b{re.escape(name)}\b", note.lower())
+                       for name in filled)]
+    settled = len(listing.missing_info) - len(kept)
+    listing.missing_info = kept
+    return settled
+
+
+def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
+                note_charge=None) -> dict:
+    """Fill ONE listing's blanks: eBay's recommended item specifics for its
+    category, read off its own photos, plus the maker double-check — the same
+    enrichment a fresh AI draft gets, applied to a listing that is already
+    live. Pushed to eBay when the listing is live, saved locally otherwise.
+
+    `note_charge(receipts)` (optional) is told about the AI charge while it is
+    outstanding, and told `None` once it has been settled in this process —
+    so a restart mid-listing can pay back a charge that bought nothing rather
+    than leaving the seller to spot it (see _settle_interrupted_jobs).
+
+    Returns a bulk_actions outcome: {"ok": True, ...}, {"skip": reason}, or
+    {"message": why it failed}.
+    """
+    rid = rec["id"]
+    status = rec.get("status") or ""
+    if status in ("sold", "ended"):
+        # A settled listing is an archive record: its photos are purged on
+        # sale, and eBay will not revise a finished item. Relist is the verb
+        # for those, and it is a different suggestion.
+        return {"skip": "Sold and ended listings can't be revised."}
+    if status in ("published", "live") and not creds:
+        # Checked BEFORE the charge: filling in a live listing that we then
+        # cannot revise leaves the buyer-facing page exactly as blank as it
+        # was, and billing for that is billing for nothing the seller can see.
+        return {"skip": "Connect eBay first — this one is live there."}
+    # An imported listing's photos live on eBay, and the AI reads files, so
+    # adopt them the way the editor does before it will open one. Adoption
+    # WRITES the local filenames onto the record, which is why it happens
+    # before the model is built: a Listing read a moment earlier carries an
+    # empty `images`, and the save below would put that straight back over
+    # the photos this just downloaded.
+    _adopt_imported_images(rid, rec)
+    listing = Listing(**(rec.get("listing") or {}))
+    # Item specifics are per category, so a listing without one has nothing to
+    # fill. Imported listings usually do carry eBay's own category; the ones
+    # that don't get the same best-effort resolve a fresh draft gets, which is
+    # what keeps this a one-click action instead of a detour through the editor.
+    _resolve_category(listing)
+    if not listing.category_id:
+        return {"skip": "No eBay category yet — open it and pick one."}
+    names = listing.images or storage.list_optimized(rid)
+    opt_dir = storage.optimized_dir(rid)
+    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    if not paths:
+        return {"skip": "This listing's photos aren't on the server anymore."}
+
+    before_brand = (listing.brand or "").strip()
+    spent = _charge_uid(uid, "specifics")
+    if note_charge:
+        note_charge(tokens.receipts(spent))
+    try:
+        try:
+            added = _enrich_listing(listing, paths)
+        except Exception:
+            tokens.refund(spent)
+            raise
+        if added is None:
+            # The enrichment never ran (no taxonomy, no model, no aspects for
+            # this category). `_enrich_listing` swallows its own failures, so
+            # "didn't run" is the return value rather than an exception — and
+            # nothing was earned, so the charge goes back.
+            tokens.refund(spent)
+            return {"skip": "The AI couldn't read eBay's details for that category."}
+        settled = _drop_answered_missing_info(listing)
+        if not added and not settled:
+            # The AI did run and found nothing the photos could answer, which
+            # is a real (billable) answer — the same one the single-listing
+            # autofill gives. What it is not is done.
+            return {"skip": "Nothing the photos could answer — this one needs you."}
+
+        if status in ("published", "live") and creds:
+            # A revise carries only what is marked changed (see dirty_fields),
+            # and this edit never passed through a save, so nothing marked it.
+            # Unmarked, eBay would receive an empty revise: the record would
+            # show the new specifics, the seller would be told it worked, and
+            # the live listing would still be blank — the exact silence this
+            # button exists to end.
+            listing.mark_dirty("item_specifics")
+            if (listing.brand or "").strip() != before_brand:
+                listing.mark_dirty("brand")
+            outcome = marketplaces.get("ebay").publish(
+                PublishContext(session_id=rid, listing=listing, mode="live",
+                               base_url=base_url, uid=uid, prev_record=rec),
+                creds)
+            if not outcome.ok:
+                return {"message": outcome.message or "eBay rejected the new details."}
+            return {"ok": True, "added": added, "settled": settled, "pushed": True}
+        # A draft (or a seller with no eBay connection): the fill is still
+        # worth keeping, it just has nowhere to go yet.
+        storage.save_listing(rid, listing)
+        db.upsert_listing(rid, listing.model_dump(), status=_sticky_status(rec),
+                          user_id=uid)
+        return {"ok": True, "added": added, "settled": settled, "pushed": False}
+    finally:
+        # Settled either way by the time we get here: earned by a fill that
+        # landed, or handed back above. Anything still recorded as outstanding
+        # would be refunded a second time on the next boot.
+        if note_charge:
+            note_charge(None)
+
+
+def _run_enrich_job(job_id: str, records: list[dict], uid: str,
+                    creds: Optional[dict], base_url: str,
+                    deferred: int = 0) -> None:
+    """Background worker for "Enrich all". One vision pass per listing means a
+    dozen of them take minutes — far longer than a browser (or the proxy in
+    front of us) holds a request open — so this is a job the client polls, and
+    every listing it finishes is saved as it goes rather than at the end."""
+    result = bulk_actions.BulkResult()
+    stopped = ""
+    finished = 0
+    try:
+        for i, rec in enumerate(records):
+            title = ((rec.get("listing") or {}).get("title")
+                     or rec.get("title") or "this listing")
+            jobstore.update(job_id, phase="enriching", current=i,
+                            current_title=title[:80])
+            try:
+                outcome = _enrich_one(
+                    rec, uid, creds, base_url,
+                    note_charge=lambda r: jobstore.update(job_id, _refunds=r)) or {}
+            except HTTPException as exc:
+                # Out of AI credits (402) or logged out from under the job.
+                # Whatever is already filled is filled; say where it stopped
+                # instead of reporting the rest as failures.
+                stopped = str(exc.detail)
+                break
+            except Exception as exc:  # noqa: BLE001 - one listing can't sink the run
+                log.warning("enrich failed for %s: %s", rec.get("id"), exc)
+                result.failed.append({"listing_id": rec.get("id") or "",
+                                      "title": title, "message": str(exc)[:200]})
+                finished = i + 1
+                continue
+            if outcome.get("skip"):
+                result.skipped.append({"listing_id": rec.get("id") or "",
+                                       "title": title, "message": outcome["skip"]})
+            elif outcome.get("ok"):
+                result.changed.append({"listing_id": rec.get("id") or "",
+                                       "title": title,
+                                       **{k: v for k, v in outcome.items() if k != "ok"}})
+            else:
+                result.failed.append({
+                    "listing_id": rec.get("id") or "", "title": title,
+                    "message": outcome.get("message") or "Couldn't fill this one in."})
+            finished = i + 1
+        filled = sum(int(c.get("added") or 0) for c in result.changed)
+        log.info("bulk enrich %s: user=%s listings=%d changed=%d skipped=%d "
+                 "failed=%d specifics=%d deferred=%d", job_id, uid, len(records),
+                 len(result.changed), len(result.skipped), len(result.failed),
+                 filled, deferred)
+        jobstore.update(job_id, done=True, phase="done", current=finished,
+                        result={"deferred": deferred, "filled": filled,
+                                "stopped": stopped, **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = _support_reference()
+        log.warning("enrich job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish filling these in. Try again in a moment — if "
+            f"it keeps happening, quote {reference} to support."))
+    finally:
+        with _ENRICH_LOCK:
+            if _ENRICH_JOBS.get(uid) == job_id:
+                _ENRICH_JOBS.pop(uid, None)
+
+
+@app.post("/api/listings/enrich")
+def enrich_listings(payload: dict, request: Request) -> dict:
+    """Fill in the blanks on several listings at once — the dashboard's "Fill
+    in details" group applied in one go instead of opening a dozen listings to
+    make the same edit on each.
+
+    Per listing: eBay's recommended item specifics for its category, read off
+    its own photos, merged in WITHOUT touching anything the seller already
+    wrote, and pushed to eBay when the listing is live.
+
+    The caller names the listings (the group's own membership), so this can
+    never widen to the seller's whole store — which matters more here than it
+    does for a price drop, because every listing this touches spends AI
+    credits. Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing to fill in.")
+    # Bounded for the same reason the price drop is: the lookup below is BY
+    # id, and an unbounded body is an unbounded `IN (...)`. Nothing useful is
+    # lost — a pass enriches at most BULK_ENRICH_CAP of them either way, and
+    # the remainder comes back as deferred for a second run.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    uid = user["id"]
+    with _ENRICH_LOCK:
+        running = _ENRICH_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                # Two tabs, or a double tap. Hand back the job already running
+                # rather than paying a second time to fill the same blanks.
+                return {"job_id": running, "running": True, "total": 0,
+                        "deferred": 0}
+            _ENRICH_JOBS.pop(uid, None)
+    # Ownership is enforced inside the read, and an id the seller doesn't own
+    # is simply absent from the answer (see db.get_listings).
+    mine = db.get_listings(ids, uid)
+    records, deferred = mine[:BULK_ENRICH_CAP], mine[BULK_ENRICH_CAP:]
+    if not records:
+        raise HTTPException(404, "None of those listings are here anymore.")
+    creds = _ebay_creds_for(request)
+    base_url = _base_url(request)
+    job_id = storage.new_session_id()
+    with _ENRICH_LOCK:
+        _ENRICH_JOBS[uid] = job_id
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "enrich", "phase": "enriching", "done": False,
+        "error": None, "current": 0, "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(
+        target=_run_enrich_job,
+        args=(job_id, records, uid, creds, base_url, len(deferred)),
+        daemon=True,
+    ).start()
+    log.info("bulk enrich %s: started for user=%s listings=%d deferred=%d",
+             job_id, uid, len(records), len(deferred))
+    return {"job_id": job_id, "running": True, "total": len(records),
+            "deferred": len(deferred)}
+
+
 @app.get("/api/listings/{listing_id}")
 def get_listing(listing_id: str, request: Request) -> dict:
     rec = db.get_listing(listing_id)
@@ -3849,30 +6473,116 @@ def get_listing(listing_id: str, request: Request) -> dict:
     # Enforce ownership for listings that belong to an account.
     if rec.get("user_id") and rec["user_id"] != _uid(request):
         raise HTTPException(404, "Listing not found")
-    _adopt_imported_images(listing_id, rec)
-    return rec
+    # Deliberately no photo adoption here. This used to download every remote
+    # photo, write them to disk, upsert the row and start an R2 upload — on a
+    # read. A prefetch, a retry, a crawler, a link preview or a double-click
+    # each started that work, two opens raced over one directory, and a GET
+    # could fail or bill storage for something the seller never asked for.
+    # storage.py states the rule. Adoption is now POST prepare-for-editing.
+    #
+    # `conflicts` is the raw map on the record turned into something the
+    # editor can render: what was held back from eBay and what the two sides
+    # say. Pure formatting of data already in `rec`, so this stays a read.
+    return {**rec,
+            "conflicts": sync_merge.describe_conflicts(
+                (rec.get("listing") or {}).get("conflicts"))}
 
 
-def _adopt_imported_images(listing_id: str, rec: dict) -> None:
-    """First open of an imported eBay listing: copy its EPS-hosted photos into
-    app storage so they're editable exactly like uploaded ones (the app owns
-    every editable image; ebayimg URLs never reach the browser editor). Runs
-    once — after this the listing has local `images` and the grid/editor treat
-    it like any other listing. Best-effort: on failure the record is returned
-    unchanged and the UI falls back to the read-only eBay photo strip."""
+@app.post("/api/listings/{listing_id}/prepare-for-editing")
+def prepare_for_editing(listing_id: str, request: Request) -> dict:
+    """Copy an imported listing's eBay-hosted photos into app storage.
+
+    The editor works only on images the app owns — ebayimg URLs never reach
+    it — so this has to happen before an imported listing can be edited. It
+    used to happen invisibly on the first GET; now the seller asks for it,
+    which is what makes the cost (up to 24 downloads and 48 files) something
+    they chose.
+
+    Idempotent: a listing whose photos are already local is reported ready
+    without fetching anything.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+    names = _adopt_imported_images(listing_id, rec)
+    return {"ok": True, "images": names,
+            "listing": (rec.get("listing") or {})}
+
+
+@app.post("/api/listings/{listing_id}/resolve-conflict")
+def resolve_conflict(listing_id: str, payload: dict, request: Request) -> dict:
+    """Settle one field the seller and eBay both changed.
+
+    The sync records these and sends neither value, which is right — picking
+    one silently is how a Seller Hub fix gets overwritten. What was missing is
+    the way to answer. Until this exists, a conflicted field is an edit that
+    never reaches eBay and never explains itself.
+
+    `choice` is "mine" or "ebay". Keeping the local value queues it for the
+    next revise, so answering actually pushes it; taking eBay's writes it in
+    and asks for nothing. Either way the base moves to eBay's current value —
+    see services/sync_merge.resolve for why that is true even for "mine".
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+    listing = Listing(**(rec.get("listing") or {}))
+    try:
+        sync_merge.resolve(listing, str(payload.get("field", "")),
+                           str(payload.get("choice", "")))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    data = listing.model_dump()
+    storage.save_listing(listing_id, listing)
+    # Strict, unlike the ordinary save: an answer the seller gave that did not
+    # commit must not be reported as settled. They would move on believing the
+    # question closed and find the same one waiting after the next sync -- and
+    # a "keep mine" that never persisted means their value is still not going
+    # to eBay, which is the silence this whole route exists to end.
+    #
+    # Only when a database is configured at all: without one, disk above IS
+    # the record, and the row this could not write does not exist to want.
+    if db.enabled() and not db.upsert_listing(
+            listing_id, data, status=rec.get("status"),
+            user_id=rec.get("user_id")):
+        raise errors.StorageUnavailable(
+            "Couldn't save that choice just now. Try again in a moment.")
+    return {"ok": True, "listing": data,
+            "conflicts": sync_merge.describe_conflicts(listing.conflicts),
+            "message": ("Saved. It'll go to eBay the next time you update "
+                        "this listing."
+                        if payload.get("choice") == "mine"
+                        else "Saved — this listing now matches eBay.")}
+
+
+def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:
+    """Copy an imported eBay listing's EPS-hosted photos into app storage so
+    they're editable exactly like uploaded ones (the app owns every editable
+    image; ebayimg URLs never reach the browser editor). Returns the local
+    filenames, or [] when there was nothing to do.
+
+    Best-effort: on failure the record is left unchanged and the UI falls back
+    to the read-only eBay photo strip."""
     listing = rec.get("listing") or {}
-    if ((listing.get("source") or "") != "ebay" or listing.get("images")
-            or not listing.get("image_urls")):
-        return
+    if (listing.get("source") or "") != "ebay" or not listing.get("image_urls"):
+        return []
+    if listing.get("images"):
+        return list(listing["images"])
     if (rec.get("status") or "") == "sold":
         # Archived — its session dir is purged on sale; adopting here would
         # re-download photos for a listing that can't be edited anyway.
-        return
-    # A previous open may have imported the files but failed the DB write.
+        return []
+    # A previous run may have imported the files but failed the DB write.
     names = storage.list_optimized(listing_id) \
         or image_import.import_listing_images(listing_id, listing["image_urls"])
     if not names:
-        return
+        return []
     # Mirror to R2 like uploads do — otherwise imported listings are the one
     # kind of session the offload sweep can never free from the volume.
     _in_background(objstore.upload_optimized, listing_id,
@@ -3885,9 +6595,10 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> None:
                           user_id=rec.get("user_id"))
         storage.save_listing(listing_id, Listing(
             **{k: v for k, v in listing.items() if k in Listing.model_fields}))
-    except Exception as exc:  # noqa: BLE001 - files are on disk; next open retries the DB
+    except Exception as exc:  # noqa: BLE001 - files are on disk; a retry redoes the DB
         log.warning("image import: couldn't persist adopted photos for %s: %s",
                     listing_id, exc)
+    return names
 
 
 # Fields that describe THIS sale and THIS eBay item, and so must never ride
@@ -3952,7 +6663,14 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     listing.images = copied
 
     storage.save_listing(new_id, listing)
-    db.upsert_listing(new_id, listing.model_dump(), status="draft", user_id=uid)
+    # Same rule, lower stakes: nothing is deleted here, but answering with a
+    # new draft id that is not in the store sends the client to a listing that
+    # does not exist.
+    landed = db.upsert_listing(new_id, listing.model_dump(),
+                               status="draft", user_id=uid)
+    if db.enabled() and not landed:      # see the note in merge_listings
+        raise errors.StorageUnavailable(
+            "Couldn't create the new draft just now. Try again in a moment.")
     log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
              listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
     return {"ok": True, "id": new_id, "from": listing_id,
@@ -3968,7 +6686,8 @@ def delete_listing(listing_id: str, request: Request) -> dict:
     the button doesn't hang on a cold database + file I/O."""
     if not db.delete_listing(listing_id, _uid(request)):
         raise HTTPException(404, "Listing not found")
-    _in_background(_purge_session_images, listing_id, what="delete cleanup")
+    _in_background(_purge_session_images_best_effort, listing_id,
+                       what="delete cleanup")
     log.info("listing deleted: id=%s user=%s", listing_id, _uid(request))
     return {"ok": True}
 
@@ -3984,9 +6703,23 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
     if not ids:
         raise HTTPException(400, "No listings selected.")
     uid = _uid(request)
-    deleted = [lid for lid in ids if db.delete_listing(lid, uid)]
+    # Each id on its own: the documented behaviour is that ids which do not
+    # exist or are not owned are skipped and reported back, and a row the
+    # database refused belongs in the same list rather than sinking the other
+    # nineteen. What must not happen -- and is why the reader below is
+    # separate -- is that one being reported as "not yours".
+    deleted = []
+    refused = []
+    for lid in ids:
+        try:
+            if db.delete_listing(lid, uid):
+                deleted.append(lid)
+        except errors.StorageUnavailable as exc:
+            log.warning("bulk delete: couldn't remove %s: %s", lid, exc)
+            refused.append(lid)
     for lid in deleted:
-        _in_background(_purge_session_images, lid, what="bulk-delete cleanup")
+        _in_background(_purge_session_images_best_effort, lid,
+                           what="bulk-delete cleanup")
     log.info("bulk delete: %d/%d removed user=%s", len(deleted), len(ids), uid)
     return {"ok": True, "deleted": deleted,
             "skipped": [i for i in ids if i not in deleted]}
@@ -4112,14 +6845,53 @@ def merge_listings(payload: dict, request: Request) -> dict:
     if added:
         objstore.upload_optimized(target_id, tdir, added)
     storage.save_listing(target_id, listing)
-    db.upsert_listing(target_id, listing.model_dump(), status="draft", user_id=uid)
+    # BEFORE the destructive half, and checked. db.upsert_listing swallows its
+    # failures by design, so this write could fail while the deletes below
+    # went ahead regardless -- leaving the seller with the sources gone, their
+    # photos purged, the master still on its pre-merge record, and `ok: true`
+    # on the screen. Unlike almost everything else here that is not
+    # recoverable by trying again: there is nothing left to try it on.
+    #
+    # The order is the fix, not the check. Same strict rule as PATCH
+    # /api/listings/{id}, applied where it decides whether anything may be
+    # deleted at all.
+    landed = db.upsert_listing(target_id, listing.model_dump(),
+                               status="draft", user_id=uid)
+    # Called unconditionally and only ENFORCED when there is a database:
+    # `db.enabled() and not db.upsert_listing(...)` short-circuits, so
+    # without one the write never happens at all. Here that would skip the
+    # save and still delete the sources.
+    if db.enabled() and not landed:
+        raise errors.StorageUnavailable(
+            "Couldn't save the merged listing just now, so nothing was "
+            "merged or removed. Try again in a moment.")
     # Sources are consumed: remove their records and reclaim their storage.
+    #
+    # `removed` is a list the client ACTS on — it drops those cards — so it
+    # reports the deletes that actually happened rather than the ones that
+    # were attempted. A source whose delete failed is still a real listing;
+    # saying it is gone hides a duplicate the seller was told had been
+    # consumed. Its photos stay too: they are the only copy left of it.
+    removed: list[str] = []
     for sid in source_ids:
-        db.delete_listing(sid, uid)
-        _purge_session_images(sid)
-    log.info("merged %d listing(s) into %s (+%d photos, %d field(s) carried over) user=%s",
-             len(source_ids), target_id, len(added), len(applied), uid)
-    return {"ok": True, "added": len(added), "removed": source_ids,
+        try:
+            removed_it = db.delete_listing(sid, uid)
+        except errors.StorageUnavailable as exc:
+            # Same outcome as a refusal: the source and its photos stay, and
+            # the caller is told which ones did not go. Raising here would
+            # abandon the sources after this one with the merge already
+            # committed.
+            log.warning("merge: couldn't remove source %s: %s", sid, exc)
+            removed_it = False
+        if not removed_it:
+            log.warning("merge: couldn't remove source %s — leaving it and "
+                        "its photos alone", sid)
+            continue
+        removed.append(sid)
+        _purge_session_images_best_effort(sid)
+    log.info("merged %d/%d listing(s) into %s (+%d photos, %d field(s) carried over) user=%s",
+             len(removed), len(source_ids), target_id, len(added), len(applied), uid)
+    return {"ok": True, "added": len(added), "removed": removed,
             "applied": applied, "listing": listing.model_dump()}
 
 
@@ -4268,6 +7040,12 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
                 "url": o.url,
                 "message": o.message,
                 "issues": o.issues,
+                # Only when true, like the two below it: a marketplace that
+                # refused the listing says nothing here, and the clients read
+                # its absence as "this outcome is known". What it means when
+                # present is in PublishOutcome — the seller must check that
+                # marketplace before publishing again, not fix a field.
+                **({"outcome_unknown": True} if o.outcome_unknown else {}),
                 **({"promote_status": o.raw["promote_status"]}
                    if o.raw.get("promote_status") else {}),
                 **({"record_warning": o.raw["record_warning"]}
@@ -4329,15 +7107,32 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
             data = listing_sync.stamp_sale(
                 data, sales.get(str(data.get("ebay_listing_id") or "")),
                 mark_now=True)
-        db.upsert_listing(req.session_id, data,
-                          status=new_status, user_id=_uid(request))
+        # Checked, because the branch below DELETES the photos. Same rule as
+        # the merge: nothing is destroyed for a status change that did not
+        # happen, or the record goes on saying the listing is live with
+        # nothing left to edit or relist it from.
+        landed = db.upsert_listing(req.session_id, data,
+                                   status=new_status, user_id=_uid(request))
+        if db.enabled() and not landed:
+            log.error("end-listing: eBay ended %s but the status write failed "
+                      "— photos kept", req.session_id)
+            raise errors.StorageUnavailable(
+                "It came off eBay, but we couldn't update your copy here. "
+                "Refresh in a moment — don't end it again.")
         if new_status == "sold" and rec.get("status") != "sold":
             notifications.notify_sold(
                 _uid(request) or rec.get("user_id"), req.session_id, data,
                 sold_quantity=data.get("sold_quantity") or 0)
-            _purge_session_images(req.session_id)
+            _purge_session_images_best_effort(req.session_id)
         res = {**res, "status": new_status}
     return res
+
+
+# How many still-live listings one status sweep re-checks. Each is its own
+# eBay round trip, so this is the per-run share of the account's daily quota
+# the background sweep is allowed to spend; the rest of the store is covered
+# by later syncs, because the sample is random rather than the first N.
+SWEEP_SAMPLE = int(os.getenv("EBAY_SWEEP_SAMPLE", "100") or "100")
 
 
 @app.post("/api/ebay/sync-listings")
@@ -4362,10 +7157,27 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # token is concerned — and since eBay answers item lookups for anyone, a
     # sweep over it doesn't fail, it just keeps reporting the old store as
     # live and healthy under the new account.
-    account = (creds or {}).get("ebay_username", "")
-    live = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"])
-            if i.get("status") in ("published", "live")
-            and listing_sync.belongs_to(i.get("listing") or {}, account)]
+    # The whole creds bundle, not just the username: ownership is decided on
+    # eBay's immutable account id where the record carries one, and falls back
+    # to the name only for records too old to have it (listing_sync.owns).
+    account = creds or {}
+    # Live listings, asked for as live listings. This used to read the newest
+    # LIST_CAP records of ANY kind and drop the rest here -- so on a store
+    # whose recent records are mostly drafts, the older live listings fell off
+    # the end and never reached the sweep at all, for as long as the store
+    # stayed that shape. A sale or an ending on eBay went unnoticed here
+    # indefinitely. The filter moves the boundary from "the newest 3,000
+    # records" to "the first 3,000 LIVE ones", which for any real store is all
+    # of them -- and `capped` now says the truer thing.
+    #
+    # One row past the cap, so the answer can tell a sweep that covered the
+    # whole store from one that could not even READ it: `partial` was computed
+    # from the sample alone, so a capped sync reported itself complete.
+    rows = db.list_listings(limit=LIST_CAP + 1, user_id=user["id"],
+                            statuses=("published", "live"))
+    capped = len(rows) > LIST_CAP
+    live = [i for i in rows[:LIST_CAP]
+            if listing_sync.owns(i.get("listing") or {}, account)]
     changed = 0
     # First, the cheap sweep that scales to any store: eBay's own sold/unsold
     # lists name every item that finished recently, so a listing that ended
@@ -4405,8 +7217,18 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
         log.debug("ebay sync: per-item sweeps skipped (cooldown) for user=%s",
                   user["id"])
         live = []
-    if len(live) > 100:
-        live = random.sample(live, 100)
+    # A sweep is one eBay call per listing, so a big store is deliberately
+    # only sampled. Randomly, so every listing gets its turn across successive
+    # syncs rather than the same first 100 being re-checked forever.
+    #
+    # The count is REPORTED rather than left implicit. This is the pass a
+    # "full sync" appears to run, and answering only `checked` let a caller
+    # read partial coverage as complete -- so the response now says how many
+    # were eligible and whether it covered all of them. Nothing may describe
+    # this as a full sync while `partial` is true.
+    eligible = len(live)
+    if eligible > SWEEP_SAMPLE:
+        live = random.sample(live, SWEEP_SAMPLE)
     if live and creds:
         try:
             changed += listing_sync.refresh_statuses(
@@ -4420,7 +7242,18 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # loop that no longer exists. refresh_statuses does the archiving now and
     # reports only a change count, and nothing read the field — the frontend
     # uses `changed` alone — so it is gone rather than reported as a constant 0.
-    return {"checked": len(live) + len(handled), "changed": changed}
+    return {"checked": len(live) + len(handled), "changed": changed,
+            # What the sweep COULD have covered, and whether it did. `checked`
+            # alone reads as "that is the whole store" on a store where it is
+            # a sample of it.
+            "eligible": eligible + len(handled),
+            # True when the sweep did not cover everything, for EITHER reason:
+            # it sampled, or the store is bigger than one read of it. Nothing
+            # may describe this as a full sync while it is set, and `eligible`
+            # is what the read could see rather than what the seller has --
+            # a number this route cannot know without counting the store.
+            "partial": eligible > len(live) or capped,
+            "sample_size": SWEEP_SAMPLE}
 
 
 # Bounds one import run. A store bigger than this imports across repeated
@@ -4459,9 +7292,15 @@ def _run_import_job(job_id: str, token: str, uid: str, account: str = "") -> Non
     except ebay_trading.TradingError as exc:
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
     except Exception as exc:  # noqa: BLE001 - surface a clear reason
-        log.warning("import-listings failed for user=%s: %s", uid, exc)
-        jobstore.update(job_id, done=True, phase="failed",
-                        error=f"Couldn't import your eBay listings: {exc}")
+        # The TradingError arm above carries eBay's own mapped sentence. This
+        # one is whatever was thrown, and for an httpx failure that is the API
+        # base, the path and a status line — rendered in the import panel.
+        reference = _support_reference()
+        log.warning("import-listings failed for user=%s [%s]: %s",
+                    uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't import your eBay listings just now. Try again in a "
+            f"moment — if it keeps happening, quote {reference} to support."))
     finally:
         with _IMPORT_LOCK:
             if _IMPORT_JOBS.get(uid) == job_id:
@@ -4531,15 +7370,27 @@ def import_status(job_id: str, request: Request) -> Response:
 def notifications_list(request: Request, limit: int = 50,
                        unread_only: bool = False) -> dict:
     """The signed-in user's notifications (newest first) + unread count.
-    Empty for logged-out users — the bell just stays quiet."""
+    Empty for logged-out users — the bell just stays quiet.
+
+    `checked` says whether the read actually happened. A 503 would be wrong
+    here: the shell polls this every 60 seconds from every screen, so a blip
+    would turn the whole app noisy. But an empty list is not a neutral answer
+    either — the bell renders it as "Nothing yet", which is a claim about the
+    seller's sales on the surface they check to find out whether they owe a
+    buyer a parcel. So it answers 200 and says which of the two it is.
+    """
     uid = _uid(request)
     if not uid:
-        return {"notifications": [], "unread": 0}
-    return {
-        "notifications": db.list_notifications(
-            uid, limit=max(1, min(limit, 200)), unread_only=unread_only),
-        "unread": db.unread_notification_count(uid),
-    }
+        return {"notifications": [], "unread": 0, "checked": True}
+    try:
+        return {
+            "notifications": db.list_notifications(
+                uid, limit=max(1, min(limit, 200)), unread_only=unread_only),
+            "unread": db.unread_notification_count(uid),
+            "checked": True,
+        }
+    except errors.StorageUnavailable:
+        return {"notifications": [], "unread": 0, "checked": False}
 
 
 @app.post("/api/notifications/read")
@@ -4678,7 +7529,9 @@ def _listing_map_by_item_id(uid: str) -> dict:
     records, so order exports/quotes can pre-fill the weight the seller
     already entered and link an order back to its listing."""
     out = {}
-    for rec in db.list_listings(limit=LIST_CAP, user_id=uid):
+    # Best effort: this only pre-fills a weight the seller can type, so an
+    # unreadable store costs them a field, not a wrong answer.
+    for rec in db.list_listings_best_effort(limit=LIST_CAP, user_id=uid):
         listing = rec.get("listing") or {}
         item_id = str(listing.get("ebay_listing_id") or "")
         if not item_id:
@@ -4709,10 +7562,15 @@ def ebay_orders_awaiting(request: Request) -> dict:
     matching listing recorded one) the package weight/dims pre-filled."""
     creds = _orders_creds(request)
     try:
-        orders = ebay_orders.awaiting_shipment(creds["access_token"])
+        page = ebay_orders.awaiting_page(creds["access_token"])
     except ebay_orders.OrdersError as exc:
         raise HTTPException(502, str(exc)) from exc
-    return {"orders": _attach_packages(creds["_uid"], orders)}
+    # `total` and `partial` ride along because this is the list a seller reads
+    # to decide what still has to be packed: a page of 50 out of 80 read as
+    # the whole pile leaves thirty orders unshipped, and eBay scores late
+    # dispatch.
+    return {"orders": _attach_packages(creds["_uid"], page["orders"]),
+            "total": page["total"], "partial": page["partial"]}
 
 
 @app.get("/api/ebay/orders/for-listing/{listing_id}")
@@ -4746,12 +7604,24 @@ def ebay_shipping_quote(request: Request, payload: dict) -> dict:
     if not order_id:
         raise HTTPException(400, "No order id given.")
     ship_from = dict(payload.get("ship_from") or {})
-    saved = db.get_prefs(creds["_uid"]).get("ship_from") or {}
+    # Best-effort: the remembered address only FILLS GAPS in the one the
+    # caller sent, so an unreadable row costs a re-typed address rather than
+    # a refused quote. What it must not do is silently quote from a
+    # half-filled address, which is why the caller's own fields win and the
+    # postal code falls back to the account's.
+    saved = db.get_prefs_best_effort(creds["_uid"]).get("ship_from") or {}
     for key, val in saved.items():  # payload wins; saved fills the gaps
         ship_from.setdefault(key, val)
     ship_from.setdefault("postal_code", creds.get("ship_from_postal") or "")
     if payload.get("ship_from"):
-        db.save_prefs(creds["_uid"], {"ship_from": ship_from})
+        # Remembering it is a convenience on the way to the quote the seller
+        # actually asked for; failing to remember must not lose them the
+        # quote. They re-type it next time, which is the old behaviour.
+        try:
+            db.save_prefs(creds["_uid"], {"ship_from": ship_from})
+        except errors.StorageUnavailable as exc:
+            log.info("shipping quote: couldn't remember the ship-from "
+                     "address: %s", exc)
     try:
         order = ebay_orders.get_order(creds["access_token"], order_id)
         quote = ebay_orders.create_shipping_quote(
@@ -4837,14 +7707,57 @@ def pirate_ship_export(request: Request, order_id: str = ""):
         "Content-Disposition": 'attachment; filename="pirate-ship-orders.csv"'})
 
 
+def _file_etag(st: os.stat_result) -> str:
+    """The same ETag Starlette's FileResponse sends, computed up front so the
+    304 check below compares against exactly what the browser was given."""
+    base = f"{st.st_mtime}-{st.st_size}"
+    return f'"{hashlib.md5(base.encode(), usedforsecurity=False).hexdigest()}"'
+
+
+def _is_unmodified(request: Optional[Request], etag: str, mtime: float) -> bool:
+    """Whether the client already holds this exact file.
+
+    /media is served no-cache (see _cache_headers), so browsers revalidate on
+    every view. Starlette sets ETag and Last-Modified on a FileResponse but
+    never answers a conditional request with a 304 — without this, "always
+    revalidate" would mean "always re-download every photo", which on a
+    24-photo listing is the wrong trade. With it, an unchanged photo costs a
+    header round trip and no body.
+    """
+    if request is None:
+        return False
+    if_none_match = request.headers.get("if-none-match", "")
+    if if_none_match:
+        # A list, and possibly weak validators ("W/" prefixed) — a match on
+        # any entry means the client is current.
+        return any(tag.strip().removeprefix("W/") == etag
+                   for tag in if_none_match.split(","))
+    since = request.headers.get("if-modified-since", "")
+    if since:
+        try:
+            # Whole seconds on both sides: HTTP dates have no sub-second
+            # precision, so a raw float mtime always looks newer.
+            return int(mtime) <= int(parsedate_to_datetime(since).timestamp())
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 @app.get("/media/{session_id}/optimized/{name}")
-def media(session_id: str, name: str, v: str = ""):
+def media(session_id: str, name: str, request: Request = None, v: str = ""):
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name` (e.g. "../../etc/passwd").
     if opt_dir not in path.parents:
         raise HTTPException(404, "Not found")
     if path.is_file():
+        st = path.stat()
+        etag = _file_etag(st)
+        if _is_unmodified(request, etag, st.st_mtime):
+            return Response(status_code=304, headers={
+                "etag": etag,
+                "last-modified": formatdate(st.st_mtime, usegmt=True),
+            })
         return FileResponse(path)
     # Local file gone (e.g. freed by the R2 offload) — fall back to R2.
     if objstore.enabled():
@@ -4866,6 +7779,15 @@ def media(session_id: str, name: str, v: str = ""):
         if url:
             return RedirectResponse(
                 url, headers={"Cache-Control": "private, max-age=300"})
+        # Inside this branch, None means the PRESIGN failed — the object store
+        # is configured, so "there is nothing here" is not what happened. 404
+        # is a claim about the photo, and the caller that acts hardest on it is
+        # eBay: this URL is what a publish hands over as <PictureURL>, and its
+        # ingestion reads 404 as "no such photo" and drops or rejects it, where
+        # a 5xx is something it comes back for.
+        log.warning("media: couldn't sign a URL for %s", key)
+        raise HTTPException(
+            503, "That photo is temporarily unavailable — try again shortly.")
     raise HTTPException(404, "Not found")
 
 
@@ -4907,6 +7829,10 @@ def marketplace_roster(request: Request) -> dict:
         # marketplace's side (Depop's partner review). Self-clears once the
         # credentials land, so the UI needs no second deploy.
         soon, soon_note = marketplaces.coming_soon(p)
+        # The other kind of "not yet": configured and working, but the
+        # marketplace itself won't let THIS seller authorize it (Etsy's
+        # seller-app wall). Per-user, so it can't be folded into coming_soon.
+        pending, pending_note = marketplaces.access_pending(p, uid)
         out.append({
             "key": p.key,
             "label": p.label,
@@ -4914,6 +7840,8 @@ def marketplace_roster(request: Request) -> dict:
             "oauth_missing": p.oauth_missing(),
             "coming_soon": soon,
             "coming_soon_note": soon_note,
+            "access_pending": pending,
+            "access_pending_note": pending_note,
             "connected": bool(status.get("connected")),
             "username": status.get("username", ""),
             "env": status.get("env", "production"),
@@ -4937,7 +7865,10 @@ def etsy_settings_options(request: Request) -> dict:
         policies = etsy_auth.list_return_policies(
             creds["access_token"], creds["shop_id"])
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Etsy couldn't list your shop's options: {exc}") from exc
+        # `str(exc)` here is httpx's, so it carries the Etsy API base, the
+        # path and the seller's own shop_id. Same rule as the eBay lookups.
+        raise _lookup_failed("load your Etsy shop's shipping and return "
+                             "options", exc) from exc
     settings = creds.get("settings") or {}
     return {
         "shipping_profiles": profiles,
@@ -4959,7 +7890,15 @@ def save_etsy_settings_options(request: Request, payload: dict) -> dict:
               if k in payload}
     if not fields:
         raise HTTPException(400, "No settings provided.")
-    db.save_marketplace_account(uid, "etsy", settings=fields)
+    # The answer is a claim about a write. P0-06's rule, on a route that kept
+    # its own copy of the old behaviour: a save that did not land must not
+    # come back as `{"ok": true}`, or the seller closes Settings believing
+    # their shipping profile is chosen and every Etsy publish goes out with
+    # the old one.
+    if not db.save_marketplace_account(uid, "etsy", settings=fields):
+        raise errors.StorageUnavailable(
+            "Couldn't save your Etsy settings just now. Try again in a "
+            "moment.")
     return {"ok": True, "selected": fields}
 
 
@@ -4974,7 +7913,8 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
     try:
         return etsy_service.suggest_taxonomy(listing)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"Etsy category suggestion failed: {exc}") from exc
+        raise _lookup_failed("work out an Etsy category for this listing",
+                             exc) from exc
 
 
 def _flow_cookie(marketplace: str) -> str:
@@ -4990,7 +7930,8 @@ def _marketplace_or_404(marketplace: str):
 
 @app.get("/api/{marketplace}/connect")
 def marketplace_connect(marketplace: str, request: Request,
-                        ticket: str = "", native: str = ""):
+                        ticket: str = "", native: str = "",
+                        return_to: str = ""):
     provider = _marketplace_or_404(marketplace)
     if not provider.oauth_ready():
         raise HTTPException(400, f"{provider.label} OAuth not configured "
@@ -4998,6 +7939,23 @@ def marketplace_connect(marketplace: str, request: Request,
     uid = _connect_uid(request, ticket)
     if not uid:
         raise HTTPException(401, f"Log in before connecting {provider.label}.")
+    # Refuse before the redirect, not after: a marketplace that only lets
+    # certain accounts authorize it (Etsy, pre-Commercial Access) says so on
+    # its OWN page, off-site, with no callback to us — so a seller sent there
+    # lands on a dead end we never hear about and cannot explain.
+    #
+    # Back into the app rather than a raw 403: the Settings button is already
+    # disabled for these sellers, so the way to arrive here is a roster
+    # fetched before the gate went up — and stranding them on an error page is
+    # the exact thing the gate exists to prevent.
+    pending, _ = marketplaces.access_pending(provider, uid)
+    if pending:
+        return _finish_connect(request, f"/?connect_pending={marketplace}")
+    # Etsy and Depop match redirect_uri exactly, so — like eBay's RuName — the
+    # callback comes back to one origin. Start the flow on it, not here.
+    offsite = _offsite_connect(request, uid, f"/api/{marketplace}/connect", native)
+    if offsite is not None:
+        return offsite
     import secrets as _secrets
     nonce = _secrets.token_urlsafe(24)
     url, flow = provider.authorize_url(auth.make_state(uid, nonce))
@@ -5011,6 +7969,7 @@ def marketplace_connect(marketplace: str, request: Request,
                     max_age=600, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https")
     _mark_native_flow(resp, request, native)
+    _mark_return_origin(resp, request, return_to)
     return resp
 
 
@@ -5037,7 +7996,15 @@ def marketplace_callback(marketplace: str, request: Request,
     except Exception as exc:  # noqa: BLE001 - the redirect is the error surface
         log.warning("%s connect failed (uid=%s): %s", marketplace, uid, exc)
         return _finish_connect(request, f"/?connect_error={marketplace}")
-    db.save_marketplace_account(uid, marketplace, **fields)
+    # Same reasoning as the eBay callback: the marketplace authorised, so the
+    # grant is real and the seller has no reason to doubt a screen that says
+    # "connected" -- while every later publish fails on it. A connection that
+    # did not commit is a failed connect, and this is the one moment the
+    # seller is still here to retry it.
+    if not db.save_marketplace_account(uid, marketplace, **fields):
+        log.warning("%s connect authorised but did not persist (uid=%s)",
+                    marketplace, uid)
+        return _finish_connect(request, f"/?connect_error={marketplace}")
     # Connecting a different account of the same marketplace must not leave the
     # previous account's access token cached against this user id.
     forget = getattr(provider, "forget_cached_creds", None)
@@ -5112,8 +8079,16 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
         new_status = prev_status if still_live else "ended"
     else:
         new_status = prev_status or "draft"
-    db.upsert_listing(req.session_id, data, status=new_status,
-                      user_id=uid or rec.get("user_id"))
+    # The marketplace really did end the listing, so `ok` is not the lie —
+    # the lost write is. The record would still say `published`, and the app
+    # would go on offering to revise and repromote something that is gone.
+    # Same check the eBay end route already makes.
+    landed = db.upsert_listing(req.session_id, data, status=new_status,
+                               user_id=uid or rec.get("user_id"))
+    if db.enabled() and not landed:
+        raise errors.StorageUnavailable(
+            f"{provider.label} ended the listing, but we couldn't record it "
+            "just now — refresh in a moment to see the right state.")
     return {"ok": True, **res}
 
 

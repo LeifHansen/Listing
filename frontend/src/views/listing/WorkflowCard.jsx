@@ -7,7 +7,8 @@ import { InfoTip } from "@/components/ui/fields";
 
 // WorkflowCard — one collapsible step of the listing workflow. Shows a
 // ✔ Complete / Needs attention chip and expands itself when eBay flags it.
-export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, children }) {
+export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged,
+                               expand, children }) {
   const [open, setOpen] = useState(true);
   const ref = useRef(null);
 
@@ -23,10 +24,17 @@ export function WorkflowCard({ id, icon: Icon, title, hint, state, flagged, chil
   //    manually collapses a still-flagged card keeps it collapsed — same as
   //    before. PublishCard's "fix this" button deliberately clears fixTarget
   //    and re-sets it on the next frame to force that transition again.
-  const [prevFlagged, setPrevFlagged] = useState(flagged);
-  if (flagged !== prevFlagged) {
-    setPrevFlagged(flagged);
-    if (flagged) setOpen(true);
+  //
+  //    `expand` opens the card the same way but claims none of the scroll
+  //    below: a card can hold something the seller has to see — eBay refused
+  //    the listing over a field of its own — while the publish bar is
+  //    jumping to whichever error came back first, and two cards fighting
+  //    over scrollIntoView leaves the seller wherever the race landed.
+  const wantsOpen = !!(flagged || expand);
+  const [prevWantsOpen, setPrevWantsOpen] = useState(wantsOpen);
+  if (wantsOpen !== prevWantsOpen) {
+    setPrevWantsOpen(wantsOpen);
+    if (wantsOpen) setOpen(true);
   }
 
   // 2. Scrolling is a real side effect on the DOM, so it stays in an effect,

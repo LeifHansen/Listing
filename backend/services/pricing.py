@@ -132,13 +132,14 @@ def suggest(query: str, category_id: Optional[str] = None,
     one source errored (log it and keep what we have). `strategy`
     (quick_flip | median | long_sale) picks which end of the comp range the
     headline suggestion uses; the full low/median/high always rides along."""
-    sources = []
+    sources, failed = [], []
     for src in _SOURCES:
         try:
             result = src(query, category_id=category_id, condition=condition)
             if result:
                 sources.append(result)
         except Exception as exc:  # noqa: BLE001 - a source is best-effort
+            failed.append(src.__name__)
             log.warning("pricing: %s failed for %r: %s", src.__name__, query, exc)
     best = sources[0] if sources else None
     pick, strategy_label = _STRATEGY_PICK.get(strategy, (None, None))
@@ -146,6 +147,16 @@ def suggest(query: str, category_id: Optional[str] = None,
         "query": query,
         "sources": sources,
         "strategy": strategy or "median",
+        # Did we actually get to look? Without this, a 429 against the shared
+        # application quota, an expired app token or a network blip produced
+        # the same answer as a search over a market with nothing comparable in
+        # it — and both screens reading this state it as fact: the editor says
+        # "No comparable listings found" and sends the seller off to rewrite a
+        # title that was never the problem, and Shop Mode says "No price
+        # estimate yet" to someone deciding whether to spend their own money
+        # on the item in their hand. A source that answered is enough to have
+        # looked; only a clean sweep of failures is unknown.
+        "checked": bool(sources) or not failed,
         "suggestion": None if not best else {
             "price": best[pick] if pick else best["estimate"],
             "low": best["low"],

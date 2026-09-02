@@ -20,111 +20,12 @@ from anthropic import Anthropic
 from .. import config
 from ..config import log
 from . import taxonomy
+from .listing_prompt import (
+    EBAY_CONDITIONS,
+    LISTING_SCHEMA,
+    REFINE_ORDER_RULE,
+)
 from ..models import TITLE_MAX_CHARS, IdentifyResult, ItemSpecific, Listing
-
-# eBay's well-known condition enum values (subset most listings use).
-EBAY_CONDITIONS = [
-    "NEW",
-    "NEW_OTHER",
-    "NEW_WITH_DEFECTS",
-    "CERTIFIED_REFURBISHED",
-    "SELLER_REFURBISHED",
-    "USED_EXCELLENT",
-    "USED_VERY_GOOD",
-    "USED_GOOD",
-    "USED_ACCEPTABLE",
-    "FOR_PARTS_OR_NOT_WORKING",
-]
-
-_LISTING_SCHEMA = """
-Return ONLY a JSON object (no markdown fences) with this exact shape:
-{
-  "title": "string, <= 80 chars, keyword-rich eBay title",
-  "subtitle": "always the empty string \\"\\" (eBay charges an extra fee for subtitles; the seller adds one manually if they want)",
-  "brand": "string",
-  "condition": "one of: %s",
-  "condition_description": "string describing visible wear/flaws",
-  "category_suggestion": "human-readable eBay category path",
-  "description": "string, 2-4 short paragraphs, buyer-friendly, no false claims, opening on the item itself (see the description rule below)",
-  "price": number or null (suggested USD price based on item & condition),
-  "purchase_price": number or null (ONLY the price on a store/thrift PRICE STICKER or price tag visible in the photos — what it costs to buy this item right now. null when no price sticker is legible. Never estimate; never confuse with the resale price above),
-  "quantity": integer (default 1),
-  "package_weight_oz": number (estimated TOTAL shipping weight in ounces, packed; best-effort estimate the seller can correct),
-  "package_length_in": number (estimated SHIPPING BOX length in inches, packed),
-  "package_width_in": number (estimated SHIPPING BOX width in inches, packed),
-  "package_height_in": number (estimated SHIPPING BOX height in inches, packed),
-  "item_specifics": [{"name": "string", "value": "string", "confidence": "high|medium"}],
-  "missing_info": ["names of ITEM details a human should verify/fill, e.g. 'exact model number', 'size'. NEVER list where the item ships from, its location, shipping/return/payment policies, or handling time — the seller's account settles those once, not per listing"],
-  "confidence": "low|medium|high",
-  "raw_observations": "brief notes on what you actually see in the photos",
-  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|other"} ]
-}
-Rules:
-- Only state facts you can see or reasonably infer. Never invent serial numbers,
-  authenticity guarantees, or specs you cannot verify; put those in missing_info.
-- Title must be <= 80 characters, and its ORDER matters as much as its words.
-  Lead with what identifies THIS item and nothing else, in this order:
-  1. Brand, maker, artist or pattern name ("Royal Stafford", "Pyrex", "Levi's")
-  2. The exact item name, model, pattern or number ("Sweetpea", "501", "441")
-  3. What the thing is ("teacup & saucer", "mixing bowl", "straight-leg jeans")
-  4. The specifics a buyer filters or searches on (size, colour, material,
-     quantity, year)
-  5. ONLY THEN the general descriptive words: vintage, antique, retro, rare,
-     MCM, boho, unique, beautiful.
-  Never START a title with a general word. "Vintage teacup" is a title
-  thousands of listings share and it spends eBay's most heavily weighted
-  position on nothing; "Royal Stafford Sweetpea teacup & saucer bone china
-  vintage" reaches the buyer searching for that pattern by name. Keep those
-  words — they earn their place at the end, not the front.
-- Description: the FIRST WORDS must be item-specific — brand, then model or
-  product name, then what the thing is ("Pyrex Cinderella 441 mixing bowl...",
-  "Levi's 501 straight-leg jeans..."). NEVER open on a generic age or hype
-  adjective: Vintage, Antique, Retro, Rare, Unique, Beautiful, Stunning,
-  Gorgeous. Search weights the opening of a description most heavily and shows
-  it as the result snippet, so a word that could head any listing in the store
-  spends the highest-value position in the listing on nothing. Keep those words
-  — just later in the sentence ("Pyrex Cinderella 441 mixing bowl, vintage
-  1960s milk glass").
-- ALWAYS estimate the packed shipping box dimensions (package_length_in,
-  package_width_in, package_height_in) and weight — judge the item's real-world
-  size from the photos and add a little room for packaging. Never leave the
-  dimensions at 0; a reasonable estimate the seller can correct is required so
-  shipping calculates. (e.g. a t-shirt ≈ 10×8×2 in; a coffee mug ≈ 6×5×5 in;
-  a paperback ≈ 8×6×1 in; a pair of shoes in-box ≈ 13×8×5 in.)
-- item_specifics: be thorough. Fill EVERY standard eBay item specific you can
-  see or confidently infer, using eBay's exact aspect names as "name" (these
-  populate the listing's item specifics, so more accurate entries = far better
-  search visibility). Give ONE value per name; never guess. Common names by
-  category:
-  * Clothing: Department, Type, Style, Size, Size Type, Color, Material,
-    Pattern, Sleeve Length, Fit, Neckline, Closure, Occasion, Season, Theme,
-    Features, Country/Region of Manufacture, Vintage.
-  * Shoes: Department, Type, Style, US Shoe Size, Color, Upper Material.
-  * Trading cards: Game, Set, Card Name, Card Number, Language, Rarity, Finish,
-    Features, Grade.
-  * Collectibles/other: Type, Character, Material, Color, Theme, Year
-    Manufactured, Country/Region of Manufacture.
-  Use the canonical value eBay expects (e.g. Color "Red", Department "Men",
-  Size "L"). For a field with two values, return it twice as separate entries
-  (e.g. {"name":"Season","value":"Spring"} and {"name":"Season","value":"Summer"})
-  rather than one comma-joined value. Put anything you cannot verify in
-  missing_info instead of guessing.
-  Read EVERYTHING legible in the photos before filling these: care tags, sewn
-  labels, stamps, box/packaging text, model plates, and the human-readable
-  digits printed under any barcode (that's the UPC/EAN; model numbers and MPN
-  often sit nearby). Mark each entry's "confidence": "high" when you can
-  literally read/see it or it's unambiguous, "medium" for a reasonable
-  inference (fill those too — the seller sees a review flag on them). Never
-  invent identifiers (UPC/EAN/ISBN/MPN/serial) you cannot actually read.
-- tags: while examining the photos, note every TAG, LABEL, STAMP, or PRINTED
-  MARKING worth reading up close: neck labels, waistband tags, care tags,
-  shoe tongue/heel labels, hang tags, box text, model plates, barcodes.
-  box is the tag's bounding region as FRACTIONS of that photo's width/height
-  (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is cut
-  off. Include a tag even when you can't read it at this size — it will be
-  zoomed in on later. At most 6 entries, best candidates first; no tags at
-  all -> [].
-""" % ", ".join(EBAY_CONDITIONS)
 
 
 # One shared client, built on first use. Every call used to construct its own,
@@ -356,7 +257,7 @@ _PRICING_STRATEGY_HINTS = {
 _IDENTIFY_SYSTEM = (
     "You are an expert eBay reseller and product cataloguer. Examine the "
     "product photos and produce a complete, accurate eBay listing draft.\n\n"
-    + _LISTING_SCHEMA)
+    + LISTING_SCHEMA)
 
 
 def identify(image_paths: list[Path], image_names: list[str],
@@ -385,7 +286,13 @@ def identify(image_paths: list[Path], image_names: list[str],
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=4096,
+        # The description alone is now a 300-600 word SEO body, and it shares
+        # the budget with the specifics, the tag boxes and the observations.
+        # A draft that runs past the cap is not a truncated description — it
+        # is unparseable JSON, raised below as an error the seller has to
+        # retry, so the headroom is worth more than the unused tokens (only
+        # what is generated is billed).
+        max_tokens=8192,
         system=[{"type": "text", "text": _IDENTIFY_SYSTEM,
                  "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content}],
@@ -651,10 +558,6 @@ def refine(listing: Listing, prompt: str) -> Listing:
     # Don't let the model rewrite the image list.
     current.pop("images", None)
 
-    # The description's opening rule has to survive a refine too: a rewrite
-    # here reaches the same buyers and the same search snippet as the first
-    # draft. Conditioned on the seller not asking otherwise — an explicit
-    # "start it with Vintage" is their call to make, not ours to override.
     msg = (
         "You are editing an eBay listing draft. Here is the current draft as "
         "JSON:\n\n" + json.dumps(current, indent=2) + "\n\n"
@@ -663,17 +566,14 @@ def refine(listing: Listing, prompt: str) -> Listing:
         "fields (title <= 80 chars, condition must be one of: "
         + ", ".join(EBAY_CONDITIONS)
         + "). Only change what the instruction asks for; keep everything else. "
-        "If you rewrite the title or the description, both must still LEAD "
-        "with what identifies this item — brand or artist, then the exact "
-        "model or pattern name, then what the thing is — and keep general "
-        "words like Vintage, Antique, Retro or Rare at the END rather than "
-        "the front, unless the seller's instruction explicitly asks for that "
-        "opening. "
-        "Return ONLY the JSON, no markdown."
+        + REFINE_ORDER_RULE
+        + "Return ONLY the JSON, no markdown."
     )
     resp = client.messages.create(
         model=config.CONTENT_MODEL,
-        max_tokens=4096,
+        # A refine echoes the WHOLE listing back, long description included,
+        # so it needs at least as much room as the draft that produced it.
+        max_tokens=8192,
         messages=[{"role": "user", "content": msg}],
     )
     if resp.stop_reason == "max_tokens":
@@ -943,10 +843,16 @@ def _aspect_lines(named: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Enough of the description to carry the Key Details block, where the values
+# an aspect fill is looking for (material, colour, size, year, markings) are
+# spelled out. 500 characters stopped inside the opening paragraph.
+_CONTEXT_DESCRIPTION_CHARS = 2_000
+
+
 def _listing_context(listing: Listing) -> str:
     return (f"Title: {listing.title}\nBrand: {listing.brand}\n"
             f"Category: {listing.category_suggestion}\n"
-            f"Description: {(listing.description or '')[:500]}")
+            f"Description: {(listing.description or '')[:_CONTEXT_DESCRIPTION_CHARS]}")
 
 
 # Separators a model reaches for when it comma-joins a repeatable aspect's
@@ -1151,6 +1057,136 @@ def fill_aspects_combined(
 # Only a candidate that survives both layers is written to the listing —
 # accuracy over coverage, since a wrong maker is worse than a blank one.
 # ---------------------------------------------------------------------------
+
+# --- research: look the item UP, instead of remembering it ------------------
+#
+# Everything above this point asks a vision model what it thinks an item is.
+# That is a memory test, and the two ways it fails both cost the seller the
+# item: a piece it half-recognizes gets hedged into a lookalike ("Fanch Ledan
+# STYLE lithograph", a genuine butcher cover called a "replica"), and a piece
+# it cannot value gets a low number. Neither failure announces itself — the
+# draft reads exactly as confident as a correct one.
+#
+# So the app now looks things up. This pass runs Claude with Anthropic's
+# server-side WEB SEARCH tool over the same photos plus the draft, and its job
+# is the one the identify pass cannot do from memory: is this a CATALOGUED
+# thing with a name, is there a valuable variant it could be, and what do real
+# examples actually go for. The answer is advice, not authority — main.py
+# merges it under rules that can raise a price and name a work, and can never
+# downgrade an item or lower a price.
+#
+# The tool type is pinned but overridable: web_search_20260209 needs Opus
+# 4.6+/5 or Sonnet 4.6+ (which VISION_MODEL is by default). A deployment on an
+# older model sets WEB_SEARCH_TOOL=web_search_20250305 rather than losing the
+# pass to a 400.
+WEB_SEARCH_TOOL = os.getenv("WEB_SEARCH_TOOL", "web_search_20260209").strip()
+# How many searches one item may run, and how many times a paused server-tool
+# turn may be resumed. Both bound the cost of a pass that is otherwise open.
+RESEARCH_MAX_SEARCHES = int(os.getenv("RESEARCH_MAX_SEARCHES", "6") or "6")
+_RESEARCH_MAX_RESUMES = 2
+
+_RESEARCH_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{
+  "identified": "one line: what this item specifically IS, or \"\" if the search could not settle it",
+  "maker": "artist, author, manufacturer or brand — \"\" if unresolved",
+  "work": "the name of the specific work, pattern, model or release — \"\" if unresolved",
+  "variant": "the specific edition/state/pressing/printing this appears to be, with what in the photos says so — \"\" if unresolved",
+  "title": "an eBay title <= 80 chars for what you actually established, or \"\" to leave the draft's alone",
+  "value_low": number or null,
+  "value_high": number or null,
+  "value_basis": "what those figures come from — sold listings, auction records, dealer prices — and their date if you saw one",
+  "high_value_variant": "if a MORE VALUABLE variant of this item exists and the photos cannot rule it out: name it, what it is worth, and what physically distinguishes it. \"\" when there is no such trap",
+  "verify": ["what the SELLER must physically check to settle the above — specific, checkable things"],
+  "sources": ["urls you actually used"],
+  "confidence": "low|medium|high"
+}
+Rules:
+- SEARCH before you answer. You are here because memory alone already got this
+  wrong. Search the maker and the work, the identifying marks, and what
+  comparable examples SOLD for. Prefer sold/auction records over asking prices.
+- Your job is the name and the money, in that order. Collectors buy the name:
+  a named work ("Three Matisses"), a state or pressing (a first-state stereo
+  butcher cover), a printing or error variant, a production year. Find it.
+- NEVER resolve a doubt downward. You may not conclude "replica", "reprint",
+  "style of", "tribute" or "not authentic" from the photos and a search — the
+  seller has the item in their hands and you do not. When you cannot confirm,
+  leave the fields "" and put what to check in verify. Absence of proof is not
+  proof, and calling a real thing a copy is the expensive direction of wrong.
+- high_value_variant is the most important field. Ask: what is the version of
+  this item that is worth 10x or 100x, and could THIS be it? A genuine Beatles
+  butcher cover called a "replica" sold for $22 and was worth over $7,000 —
+  that is the failure this field exists to prevent. Fill it whenever the trap
+  exists, even at low confidence, and say what would settle it.
+- value_low/value_high describe what THIS item is worth as best you can
+  establish, in USD. If the range depends on which variant it is, use the range
+  for the variant the photos support and name the other one in
+  high_value_variant. null when the search genuinely could not price it —
+  never a placeholder number.
+- Cite what you used in sources. A finding with no source is a guess wearing a
+  suit, and it will be treated as one.
+"""
+
+
+def research_item(image_paths: list[Path], listing: Listing,
+                  observations: str = "") -> Optional[dict]:
+    """Look the drafted item up on the web. Returns the parsed research dict,
+    or None when the pass did not run or produced nothing usable.
+
+    Best-effort by contract: every caller treats a failure as "no research".
+    Raises nothing.
+    """
+    if not image_paths:
+        return None
+    try:
+        client = _client()
+        imgs = [_image_block(p) for p in image_paths[:4]]
+        specifics = "; ".join(
+            f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
+            if (s.value or "").strip())
+        context = (
+            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with no "
+            "lookup of any kind. Check it.\n\n"
+            f"Drafted title: {listing.title}\n"
+            f"Drafted brand: {listing.brand or '(none)'}\n"
+            f"Drafted price: {'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
+            f"Category: {listing.category_suggestion or '(unknown)'}\n"
+            f"Specifics: {specifics or '(none)'}\n"
+            f"What the first pass saw: {(observations or '')[:600]}\n\n"
+            "Establish what this actually is and what it is actually worth."
+            + _RESEARCH_SCHEMA)
+        messages = [{"role": "user", "content": imgs + [{"type": "text",
+                                                         "text": context}]}]
+        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+                  "max_uses": RESEARCH_MAX_SEARCHES}]
+        resp = client.messages.create(
+            model=config.VISION_MODEL, max_tokens=4096,
+            tools=tools, messages=messages)
+        # A server-tool loop that hits its iteration limit comes back paused,
+        # not finished. Resending the turn resumes it; the API needs no extra
+        # user message and adding one would derail it.
+        resumes = 0
+        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
+            resumes += 1
+            messages = messages + [{"role": "assistant", "content": resp.content}]
+            resp = client.messages.create(
+                model=config.VISION_MODEL, max_tokens=4096,
+                tools=tools, messages=messages)
+        _log_usage("research", resp)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        data = _extract_json(text)
+    except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
+        log.info("research skipped: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    searches = sum(1 for b in resp.content
+                   if getattr(b, "type", "") == "server_tool_use")
+    log.info("research: %d searches -> %r (confidence=%s, %s-%s)", searches,
+             str(data.get("identified", ""))[:80], data.get("confidence"),
+             data.get("value_low"), data.get("value_high"))
+    return data
+
 
 _MAKER_HUNT_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):

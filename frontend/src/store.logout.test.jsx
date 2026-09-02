@@ -149,7 +149,11 @@ describe("logout", () => {
     const app = get();
     expect(app.user).toBe(null);
     expect(app.listingsState.items).toEqual([]);
-    expect(app.notifications).toEqual({ items: [], unread: 0 });
+    // Everything the previous account's bell held is gone. `checked` rides
+    // along on this state now (it says whether the last read landed); a
+    // signed-out bell has nothing to report and is not an outage, so it
+    // resets to true with the rest.
+    expect(app.notifications).toEqual({ items: [], unread: 0, checked: true });
     expect(app.messages.conversations).toEqual([]);
     expect(app.messages.unread).toBe(0);
     expect(app.threads).toEqual({});
@@ -166,6 +170,11 @@ describe("logout", () => {
     expect(app.storeSync.lastSynced).toBe(null);
     expect(app.activeBulk).toBe(null);
     expect(app.bulkRetry).toBe(null);
+    expect(localStorage.getItem("thryft-bulk")).toBe(null);
+    // The pre-rename key too: a seller who signs out on the same browser they
+    // used before the rename must not leave the old copy behind for whoever
+    // signs in next. Setting it above is what makes this assertion mean
+    // something — it is a real leftover, cleared by the same call.
     expect(localStorage.getItem("quickflip-bulk")).toBe(null);
     expect(app.skippedDraftIds.size).toBe(0);
     await act(async () => { root.unmount(); });

@@ -95,7 +95,12 @@ export function TokensDialog() {
     let alive = true;
     api("/api/tokens/history")
       .then((r) => { if (alive) setHistory({ entries: r.entries || [] }); })
-      .catch((e) => { if (alive) setHistory({ error: `Couldn't load your activity: ${e.message}` }); });
+      .catch((e) => {
+        // Shown as it arrived: `api()` hands back a sentence written for the
+        // seller, and prefixing it produced "Couldn't load your activity: We
+        // couldn't load your activity just now."
+        if (alive) setHistory({ error: e.message || "Couldn’t load your activity just now. Try again in a moment." });
+      });
     return () => { alive = false; };
   }, [historyOpen, user, tokensOpen]);
 

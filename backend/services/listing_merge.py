@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..money import money
+
 # eBay condition codes and listing formats, spelled the way the editor spells
 # them. Anything not named here falls back to a de-shouted version of the raw
 # value, which reads fine for codes this doesn't know.
@@ -41,6 +43,9 @@ CONDITION_LABELS = {
     "NEW_WITH_DEFECTS": "New with defects",
     "CERTIFIED_REFURBISHED": "Certified refurbished",
     "SELLER_REFURBISHED": "Seller refurbished",
+    "LIKE_NEW": "Like new",
+    "PRE_OWNED_EXCELLENT": "Pre-owned — excellent",
+    "PRE_OWNED_FAIR": "Pre-owned — fair",
     "USED_EXCELLENT": "Used — excellent",
     "USED_VERY_GOOD": "Used — very good",
     "USED_GOOD": "Used — good",
@@ -139,8 +144,13 @@ def _clip(text: str) -> str:
 
 
 def _money(amount: float, currency) -> str:
-    code = (_text(currency) or "USD").upper()
-    return f"${amount:,.2f}" if code == "USD" else f"{amount:,.2f} {code}"
+    """This module's own view formatting, on the shared rule.
+
+    Kept as a wrapper rather than inlined at the call sites: those hand it an
+    amount already coerced to a float, and want a string either way, where
+    the shared helper answers None for something it could not read.
+    """
+    return money(amount, _text(currency)) or f"{amount:,.2f}"
 
 
 def _plain(raw: str) -> str:

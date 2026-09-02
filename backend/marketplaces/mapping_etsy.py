@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 
 from ..models import Listing
+from ..money import money
 
 TITLE_LIMIT = 140
 TAG_LIMIT = 13
@@ -175,8 +176,12 @@ def preflight(listing: Listing, settings: dict) -> list[dict]:
             "Write a description — Etsy requires one.")
     price = float(listing.price or 0)
     if price < PRICE_FLOOR:
-        add("price", f"Etsy's minimum price is ${PRICE_FLOOR:.2f}",
-            "Raise the price — Etsy rejects listings under 20 cents.")
+        # In the listing's own currency, and without "20 cents": an Etsy shop
+        # sets its own currency, and both the symbol and the word were claims
+        # about money a seller outside the US does not use.
+        floor = money(PRICE_FLOOR, listing.currency)
+        add("price", f"Etsy's minimum price is {floor}",
+            f"Raise the price — Etsy rejects listings under {floor}.")
     if not listing.etsy.taxonomy_id:
         add("etsy_taxonomy", "Etsy category is missing",
             "Pick an Etsy category in the Etsy section (or tap Suggest).")

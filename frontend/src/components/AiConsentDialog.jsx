@@ -16,7 +16,13 @@ export function AiConsentDialog() {
   const [pending, setPending] = useState(null); // {accept, decline} | null
 
   useEffect(() => {
-    const onNeeded = (e) => setPending(e.detail);
+    const onNeeded = (e) => {
+      // Marked synchronously, inside the dispatch, so lib/aiConsent can tell
+      // "the dialog took this" from "nobody was listening". Without it, an
+      // ask that reached no one left the upload waiting forever.
+      e.detail.shown = true;
+      setPending(e.detail);
+    };
     window.addEventListener("ai-consent:needed", onNeeded);
     return () => window.removeEventListener("ai-consent:needed", onNeeded);
   }, []);

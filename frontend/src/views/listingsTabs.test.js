@@ -11,6 +11,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { TABS, STALE_TABS, inTab } from "./ListingsView";
+import { ARCHIVED_STATUSES, recentListings } from "@/lib/listingsView";
 
 const tab = (id) => TABS.find((t) => t.id === id);
 const item = (status) => ({ id: status, status });
@@ -83,5 +84,25 @@ describe("counting", () => {
 
   it("leaves the sold ones out of the All count", () => {
     expect(count("all")).toBe(items.length - 2);
+  });
+});
+
+describe("the dashboard's strip and the Sell screen's tabs", () => {
+  // These two are the halves of the reported defect: a sold item left the
+  // tabs and stayed on the dashboard. They now subtract the same list, so
+  // adding a status to one screen cannot forget the other.
+  it("hide the same statuses", () => {
+    for (const status of ARCHIVED_STATUSES) {
+      expect(inTab(tab("all"), item(status))).toBe(false);
+      expect(recentListings([{ id: status, status, updated_at: "2026-03-01" }]))
+        .toEqual([]);
+    }
+  });
+
+  it("keeps the archive itself showing every one of them", () => {
+    // Hidden everywhere is not the goal — hidden everywhere BUT Inactive is.
+    for (const status of ARCHIVED_STATUSES) {
+      expect(inTab(tab("inactive"), item(status))).toBe(true);
+    }
   });
 });

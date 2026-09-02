@@ -23,6 +23,17 @@ from typing import Optional
 from . import config, storage
 from .config import log
 
+
+class ObjectStoreUnavailable(RuntimeError):
+    """The bucket could not be reached, or refused the operation.
+
+    Everything else in this module is best-effort by design: a photo that
+    cannot be offloaded stays local, a URL that cannot be signed falls back.
+    This exists for the one operation where "we could not tell" and "there is
+    nothing there" have to be different answers — an erasure. See
+    `delete_prefix_strict`.
+    """
+
 _RETRY_AFTER = 600  # seconds a failed init latches storage off before retrying
 
 _lock = threading.Lock()
@@ -317,3 +328,38 @@ def delete_prefix(prefix: str) -> int:
     except Exception as exc:  # noqa: BLE001 - never break the request
         log.warning(f"objstore: delete_prefix({prefix}) failed: {exc}")
         return 0
+
+
+def delete_prefix_strict(prefix: str) -> int:
+    """delete_prefix, but a failure is reported rather than counted as zero.
+
+    For erasure. The deletion queue drops a listing's debt the moment its
+    purge returns without raising -- `db.finish_media_purge` says so in its
+    own docstring -- so a delete that answers `0` for an unreachable bucket
+    leaves the photos in R2 for ever, with the account that owned them
+    already gone. That is the failure the durable queue exists to prevent,
+    and it was reachable through the one line that swallowed the error.
+
+    Returns the same count as its tolerant twin, so a caller that wants both
+    the number and the truth has one call to make.
+    """
+    client = _get_client()
+    # No bucket configured is a configuration, not a failure: there is
+    # genuinely nothing in object storage to erase.
+    if client is None:
+        return 0
+    try:
+        removed = 0
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=config.R2_BUCKET, Prefix=prefix):
+            keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+            if not keys:
+                continue
+            client.delete_objects(Bucket=config.R2_BUCKET,
+                                  Delete={"Objects": keys, "Quiet": True})
+            removed += len(keys)
+        return removed
+    except Exception as exc:  # noqa: BLE001 - re-raised as our own type
+        log.warning(f"objstore: delete_prefix_strict({prefix}) failed: {exc}")
+        raise ObjectStoreUnavailable(
+            f"could not erase objects under {prefix}: {exc}") from exc

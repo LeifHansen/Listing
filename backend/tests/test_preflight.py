@@ -120,6 +120,45 @@ def test_account_gaps_are_blockers_the_seller_can_be_sent_to():
     assert all(i["field"] for i in issues)
 
 
+def test_a_required_aspect_is_answered_by_any_row_that_holds_a_value():
+    """An aspect can own SEVERAL rows — eBay's multi-selects do, and a blank
+    one (a cleared field, an identify pass that named the aspect and left it
+    empty) can sit in front of the answer. The answer counts wherever it is:
+    the browser's copy of this rule stopped at the first row, and told sellers
+    a Color reading "Multi-Color" on their screen was a missing required
+    field."""
+    from backend.models import ItemSpecific
+
+    filled = listing(item_specifics=[
+        ItemSpecific(name="Color", value=""),
+        ItemSpecific(name="Color", value="Multi-Color"),
+    ])
+    assert preflight.errors_only(preflight.validate(
+        filled, "live", **ACCOUNT_READY, required_aspects=["Color"])) == []
+
+
+def test_a_required_aspect_holding_only_whitespace_is_still_missing():
+    from backend.models import ItemSpecific
+
+    blank = listing(item_specifics=[ItemSpecific(name="Color", value="   ")])
+    issues = preflight.errors_only(preflight.validate(
+        blank, "live", **ACCOUNT_READY, required_aspects=["Color"]))
+    assert targets(issues) == ["specifics"]
+    assert "Color" in issues[0]["title"]
+
+
+def test_the_missing_aspects_are_named_for_the_editor_to_ring():
+    """The title lists at most six of them and the card holds forty inputs.
+    `fields` is the machine-readable half — what the editor marks."""
+    from backend.models import ItemSpecific
+
+    bare = listing(item_specifics=[ItemSpecific(name="Color", value="Red")])
+    issues = preflight.errors_only(preflight.validate(
+        bare, "live", **ACCOUNT_READY,
+        required_aspects=["Color", "Brand", "Size Type"]))
+    assert [i["fields"] for i in issues] == [["Brand", "Size Type"]]
+
+
 def test_draft_mode_only_checks_what_a_draft_needs():
     """Saving a draft isn't publishing: price, category and weight aren't
     blocking anything yet, so they must not be reported as if they were."""

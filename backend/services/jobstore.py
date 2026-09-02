@@ -224,6 +224,17 @@ def interrupted_message(record: dict) -> str:
         # nothing was written, so don't send the seller looking in Drafts.
         return ("The server restarted before the AI finished this item, so no "
                 "draft was saved. Please try again.")
+    if record.get("kind") == "enrich":
+        # Filling in a group of existing listings. Each one is saved (and
+        # pushed to eBay) as it finishes, so an interrupted run leaves real
+        # work behind — and pointing the seller at Drafts, as the photo-batch
+        # wording below does, would send them somewhere their listings aren't.
+        total = record.get("total_items") or 0
+        current = record.get("current") or 0
+        where = f" ({min(current, total)} of {total} done)" if total else ""
+        return ("The server restarted while filling in your listings"
+                f"{where}, so the run stopped early. The ones it finished are "
+                "filled in — run it again for the rest.")
     phase = record.get("phase")
     current = record.get("current") or 0
     photos = record.get("total_photos") or 0
