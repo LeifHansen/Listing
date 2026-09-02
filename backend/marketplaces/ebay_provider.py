@@ -21,9 +21,9 @@ from fastapi import HTTPException
 from .. import config, db, ebay_auth, storage
 from ..config import log
 from ..models import Listing
-from ..services import (ebay, ebay_account, ebay_trading, image_import,
-                        listing_sync, preflight, promotions, publish_guard,
-                        sync_merge, taxonomy)
+from ..services import (ebay, ebay_account, ebay_messages, ebay_trading,
+                        image_import, listing_sync, preflight, promotions,
+                        publish_guard, sync_merge, taxonomy)
 from ..services.background import run_in_background
 from . import register
 from .base import PublishContext, PublishOutcome
@@ -1258,6 +1258,63 @@ class EbayProvider:
             ok=True, dry_run=True, status="dry_run", message=dev_message,
             raw={"dry_run": True, "mode": "live", "message": dev_message,
                  "export_path": str(export_path), "payload": payload})
+
+
+    # --- buyer messages (Message API — limited release) -------------------
+    #
+    # The five methods of marketplaces.messaging.MessagingProvider. Ids in and
+    # out are RAW; the inbox adds the "ebay:" prefix. Everything delegates to
+    # services.ebay_messages, which owns the FROM_MEMBERS filter that keeps
+    # eBay's own system mail out of a P2P inbox.
+
+    def messaging_status(self, uid: Optional[str]) -> dict:
+        if not config.EBAY_MESSAGING_ENABLED:
+            return {"available": False, "reason": "disabled", "message": ""}
+        if not uid:
+            return {"available": False, "reason": "signed_out", "message": ""}
+        if not creds_for(uid):
+            return {"available": False, "reason": "not_connected",
+                    "message": "Connect eBay in Settings to see buyer messages."}
+        return {"available": True, "reason": "", "message": ""}
+
+    def _messaging_creds(self, uid: str) -> dict:
+        if not config.EBAY_MESSAGING_ENABLED:
+            raise ebay_messages.MessagesError("eBay messages aren't enabled.")
+        creds = creds_for(uid)
+        if not creds:
+            raise ebay_messages.MessagesError(
+                "Connect eBay in Settings to see buyer messages.")
+        return creds
+
+    def list_conversations(self, uid: str, limit: int = 25) -> list:
+        creds = self._messaging_creds(uid)
+        return ebay_messages.list_conversations(
+            creds["access_token"], me=creds.get("ebay_username", ""),
+            limit=limit, cache_key=f"ebay:{uid}")
+
+    def get_conversation(self, uid: str, raw_id: str, limit: int = 50) -> dict:
+        creds = self._messaging_creds(uid)
+        return ebay_messages.get_conversation(
+            creds["access_token"], raw_id,
+            me=creds.get("ebay_username", ""), limit=limit)
+
+    def send_message(self, uid: str, raw_id: str, text: str) -> dict:
+        creds = self._messaging_creds(uid)
+        out = ebay_messages.send_message(
+            creds["access_token"], text=text, raw_id=raw_id,
+            me=creds.get("ebay_username", ""))
+        # Their own reply must not be invisible until the next poll.
+        ebay_messages.invalidate(f"ebay:{uid}")
+        return out
+
+    def mark_read(self, uid: str, raw_id: str) -> bool:
+        try:
+            creds = self._messaging_creds(uid)
+        except ebay_messages.MessagesError:
+            return False
+        ok = ebay_messages.mark_read(creds["access_token"], raw_id)
+        ebay_messages.invalidate(f"ebay:{uid}")
+        return ok
 
 
 register(EbayProvider())

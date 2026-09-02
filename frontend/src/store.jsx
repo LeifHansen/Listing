@@ -34,10 +34,15 @@ const INVALIDATE_DEBOUNCE_MS = 350;
 // just booted or someone just left, and two copies of these drift.
 const NO_EBAY = {
   connected: false, env: "", username: "", email: "", oauth_ready: false,
-  oauth_missing: [], labels_enabled: false, foreign_listings: 0,
+  oauth_missing: [], labels_enabled: false, messaging_enabled: false,
+  foreign_listings: 0,
   unowned_listings: 0,
 };
 const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
+const NO_MESSAGES = {
+  conversations: [], unread: 0, sources: [], available: false, reason: "",
+  message: "", loaded: false,
+};
 const NO_STORE_SYNC = {
   syncing: false, lastSynced: null, error: null, progress: null,
   // Whether the last sweep actually covered the store — it SAMPLES on a
@@ -178,6 +183,7 @@ export function AppProvider({ children }) {
         oauth_ready: !!s.oauth_ready,
         oauth_missing: s.oauth_missing || [],
         labels_enabled: !!s.labels_enabled,
+        messaging_enabled: !!s.messaging_enabled,
         // Listings still here from an eBay account other than the connected
         // one — see the banner in Settings.
         foreign_listings: s.foreign_listings || 0,
@@ -334,6 +340,136 @@ export function AppProvider({ children }) {
       await postJson("/api/notifications/read", ids ? { ids } : { all: true });
     } catch (e) { /* the next poll re-syncs */ }
   }, []);
+
+  // ---------- buyer messages (the unified P2P inbox) ----------
+  // Conversations with actual people, merged across every marketplace that
+  // can carry one. Deliberately NOT the bell: that is app-generated alerts,
+  // this is someone typing to you, and mixing the two is what makes a seller
+  // stop reading both. Each marketplace adapter excludes its own automated
+  // mail server-side, so nothing here has to filter.
+  const [messages, setMessages] = useState(NO_MESSAGES);
+  const [activeConversationId, setActiveConversationId] = useState(null);
+  // Which marketplace the inbox is filtered to ("" = all). The unread badge
+  // stays global regardless, so a filter never makes the other marketplace's
+  // waiting messages look like they went away.
+  const [messageSource, setMessageSource] = useState("");
+  const [threads, setThreads] = useState({});
+
+  const messagingOn = !!(user && ebay.messaging_enabled);
+  const loadMessages = useCallback(async () => {
+    // A deployment with messaging off makes no network requests at all — the
+    // flag is default-off precisely so it costs nothing until switched on.
+    if (!messagingOn) { setMessages(NO_MESSAGES); return; }
+    try {
+      const res = await api("/api/messages");
+      setMessages({
+        conversations: res.conversations || [], unread: res.unread || 0,
+        sources: res.sources || [], available: !!res.available,
+        reason: res.reason || "", message: res.message || "", loaded: true,
+      });
+    } catch (e) { /* keep previous — a poll must never blank the inbox */ }
+  }, [messagingOn]);
+
+  useEffect(() => {
+    // Same subscription shape as the notifications poll, with one addition:
+    // it skips while the tab is hidden and catches up on return. Without that
+    // every open tab would poll a marketplace API forever in the background,
+    // and that quota is shared with publishing.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadMessages();
+    if (!messagingOn) return undefined;
+    const tick = () => { if (!document.hidden) loadMessages(); };
+    const t = setInterval(tick, 60000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [messagingOn, loadMessages]);
+
+  const markConversationRead = useCallback(async (id) => {
+    // Optimistic, like the bell: the badge drops now and the next poll
+    // reconciles if the marketplace disagreed.
+    setMessages((m) => {
+      const hit = m.conversations.find((c) => c.id === id);
+      if (!hit || !hit.unread) return m;
+      return {
+        ...m,
+        unread: Math.max(0, m.unread - hit.unread),
+        conversations: m.conversations.map((c) => (
+          c.id === id ? { ...c, unread: 0 } : c)),
+      };
+    });
+    try {
+      await postJson("/api/messages/read", { conversation_id: id });
+    } catch (e) { /* the next poll re-syncs */ }
+  }, []);
+
+  const loadThread = useCallback(async (id) => {
+    if (!id) return;
+    setThreads((t) => ({ ...t, [id]: { ...(t[id] || {}), loading: true, error: "" } }));
+    try {
+      const res = await api(`/api/messages/${encodeURIComponent(id)}`);
+      setThreads((t) => ({
+        ...t,
+        [id]: { loading: false, error: "", messages: res.messages || [],
+          conversation: res.conversation || null },
+      }));
+    } catch (e) {
+      setThreads((t) => ({
+        ...t, [id]: { ...(t[id] || {}), loading: false, error: e.message },
+      }));
+    }
+  }, []);
+
+  const openConversation = useCallback((id) => {
+    setActiveConversationId(id || null);
+    if (id) { loadThread(id); markConversationRead(id); }
+  }, [loadThread, markConversationRead]);
+
+  const openMessages = useCallback((id) => {
+    setView("messages");
+    setActiveConversationId(id || null);
+    if (id) { loadThread(id); markConversationRead(id); }
+  }, [loadThread, markConversationRead]);
+
+  const sendMessage = useCallback(async (id, text) => {
+    const body = (text || "").trim();
+    if (!id || !body) return false;
+    // Optimistic bubble: the seller sees their words land immediately and the
+    // server's version replaces it. A failure MARKS the bubble rather than
+    // removing it, so nobody loses what they typed.
+    const pendingId = `pending-${Date.now()}`;
+    setThreads((t) => ({
+      ...t,
+      [id]: {
+        ...(t[id] || {}),
+        messages: [...((t[id] || {}).messages || []),
+          { id: pendingId, from_me: true, text: body, sent_at: "", pending: true }],
+      },
+    }));
+    try {
+      const res = await postJson("/api/messages/send",
+        { conversation_id: id, text: body });
+      setThreads((t) => ({
+        ...t,
+        [id]: { ...(t[id] || {}), loading: false, error: "",
+          messages: res.messages || [] },
+      }));
+      loadMessages();
+      return true;
+    } catch (e) {
+      setThreads((t) => ({
+        ...t,
+        [id]: {
+          ...(t[id] || {}),
+          messages: ((t[id] || {}).messages || []).map((m) => (
+            m.id === pendingId ? { ...m, pending: false, failed: true } : m)),
+        },
+      }));
+      return false;
+    }
+  }, [loadMessages]);
 
   // ---------- shipping dialog (sold → label) ----------
   // null = closed; { listingId } = one listing's order; {} = all awaiting.
@@ -955,6 +1091,10 @@ export function AppProvider({ children }) {
     setSession(null);
     setSkippedDraftIds(new Set());
     setNotifications(NO_NOTIFICATIONS);
+    setMessages(NO_MESSAGES);
+    setActiveConversationId(null);
+    setMessageSource("");
+    setThreads({});
     setEbay(NO_EBAY);
     setPoliciesData(null);
     setMarketplaces([]);
@@ -1166,6 +1306,9 @@ export function AppProvider({ children }) {
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
+    messages, loadMessages, threads, loadThread, sendMessage,
+    activeConversationId, openConversation, openMessages,
+    markConversationRead, messageSource, setMessageSource,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
     listingsState, loadListings, loadMoreListings, patchListing,
@@ -1184,6 +1327,9 @@ export function AppProvider({ children }) {
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
+    messages, loadMessages, threads, loadThread, sendMessage,
+    activeConversationId, openConversation, openMessages,
+    markConversationRead, messageSource,
     shipping, openShipping, closeShipping,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,

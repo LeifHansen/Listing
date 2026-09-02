@@ -41,6 +41,10 @@ _SCRUBBED = (
     # they would make the warning fire (or not) for reasons unrelated to code.
     "STRIPE_API_SECRET_KEY", "STRIPE_API_WEBHOOK_SECRET",
     "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "API_SECRET_KEY",
+    # Limited-release eBay scope flags. Inherited from a developer's shell
+    # they would decide what EBAY_OAUTH_SCOPES contains, so the scope tests
+    # would pass or fail for reasons unrelated to the code.
+    "EBAY_LOGISTICS_ENABLED", "EBAY_MESSAGING_ENABLED",
     # Etsy's seller-app gate: which sellers may reach Etsy's consent screen.
     # Inherited from a developer's shell it would gate (or un-gate) the tests
     # for reasons unrelated to the code.

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Settings, ShieldCheck,
+  LayoutDashboard, PlusCircle, Store, Settings, MessageCircle, ShieldCheck,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,7 @@ const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
   { id: "new", label: "Sell", icon: PlusCircle },
   { id: "shop", label: "Shop", icon: Store },
+  { id: "messages", label: "Messages", icon: MessageCircle },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -94,7 +95,8 @@ function NavItem({ item, active, collapsed, badge, onClick }) {
 // Sidebar — rounded, floating, detached from the screen edges. Hidden on
 // mobile (BottomNav takes over there).
 export function Sidebar() {
-  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout, listingsState, isSuperadmin } = useApp();
+  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout,
+    listingsState, ebay, messages, isSuperadmin } = useApp();
   const [collapsed, setCollapsed] = useState(false);
 
   // Drafts live at the top of the Sell screen, so its badge is the
@@ -102,8 +104,14 @@ export function Sidebar() {
   const counts = {
     new: listingsState.items.filter(
       (i) => i.status === "draft" || i.status === "dry_run").length,
+    messages: messages.unread,
   };
-  const items = isSuperadmin ? [...NAV, ADMIN_NAV] : NAV;
+
+  // Messaging is a limited-release integration: with it off there is nothing
+  // behind the entry, so don't offer one.
+  const visible = NAV.filter(
+    (n) => n.id !== "messages" || ebay.messaging_enabled);
+  const items = isSuperadmin ? [...visible, ADMIN_NAV] : visible;
 
   return (
     <motion.aside

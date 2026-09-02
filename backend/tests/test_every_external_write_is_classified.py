@@ -50,6 +50,11 @@ CHANGES_SOMETHING = {
     "backend.services.depop._request":
         "the single choke point for Depop; classified by HTTP method, so a "
         "new call cannot slip past unclassified.",
+    "backend.services.ebay_messages._request":
+        "send_message puts words in a buyer's inbox — a repeat is the same "
+        "message twice. The one choke point for eBay messaging, classified "
+        "by HTTP method like depop._request; reads stay repeatable, and the "
+        "best-effort mark_read swallows every MessagesError by design.",
 }
 
 # Call sites where a lost answer costs nothing that matters: the request can
@@ -160,9 +165,10 @@ def test_the_change_making_clients_all_raise_an_unknown_outcome():
     """Coverage of the CHANGES_SOMETHING side: each client that owns one of
     those call sites must have a condition for it, and it must be
     recognisable without importing that client (see `outcome_unknown`)."""
-    from backend.services import depop, ebay_orders, ebay_trading, etsy
+    from backend.services import (depop, ebay_messages, ebay_orders,
+                                  ebay_trading, etsy)
 
-    for module in (ebay_trading, ebay_orders, etsy, depop):
+    for module in (ebay_trading, ebay_orders, etsy, depop, ebay_messages):
         unknown = getattr(module, "UnknownOutcome", None)
         assert unknown is not None, f"{module.__name__} has no UnknownOutcome"
         assert unknown.outcome_unknown is True
