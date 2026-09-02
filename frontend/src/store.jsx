@@ -18,6 +18,16 @@ const AppContext = createContext(null);
 const NO_METRICS = {};
 const NO_METRICS_STATUS = { trafficOk: false, needsReconnect: false };
 
+// How long a freshly loaded page of listings is trusted without asking for
+// it again. Only the passive refreshes read it (coming back to a tab that has
+// been open a while); every WRITE goes through invalidateListings, which
+// refetches regardless of how recent the last load was.
+const LISTINGS_FRESH_MS = 60000;
+// How long invalidateListings waits before refetching, so a burst of small
+// writes (drag three photos, then save) costs one /api/listings instead of
+// four. Short enough that a card is corrected before anyone looks away.
+const INVALIDATE_DEBOUNCE_MS = 350;
+
 // The rest of "nobody is signed in": the shapes each per-account cache starts
 // at, and the shapes logout() puts them back to. They are the same values, so
 // they are written once — a signed-out app has to look identical whether it
@@ -372,6 +382,9 @@ export function AppProvider({ children }) {
     setMetricsStatus(NO_METRICS_STATUS);
   }
 
+  // When the copy we hold stops being worth trusting. 0 = stale right now.
+  const listingsFreshUntil = useRef(0);
+
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     // `quiet` suppresses the spinner for background refreshes — but the FIRST
     // load is quiet too (the boot effect), and suppressing it there meant the
@@ -404,6 +417,7 @@ export function AppProvider({ children }) {
         nextCursor: res.next_cursor || null,
         loadingMore: false,
       });
+      listingsFreshUntil.current = Date.now() + LISTINGS_FRESH_MS;
     } catch (e) {
       // Recorded, not just toasted: the toast is gone in seconds, the view
       // stays, and without this it goes on saying the store is empty.
@@ -431,6 +445,58 @@ export function AppProvider({ children }) {
       return items === s.items ? s : { ...s, items };
     });
   }, []);
+
+  // ---------- keeping the cache honest ----------
+  // Every screen — Dashboard, Listings, the drafts strip, the tab counts —
+  // renders from `listingsState.items`, and nothing else re-reads the store
+  // on its own. So a write that isn't followed by a refetch leaves the app
+  // showing what the store USED to be: a photo still sideways on its card
+  // after a rotate, a draft under the title it had before it was renamed, a
+  // listing just created missing from Drafts entirely until something
+  // unrelated happened to refresh.
+  //
+  // The rule here is the ordinary one every data-backed site follows: a
+  // mutation invalidates the cache. Callers say "this changed" and this owns
+  // the refetch — coalesced, because a burst of small writes (drag three
+  // photos, then save) is one change as far as any card is concerned and one
+  // /api/listings shows all of it.
+  //
+  // patchListing above is the other half and not a substitute: it applies one
+  // change we already know the answer to, so a card doesn't wait on a round
+  // trip. This is what makes the record itself authoritative again.
+  const invalidateTimer = useRef(null);
+  const invalidateListings = useCallback(() => {
+    listingsFreshUntil.current = 0;
+    if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
+    invalidateTimer.current = setTimeout(() => {
+      invalidateTimer.current = null;
+      loadListings({ quiet: true });
+    }, INVALIDATE_DEBOUNCE_MS);
+  }, [loadListings]);
+  useEffect(() => () => {
+    if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
+  }, []);
+
+  // The passive half: a tab (or the native shell) can sit in the background
+  // for hours while the seller edits on their phone, and what it holds is a
+  // snapshot from whenever it was last looked at. Coming back re-reads it
+  // once it has gone stale — the refresh-on-focus every list-backed app does.
+  // Gated on freshness so flicking between tabs isn't a fetch each time, and
+  // on `user` because signed out there is nothing of theirs to load.
+  useEffect(() => {
+    if (!user) return undefined;
+    const refreshIfStale = () => {
+      if (document.hidden) return;
+      if (Date.now() < listingsFreshUntil.current) return;
+      loadListings({ quiet: true });
+    };
+    document.addEventListener("visibilitychange", refreshIfStale);
+    window.addEventListener("focus", refreshIfStale);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfStale);
+      window.removeEventListener("focus", refreshIfStale);
+    };
+  }, [user, loadListings]);
 
   // ---------- eBay store mirror ----------
   // The app mirrors the seller's WHOLE eBay store, not just what it created,
@@ -1099,6 +1165,7 @@ export function AppProvider({ children }) {
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
     listingsState, loadListings, loadMoreListings, patchListing,
+    invalidateListings,
     metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
@@ -1115,6 +1182,7 @@ export function AppProvider({ children }) {
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
     listingsState, loadListings, loadMoreListings, patchListing,
+    invalidateListings,
     metricsById, metricsStatus,
     storeSync, syncStore,
     session, startNew, openListing,

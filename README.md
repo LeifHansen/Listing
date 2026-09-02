@@ -392,6 +392,7 @@ Without them, you can still type a category ID manually in the preview.
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
+| `POST` | `/api/enrich/{session_id}` | Fill ONE listing's blanks from its own photos — category if missing, the category's item specifics, the maker. The last step of the editor before Publish; fills blanks only, never overwrites |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 | `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |

@@ -4480,6 +4480,91 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
 
 
+@app.post("/api/enrich/{session_id}")
+def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> dict:
+    """Fill in everything this ONE listing can still be filled in with, from
+    its own photos — the last step before it is published.
+
+    This is "Enrich all" (the dashboard's bulk fill, /api/listings/enrich)
+    applied to a single draft, and deliberately on THIS side of the publish.
+    There, the same work has to land on a listing eBay is already showing:
+    the record has to carry a category eBay agrees with, its photos have to
+    still be on the server (an imported listing's live on eBay and have to be
+    downloaded first), the seller has to be connected, and the fill then has
+    to survive a ReviseItem — every one of which is a way for it to come back
+    "skipped" with the blanks still blank. A draft has none of those
+    problems: nothing is live yet, the photos are right here, and the answer
+    is saved locally.
+
+    What it fills, in one pass:
+      * an eBay category, when the draft has none (specifics are per
+        category, so nothing else can run until this is settled);
+      * every category item specific the photos can answer — required ones
+        first — chosen from eBay's own allowed values;
+      * the maker/brand, double-checked against the photos.
+    Anything the seller already wrote is left exactly as it is: this only
+    ever fills blanks.
+
+    Takes the listing in the request body rather than reading the saved copy,
+    so edits still open in the editor are enriched (and are not overwritten
+    by an older save). Returns the whole listing back for the form to adopt.
+    """
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    _assert_session_owner(session_id, request)
+    listing = req.listing
+    # A missing category is a blocker the seller would otherwise have to go
+    # and clear by hand before this could do anything — and the same
+    # best-effort resolve a fresh draft gets can usually settle it. Done
+    # BEFORE the charge: an enrichment with no category has nothing to fill
+    # and must not be billed for finding that out.
+    if not listing.category_id:
+        _resolve_category(listing)
+    if not listing.category_id:
+        raise HTTPException(
+            400, "Pick an eBay category first — the details eBay asks for "
+                 "depend on it.")
+    opt_dir = storage.optimized_dir(session_id)
+    names = listing.images or storage.list_optimized(session_id)
+    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    if not paths:
+        raise HTTPException(400, "This listing's photos aren't on the server anymore.")
+    spent = _charge_ai(request, "specifics")
+    try:
+        added = _enrich_listing(listing, paths)
+    except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
+        tokens.refund(spent)
+        code, message = claude_ai.ai_error_message(exc)
+        log.warning("enrich failed (session=%s): %s", session_id, exc)
+        raise HTTPException(code, message) from exc
+    if added is None:
+        # Never ran — no taxonomy, no model, or no aspects published for this
+        # category. `_enrich_listing` swallows its own failures, so this is
+        # the return value rather than an exception, and nothing was earned.
+        tokens.refund(spent)
+        raise HTTPException(
+            400, "The AI couldn't read eBay's details for that category — "
+                 "nothing was filled in, and nothing was charged.")
+    # Blanks the fill has now answered stop asking. Same rule the bulk enrich
+    # applies, so a draft filled here and one filled from the dashboard end
+    # up in the same state.
+    settled = _drop_answered_missing_info(listing)
+    # Saved the way every other save saves. _restore_server_state is not
+    # optional bookkeeping here: it keeps the client's copy of the
+    # server-owned publish state from erasing the real one, and it marks what
+    # changed. A listing that is ALREADY live is revised with only its dirty
+    # fields, so specifics filled in here and left unmarked would be saved
+    # locally and never reach eBay when the seller presses Update — the exact
+    # silence _enrich_one had to mark_dirty around, avoided by going through
+    # the same path a save does.
+    prev = _restore_server_state(session_id, listing)
+    storage.save_listing(session_id, listing)
+    db.upsert_listing(session_id, listing.model_dump(),
+                      status=_sticky_status(prev), user_id=_uid(request))
+    log.info("enrich: session=%s added=%d settled=%d", session_id, added, settled)
+    return {"listing": listing.model_dump(), "added": added, "settled": settled}
+
+
 def _taxonomy_guard(request: Request) -> None:
     """Shared brake on the eBay lookups that need no login.
 
