@@ -42,8 +42,8 @@ from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
-from .models import (ImageOrderRequest, ItemSpecific, Listing,
-                     MarketplaceState, PublishRequest,
+from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
+                     Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
@@ -2983,6 +2983,178 @@ DRAFT_PRICE_COMPS = (os.getenv("DRAFT_PRICE_COMPS", "1").strip().lower()
 _COMP_QUERY_WORDS = 5
 
 
+# --- research: what the item IS, looked up rather than remembered ----------
+#
+# The identify pass is a memory test over photos. It has now cost this seller
+# two items in the expensive direction: a hand-signed Fanch Ledan lithograph
+# drafted as a "Fanch Ledan style lithograph" at $85, and a genuine Beatles
+# butcher cover called a "replica" that sold for $22 and was worth $7,000+.
+# Both are the same failure — the model half-recognized something, hedged, and
+# the hedge became the listing.
+#
+# So a draft that shows any sign of turning on an identification now gets
+# looked UP (claude_ai.research_item: Claude with the server-side web search
+# tool over the same photos). What comes back is advice under strict rules,
+# below: it may name a work, fill a blank, raise a price and raise a question.
+# It may never downgrade an item, lower a price, or overwrite something the
+# seller can already see is right.
+RESEARCH_PASS = os.getenv("RESEARCH_PASS", "auto").strip().lower() or "auto"
+
+# Words in a draft that mean an identification decides the price. Any of them
+# and the item gets looked up: this is the "is this the expensive one?" list.
+_RESEARCH_SIGNALS = (
+    "signed", "signature", "autograph", "inscribed", "numbered", "edition",
+    "limited", "artist proof", "lithograph", "serigraph", "etching",
+    "screenprint", "silkscreen", "giclee", "original painting", "oil on",
+    "acrylic on", "watercolor", "sculpture", "provenance", "authenticity",
+    "coa", "first edition", "first pressing", "first printing",
+    "promo", "misprint", "error", "variant", "rookie", "graded", "psa",
+    "hallmark", "sterling", "14k", "18k", "karat", "antique", "rare",
+)
+# ...and the hedges themselves, which are the model saying "I am not sure"
+# in the one place it costs the most.
+_RESEARCH_HEDGES = (
+    "style of", " style ", "attributed", "manner of", "after ", "replica",
+    "reproduction", "repro", "tribute", "homage", "copy of", "knockoff",
+    "bootleg", "not original", "unauthorized", "unsigned",
+)
+# Categories where the same photo can be a $20 item or a $7,000 one.
+_RESEARCH_CATEGORIES = (
+    "art", "print", "painting", "poster", "sculpture", "collectible",
+    "memorabilia", "autograph", "record", "vinyl", "music", "trading card",
+    "sports card", "coin", "currency", "stamp", "antique", "comic", "book",
+    "jewelry", "watch", "pottery", "glass",
+)
+
+
+def _research_reason(listing: Listing, observations: str = "") -> str:
+    """Why this draft needs looking up, or "" when it doesn't.
+
+    Deliberately NOT "is the price high" — the whole problem is that the
+    valuable items came back cheap. The gate is "does an identification decide
+    what this is worth", which is a property of the item and of how sure the
+    draft sounds, never of the number on it.
+    """
+    if RESEARCH_PASS == "off":
+        return ""
+    if RESEARCH_PASS == "always":
+        return "always"
+    haystack = " ".join([
+        listing.title or "", listing.brand or "", listing.description or "",
+        listing.condition_description or "", observations or "",
+        " ".join(f"{s.name} {s.value}" for s in (listing.item_specifics or [])),
+    ]).lower()
+    for hedge in _RESEARCH_HEDGES:
+        if hedge in haystack:
+            return f"the draft hedged ({hedge.strip()!r})"
+    for signal in _RESEARCH_SIGNALS:
+        if signal in haystack:
+            return f"attribution decides the price ({signal!r})"
+    category = (listing.category_suggestion or "").lower()
+    for landmine in _RESEARCH_CATEGORIES:
+        if landmine in category:
+            return f"category where a variant changes everything ({landmine!r})"
+    return ""
+
+
+def _research_draft(listing: Listing, image_paths: list,
+                    observations: str = "", confidence: str = "") -> Optional[dict]:
+    """Look a drafted item up and fold the findings in, in place.
+
+    What the research may do:
+      * name the item — replace a HEDGED title with the researched one, and
+        fill an empty brand;
+      * raise the price to the bottom of the researched range (never lower it,
+        and never touch a price already above that floor);
+      * add what the seller has to check, including the trap this exists for:
+        the more valuable variant the photos cannot rule out.
+
+    What it may never do: downgrade an item, lower a price, overwrite a title
+    that is already specific, or replace the seller's own words. It is a
+    second opinion with a source list, not an appraiser.
+
+    Returns the research dict when something was applied, else None. Never
+    raises — a draft is worth more than a lookup.
+    """
+    reason = _research_reason(listing, observations)
+    if not reason:
+        return None
+    if not config.anthropic_ready():
+        return None
+    # A first pass that was SURE and hedged nothing has earned its answer;
+    # research still runs on everything else, including "high" confidence on a
+    # landmine category, because that is where a confident wrong answer costs
+    # the most.
+    log.info("research: looking up %r — %s (first pass was %s confidence)",
+             (listing.title or "")[:60], reason, confidence or "unstated")
+    try:
+        paths = [p for p in image_paths if p.is_file()]
+        found = claude_ai.research_item(paths, listing, observations=observations)
+    except Exception as exc:  # noqa: BLE001 - best-effort by contract
+        log.info("research failed: %s", exc)
+        return None
+    if not found:
+        return None
+
+    notes: list[str] = []
+    conf = str(found.get("confidence") or "low").strip().lower()
+    identified = str(found.get("identified") or "").strip()
+    researched_title = str(found.get("title") or "").strip()[:TITLE_MAX_CHARS]
+    hedged = any(h in (listing.title or "").lower() for h in _RESEARCH_HEDGES)
+
+    # The title. A hedged title is the one thing research is allowed to
+    # overwrite outright — "Fanch Ledan style lithograph" is not a title worth
+    # protecting. Anything else only gets a suggestion the seller can take.
+    if researched_title and conf in ("medium", "high"):
+        if hedged:
+            log.info("research: title %r -> %r", listing.title, researched_title)
+            listing.title = researched_title
+        elif researched_title.lower() != (listing.title or "").lower():
+            notes.append(f"The lookup suggests this title: “{researched_title}”.")
+    maker = str(found.get("maker") or "").strip()
+    if maker and not (listing.brand or "").strip() and conf in ("medium", "high"):
+        listing.brand = maker[:65]
+
+    # The price, one direction only.
+    low = found.get("value_low")
+    high = found.get("value_high")
+    try:
+        low = float(low) if low is not None else None
+        high = float(high) if high is not None else None
+    except (TypeError, ValueError):
+        low = high = None
+    if low and low > 0:
+        basis = str(found.get("value_basis") or "researched comparables")[:120]
+        span = f"${_money(low)}" + (f"-${_money(high)}" if high and high > low else "")
+        if listing.price is None or float(listing.price) < low:
+            was = listing.price
+            listing.price = round(low, 2)
+            notes.append(
+                f"Price raised to the bottom of what this looks worth ({span}, "
+                f"{basis})" + (f" — the photos alone suggested ${_money(was)}."
+                               if was is not None else "."))
+        else:
+            notes.append(f"For reference, the lookup puts this at {span} ({basis}).")
+
+    # The trap. This is the whole point of the pass: the version of this item
+    # that is worth 100x, and what would tell it apart.
+    trap = str(found.get("high_value_variant") or "").strip()
+    if trap:
+        notes.append(f"CHECK BEFORE LISTING — {trap}")
+    for item in (found.get("verify") or [])[:3]:
+        text = str(item or "").strip()
+        if text:
+            notes.append(f"Verify: {text}")
+    if identified and conf == "low" and not trap:
+        notes.append(f"The lookup wasn't sure either — its best reading: {identified}")
+    sources = [str(u).strip() for u in (found.get("sources") or [])[:3] if u]
+    if sources and notes:
+        notes.append("Looked up from: " + ", ".join(sources))
+    if notes:
+        listing.missing_info = [*(listing.missing_info or []), *notes]
+    return found if notes else None
+
+
 def _price_against_comps(listing: Listing, uid: Optional[str] = None,
                          prefs: Optional[dict] = None) -> Optional[dict]:
     """Check a fresh AI draft's price against live eBay comps, in place.
@@ -3940,6 +4112,10 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
     _resolve_category(result.listing)
+    # Research BEFORE comps: it can rewrite a hedged title into the real one,
+    # and the comp search is only as good as the title it searches for.
+    _research_draft(result.listing, paths, result.raw_observations,
+                    result.confidence)
     # After the category: comps are sharper filtered to it. See
     # _price_against_comps — the photos alone never see a comparable listing.
     _price_against_comps(result.listing, _uid(request))
@@ -4742,6 +4918,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # first pass — one consolidated call on chain v2.
                 _enrich_listing(listing, [item_dir / n for n in item_names],
                                 tags=result.tags)
+                _research_draft(listing, [item_dir / n for n in item_names],
+                                result.raw_observations, result.confidence)
                 _price_against_comps(listing, uid, prefs)
                 storage.save_listing(sid, listing)
                 db.upsert_listing(sid, listing.model_dump(), status="draft", user_id=uid)
@@ -4943,6 +5121,9 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # filled and stood the fallback down over a draft with every required
         # specific still blank.
         result.specifics_autofilled = _specifics_were_filled(added)
+        _beat("research")
+        _research_draft(result.listing, [opt_dir / n for n in names],
+                        result.raw_observations, result.confidence)
         _price_against_comps(result.listing, uid, prefs)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
