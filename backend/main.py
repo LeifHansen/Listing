@@ -4547,7 +4547,14 @@ async def rotate_image(payload: dict, request: Request) -> dict:
                      "didn't update. Try the rotation again in a moment."
             ) from exc
     _in_background(db.touch_listing, session_id, what="rotate touch")
-    return {"ok": True}
+    # The rotated file's own timestamp, for the client's cache-buster. Its
+    # per-open counter restarted at 0 on every open of the editor, and a
+    # browser reuses an image it has already loaded in the same page for an
+    # identical URL without asking the server -- so "?v=1" could hand back
+    # the bytes of an earlier edit, and the tile's turn came off over the
+    # wrong picture. A version no other load of this photo has ever used
+    # cannot be answered from anything but the file.
+    return {"ok": True, "version": int(path.stat().st_mtime * 1000)}
 
 
 @app.post("/api/image/auto-clean")

@@ -152,7 +152,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
             name={name}
             index={i}
             total={formImages.length}
-            version={w.imageVersions[name] || 0}
+            version={w.imageVersions[name] || w.imageBase}
             reorderable={formImages.length > 1}
             onEdit={() => onEdit(name)}
             onDelete={() => onDelete(name)}

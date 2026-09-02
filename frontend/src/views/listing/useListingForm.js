@@ -375,10 +375,33 @@ export function useListingForm() {
   // Cache-bust per PHOTO, not globally: a global counter made one rotate
   // re-download every tile's full-size image — the main reason rotating felt
   // slow on a listing with many photos.
+  //
+  // And never a value this page has used for this photo before. The versions
+  // were a per-open counter — 0, then 1, then 2 — so every open of the editor
+  // asked for "?v=0" again, and a rotate asked for "?v=1" again. The server
+  // marks /media no-cache, but a browser reuses an image it has ALREADY
+  // loaded in the same page for an identical URL without asking: "?v=1" was
+  // answered with the bytes of an earlier edit, the tile's turn came off over
+  // that picture, and the seller watched the photo rotate and then rotate
+  // straight back while the file on the server stayed turned. A version is
+  // now the rotated file's own timestamp when the server sends one, a fresh
+  // clock reading when it does not, and the first load of an open uses a
+  // base taken when the editor opened — none of them can repeat.
+  const [imageBase] = useState(() => Date.now());
   const [imageVersions, setImageVersions] = useState({});
-  const bumpImageVersion = useCallback((name) => {
-    if (name) setImageVersions((m) => ({ ...m, [name]: (m[name] || 0) + 1 }));
-  }, []);
+  const bumpImageVersion = useCallback((name, version) => {
+    if (!name) return;
+    setImageVersions((m) => {
+      const prev = m[name] || imageBase;
+      // Unique is the property, not increasing: the tile only ever asks
+      // "is this the version the turn was applied to?". The server's value
+      // is the file's own timestamp on ITS clock, which may sit behind this
+      // one, and is still a value no load of this photo has used.
+      const next = Number.isFinite(version) && version !== prev
+        ? version : Math.max(prev + 1, Date.now());
+      return { ...m, [name]: next };
+    });
+  }, [imageBase]);
 
   // One-tap 90° clockwise rotate; only the rotated tile refreshes.
   //
@@ -391,8 +414,8 @@ export function useListingForm() {
   // that would keep it until the editor was reopened.
   const rotateImage = useCallback(async (name) => {
     try {
-      await postJson("/api/rotate-image", { session_id: sessionId, name });
-      bumpImageVersion(name);
+      const res = await postJson("/api/rotate-image", { session_id: sessionId, name });
+      bumpImageVersion(name, res?.version);
       // The saved file changed, so every card showing this listing is now
       // showing a photo that no longer exists. See store.invalidateListings.
       invalidateListings();
@@ -952,7 +975,7 @@ export function useListingForm() {
     getSpecific, getSpecificRow, getSpecificValues, upsertSpecific,
     toggleSpecificValue, confirmSpecific, confirmAllSpecifics,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
-    imageVersions, bumpImageVersion,
+    imageVersions, imageBase, bumpImageVersion,
     completion, blockers,
   };
 }

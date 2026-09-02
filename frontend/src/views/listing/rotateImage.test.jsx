@@ -103,14 +103,36 @@ describe("rotateImage", () => {
       expect(thrown.message).toContain("Couldn't rotate that photo.");
     });
 
-  it("bumps only the rotated photo's version on success", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => ok({ ok: true })));
+  it("takes the rotated file's own version, for only that photo", async () => {
+    // The server answers with the rotated file's timestamp: a value no load
+    // of this photo has ever used, so no cache in the page can answer it
+    // with older bytes.
+    vi.stubGlobal("fetch", vi.fn(() => ok({ ok: true, version: 1756800000123 })));
     const get = await mountEditor();
 
     await act(async () => { await get().form.rotateImage("img_000.jpg"); });
 
-    expect(get().form.imageVersions["img_000.jpg"]).toBe(1);
+    expect(get().form.imageVersions["img_000.jpg"]).toBe(1756800000123);
     expect(get().form.imageVersions["img_001.jpg"]).toBeUndefined();
+  });
+
+  it("never reuses a version, even without one from the server", async () => {
+    // The old counter went 0, 1, 2 on every open of the editor, and a browser
+    // hands back an image it already loaded in this page for an identical
+    // URL without asking — so "?v=1" showed an earlier edit, and the tile's
+    // turn came off over the wrong picture.
+    vi.stubGlobal("fetch", vi.fn(() => ok({ ok: true })));
+    const get = await mountEditor();
+    const base = get().form.imageBase;
+    expect(base).toBeGreaterThan(1_700_000_000_000);
+
+    await act(async () => { await get().form.rotateImage("img_000.jpg"); });
+    const first = get().form.imageVersions["img_000.jpg"];
+    await act(async () => { await get().form.rotateImage("img_000.jpg"); });
+    const second = get().form.imageVersions["img_000.jpg"];
+
+    expect(first).toBeGreaterThan(base);
+    expect(second).toBeGreaterThan(first);
   });
 
   it("leaves the version alone when the rotate did not happen", async () => {
