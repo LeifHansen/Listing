@@ -24,6 +24,7 @@ from .listing_prompt import (
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
+    expected_item_count,
     group_notes_block,
     identify_notes_block,
 )
@@ -345,10 +346,20 @@ Rules:
   ORDER is strong evidence: consecutive photos usually belong to the same item.
   A close-up (tag, label, texture, flaw) almost always belongs to the item in
   the surrounding overview shots — never make a close-up its own item.
-- Split ONLY when two photos clearly show different physical items (different
-  garment/object, clearly different color or print). When unsure, KEEP THEM
-  TOGETHER: a duplicate listing of the same item is a much worse mistake than
-  one extra photo on a listing, and the seller can drag a photo out later.
+- IDENTITY EVIDENCE OUTRANKS LOOKS. A size tag, a care label, a brand patch
+  (a Levi's leather patch with its lot number and W/L size), a model or serial
+  number, a distinctive flaw: two photos showing DIFFERENT such marks are two
+  items, even when the garments look identical. Two pairs of jeans in the
+  same wash are two listings. Count the tags and patches you can see and
+  expect at least that many items. A seller who shoots look-alikes shoots
+  each one's tag right after its overview: the tag belongs to the overview
+  before it, and the next overview starts the next item.
+- Split when two photos show different physical items (a different
+  garment/object, a clearly different color or print, or different identity
+  marks as above). When nothing tells two look-alikes apart -- no tag, patch
+  or label reads differently -- KEEP THEM TOGETHER: a duplicate listing of
+  one item is a worse mistake than one extra photo on a listing, and the
+  seller can drag a photo out later.
 - Order each group's indices with the best overview shot first.
 """
 
@@ -362,9 +373,147 @@ Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
   single print from a print set, one shoe of a pair) belongs with its set's
   overview group — those are the classic accidental splits.
 - Keep genuinely different physical products separate, even from the same
-  brand or artist.
+  brand or artist. Two groups whose tags or patches read differently (a
+  different size, lot or model number) are two items however alike they
+  look; never merge look-alikes on looks alone.
 - Nothing to merge? Return {"merge": []}.
 """
+
+
+# --- the split check: one item, or two of the same? -------------------------
+#
+# The first pass is told to keep look-alikes together when unsure, and the
+# verify pass above only ever merges. Nothing corrected the opposite mistake,
+# and it happened: two pairs of Levi's, each with its own patch and tag,
+# drafted as one listing. So a group big enough to be two items -- or, when
+# the seller's notes promised more items than the grouping found, the biggest
+# groups -- gets a second look with all of its photos, and is split only on
+# identity evidence the model can point at. Angles are never evidence.
+#
+# One garment gets three to five photos: front, back, tag, a detail. Two of
+# the same garment merged into one group is the six-to-ten-photo group.
+GROUP_SPLIT_MIN_PHOTOS = int(os.getenv("BULK_SPLIT_CHECK_MIN_PHOTOS", "6") or "6")
+# Below this a group cannot be two items with a tag each; not worth a call.
+_GROUP_SPLIT_FLOOR = 3
+
+_GROUP_SPLIT_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{"items": [{"name": "short name telling this one apart", "indices": [3, 4, 5], "evidence": "what makes this a separate physical item"}]}
+- These numbered photos were grouped as ONE item for sale. Decide whether
+  they show one physical item, or MORE THAN ONE of the same kind (two pairs
+  of the same jeans, two of the same shirt in different sizes).
+- Split ONLY on identity evidence you can point at: a different size on the
+  tag or patch, a different lot, model or serial number, a different care
+  label, a different flaw or wear pattern, a clearly different wash or color.
+  Quote the tag or patch text where you can read it.
+- Angles, lighting, a hanger vs laid flat, a close-up vs an overview, front
+  vs back are NOT evidence of a second item. A close-up of a tag belongs
+  with the overview shots taken around it.
+- Every photo index appears in exactly one item. One item: return a single
+  entry with every index and evidence "".
+"""
+
+
+def _split_candidates(groups: list[dict], expected: int = 0) -> list[int]:
+    """Which groups get the second look: every group at or above
+    GROUP_SPLIT_MIN_PHOTOS, and -- when the seller's notes named more items
+    than the grouping found -- the biggest groups down to the floor, until
+    the count could come out right. Largest first: the merged pair is the
+    biggest group in the pile."""
+    order = sorted(range(len(groups)),
+                   key=lambda gi: -len(groups[gi].get("indices") or []))
+    picked = [gi for gi in order
+              if len(groups[gi].get("indices") or []) >= GROUP_SPLIT_MIN_PHOTOS]
+    short = max(0, expected - len(groups))
+    for gi in order:
+        if short <= 0:
+            break
+        if gi in picked:
+            continue
+        if len(groups[gi].get("indices") or []) < _GROUP_SPLIT_FLOOR:
+            break
+        picked.append(gi)
+        short -= 1
+    return picked
+
+
+def _apply_split(group: dict, items) -> list[dict]:
+    """The verifier's answer for one group, applied deterministically: the
+    group is split only into items that partition its photos exactly and
+    each carry evidence. Anything else -- one item, a photo dropped or used
+    twice, a split with nothing to point at -- keeps the group as it was."""
+    want = list(group.get("indices") or [])
+    if not isinstance(items, list) or len(items) < 2:
+        return [group]
+    parts: list[dict] = []
+    seen: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            return [group]
+        idxs: list[int] = []
+        for i in item.get("indices") or []:
+            try:
+                i = int(i)
+            except (TypeError, ValueError):
+                return [group]
+            if i in seen or i not in want:
+                return [group]
+            seen.add(i)
+            idxs.append(i)
+        if not idxs or not str(item.get("evidence") or "").strip():
+            return [group]
+        parts.append({"indices": idxs,
+                      "name": str(item.get("name") or "").strip()})
+    if seen != set(want):
+        return [group]
+    base = group.get("name") or "Item"
+    out = []
+    for k, part in enumerate(parts, start=1):
+        name = part["name"] or (base if k == 1 else f"{base} ({k})")
+        out.append({"name": name, "indices": part["indices"]})
+    return out
+
+
+def _check_splits(client, images: list[bytes], groups: list[dict],
+                  expected: int = 0) -> list[dict]:
+    """Second look at the groups that could be two items. Best-effort per
+    group: a failed call keeps that group as it was."""
+    candidates = _split_candidates(groups, expected)
+    if not candidates:
+        return groups
+    result: dict[int, list[dict]] = {}
+    for gi in candidates:
+        group = groups[gi]
+        content: list[dict] = []
+        for i in group["indices"]:
+            content.append({"type": "text", "text": f"Photo {i}:"})
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(images[i]).decode("ascii")}})
+        content.append({"type": "text", "text": (
+            f'These photos were grouped as one item, "{group.get("name", "")}", '
+            "from a reseller's bulk photo dump. Is it one item?\n\n"
+            + _GROUP_SPLIT_SCHEMA)})
+        try:
+            resp = client.messages.create(
+                model=config.VISION_MODEL, max_tokens=800,
+                messages=[{"role": "user", "content": content}])
+            text = "".join(b.text for b in resp.content if b.type == "text")
+            parts = _apply_split(group, _extract_json(text).get("items"))
+        except Exception as exc:  # noqa: BLE001 - an assist, never a gate
+            log.info("bulk split check skipped for %r: %s",
+                     group.get("name", ""), exc)
+            continue
+        if len(parts) > 1:
+            log.info("bulk split check: %r -> %d items", group.get("name", ""),
+                     len(parts))
+            result[gi] = parts
+    if not result:
+        return groups
+    out: list[dict] = []
+    for gi, group in enumerate(groups):
+        out.extend(result.get(gi, [group]))
+    return out
 
 
 def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
@@ -498,6 +647,15 @@ def group_photos(images: list[bytes], notes: str = "") -> dict:
     try:
         groups = _verify_groups(client, images, groups)
     except Exception:  # noqa: BLE001 - verification is an assist, never a gate
+        pass
+    # The opposite mistake, checked AFTER the merges so nothing it separates
+    # is put back together: a group big enough to be two of the same thing,
+    # or the biggest groups when the seller's notes promised more items than
+    # were found, is looked at photo by photo and split on identity evidence.
+    try:
+        groups = _check_splits(client, images, groups,
+                               expected=expected_item_count(notes))
+    except Exception:  # noqa: BLE001 - an assist, never a gate
         pass
     return {"groups": groups}
 

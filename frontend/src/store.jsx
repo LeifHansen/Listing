@@ -993,8 +993,18 @@ export function AppProvider({ children }) {
   // still processing for the rest of the session — it only knew "a batch
   // exists", so a finished one kept its spinner on every screen until the
   // seller reopened the queue and exited it.
-  const bulkSettled = useCallback(() => {
-    setActiveBulk((b) => (b && !b.done ? { ...b, done: true } : b));
+  //
+  // `itemIds` are the sessions the batch drafted, when the caller has them
+  // (the queue screen's status, or the full status the heartbeat fetches
+  // once at the end). They are what lets the finished banner retire itself
+  // below, once every one of them has been listed.
+  const bulkSettled = useCallback((itemIds) => {
+    const ids = Array.isArray(itemIds) ? itemIds.filter(Boolean) : null;
+    setActiveBulk((b) => {
+      if (!b) return b;
+      if (b.done && !ids) return b;
+      return { ...b, done: true, itemIds: ids || b.itemIds || null };
+    });
     clearLocal("bulk");
   }, []);
   const clearBulk = useCallback(() => {
@@ -1022,7 +1032,15 @@ export function AppProvider({ children }) {
         fails = 0;
         if (stopped) return;
         if (j.done) {
-          bulkSettled();
+          // One full read at the end, for the drafted session ids: the brief
+          // deliberately leaves them out on every other tick.
+          let ids = null;
+          try {
+            const full = await api(`/api/bulk/status/${jobId}`);
+            ids = (full.items || []).map((it) => it.session_id);
+          } catch { /* the banner keeps its X */ }
+          if (stopped) return;
+          bulkSettled(ids);
           loadListings({ quiet: true });
           return;  // settled — the effect tears itself down on the state change
         }
@@ -1046,6 +1064,22 @@ export function AppProvider({ children }) {
     timer = setTimeout(tick, 5000);
     return () => { stopped = true; clearTimeout(timer); };
   }, [activeBulk, bulkSettled, loadListings]);
+
+  // The finished banner retires itself once there is nothing left to review:
+  // every item the batch drafted has been listed (or sold, ended, put in
+  // inventory), and none is still a draft. "Every item is saved to Drafts —
+  // tap to review the results" sat on every screen after a seller had listed
+  // the whole batch, until they found the X. A batch that drafted nothing
+  // that went anywhere keeps its banner, and its way back to the errors.
+  useEffect(() => {
+    const ids = activeBulk?.done ? activeBulk.itemIds : null;
+    if (!ids || !ids.length || !listingsState.loaded) return;
+    const byId = new Map(listingsState.items.map((it) => [it.id, it]));
+    const isDraft = (it) => it.status === "draft" || it.status === "dry_run";
+    if (ids.some((id) => byId.has(id) && isDraft(byId.get(id)))) return;
+    if (!ids.some((id) => byId.has(id))) return;  // nothing landed: keep the way back
+    clearBulk();
+  }, [activeBulk, listingsState, clearBulk]);
 
   // The whole bulk upload — screen flip first, then the slow part. It lives
   // here rather than in the uploader because that flip unmounts the uploader

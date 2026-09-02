@@ -694,11 +694,17 @@ export function Dashboard() {
       // "did it do anything?", and for a listing it could not finish the
       // answer is the reason it gave -- which the job reports per listing
       // and which a bare "1 need you" hid.
-      const undone = [...((res.results || {}).skipped || []),
-                      ...((res.results || {}).failed || [])];
-      const lines = undone.slice(0, 3).map(
-        (r) => `• ${r.title || "A listing"}: ${r.message}`);
-      const more = undone.length - lines.length;
+      const results = res.results || {};
+      const named = (results.changed || []).filter((r) => (r.filled || []).length);
+      const lines = named.slice(0, 3).map((r) => {
+        const got = r.filled.map((f) => `${f.name}: ${f.value}`);
+        const rest = got.length > 3 ? ` +${got.length - 3}` : "";
+        return `✓ ${r.title || "A listing"}: ${got.slice(0, 3).join(", ")}${rest}`;
+      });
+      const undone = [...(results.skipped || []), ...(results.failed || [])];
+      lines.push(...undone.slice(0, 3).map(
+        (r) => `• ${r.title || "A listing"}: ${r.message}`));
+      const more = (named.length + undone.length) - lines.length;
       if (more > 0) lines.push(`• …and ${more} more`);
       toast([parts.join(" · ") || "Nothing to fill in.", ...lines].join("\n"), {
         kind: res.changed ? "success" : res.failed ? "error" : "info",

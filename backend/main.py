@@ -4777,7 +4777,18 @@ def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> di
 
     Takes the listing in the request body rather than reading the saved copy,
     so edits still open in the editor are enriched (and are not overwritten
-    by an older save). Returns the whole listing back for the form to adopt.
+    by an older save).
+
+    Runs as a JOB, like identify and the dashboard's bulk fill, and for the
+    same reason: one vision call over up to eight photos plus a maker check
+    is routinely longer than the 90 seconds the client waits on a request,
+    and longer than the proxy in front of this server holds one open. Run in
+    the request, the fill kept finishing and saving on the server after the
+    editor had already reported "Couldn't fill in the details" -- which is
+    how a working feature came to be reported as one that does not work.
+    Everything that can refuse does so here, before the charge; the answer
+    -- the whole listing for the form to adopt, plus what was filled -- is
+    the job's result, polled at /api/bulk/status/{job_id}.
     """
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
@@ -4800,39 +4811,97 @@ def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> di
     if not paths:
         raise HTTPException(400, "This listing's photos aren't on the server anymore.")
     spent = _charge_ai(request, "specifics")
+    uid = _uid(request)
+    job_id = storage.new_session_id()
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "enrich_one", "phase": "specifics", "done": False,
+        "error": None, "session_id": session_id,
+        # The charge, while it is outstanding: a restart mid-fill pays it
+        # back the way it does for every other job (see _settle_interrupted_jobs).
+        "_refunds": tokens.receipts(spent) if spent else None,
+    }, uid=uid)
+    threading.Thread(target=_run_single_enrich_job,
+                     args=(job_id, session_id, listing, paths, uid, spent),
+                     daemon=True).start()
+    return {"job_id": job_id, "running": True}
+
+
+def _specifics_filled(before: list[tuple[str, str]], before_brand: str,
+                      listing: Listing) -> list[dict]:
+    """What a fill actually wrote: the name/value pairs on the listing now
+    that were not on it before, the brand included. "Filled 3 details" is a
+    number; "Color: Blue, Size: M" is evidence, and evidence is what a seller
+    who cannot tell whether the button did anything was asking for."""
+    had = {(n.strip().lower(), (v or "").strip().lower())
+           for n, v in before if (v or "").strip()}
+    out: list[dict] = []
+    for s in listing.item_specifics:
+        value = (s.value or "").strip()
+        if value and (s.name.strip().lower(), value.lower()) not in had:
+            out.append({"name": s.name.strip(), "value": value})
+    brand = (listing.brand or "").strip()
+    if brand and brand.lower() != (before_brand or "").strip().lower():
+        out.insert(0, {"name": "Brand", "value": brand})
+    return out[:40]
+
+
+def _run_single_enrich_job(job_id: str, session_id: str, listing: Listing,
+                           paths: list, uid: Optional[str], spent) -> None:
+    """Background worker for the editor's "Fill in details" -- the body the
+    route above used to run in the request. Saves the way every other save
+    saves and reports the whole listing back, plus what it filled."""
     try:
-        added = _enrich_listing(listing, paths)
-    except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
+        before = [(s.name, s.value) for s in listing.item_specifics]
+        before_brand = listing.brand or ""
+        try:
+            added = _enrich_listing(listing, paths)
+        except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
+            tokens.refund(spent)
+            _code, message = claude_ai.ai_error_message(exc)
+            log.warning("enrich failed (session=%s): %s", session_id, exc)
+            _bulk_set(job_id, _refunds=None, done=True, phase="failed",
+                      error=message)
+            return
+        if added is None:
+            # Never ran -- no taxonomy, no model, or no aspects published for
+            # this category. `_enrich_listing` swallows its own failures, so
+            # this is the return value rather than an exception, and nothing
+            # was earned.
+            tokens.refund(spent)
+            _bulk_set(job_id, _refunds=None, done=True, phase="failed", error=(
+                "The AI couldn't read eBay's details for that category -- "
+                "nothing was filled in, and nothing was charged."))
+            return
+        # Blanks the fill has now answered stop asking. Same rule the bulk
+        # enrich applies, so a draft filled here and one filled from the
+        # dashboard end up in the same state.
+        settled = _drop_answered_missing_info(listing)
+        filled = _specifics_filled(before, before_brand, listing)
+        # Saved the way every other save saves. _restore_server_state is not
+        # optional bookkeeping here: it keeps the client's copy of the
+        # server-owned publish state from erasing the real one, and it marks
+        # what changed. A listing that is ALREADY live is revised with only
+        # its dirty fields, so specifics filled in here and left unmarked
+        # would be saved locally and never reach eBay when the seller presses
+        # Update -- the exact silence _enrich_one had to mark_dirty around,
+        # avoided by going through the same path a save does.
+        prev = _restore_server_state(session_id, listing)
+        storage.save_listing(session_id, listing)
+        db.upsert_listing(session_id, listing.model_dump(),
+                          status=_sticky_status(prev), user_id=uid)
+        log.info("enrich: session=%s added=%d settled=%d filled=%s", session_id,
+                 added, settled, ", ".join(f["name"] for f in filled) or "-")
+        _bulk_set(job_id, _refunds=None, done=True, phase="done", result={
+            "listing": listing.model_dump(), "added": added,
+            "settled": settled, "filled": filled})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
         tokens.refund(spent)
-        code, message = claude_ai.ai_error_message(exc)
-        log.warning("enrich failed (session=%s): %s", session_id, exc)
-        raise HTTPException(code, message) from exc
-    if added is None:
-        # Never ran — no taxonomy, no model, or no aspects published for this
-        # category. `_enrich_listing` swallows its own failures, so this is
-        # the return value rather than an exception, and nothing was earned.
-        tokens.refund(spent)
-        raise HTTPException(
-            400, "The AI couldn't read eBay's details for that category — "
-                 "nothing was filled in, and nothing was charged.")
-    # Blanks the fill has now answered stop asking. Same rule the bulk enrich
-    # applies, so a draft filled here and one filled from the dashboard end
-    # up in the same state.
-    settled = _drop_answered_missing_info(listing)
-    # Saved the way every other save saves. _restore_server_state is not
-    # optional bookkeeping here: it keeps the client's copy of the
-    # server-owned publish state from erasing the real one, and it marks what
-    # changed. A listing that is ALREADY live is revised with only its dirty
-    # fields, so specifics filled in here and left unmarked would be saved
-    # locally and never reach eBay when the seller presses Update — the exact
-    # silence _enrich_one had to mark_dirty around, avoided by going through
-    # the same path a save does.
-    prev = _restore_server_state(session_id, listing)
-    storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(prev), user_id=_uid(request))
-    log.info("enrich: session=%s added=%d settled=%d", session_id, added, settled)
-    return {"listing": listing.model_dump(), "added": added, "settled": settled}
+        reference = _support_reference()
+        log.warning("enrich job %s failed for session=%s [%s]: %s",
+                    job_id, session_id, reference, exc)
+        _bulk_set(job_id, _refunds=None, done=True, phase="failed", error=(
+            "We couldn't finish filling this in. Try again in a moment -- if "
+            f"it keeps happening, quote {reference} to support."))
 
 
 def _taxonomy_guard(request: Request) -> None:
@@ -6796,6 +6865,7 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
         return {"skip": "This listing's photos aren't on the server anymore."}
 
     before_brand = (listing.brand or "").strip()
+    before = [(s.name, s.value) for s in listing.item_specifics]
     spent = _charge_uid(uid, "specifics")
     if note_charge:
         note_charge(tokens.receipts(spent))
@@ -6813,6 +6883,7 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
             tokens.refund(spent)
             return {"skip": "The AI couldn't read eBay's details for that category."}
         settled = _drop_answered_missing_info(listing)
+        filled = _specifics_filled(before, before_brand, listing)
         if not added and not settled:
             # The AI did run and found nothing the photos could answer, which
             # is a real (billable) answer — the same one the single-listing
@@ -6835,13 +6906,15 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
                 creds)
             if not outcome.ok:
                 return {"message": outcome.message or "eBay rejected the new details."}
-            return {"ok": True, "added": added, "settled": settled, "pushed": True}
+            return {"ok": True, "added": added, "settled": settled, "pushed": True,
+                    "filled": filled}
         # A draft (or a seller with no eBay connection): the fill is still
         # worth keeping, it just has nowhere to go yet.
         storage.save_listing(rid, listing)
         db.upsert_listing(rid, listing.model_dump(), status=_sticky_status(rec),
                           user_id=uid)
-        return {"ok": True, "added": added, "settled": settled, "pushed": False}
+        return {"ok": True, "added": added, "settled": settled, "pushed": False,
+                "filled": filled}
     finally:
         # Settled either way by the time we get here: earned by a fill that
         # landed, or handed back above. Anything still recorded as outstanding

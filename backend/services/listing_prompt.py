@@ -337,6 +337,32 @@ def _notes_bullets(notes: str) -> str:
     return "\n".join(f"- {item}" for item in seller_note_items(notes))
 
 
+_COUNT_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "a pair of": 1,
+}
+
+
+def expected_item_count(notes: str) -> int:
+    """How many distinct items the seller's notes say are in the pile.
+
+    "two pairs of levis, a mug" is three items, not two lines: the grouping
+    pass reads the count as the number of listings to expect, and the split
+    check uses it to decide whether to look again at a pile the grouping
+    found fewer items in. A line with no leading number counts as one. 0 when
+    there are no notes.
+    """
+    total = 0
+    for item in seller_note_items(notes):
+        words = item.lower().split()
+        head = words[0] if words else ""
+        if head.isdigit():
+            total += max(1, min(int(head), 50))
+        else:
+            total += _COUNT_WORDS.get(head, 1)
+    return total
+
+
 def identify_notes_block(notes: str) -> str:
     """The seller's hints, as a block appended to the identify user message.
 

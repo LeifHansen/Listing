@@ -516,7 +516,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         } else {
           stopped.current = true;  // nothing left to watch — don't re-poll on focus
           loadListings({ quiet: true });
-          onSettled?.();  // stop persisting; a reload shouldn't restore a done batch
+          // Stop persisting (a reload shouldn't restore a done batch), and say
+          // which sessions it drafted so the shell's banner can retire itself
+          // once they are all listed.
+          onSettled?.((j.items || []).map((it) => it.session_id));
         }
       } catch (e) {
         if (stopped.current) return;

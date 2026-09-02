@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, postJson, downscaleAllForUpload, batchModelTimeoutMs } from "@/lib/api";
+import { api, pollJob, postJson, downscaleAllForUpload, batchModelTimeoutMs } from "@/lib/api";
 import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -813,9 +813,14 @@ export function useListingForm() {
       "Double-checking the maker…",
     ]);
     try {
-      const res = await postJson(`/api/enrich/${sessionId}`, {
+      // A job, not a request: the fill is a vision call over every photo
+      // plus a maker check, which routinely outlives the request deadline.
+      // It used to finish and save on the server AFTER this had reported
+      // "Couldn't fill in the details" -- a working feature reported broken.
+      const start = await postJson(`/api/enrich/${sessionId}`, {
         session_id: sessionId, listing: before, mode: "draft",
       });
+      const res = start.job_id ? await pollJob(start.job_id) : start;
       // The server merged onto the copy we just sent, so its answer is this
       // form plus the fills — adopting it whole cannot lose an edit.
       if (res.listing) {
@@ -826,7 +831,14 @@ export function useListingForm() {
         && !!(res.listing?.category_id || "");
       const parts = [];
       if (gotCategory) parts.push("picked the eBay category");
-      if (res.added) {
+      // Name what was filled. "Filled 3 details" is a count; the seller's
+      // question is whether anything happened, and "Color: Blue, Size: M"
+      // answers it where a number does not.
+      const filled = (res.filled || []).map((f) => `${f.name}: ${f.value}`);
+      if (filled.length) {
+        const more = filled.length > 4 ? ` and ${filled.length - 4} more` : "";
+        parts.push(`filled ${filled.slice(0, 4).join(", ")}${more}`);
+      } else if (res.added) {
         parts.push(`filled ${res.added} detail${res.added === 1 ? "" : "s"}`);
       }
       toast(parts.length
