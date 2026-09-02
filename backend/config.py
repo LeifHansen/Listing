@@ -9,19 +9,52 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+# No dependencies and no import-time work of its own, so importing it here
+# cannot cycle back through this module. See redact.py's docstring.
+from .redact import RedactingFormatter
+
 load_dotenv()
 
 # --- Logging ---------------------------------------------------------------
 # One app-wide logger ("thryft") with a consistent format, independent of
 # uvicorn's config so our lines are easy to grep in the Fly logs. Level via
 # LOG_LEVEL (default INFO).
+#
+# The formatter redacts. It sits on the HANDLER, so it also covers lines from
+# the sub-loggers (thryft.promotions, thryft.metrics) that propagate up here,
+# and it scrubs the interpolated result — which is the only thing that works,
+# because in `log.warning("...: %s", exc)` the secret is in the args, not the
+# format string. See redact.py for why this is a formatter and not a filter.
 log = logging.getLogger("thryft")
 if not log.handlers:
     _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s thryft: %(message)s"))
+    _handler.setFormatter(
+        RedactingFormatter("%(asctime)s %(levelname)s thryft: %(message)s"))
     log.addHandler(_handler)
     log.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     log.propagate = False
+
+# --- Error capture ---------------------------------------------------------
+# Whether failures are recorded to the error_events table for the Errors tab
+# and the daily triage job. Off turns the capture handler into a no-op and
+# leaves stdout logging exactly as it was; the app is otherwise unaffected.
+ERROR_CAPTURE_ENABLED = os.getenv(
+    "ERROR_CAPTURE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+# How long a recorded error is kept. Rows are aggregated per fingerprint, so
+# this bounds the number of DISTINCT failures retained, not the traffic —
+# pruning runs from the reclaim daemon that already sweeps the volume.
+ERROR_TTL_DAYS = int(os.getenv("ERROR_TTL_DAYS", "30") or 30)
+# Browser error reports accepted per client per rate-limit window. Generous
+# enough for a genuinely broken page, low enough that the unauthenticated
+# ingest route cannot be used to fill the table.
+CLIENT_ERROR_MAX_PER_WINDOW = int(
+    os.getenv("CLIENT_ERROR_MAX_PER_WINDOW", "20") or 20)
+# The daily triage job's own door onto the error report. Deliberately NOT
+# ADMIN_TOKEN: that one also opens /api/admin/diagnostics, whose payload names
+# the Neon host, the database role and the R2 account in raw exception text.
+# A robot that only needs to read which bugs are open should not hold a
+# credential to that. Unset means CLOSED, like ADMIN_TOKEN.
+ERROR_FEED_TOKEN = os.getenv("ERROR_FEED_TOKEN", "").strip()
 
 # --- Paths -----------------------------------------------------------------
 # DATA_DIR can be pointed at a mounted volume (e.g. on Fly.io) so uploaded and

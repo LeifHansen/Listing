@@ -47,6 +47,87 @@ cp .env.example .env
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
 
+## Reading production errors
+
+`flyctl logs` used to be the telemetry, and `.github/workflows/fly-logs.yml`
+said so. Failures are now recorded as they happen, so there is something to
+read that outlives Fly's retained window and can be queried.
+
+**One row per distinct failure, with a count** — not one per occurrence. A bug
+hit ten thousand times is one row that says ten thousand. That is what keeps
+the list readable during an incident, and what bounds the table by how many
+things are broken rather than by traffic. The collapsing is done by a
+`fingerprint` built from the module, the function, the exception type and the
+message TEMPLATE — deliberately not the line number and not the release, so a
+refactor or a deploy does not make every open bug look new.
+
+**Where to look:**
+
+| | |
+|---|---|
+| The console | **Admin → Errors.** Newest-seen first, click a row for the traceback. |
+| A specific complaint | The 8-character reference the app showed the seller is the row's `reference`, and the `X-Request-Id` on the response. One value, three places. |
+| Programmatically | `curl -H "x-error-feed-token: $ERROR_FEED_TOKEN" $SITE/api/ops/error-feed` |
+| Months later | `ops/errors/YYYY/MM/DD.jsonl.gz` in R2 — written daily, before the table is pruned. |
+
+Capture starts at **WARNING**, not ERROR, because this codebase fails soft:
+there are ~240 `log.warning` calls against 7 `log.error`, so the real failures
+are at warning level. "Is this serious" is answered by a derived `severity`
+instead. A warning logged inside an `except` block gets the live traceback
+attached automatically, so those rows are actionable without their call sites
+being touched.
+
+Everything recorded is scrubbed — Stripe keys, JWTs, emails, IPs, OAuth codes
+in URLs — on the way to stdout as well as into the table. The shape survives so
+the line stays readable (`sk_live_<redacted>`, not nothing). The support
+reference is deliberately *not* redacted: it identifies nothing on its own and
+is the only join between a complaint and a cause.
+
+`ERROR_CAPTURE_ENABLED=0` turns the whole thing off without a code change.
+
+### The daily triage job
+
+`.github/workflows/error-triage.yml` runs at 09:41 UTC, reads the feed, and
+picks the failures worth a fix using `.github/scripts/triage_errors.py` — where
+the thresholds live so they are reviewable in a diff.
+
+**It ships inert.** It collects, triages and writes a run summary; it opens
+nothing. To let it propose fixes:
+
+1. `fly secrets set --stage ERROR_FEED_TOKEN="$(openssl rand -hex 32)"` and add
+   the same value as the GitHub Actions secret `ERROR_FEED_TOKEN`. (`--stage`
+   because this app runs a single machine — an unstaged set restarts
+   production immediately.)
+2. Add `ANTHROPIC_API_KEY` as an Actions secret. It exists today only as a Fly
+   app secret.
+3. Add `AUTOFIX_GITHUB_TOKEN` — a fine-grained PAT or GitHub App token with
+   contents and pull-requests write. **This one is not optional.** A pull
+   request opened with the default `GITHUB_TOKEN` does not trigger
+   `pull_request` workflows, so `ci.yml` never runs and the four required
+   `Gates / …` checks sit unstarted forever. An autofix PR that looks green
+   because nothing ran is worse than no autofix at all.
+4. Set the repository **variable** `ERROR_AUTOFIX_ENABLED` to `1`.
+
+Run it once by hand from the Actions tab before trusting the schedule.
+
+Two properties are deliberate and worth not "fixing":
+
+**A clean day is silent and green.** It opens nothing and notifies nobody. The
+only thing that fails the run is being unable to *read* the feed — "I could not
+look" and "I looked and it was clean" are different outcomes. This is the
+opposite of `health-watch.yml`, which fails to alert, and the difference is on
+purpose: a job that goes red every morning that production has a bug is a
+notification nobody reads by the second week.
+
+**The agent gets no network and no Fly token.** Error text comes from
+production, and some of it from people's browsers, so it is attacker-controlled
+input. The workflow is split in two jobs for that reason alone: `collect` holds
+the credentials, `fix` reads the text. Its pull requests are drafts.
+
+To silence a failure permanently, add its fingerprint to
+`.github/known-errors.json`. A checked-in file, so muting an alarm shows up in
+a diff.
+
 ## Shipping an update
 
 **Merging to `main` is the deploy.** There is no other step, and no button to
@@ -672,8 +753,9 @@ one listing, behind a confirm, through the usual `/api/ebay/end-listing`.
 The Dashboard's **Suggested actions** card is `services/recommender.py` over the
 signals the app already has — listing status, age, price, photo count, promotion
 state, plus eBay views/watchers when the scope is granted. Rules turn a store
-into a short ranked list: finish a draft, relist an ended item, promote a live
-one, drop a stale price, add photos, fill in specifics. Suggestions are grouped
+into a short ranked list: finish a draft, promote a live one, drop a stale
+price, add photos, fill in specifics. An ended listing earns nothing: relisting
+is done by hand, and the ended bucket picks up sold items. Suggestions are grouped
 by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
 listing so the list spans the portfolio instead of piling onto one item.
 

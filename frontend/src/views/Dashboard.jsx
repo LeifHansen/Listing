@@ -56,7 +56,8 @@ const REC_ICON = {
 };
 const REC_TONE = {
   promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
-  finish: "bg-blue-soft text-blue", photos: "bg-blue-soft text-blue",
+  finish: "bg-blue-soft text-blue",
+  photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
@@ -119,8 +120,8 @@ function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
 // marks the one whose spinner is the per-listing `promoting` latch, because
 // its rows fire the very same action.
 //
-// Photos and finish are deliberately absent: photos need a human holding
-// the item, and finishing creates a listing, which is not something to hand
+// Photos and finish are deliberately absent: photos need a human holding the
+// item, and finishing a draft creates a listing, which is not something to hand
 // a single button.
 const BULK_ACTIONS = {
   promote: {

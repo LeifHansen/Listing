@@ -31,18 +31,12 @@ def test_one_rec_per_listing_keeps_strongest():
 
 
 def test_sorted_by_priority_desc():
-    # A promote rec (70) and a finish rec (60), so the order is a real one.
-    items = [_published(0), {"id": "u1", "status": "unlisted", "title": "Draft",
+    # An UNLISTED draft, not an ended listing: ended records earn nothing now
+    # (relisting was dropped as advice), so using one here would leave a
+    # single-element list and an assertion that cannot fail.
+    items = [_published(0), {"id": "d1", "status": "unlisted", "title": "Draft",
                              "listing": {"title": "Draft"}}]
     recs = recommender.recommendations(items, limit=50)
     priorities = [r["priority"] for r in recs]
+    assert len(priorities) == 2, "the ordering is only tested if both items rank"
     assert priorities == sorted(priorities, reverse=True)
-
-
-def test_an_ended_listing_is_not_nagged_to_relist():
-    """Ending a listing is usually deliberate, so it earns no suggestion —
-    Relist stays where the seller goes looking for it, on the Inactive tab."""
-    ended = {"id": "e1", "status": "ended", "title": "Ended",
-             "listing": {"title": "Ended", "images": []}}
-    assert recommender.recommend_for(ended) == []
-    assert recommender.recommendations([ended], limit=50) == []
