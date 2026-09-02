@@ -2956,6 +2956,119 @@ def _pricing_strategy(uid: Optional[str], prefs: Optional[dict] = None) -> str:
         return ""
 
 
+# How far under the market a fresh draft's own price may sit before the comps
+# overrule it. The identify pass prices from the PHOTOS ALONE — it never sees a
+# comparable listing — so its number is a guess, and the guess it makes when it
+# cannot pin the item down is a low one. That is the expensive direction to be
+# wrong in: an underpriced listing sells within the hour at a number nobody can
+# take back, and a hand-signed piece drafted at $85 is gone before the seller
+# reads the draft.
+#
+# 0.6 = "less than 60% of what the cheapest quarter of comparable listings
+# ask". Deliberately not 1.0: comps are ASKING prices on a keyword match, a
+# fair draft often sits under them on purpose (condition, a quick-flip
+# strategy), and overruling every such draft would make the number no more
+# honest, just higher. This fires on the drafts that are wrong by an order of
+# magnitude, not the ones that are merely keen.
+UNDERPRICE_RATIO = float(os.getenv("UNDERPRICE_RATIO", "0.6") or 0.6)
+# The kill switch for the lookup itself: one eBay Browse call per drafted
+# item, which a 50-item bulk batch multiplies. On by default — a draft priced
+# without ever asking the market is the bug this exists to close.
+DRAFT_PRICE_COMPS = (os.getenv("DRAFT_PRICE_COMPS", "1").strip().lower()
+                     not in ("0", "false", "no", "off"))
+# How much of the title the fallback comp search keeps when the whole thing
+# matched nothing. Five words is the identifying head the title rule puts
+# first (brand/artist, model or work, what the thing is) without the specifics
+# that make a search return zero.
+_COMP_QUERY_WORDS = 5
+
+
+def _price_against_comps(listing: Listing, uid: Optional[str] = None,
+                         prefs: Optional[dict] = None) -> Optional[dict]:
+    """Check a fresh AI draft's price against live eBay comps, in place.
+
+    Two things this fixes, both of them the same bug from opposite ends:
+
+      * the AI returned no price at all (the prompt now asks for null rather
+        than a guess when the value turns on an attribution it cannot confirm)
+        — the market fills it in; and
+      * the AI returned a price far under what comparable listings ask, which
+        is what "I could not really identify this" looks like in a number.
+
+    It never LOWERS a draft's price: a high number is the seller's to reduce
+    after it fails to sell, and the market only ever gets a vote here on the
+    side that cannot be undone. Whatever it changes is said out loud in
+    missing_info, so the editor flags it for a human instead of quietly
+    swapping one confident-looking number for another.
+
+    Best-effort and silent on failure: no eBay credentials, no comparable
+    listings, or a lookup that errors all leave the draft exactly as drafted.
+    Returns the comp suggestion it used, or None when nothing changed.
+    """
+    if not (DRAFT_PRICE_COMPS and config.taxonomy_ready()):
+        return None
+    title = (listing.title or "").strip()
+    if not title:
+        return None
+    strategy = _pricing_strategy(uid, prefs)
+
+    def _ask(query: str) -> dict:
+        try:
+            data = pricing.suggest(query, category_id=listing.category_id or None,
+                                   condition=listing.condition or None,
+                                   strategy=strategy)
+        except Exception as exc:  # noqa: BLE001 - a draft beats a comp
+            log.info("draft price check skipped for %r: %s", query[:60], exc)
+            return {}
+        return (data or {}).get("suggestion") or {}
+
+    # A good title is a bad search. The title rule packs it with the words that
+    # identify THIS one piece — artist, work, edition, size — and a keyword
+    # search for all of them together matches nothing, which is exactly the
+    # answer a valuable one-off produces. So a full-title miss falls back to
+    # the head of the title, which by that same rule is the maker/artist and
+    # the item itself: "Fanch Ledan hand signed lithograph", not "... Interior
+    # with Matisse 84/250 framed 24x30".
+    best = _ask(title)
+    query = title
+    if not best.get("price"):
+        head = " ".join(title.split()[:_COMP_QUERY_WORDS])
+        if head and head != title:
+            best, query = _ask(head), head
+    market = best.get("price")
+    low = best.get("low")
+    if not market or market <= 0:
+        return None
+    was = listing.price
+    if was is None:
+        note = (f"Confirm the price — the AI wouldn't put a number on this one. "
+                f"Comparable eBay listings ask ${_money(low or market)}-"
+                f"${_money(best.get('high') or market)}.")
+    elif low and float(was) < float(low) * UNDERPRICE_RATIO:
+        note = (f"Confirm the price — the photos alone suggested "
+                f"${_money(was)}, but comparable eBay listings ask "
+                f"${_money(low)}-${_money(best.get('high') or market)}.")
+    else:
+        return None                       # the draft's own number stands
+    listing.price = round(float(market), 2)
+    # In front of the seller, not just in the log: this is a number that
+    # changed under them, on the field where being wrong is unrecoverable.
+    listing.missing_info = [*(listing.missing_info or []), note]
+    log.info("draft price: %r %s -> %.2f from %d comps (%s)", query[:60],
+             "none" if was is None else f"{float(was):.2f}",
+             listing.price, best.get("count") or 0, best.get("basis") or "")
+    return best
+
+
+def _money(value) -> str:
+    """A price for a sentence: no decimals when it doesn't need them."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{number:,.0f}" if number == int(number) else f"{number:,.2f}"
+
+
 def _apply_listing_defaults(listing: Listing, uid: Optional[str],
                             prefs: Optional[dict] = None) -> Listing:
     """Fill gaps in a fresh AI draft from the user's saved defaults — the
@@ -3827,6 +3940,9 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
     _resolve_category(result.listing)
+    # After the category: comps are sharper filtered to it. See
+    # _price_against_comps — the photos alone never see a comparable listing.
+    _price_against_comps(result.listing, _uid(request))
     storage.save_listing(session_id, result.listing)
     db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
     return result.model_dump()
@@ -4626,6 +4742,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # first pass — one consolidated call on chain v2.
                 _enrich_listing(listing, [item_dir / n for n in item_names],
                                 tags=result.tags)
+                _price_against_comps(listing, uid, prefs)
                 storage.save_listing(sid, listing)
                 db.upsert_listing(sid, listing.model_dump(), status="draft", user_id=uid)
                 item["listing"] = listing.model_dump()
@@ -4826,6 +4943,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # filled and stood the fallback down over a draft with every required
         # specific still blank.
         result.specifics_autofilled = _specifics_were_filled(added)
+        _price_against_comps(result.listing, uid, prefs)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
