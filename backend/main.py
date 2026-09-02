@@ -4288,9 +4288,20 @@ async def upload_more(
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
 ) -> dict:
-    """Add more photos to an existing listing. Optimizes each new file into the
-    session with non-colliding names and returns the new filenames, so the
-    client can append them to the listing's image order."""
+    """Add more photos to an existing listing. Saves the files, then optimizes
+    each into the session under non-colliding names as a JOB the client polls;
+    the job's result carries the new filenames, so the client can append them
+    to the listing's image order.
+
+    A job, like every other upload path, and later than the rest of them: this
+    one kept running the orientation pass (a vision call) and the cutouts
+    (single-flight inference, queued behind whatever bulk batch holds the
+    lock, on a model that takes a minute to warm) inside the request. A
+    seller adding four photos to a listing waited on a spinner for the length
+    of all of that, and past the client's deadline the request was abandoned
+    with the work still running -- "adding photos is taking forever / not
+    working". The request now returns the moment the originals are on disk.
+    """
     await run_in_threadpool(_assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
@@ -4305,7 +4316,6 @@ async def upload_more(
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
     orig = storage.original_dir(session_id)
-    opt_dir = storage.optimized_dir(session_id)
     # Save every new file first, so the orientation pass can judge them all in
     # one batched call rather than one call per photo.
     staged: list[tuple[int, Path]] = []
@@ -4325,15 +4335,62 @@ async def upload_more(
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
-    rotations = await run_in_threadpool(
-        orient.detect_rotations, [src for _idx, src in staged])
-    # One batched call so added photos share the same worker pool as the main
-    # upload path, instead of one serial threadpool round-trip per photo.
-    results = await run_in_threadpool(
-        images.optimize_batch,
-        [(src, opt_dir / f"img_{idx:03d}.jpg", rotations.get(src.name, 0))
-         for idx, src in staged],
-        strip_bg)
+    uid = _uid(request)
+    job_id = storage.new_session_id()
+    # The background-removal charge is deliberately NOT written to the job
+    # mirror: it can be refunded in PART (one photo's worth per failed
+    # cutout), and a partial refund is keyed in the ledger by its amount, so
+    # settling it from a mirror after the process died could pay twice. Same
+    # reasoning as the upload pipeline's job.
+    await run_in_threadpool(_register_bulk_job, job_id, {
+        "id": job_id, "kind": "upload_more", "phase": "orienting", "done": False,
+        "error": None, "result": None, "session_id": session_id,
+        "total_photos": len(staged), "current": 0,
+    }, uid=uid)
+    threading.Thread(
+        target=_run_upload_more_job,
+        args=(job_id, session_id, staged, strip_bg, spent),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id, "running": True, "total": len(staged)}
+
+
+def _run_upload_more_job(job_id: str, session_id: str,
+                         staged: list[tuple[int, Path]], strip_bg: bool,
+                         spent: Optional[dict]) -> None:
+    """Background worker for "Add photos": the orientation pass, then the
+    optimize/cutout pass with live per-photo progress, then the R2 push. The
+    result is what the synchronous route used to answer with."""
+    opt_dir = storage.optimized_dir(session_id)
+    try:
+        _bulk_set(job_id, phase="orienting", beat=time.time())
+        rotations = orient.detect_rotations([src for _idx, src in staged])
+        _bulk_set(job_id, phase="optimizing", current=0,
+                  total_photos=len(staged), beat=time.time())
+        # One batched call so added photos share the same worker pool as the
+        # main upload path, instead of one serial round-trip per photo.
+        results = images.optimize_batch(
+            [(src, opt_dir / f"img_{idx:03d}.jpg", rotations.get(src.name, 0))
+             for idx, src in staged],
+            strip_bg,
+            progress=lambda done, total: _bulk_set(
+                job_id, current=done, total_photos=total, beat=time.time()))
+    except OSError as exc:
+        tokens.refund(spent)
+        if getattr(exc, "errno", None) == errno.ENOSPC:
+            freed = reclaim_space(aggressive=True)
+            log.warning("upload-more %s hit a full volume; reclaimed %.1f MB",
+                        job_id, freed / 1e6)
+        log.warning("upload-more %s: optimize failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, phase="failed", error=(
+            "The server ran out of photo storage — try again shortly."))
+        return
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        tokens.refund(spent)
+        log.warning("upload-more %s: optimize failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, phase="failed",
+                  error=f"Photo processing failed: {exc}")
+        return
     new_names: list[str] = []
     # Photos whose cutout failed (engine down / out of credits) kept their
     # background, so they owe nothing — counted the same way /api/upload does.
@@ -4348,23 +4405,24 @@ async def upload_more(
         if res.get("bg_error"):
             bg_failed += 1
     if not new_names:
-        await run_in_threadpool(tokens.refund, spent)
-        raise HTTPException(400, "Could not process the uploaded image(s).")
+        tokens.refund(spent)
+        _bulk_set(job_id, done=True, phase="failed",
+                  error="Could not process the uploaded image(s).")
+        return
     if spent and bg_failed:
-        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
     # optimize_results carries each photo's bg_error, exactly as /api/upload
-    # returns it. It was computed here already -- the token refund above counts
-    # it -- and then dropped on the floor, so a photo that kept its background
-    # reached the seller with nothing said about it. The refund is not the
-    # message; it is invisible.
-    return {"added": new_names, "optimized": storage.list_optimized(session_id),
-            "optimize_results": [
-                {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
-                for (idx, _src), res in zip(staged, results)
-                if not res.get("error") and res.get("bg_error")]}
+    # returns it: a photo that kept its background has to be SAID, or the
+    # seller is left wondering why two photos look nothing like the others.
+    _bulk_set(job_id, done=True, phase="done", result={
+        "added": new_names, "optimized": storage.list_optimized(session_id),
+        "optimize_results": [
+            {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
+            for (idx, _src), res in zip(staged, results)
+            if not res.get("error") and res.get("bg_error")]})
 
 
 @app.post("/api/edit-image")

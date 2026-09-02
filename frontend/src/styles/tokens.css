@@ -256,8 +256,34 @@ body {
   animation: sparkle-pulse 1.2s ease-in-out infinite;
 }
 
+/* Brand pulse — the logo breathing while a long job runs (see BrandPulse).
+   A slow, gentle swell with a soft halo behind it: "alive and working",
+   never "frozen", without the fidget of a spinner. */
+@keyframes brand-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+@keyframes brand-halo {
+  0%, 100% { transform: scale(0.9); opacity: 0.35; }
+  50% { transform: scale(1.25); opacity: 0.1; }
+}
+.brand-pulse {
+  animation: brand-pulse 2.2s ease-in-out infinite;
+  will-change: transform;
+}
+.brand-pulse-halo {
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--brand-blue) 55%, transparent) 0%,
+    color-mix(in srgb, var(--brand-yellow) 30%, transparent) 45%,
+    transparent 70%
+  );
+  animation: brand-halo 2.2s ease-in-out infinite;
+}
+
 /* Reduced motion: kill the ambient animations. */
 @media (prefers-reduced-motion: reduce) {
-  .ai-shimmer, .ai-shimmer-text, .ai-sparkle, .brand-progress-fill { animation: none; }
+  .ai-shimmer, .ai-shimmer-text, .ai-sparkle, .brand-progress-fill,
+  .brand-pulse, .brand-pulse-halo { animation: none; }
   * { transition-duration: 0.01ms !important; }
 }

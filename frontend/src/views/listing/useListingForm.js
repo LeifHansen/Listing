@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, pollJob, postJson, downscaleAllForUpload, batchModelTimeoutMs } from "@/lib/api";
+import { api, pollJob, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -505,10 +505,14 @@ export function useListingForm() {
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
   const [addingPhotos, setAddingPhotos] = useState(false);
+  // What the add is doing right now, for the tile: "Uploading…", "Photo 2 of
+  // 4…". Minutes of cutouts behind a plain "Adding…" is the shape of a hang.
+  const [addingStatus, setAddingStatus] = useState("");
   const addImages = useCallback(async (fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length || !sessionId) return;
     setAddingPhotos(true);
+    setAddingStatus("Uploading…");
     try {
       const fd = new FormData();
       // Every other upload path re-encodes to 2000px first; this one did not,
@@ -523,13 +527,21 @@ export function useListingForm() {
       // cut-outs, with no toggle on the card and no word about it afterwards.
       const removeBg = lastRemoveBg();
       fd.append("remove_bg", removeBg ? "true" : "false");
-      // This endpoint still runs the cutouts INLINE (every other upload path
-      // hands them to a job), and inference is single-flight, so the deadline
-      // has to scale with the photo count or the client abandons work the
-      // server is mid-way through -- losing the photos AND the tokens.
-      const res = await api(`/api/upload-more/${sessionId}`,
-        { method: "POST", body: fd,
-          timeoutMs: batchModelTimeoutMs(prepped.length, removeBg) });
+      // The request only carries the files; the orientation pass and the
+      // cutouts run as a job the way every other upload path's do. They used
+      // to run INLINE here, and a deadline stretched to fit N inferences was
+      // still a spinner for minutes and, past it, photos and tokens lost to
+      // work the server was mid-way through.
+      const start = await api(`/api/upload-more/${sessionId}`,
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
+      const res = start.job_id
+        ? await pollJob(start.job_id, {
+            onUpdate: (j) => setAddingStatus(
+              j.phase === "optimizing" && j.total_photos
+                ? `Photo ${Math.min((j.current || 0) + 1, j.total_photos)} of ${j.total_photos}…`
+                : j.phase === "orienting" ? "Checking which way is up…" : "Adding…"),
+          })
+        : start;
       const added = res.added || [];
       if (added.length) {
         const next = [...(form.images || []), ...added];
@@ -558,6 +570,7 @@ export function useListingForm() {
       toast(`Couldn't add photos: ${e.message}`, { kind: "error" });
     } finally {
       setAddingPhotos(false);
+      setAddingStatus("");
     }
   }, [sessionId, form.images, collect, setForm, setSession,
       invalidateListings, toast]);
@@ -974,7 +987,7 @@ export function useListingForm() {
     categoryMeta, loadCategoryMeta,
     getSpecific, getSpecificRow, getSpecificValues, upsertSpecific,
     toggleSpecificValue, confirmSpecific, confirmAllSpecifics,
-    deleteImage, rotateImage, reorderImages, addImages, addingPhotos,
+    deleteImage, rotateImage, reorderImages, addImages, addingPhotos, addingStatus,
     imageVersions, imageBase, bumpImageVersion,
     completion, blockers,
   };

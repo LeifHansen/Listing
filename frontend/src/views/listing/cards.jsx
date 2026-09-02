@@ -178,7 +178,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
             {w.addingPhotos
               ? <Loader2 size={20} className="animate-spin" aria-hidden />
               : <Plus size={20} aria-hidden />}
-            {w.addingPhotos ? "Adding…" : fileDrag ? "Drop to add" : "Add photos"}
+            {w.addingPhotos ? (w.addingStatus || "Adding…") : fileDrag ? "Drop to add" : "Add photos"}
           </span>
         </label>
       </div>
