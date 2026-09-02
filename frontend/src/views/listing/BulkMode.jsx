@@ -903,7 +903,9 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // cards stream in below it as each item is drafted.
   const pct = Math.round((() => {
     const frac = (cur, tot) => (tot ? Math.min(1, (cur || 0) / tot) : 0);
-    if (!job) return 3;
+    // Nothing has happened before the server has the pile. A bar that opens
+    // on 3% claims progress that was never made, and the seller noticed.
+    if (!job) return 0;
     if (job.done) return 100;
     if (phase === "uploading") return 5;
     if (phase === "optimizing") return 10 + 35 * frac(job.current, job.total_photos);

@@ -543,7 +543,17 @@ export function AppProvider({ children }) {
   // When the copy we hold stops being worth trusting. 0 = stale right now.
   const listingsFreshUntil = useRef(0);
 
+  // Only the NEWEST request's answer may land. Several writers refetch in
+  // quick succession — a publish patches the card and refetches, the shell's
+  // heartbeat refetches when a batch ends, a focus refreshes a stale copy,
+  // a shipping pick on a card refetches — and a slower, EARLIER answer
+  // arriving after a later one put the store back to what it was before the
+  // write. That is how a draft the seller had just published sat under
+  // Drafts until a hard refresh: the server said "published", and then an
+  // older page that still said "draft" overwrote it.
+  const listingsRequest = useRef(0);
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
+    const seq = ++listingsRequest.current;
     // `quiet` suppresses the spinner for background refreshes — but the FIRST
     // load is quiet too (the boot effect), and suppressing it there meant the
     // skeletons never rendered and every visit flashed "No listings yet"
@@ -552,6 +562,7 @@ export function AppProvider({ children }) {
     setListingsState((s) => ({ ...s, loading: !quiet || !s.loaded }));
     try {
       const res = await api("/api/listings");
+      if (seq !== listingsRequest.current) return;   // superseded: a newer answer is coming
       setListingsState({
         loaded: true,
         loading: false,
@@ -584,6 +595,7 @@ export function AppProvider({ children }) {
       // this component, which quietly retires every set-state-in-effect
       // suppression in the file.
       const failure = e.message || "we couldn’t reach the server";
+      if (seq !== listingsRequest.current) return;
       setListingsState((s) => ({ ...s, loading: false, loaded: true,
                                  error: failure }));
       if (!quiet) toast(`Couldn't load listings: ${e.message}`, { kind: "error" });
