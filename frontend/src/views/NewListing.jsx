@@ -21,6 +21,7 @@ import { ImageEditor } from "./listing/ImageEditor";
 import { SoldArchive } from "./listing/SoldArchive";
 import { ConflictBanner } from "./listing/ConflictBanner";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
+import { FinishUpCard } from "./listing/FinishUpCard";
 import {
   PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard, PromoteCard, EtsyCard, DepopCard,
@@ -439,6 +440,10 @@ function Workflow() {
           <ShippingCard w={w} />
           <PromoteCard w={w} />
         </MoreDetails>
+        {/* The last step before Publish: one pass that fills in everything
+            the photos can still answer. (A sold record never reaches here —
+            it returns as a SoldArchive well above.) */}
+        <FinishUpCard w={w} />
         <PublishCard w={w} />
       </motion.div>
 

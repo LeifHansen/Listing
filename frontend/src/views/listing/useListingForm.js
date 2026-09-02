@@ -71,7 +71,8 @@ function fromListing(l) {
 
 export function useListingForm() {
   const {
-    session, setSession, health, loadListings, openListings, patchListing,
+    session, setSession, health, loadListings, invalidateListings,
+    openListings, patchListing,
   } = useApp();
   const { toast } = useToast();
 
@@ -360,13 +361,15 @@ export function useListingForm() {
       // listing while the refine was in flight, since it re-armed a re-seed
       // against a session that had already moved on.)
       toast("Listing refined ✨", { kind: "success" });
+      // A refine rewrites the title and price the cards are showing.
+      invalidateListings();
       return true;
     } catch (e) {
       toast(`Refine error: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, toast]);
+  }), [collect, sessionId, setSession, invalidateListings, toast]);
 
   // ---------- images ----------
   // Cache-bust per PHOTO, not globally: a global counter made one rotate
@@ -390,11 +393,14 @@ export function useListingForm() {
     try {
       await postJson("/api/rotate-image", { session_id: sessionId, name });
       bumpImageVersion(name);
+      // The saved file changed, so every card showing this listing is now
+      // showing a photo that no longer exists. See store.invalidateListings.
+      invalidateListings();
     } catch (e) {
       toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
       throw e;
     }
-  }, [sessionId, bumpImageVersion, toast]);
+  }, [sessionId, bumpImageVersion, invalidateListings, toast]);
 
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
@@ -428,11 +434,13 @@ export function useListingForm() {
       const res = await postJson("/api/delete-image", { session_id: sessionId, name });
       const saved = Array.isArray(res?.images) && res.images.length ? res.images : next;
       if (saved.join("|") !== next.join("|")) setImages(saved);
+      // Deleting the FIRST photo changes the thumbnail every card renders.
+      invalidateListings();
     } catch (e) {
       setImages(prev);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, toast]);
+  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
 
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
@@ -461,12 +469,15 @@ export function useListingForm() {
         setForm((f) => ({ ...f, images: saved }));
         setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: saved } } : s));
       }
+      // The first image is the card's thumbnail, so a reorder can change what
+      // every listing card is showing.
+      invalidateListings();
     } catch (e) {
       setForm((f) => ({ ...f, images: previous }));
       setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: previous } } : s));
       toast(`Photo order not saved: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, toast]);
+  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
 
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
@@ -516,13 +527,17 @@ export function useListingForm() {
           toast(`${kept.length} photo${kept.length === 1 ? " kept its" : "s kept their"} `
                 + `background: ${kept[0].bg_error}`, { kind: "warning" });
         }
+        // New photos were saved onto the listing — and if it had none, the
+        // card was rendering the no-photo placeholder.
+        invalidateListings();
       }
     } catch (e) {
       toast(`Couldn't add photos: ${e.message}`, { kind: "error" });
     } finally {
       setAddingPhotos(false);
     }
-  }, [sessionId, form.images, collect, setForm, setSession, toast]);
+  }, [sessionId, form.images, collect, setForm, setSession,
+      invalidateListings, toast]);
 
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
@@ -764,12 +779,74 @@ export function useListingForm() {
         ? `Filled ${res.added} item specific${res.added === 1 ? "" : "s"} from your photos.`
         : "Nothing new to add — your item specifics already look complete.",
         { kind: "success" });
+      // Saved server-side, so the record behind every card has changed — and
+      // the drafts strip counts unreviewed specifics off it.
+      invalidateListings();
     } catch (e) {
       toast(`Couldn't auto-fill specifics: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [form.category_id, sessionId, collect, setForm, toast]);
+  }), [form.category_id, sessionId, collect, setForm, invalidateListings, toast]);
+
+  // ---------- fill in everything, one step before publishing ----------
+  // The last thing worth doing to a listing before it goes live: one pass
+  // that settles the eBay category if it is still missing, fills every item
+  // specific the photos can answer, and double-checks the maker.
+  //
+  // This is the same enrichment the dashboard's "Enrich all" runs, moved to
+  // where it can actually land. There it has to reach a listing eBay is
+  // already showing — which means a resolvable category, photos still on the
+  // server (an imported listing's live on eBay), a connected account, and a
+  // ReviseItem that eBay accepts — and any one of those missing comes back
+  // as "skipped" with the blanks still blank. Here the listing has not been
+  // published yet: nothing to revise, the photos are right there, and the
+  // answer is saved locally.
+  //
+  // It fills BLANKS. Anything already written is left exactly as it is, so
+  // this is safe to press on a listing that is nearly finished.
+  const fillInDetails = useMemo(() => once("enrich-listing", async () => {
+    const before = collect();
+    setAiBusy([
+      "Reading your photos for everything eBay asks for…",
+      "Filling in the details buyers filter by…",
+      "Double-checking the maker…",
+    ]);
+    try {
+      const res = await postJson(`/api/enrich/${sessionId}`, {
+        session_id: sessionId, listing: before, mode: "draft",
+      });
+      // The server merged onto the copy we just sent, so its answer is this
+      // form plus the fills — adopting it whole cannot lose an edit.
+      if (res.listing) {
+        setSession((s) => (s ? { ...s, listing: res.listing } : s));
+        setForm(fromListing(res.listing));
+      }
+      const gotCategory = !before.category_id.trim()
+        && !!(res.listing?.category_id || "");
+      const parts = [];
+      if (gotCategory) parts.push("picked the eBay category");
+      if (res.added) {
+        parts.push(`filled ${res.added} detail${res.added === 1 ? "" : "s"}`);
+      }
+      toast(parts.length
+        ? `${parts.join(" and ")} from your photos.`
+            .replace(/^./, (c) => c.toUpperCase())
+        // A pass that ran and found nothing is a real answer, not a failure —
+        // and it is the seller's cue that the rest is theirs to write.
+        : "Nothing more the photos could answer — anything still blank needs you.",
+        { kind: res.added || gotCategory ? "success" : "info" });
+      invalidateListings();
+      return true;
+    } catch (e) {
+      // Warning, not error: the listing is untouched and still publishable
+      // by hand. Nothing was lost and nothing is broken.
+      toast(`Couldn't fill in the details: ${e.message}`, { kind: "warning" });
+      return false;
+    } finally {
+      setAiBusy(null);
+    }
+  }), [collect, sessionId, setSession, setForm, invalidateListings, toast]);
 
   // Auto-populate item specifics right after a fresh AI identify (session has a
   // confidence score), so listings come SEO-ready with no manual step. Runs
@@ -856,7 +933,7 @@ export function useListingForm() {
     publish, publishResult, setPublishResult, runPreflight,
     fixTarget, setFixTarget,
     refine,
-    autofillSpecifics,
+    autofillSpecifics, fillInDetails,
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,

@@ -75,6 +75,15 @@ def test_ebay_actually_refusing_the_zip_is_still_the_sellers_to_fix(
 
 def test_the_message_never_carries_ebays_url(client, monkeypatch):
     main, api = client
+    # The message ends with a support reference, and that reference is
+    # `secrets.token_hex(4)` -- eight random hex characters. "401" is three of
+    # them, so roughly one run in seven hundred drew a reference CONTAINING
+    # the status code this test is looking for and failed on its own id:
+    # "quote 58b04401 to support" is not eBay's 401 leaking, it is a coin
+    # landing badly. Pinned to a reference with no hex run that could collide,
+    # so the assertion below tests the one thing it is about -- that eBay's
+    # status line stayed out of the sentence -- and tests it every time.
+    monkeypatch.setattr(main, "_support_reference", lambda: "deadbeef")
     _location_raises(main, monkeypatch,
                      httpx.HTTPStatusError(URL_LEAK, request=None, response=None))
 
