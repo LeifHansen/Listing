@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
-  PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck,
+  PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck, Handshake,
   Trash2, Clock, LogOut,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
@@ -12,7 +12,7 @@ import { Card, SectionHeader } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { SiteLink } from "@/components/ui/SiteLink";
-import { Field, Input, Select } from "@/components/ui/fields";
+import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
@@ -398,6 +398,41 @@ export function SettingsView() {
             <div className="ai-shimmer h-16 rounded-tile" aria-hidden />
           ) : (
             <PricingStrategySlider prefs={prefs} set={setPref} />
+          )}
+        </div>
+
+        {/* ── Allow offers (Best Offer) ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={Handshake}
+            title="Offers"
+            /* "No minimum" is the whole setting, so it is stated where the
+               seller decides — not left for them to discover from the first
+               $5 offer on a $200 item. eBay's auto-decline and auto-accept
+               thresholds are what a minimum would be, and this app does not
+               pick either: every offer comes to the seller to answer. The
+               last sentence is not padding either — eBay has no Best Offer
+               on auction-format listings, so an auction publishes without
+               it, and saying so here is what keeps that from reading as a
+               bug. */
+            hint="Let buyers send you an offer on every new listing you publish. There’s no minimum: eBay passes every offer to you to accept, counter, or decline — nothing is auto-declined and nothing is auto-accepted on your behalf. Listings that are already live are left as they are, and auctions don’t take offers."
+          />
+          {prefsError ? (
+            <PanelUnavailable
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
+              onRetry={loadPrefs}
+            />
+          ) : prefs === null ? (
+            <div className="ai-shimmer h-10 rounded-tile" aria-hidden />
+          ) : (
+            <div className="max-w-lg">
+              <Toggle
+                checked={Boolean(prefs.allow_offers)}
+                onChange={(on) => setPref("allow_offers", on ? 1 : 0)}
+                label="Allow offers on new listings"
+                help="Applies when a listing is published. Turning it off later leaves listings already on eBay accepting offers — end or edit those on eBay if you want them changed."
+              />
+            </div>
           )}
         </div>
 
