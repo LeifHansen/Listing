@@ -152,6 +152,30 @@ def test_the_best_effort_variant_says_what_it_is():
     assert main.db.get_prefs_best_effort("nobody") == {}
 
 
+def test_the_allow_offers_switch_round_trips(seller):
+    """The Settings toggle is only a toggle if the answer comes back on.
+
+    It also has to come back OFF once turned off: `save_prefs` merges, so a
+    field that is dropped rather than stored as 0 would leave the seller
+    unable to switch offers back off at all.
+    """
+    assert seller.post("/api/prefs", json={"allow_offers": 1}).status_code == 200
+    assert seller.get("/api/prefs").json()["prefs"]["allow_offers"] == 1
+    assert seller.post("/api/prefs", json={"allow_offers": 0}).status_code == 200
+    assert seller.get("/api/prefs").json()["prefs"]["allow_offers"] == 0
+
+
+def test_a_broken_prefs_read_does_not_allow_offers(monkeypatch):
+    """An outage is not a decision to list the seller's items open to
+    negotiation, any more than it is consent to an ad fee."""
+    from backend.services import listing_sync
+
+    def boom(*_a, **_k):
+        raise errors.StorageUnavailable("down")
+    monkeypatch.setattr(listing_sync.db, "get_prefs", boom)
+    assert listing_sync.offers_enabled("someone") is False
+
+
 def test_a_broken_prefs_read_does_not_promote_anything(monkeypatch):
     """An outage is never consent, least of all to a per-sale ad fee."""
     from backend.marketplaces import ebay_provider

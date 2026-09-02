@@ -3160,6 +3160,12 @@ _PREF_FIELDS = {
     # "Missing = ON", which is what the code did before P1-06 — left here it is
     # an invitation to restore it.
     "auto_promote": (int, 0, 1),
+    # Accept Best Offer on every new listing, with no minimum: eBay sends the
+    # seller every offer to accept or decline. OFF unless explicitly saved on
+    # — see services/listing_sync.offers_enabled, which is where the decision
+    # is actually made, and which also explains why it never touches a listing
+    # that is already live.
+    "allow_offers": (int, 0, 1),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 
@@ -3292,7 +3298,16 @@ _COMP_QUERY_WORDS = 5
 # below: it may name a work, fill a blank, raise a price and raise a question.
 # It may never downgrade an item, lower a price, or overwrite something the
 # seller can already see is right.
-RESEARCH_PASS = os.getenv("RESEARCH_PASS", "auto").strip().lower() or "auto"
+#
+# OFF unless asked for. The lookup is a second vision call with up to
+# RESEARCH_MAX_SEARCHES web searches inside it, and it runs INSIDE the
+# identify request — the seller (or the whole bulk batch) waits on it. The
+# gate below catches most of a thrift store ("edition", "rare", "book",
+# "record", "glass"...), so the morning it shipped on "auto" every identify
+# went from seconds to a minute or more and the app read as broken. Set
+# RESEARCH_PASS=auto (or always) to turn it on; the fix that lets it run
+# without holding the draft hostage is the one that earns "auto" back.
+RESEARCH_PASS = os.getenv("RESEARCH_PASS", "off").strip().lower() or "off"
 
 # Words in a draft that mean an identification decides the price. Any of them
 # and the item gets looked up: this is the "is this the expensive one?" list.

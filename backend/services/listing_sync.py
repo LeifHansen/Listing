@@ -895,6 +895,45 @@ def publish_policies(listing: Listing, creds: dict) -> dict:
             "return_policy_id": creds.get("return_policy_id")}
 
 
+def offers_enabled(uid: Optional[str]) -> bool:
+    """Account default: accept Best Offer on every NEW listing, no minimum.
+
+    The "Allow offers" switch in Settings, read at publish time so it covers
+    every listing this app creates without touching the drafts themselves.
+
+    OFF unless the seller saved it on, and off again when the preference
+    cannot be read. Neither is timidity about a free feature: offers change
+    what the listing IS to a buyer — the price stops being the price, and the
+    seller signs up to answer messages about it — and an outage is not a
+    decision. Same reasoning as auto_promote (marketplaces/ebay_provider.py),
+    which is a fee; the failure here is cheaper but it is still the app
+    listing an item on terms the seller did not choose.
+
+    Deliberately NOT applied on a revise. The switch says "new listings", and
+    flipping it must not go back through a live store silently opening
+    hundreds of existing listings to negotiation.
+    """
+    if not uid:
+        return False
+    try:
+        value = db.get_prefs(uid).get("allow_offers")
+    except Exception as exc:  # noqa: BLE001 - an outage is not a choice
+        log.warning("offers: couldn't read the allow-offers preference for "
+                    "%s, treating as off: %s", uid, exc)
+        return False
+    return bool(value)
+
+
+def publish_best_offer(creds: Optional[dict]) -> bool:
+    """Whether a publish made with `creds` goes out with Best Offer on.
+
+    The companion of publish_policies: it reads the account's own switch off
+    the same creds dict, so create_on_ebay and the verifier below cannot
+    disagree about what the real publish sends.
+    """
+    return offers_enabled(str((creds or {}).get("_uid") or ""))
+
+
 def verifier(token: str, image_urls: list[str],
              creds: Optional[dict] = None) -> Optional[Callable[[Listing], None]]:
     """A "would eBay take this?" callable, or None when we can't ask cleanly.
@@ -909,6 +948,10 @@ def verifier(token: str, image_urls: list[str],
     postal = (c.get("ship_from_postal") or "").strip()
     if not postal:
         return None
+    # Read once, here: publish_block_issues re-puts the listing several times
+    # to narrow a rejection down, and each probe must describe the same
+    # publish — including whether it carries Best Offer.
+    best_offer = publish_best_offer(c)
 
     def verify(candidate: Listing, *, with_policies: bool = True,
                with_photos: bool = True) -> None:
@@ -925,7 +968,7 @@ def verifier(token: str, image_urls: list[str],
             token, candidate,
             image_urls if with_photos else [],
             policies=publish_policies(candidate, c) if with_policies else None,
-            postal_code=postal)
+            postal_code=postal, best_offer=best_offer)
     return verify
 
 
@@ -971,7 +1014,8 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
         res = ebay_trading.create_listing(
             token, listing, image_urls,
             policies=publish_policies(listing, c),
-            postal_code=postal, idempotency_key=idempotency_key)
+            postal_code=postal, idempotency_key=idempotency_key,
+            best_offer=publish_best_offer(c))
     except AlreadyListedError as exc:
         # This publish already produced a listing — a retry, or a second
         # request that raced this one. Adopt what's there instead of creating a
