@@ -21,19 +21,16 @@ export const SITE_URL = import.meta.env?.SITE || "https://thryftshop.com";
 export const APP_URL = "https://app.thryftshop.com";
 
 /**
- * The two ways in. The app has no separate login page: its sign-in prompt is
- * a dialog over the shell, with Log in / Sign up tabs, and a bare APP_URL
- * lands a signed-out visitor on the dashboard with that dialog closed. For
- * "Log in" that was the awkward part — they asked to sign in and were handed
- * a dashboard with a sign-in button on it to find. So each button carries its
- * intent as a query param the app reads (authIntentFromSearch in
- * frontend/src/store.jsx) to open the dialog on the matching tab.
+ * The two ways in. The app's auth dialog has Log in / Sign up tabs and opens on
+ * Log in, so a visitor who came here to create an account would land on the
+ * wrong one — hence a separate entry point rather than one "open the app".
  *
- * Someone already signed in lands on their dashboard from either link: the
- * app only opens the dialog once it knows nobody is signed in. "Open the app"
- * links that make no promise about signing in (mobile.astro) stay on APP_URL.
+ * `?signup=1` is what the app reads to select the Sign up tab. Until the
+ * app-side change ships it is simply an unknown query param: the link still
+ * works and still opens the dialog, just on Log in — the same place "Open the
+ * app" used to land, so nothing is worse in the meantime.
  */
-export const LOGIN_URL = `${APP_URL}/?login=1`;
+export const LOGIN_URL = APP_URL;
 export const SIGNUP_URL = `${APP_URL}/?signup=1`;
 
 export const site = {
