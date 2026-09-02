@@ -72,6 +72,23 @@ const NO_LISTINGS = {
 const AUTO_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const AUTO_SYNC_KEY = "last-store-sync";   // see lib/localPrefs
 
+/**
+ * Which tab, if any, the URL asks the sign-in dialog to open on.
+ *
+ * The app has no separate login page — the prompt IS a dialog over the shell —
+ * and the marketing site, on another origin, cannot open that dialog itself.
+ * So its Log in and Sign up buttons carry the intent as `?login=1` and
+ * `?signup=1` (marketing/src/lib/site.js), and loadAuth opens the dialog on
+ * that tab once it knows nobody is signed in. Anything else is an ordinary
+ * visit and opens nothing.
+ */
+export function authIntentFromSearch(search) {
+  const params = new URLSearchParams(search);
+  if (params.get("signup") === "1") return "signup";
+  if (params.get("login") === "1") return "login";
+  return null;
+}
+
 // Per user, so connecting a different eBay account (or a different person on
 // a shared device) still gets the first-run import rather than inheriting
 // someone else's "recently synced".
@@ -205,13 +222,14 @@ export function AppProvider({ children }) {
   const [user, setUser] = useState(null);
   const [authOpen, setAuthOpen] = useState(false);
   // Which tab the auth dialog opens on. Lifted out of AuthDialog so arriving
-  // from the marketing site's "Sign up" can choose it before the dialog mounts.
+  // from the marketing site's "Log in" or "Sign up" can choose it before the
+  // dialog mounts.
   const [authMode, setAuthMode] = useState("login");
-  // The marketing site's Sign up links land on /?signup=1. Read once, at the
-  // first render, because loadAuth removes it from the URL once it has acted.
-  const signupIntent = useRef(
-    typeof window !== "undefined"
-    && new URLSearchParams(window.location.search).get("signup") === "1",
+  // The marketing site's Log in links land on /?login=1 and its Sign up links
+  // on /?signup=1. Read once, at the first render, because loadAuth removes
+  // the param from the URL once it has acted.
+  const authIntent = useRef(
+    typeof window !== "undefined" ? authIntentFromSearch(window.location.search) : null,
   );
   // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
   const afterLogin = useRef(null);
@@ -237,24 +255,28 @@ export function AppProvider({ children }) {
       // lands on the signed-out app.
       if (e.status && e.status < 500) setUser(null);
     } finally {
-      // Someone who clicked "Sign up" on the marketing site should land in the
-      // signup form, not on a signed-out app with nothing open.
+      // Someone who clicked "Log in" or "Sign up" on the marketing site should
+      // land in that form, not on a signed-out dashboard with nothing open.
+      // "Log in" used to do exactly that: the visitor asked to sign in and was
+      // handed a dashboard with a sign-in button somewhere on it to find.
       //
       // This lives here, after the answer, rather than in an effect watching
       // `user`: `user` is null both before /api/auth/me replies and when it
       // says nobody is signed in, so an effect cannot tell those apart without
       // a second state to track it — and a seller who is ALREADY signed in and
       // follows the same link (a bookmark, a pasted URL) must never get a
-      // signup box thrown over their own dashboard while the request is still
+      // sign-in box thrown over their own dashboard while the request is still
       // in flight. The param is then dropped, so a refresh does not reopen it
       // forever.
-      if (signupIntent.current) {
-        signupIntent.current = false;
+      const intent = authIntent.current;
+      if (intent) {
+        authIntent.current = null;
         if (!signedIn) {
-          setAuthMode("signup");
+          setAuthMode(intent);
           setAuthOpen(true);
         }
         const url = new URL(window.location.href);
+        url.searchParams.delete("login");
         url.searchParams.delete("signup");
         window.history.replaceState({}, "", url.toString());
       }
