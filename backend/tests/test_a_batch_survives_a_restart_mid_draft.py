@@ -25,7 +25,7 @@ pytest.importorskip("fastapi")
 
 from PIL import Image  # noqa: E402
 
-from backend import main, storage  # noqa: E402
+from backend import config, main, storage  # noqa: E402
 from backend.models import IdentifyResult, Listing  # noqa: E402
 from backend.services import jobstore  # noqa: E402
 
@@ -83,9 +83,22 @@ def _record(staging, names, groups, done, inflight, **extra):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_jobstore():
+def _fresh_jobstore(monkeypatch, tmp_path):
+    """A jobstore of this test's own, mirrors included.
+
+    The mirrors matter more than the dict. A job registered here with a
+    stubbed worker is still "running" in its mirror file when the test ends,
+    and the next TestClient in this process runs _adopt_job_mirrors at
+    startup — which would pick that job up and run the REAL worker over it
+    in the background of an unrelated test. So the mirrors go in a data root
+    that dies with the test, and whatever is still running is finished
+    before it does.
+    """
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     jobstore.reset()
     yield
+    for job_id in list(jobstore._JOBS):
+        jobstore.update(job_id, done=True)
     jobstore.reset()
 
 
@@ -205,7 +218,7 @@ def quiet_pipeline(monkeypatch):
     which items get drafted and billed, not about categories or comps."""
     identified = []
 
-    def fake_identify(paths, names, strategy=""):
+    def fake_identify(paths, names, strategy="", **kw):
         identified.append(paths[0].parent.parent.name)   # the item's session
         return IdentifyResult(listing=Listing(
             title=f"drafted {len(identified)}", price=10, images=list(names)))
@@ -277,7 +290,7 @@ def test_a_fresh_batch_writes_its_plan_down_as_it_goes(quiet_pipeline, monkeypat
     staging = storage.new_session_id()
     names = _photos(storage.original_dir(staging), 4)
     monkeypatch.setattr(main.images, "thumb_jpeg", lambda p: b"jpeg")
-    monkeypatch.setattr(main.claude_ai, "group_photos", lambda thumbs: {
+    monkeypatch.setattr(main.claude_ai, "group_photos", lambda thumbs, **kw: {
         "groups": [{"name": "a", "indices": [0, 1]},
                    {"name": "b", "indices": [2, 3]}]})
     seen = []

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Sparkles, FolderOpen, Trash2, Camera } from "lucide-react";
+import { Sparkles, FolderOpen, Trash2, Camera, MessageSquareText } from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import { lastRemoveBg, rememberRemoveBg } from "@/lib/photoPrefs";
 import {
@@ -8,7 +8,7 @@ import {
 } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
-import { Toggle } from "@/components/ui/fields";
+import { Field, Textarea, Toggle } from "@/components/ui/fields";
 import { Card } from "@/components/ui/Card";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { WorkflowSkeleton } from "@/components/ui/Skeleton";
@@ -38,6 +38,17 @@ function bgFailureMessage(results, total) {
 const MAX_SINGLE_FILES = 40;
 const MAX_BATCH_FILES = 250;
 
+// Mirrors listing_prompt.SELLER_NOTES_MAX_CHARS. Enforced here as well as on
+// the server so the box stops taking characters it is about to drop, rather
+// than silently truncating a hint the seller watched themselves type.
+const MAX_NOTES_CHARS = 1000;
+
+// The seller's hints, one per comma — the same split the server prompt does,
+// so the count under the box is the number of hints the AI will actually see.
+function countHints(notes) {
+  return notes.split(",").filter((p) => p.trim()).length;
+}
+
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
@@ -58,6 +69,12 @@ export function UploadPhase() {
     setRemoveBg(on);
     rememberRemoveBg(on);
   }, []);
+  // Hints for the AI, comma-separated: what the seller knows and the camera
+  // can't show. Deliberately NOT remembered across uploads the way removeBg is
+  // — it describes this pile, and last week's pile leaking into this one is
+  // worse than typing it again. Seeded from a failed bulk retry, though: the
+  // seller wrote it seconds ago.
+  const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -102,7 +119,7 @@ export function UploadPhase() {
   // upload itself runs from the store (see runBulkUpload).
   const startBulk = once("bulk", async () => {
     if (!files.length) return;
-    await runBulkUpload(files, removeBg);
+    await runBulkUpload(files, removeBg, notes);
   });
 
   const process = once("process", async () => {
@@ -115,6 +132,9 @@ export function UploadPhase() {
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
+      // Saved with the session server-side, so a later "Start over" re-drafts
+      // with the same hints instead of forgetting them.
+      fd.append("notes", notes);
       // The upload returns as soon as the originals are saved; optimization
       // and the whole identify chain run as ONE background job we poll, with
       // real per-stage progress instead of a request that blocks silently
@@ -267,6 +287,43 @@ export function UploadPhase() {
                   ))}
                 </AnimatePresence>
               </div>
+
+              {/* Hints for the AI. The model reads pixels; the seller is
+                  holding the thing — the brand on a worn-off label, the era,
+                  and above all HOW MANY items are in a bulk pile are exactly
+                  what it gets wrong and exactly what one typed line fixes. */}
+              <Field
+                label={(
+                  <span className="inline-flex items-center gap-1.5">
+                    <MessageSquareText size={14} aria-hidden className="text-blue" />
+                    Notes for the AI
+                  </span>
+                )}
+                hint="optional"
+                help={"Anything you know that the photos don't show — brand, maker, era, "
+                  + "material, size, or how many separate items are in the pile. "
+                  + "Separate each one with a comma. The AI treats them as strong hints "
+                  + "and won't invent details they don't cover."}
+              >
+                <Textarea
+                  rows={3}
+                  value={notes}
+                  maxLength={MAX_NOTES_CHARS}
+                  onChange={(e) => setNotes(e.target.value.slice(0, MAX_NOTES_CHARS))}
+                  placeholder={"e.g. one perrier vintage hand painted champagne bottle, "
+                    + "one vintage ralph lauren polo, two lacoste polos different size color"}
+                />
+              </Field>
+              {/* The hint count is the format teaching itself: type a comma,
+                  watch it go from 1 to 2. The character count only shows up
+                  once it is close enough to the cap to matter. */}
+              <p className="-mt-3 text-xs text-ink-faint">
+                {notes.trim()
+                  ? `${countHints(notes)} hint${countHints(notes) === 1 ? "" : "s"} — the AI reads each one separately.`
+                  : "Skip it and the AI works from the photos alone."}
+                {notes.length > MAX_NOTES_CHARS - 100
+                  && ` ${MAX_NOTES_CHARS - notes.length} characters left.`}
+              </p>
 
               <Toggle
                 checked={removeBg}

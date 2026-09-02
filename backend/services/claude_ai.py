@@ -24,6 +24,8 @@ from .listing_prompt import (
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
+    group_notes_block,
+    identify_notes_block,
 )
 from ..models import TITLE_MAX_CHARS, IdentifyResult, ItemSpecific, Listing
 
@@ -261,10 +263,14 @@ _IDENTIFY_SYSTEM = (
 
 
 def identify(image_paths: list[Path], image_names: list[str],
-             strategy: str = "") -> IdentifyResult:
+             strategy: str = "", notes: str = "") -> IdentifyResult:
     """Identify the item(s) in the images and draft a full listing.
     `strategy` (optional): quick_flip | median | long_sale — tilts the
     suggested price toward that end of the market range.
+    `notes` (optional): the seller's own comma-separated hints about what is
+    in the photos — a brand the camera never caught, a variant only the owner
+    knows. Rides the user message, never the cached system prefix, because it
+    changes per upload.
 
     The result also carries `tags`: bounding boxes of tags/labels the model
     spotted while examining the photos, for the zoom-and-transcribe pass —
@@ -280,6 +286,7 @@ def identify(image_paths: list[Path], image_names: list[str],
             "text": (
                 "These are the product photos for one listing. Draft it."
                 + _PRICING_STRATEGY_HINTS.get(strategy, "")
+                + identify_notes_block(notes)
             ),
         }
     )
@@ -426,10 +433,15 @@ def _verify_groups(client, images: list[bytes], groups: list[dict]) -> list[dict
     return _apply_group_merges(groups, data.get("merge"))
 
 
-def group_photos(images: list[bytes]) -> dict:
+def group_photos(images: list[bytes], notes: str = "") -> dict:
     """Bulk mode: split a pile of photos into per-item groups, then a second
     verification pass re-checks the result for the same item accidentally
     split into two groups (the duplicate-listing bug) and merges those.
+
+    `notes` (optional): the seller's comma-separated inventory of the pile.
+    This pass is where it is worth the most — the seller stating "two lacoste
+    polos different size color" answers the one question grouping keeps
+    getting wrong, in the seller's own words, before it is asked.
 
     Returns {"groups": [{"name", "indices"}]} covering every input index
     exactly once (indices the model dropped/duplicated are repaired here).
@@ -443,7 +455,7 @@ def group_photos(images: list[bytes]) -> dict:
             "type": "base64", "media_type": "image/jpeg", "data": b64}})
     content.append({"type": "text", "text": (
         "You are sorting a reseller's bulk photo dump into individual items "
-        "to list on eBay.\n\n" + _GROUP_SCHEMA)})
+        "to list on eBay.\n\n" + _GROUP_SCHEMA + group_notes_block(notes))})
 
     # Headroom matters at the batch cap: a 100-photo chunk that turns out to be
     # ~80 distinct items needs well over 1500 tokens of JSON, and a cut-off
