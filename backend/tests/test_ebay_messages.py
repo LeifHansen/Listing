@@ -6,6 +6,7 @@ that the normalizer keeps working when the payload isn't shaped the way we
 guessed — the docs were unreachable when this was written, so every field is
 read through a table of plausible spellings and nothing may raise.
 """
+import httpx
 import pytest
 
 from backend.services import ebay_messages as em
@@ -209,3 +210,61 @@ def test_mark_read_never_raises_on_unknown_action(monkeypatch):
 
 def test_unread_total_sums_and_ignores_junk():
     assert em.unread_total([{"unread": 2}, {"unread": "3"}, {}, None, "x"]) == 5
+
+
+# --- a lost answer on a send is not "it didn't go" --------------------------
+
+def _wire(monkeypatch, outcome):
+    """Stub the HTTP layer: `outcome` is an exception to raise or a status."""
+    calls = []
+
+    def request(method, url, **kw):
+        calls.append(method)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return httpx.Response(outcome, text="{}",
+                              request=httpx.Request(method, url))
+    monkeypatch.setattr(em.httpx, "request", request)
+    monkeypatch.setattr(em, "_bases", lambda: ["https://api.example.test",
+                                               "https://apiz.example.test"])
+    return calls
+
+
+@pytest.mark.parametrize("lost", [httpx.ReadTimeout("slow"),
+                                  httpx.RemoteProtocolError("cut off"),
+                                  RuntimeError("something nobody expected")])
+def test_a_send_whose_answer_was_lost_says_so(monkeypatch, lost):
+    calls = _wire(monkeypatch, lost)
+    with pytest.raises(em.UnknownOutcome) as caught:
+        em._post("tok", "/commerce/message/v1/send_message", {"messageText": "hi"})
+    assert caught.value.outcome_unknown is True
+    assert "landed" in str(caught.value)
+    assert calls == ["POST"]        # never retried on the other host
+
+
+def test_a_send_that_never_left_is_a_plain_failure(monkeypatch):
+    _wire(monkeypatch, httpx.ConnectError("refused"))
+    with pytest.raises(em.MessagesError) as caught:
+        em._post("tok", "/commerce/message/v1/send_message", {"messageText": "hi"})
+    assert caught.value.outcome_unknown is False
+
+
+def test_ebay_falling_over_after_a_send_is_unknown_not_rejected(monkeypatch):
+    calls = _wire(monkeypatch, 502)
+    with pytest.raises(em.UnknownOutcome):
+        em._post("tok", "/commerce/message/v1/send_message", {"messageText": "hi"})
+    assert calls == ["POST"]
+
+
+def test_a_lost_read_is_just_a_read_to_repeat(monkeypatch):
+    _wire(monkeypatch, httpx.ReadTimeout("slow"))
+    with pytest.raises(em.MessagesError) as caught:
+        em._get("tok", "/commerce/message/v1/conversation")
+    assert caught.value.outcome_unknown is False
+
+
+def test_mark_read_swallows_an_unknown_outcome_too(monkeypatch):
+    """Best effort means best effort: an unconfirmed "I read this" is not an
+    error the seller sees for something they never asked for."""
+    _wire(monkeypatch, httpx.ReadTimeout("slow"))
+    assert em.mark_read("tok", "c-1") is False

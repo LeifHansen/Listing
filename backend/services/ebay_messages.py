@@ -68,9 +68,37 @@ class MessagesError(ValueError):
     the route can offer that instead of a generic outage message.
     """
 
+    outcome_unknown = False
+
     def __init__(self, message: str, *, needs_reconnect: bool = False):
         super().__init__(message)
         self.needs_reconnect = needs_reconnect
+
+
+class UnknownOutcome(MessagesError):
+    """A send went out and we never learned whether eBay delivered it.
+
+    "Couldn't reach eBay" reads as "it didn't go", and a seller who reads
+    that sends the message again — which, if the first one landed, puts the
+    same words in the buyer's inbox twice. So a lost answer on a write says
+    what it is and points at the thread, where the truth is one read away.
+    Reads stay plain MessagesErrors: asking again costs nothing.
+    """
+
+    outcome_unknown = True
+
+
+# Transport failures that prove the request never reached eBay. Anything
+# else -- a read timeout, a dropped connection mid-reply, an exception type
+# nobody here anticipated -- may have been acted on, the same asymmetry the
+# Trading, Etsy and Depop clients use.
+_NEVER_SENT = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+    httpx.UnsupportedProtocol, httpx.InvalidURL,
+)
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_UNKNOWN = ("eBay didn't confirm the send. Open the conversation to see "
+            "whether your message landed before sending it again.")
 
 
 # --- transport --------------------------------------------------------------
@@ -117,13 +145,23 @@ def _raise_for(resp: httpx.Response, verb: str) -> None:
 def _request(method: str, token: str, path: str, *, params=None, json=None,
              verb: str = "reading", allow_host_retry: bool = False) -> dict:
     global _HOST
+    changes = method.upper() in _WRITE_METHODS
     last: Optional[httpx.Response] = None
     for base in _bases():
         try:
             resp = httpx.request(method, f"{base}{path}", headers=_headers(token),
                                  params=params, json=json, timeout=_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - network/timeout
+        except _NEVER_SENT as exc:
             raise MessagesError(f"Couldn't reach eBay: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+            if changes:
+                raise UnknownOutcome(_UNKNOWN) from exc
+            raise MessagesError(f"Couldn't reach eBay: {exc}") from exc
+        if changes and resp.status_code >= 500:
+            # eBay's side fell over after the request arrived; it may or may
+            # not have applied it. Never try the other host: that is a second
+            # send.
+            raise UnknownOutcome(_UNKNOWN)
         if resp.status_code < 300:
             if _HOST != base:
                 _HOST = base
