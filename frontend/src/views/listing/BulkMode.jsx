@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
-  ArrowRight, X,
+  ArrowRight, CircleStop, X,
 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
@@ -424,6 +424,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // Watching was given up on (job gone, or too many failed polls). Without it
   // the pre-first-poll "Uploading…" state below would spin forever.
   const [unwatched, setUnwatched] = useState(false);
+  // "Stop batch" has been sent and accepted. Latched so the button can't be
+  // hit twice in the up-to-1.5s before the next poll brings back the finished
+  // job — and so it can say "Stopping…" instead of looking ignored.
+  const [stopping, setStopping] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
   const notFound = useRef(0);
@@ -563,6 +567,27 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       window.removeEventListener("focus", onVisible);
     };
   }, [jobId, loadListings, toast, onSettled]);
+
+  // Stop the batch. Nothing is deleted and nothing is lost: every item the
+  // batch has already drafted was saved as it finished and stays in Drafts, so
+  // this doesn't stop to ask — a seller who wants out of a batch that isn't
+  // moving should be out of it on the first tap. The server settles the job
+  // immediately and the worker stands down at its next item, so the screen
+  // lets go even when the batch itself is wedged somewhere it can't answer
+  // from, which is the case this exists for.
+  const stopBatch = useCallback(async () => {
+    setStopping(true);
+    try {
+      await postJson(`/api/bulk/cancel/${jobId}`, {});
+      toast("Stopping the batch — anything it already drafted is saved in Drafts.",
+            { kind: "info" });
+    } catch (e) {
+      // Still running, so the button goes back rather than leaving the seller
+      // looking at a "Stopping…" that never happened.
+      setStopping(false);
+      toast(`Couldn't stop the batch: ${e.message}`, { kind: "error" });
+    }
+  }, [jobId, toast]);
 
   const updateItem = (sid, listing) => {
     setItems((cur) => cur.map((it) =>
@@ -920,6 +945,18 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               ? `${items.length} item${items.length === 1 ? "" : "s"} drafted so far`
               : null}
           />
+          {/* Only once the server has the batch: before the job id lands there
+              is nothing to stop yet, and the photos are still on their way. */}
+          {jobId && (
+            <div className="flex justify-end">
+              <Button
+                variant="ghost" size="sm" onClick={stopBatch} disabled={stopping}
+                title="Stop this batch. Items already drafted stay in Drafts; the rest won't run."
+              >
+                <CircleStop aria-hidden /> {stopping ? "Stopping…" : "Stop batch"}
+              </Button>
+            </div>
+          )}
         </div>
       )}
       {job?.done && (
@@ -928,6 +965,15 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             <p className="text-sm font-semibold text-ink flex items-center gap-2 flex-1 min-w-0">
               {job.error
                 ? <><AlertTriangle size={17} className="text-warning" aria-hidden /> {job.error}</>
+                : job.cancelled
+                ? <>
+                    <CircleStop size={17} className="text-ink-secondary shrink-0" aria-hidden />
+                    <span title="The rest of the batch never ran, so it wasn't charged for.">
+                      You stopped this batch{items.length
+                        ? ` — the ${items.length} item${items.length === 1 ? "" : "s"} it finished ${items.length === 1 ? "is" : "are"} saved in Drafts`
+                        : " before it drafted anything"}.
+                    </span>
+                  </>
                 : <>
                     <CheckCircle2 size={17} className="text-success" aria-hidden />
                     <span title="Also saved in Drafts — review below or come back anytime.">

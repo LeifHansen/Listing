@@ -1025,7 +1025,8 @@ def _package_details(listing: Listing) -> str:
 def create_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
-                   idempotency_key: str = "") -> dict:
+                   idempotency_key: str = "",
+                   best_offer: bool = False) -> dict:
     """Publish a NEW listing through the Trading API.
 
     This is what keeps a listing editable everywhere. A listing published via
@@ -1049,6 +1050,9 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     listing findable by GetItem afterwards -- so a caller that loses the
     response can still find what it made. A collision raises
     AlreadyListedError instead of duplicating. Pass "" to opt out.
+
+    `best_offer` enables Best Offer on the new listing, with no minimum —
+    see build_add_item.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -1058,7 +1062,7 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
             "eBay needs to know where this ships from. Add your ship-from ZIP "
             "in Settings → Listing settings and publish again.")
     call, body = build_add_item(listing, image_urls, policies, postal_code,
-                                idempotency_key)
+                                idempotency_key, best_offer=best_offer)
     try:
         root = _call(call, token, body)
     except TradingError as exc:
@@ -1095,13 +1099,23 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
 def build_add_item(listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
-                   idempotency_key: str = "") -> tuple[str, str]:
+                   idempotency_key: str = "",
+                   best_offer: bool = False) -> tuple[str, str]:
     """(call name, <Item> XML) for a NEW listing.
 
     Exactly the body create_listing sends, built without touching the network
     or validating anything — so the dry-run preview and the real publish can
     never describe two different requests. An empty postal_code simply omits
     the element here; create_listing is what refuses to publish without one.
+
+    `best_offer` turns eBay's Best Offer on for this listing — the seller's
+    "Allow offers" account default (see listing_sync.offers_enabled). It is
+    deliberately the whole of the feature: no MinimumBestOfferPrice and no
+    BestOfferAutoAcceptPrice go with it, so no offer is auto-declined and none
+    is auto-accepted. Every offer reaches the seller to answer. Those two
+    prices are eBay's auto-decline / auto-accept thresholds, and picking
+    either on the seller's behalf would sell an item, or bin a buyer, at a
+    number they never named.
     """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
@@ -1121,6 +1135,15 @@ def build_add_item(listing: Listing, image_urls: list[str],
         parts.append("<ListingType>FixedPriceItem</ListingType>"
                      "<ListingDuration>GTC</ListingDuration>"
                      f"<Quantity>{max(1, int(listing.quantity or 1))}</Quantity>")
+
+    # Best Offer, fixed-price only. eBay does not offer it on auction-format
+    # listings (a Chinese auction already has a bidding mechanism), and asking
+    # for it there is a rejection of the whole publish rather than a listing
+    # without offers — so an auction drafted while "Allow offers" is on still
+    # publishes, as an ordinary auction. AUCTION_BIN is an auction too.
+    if best_offer and not is_auction:
+        parts.append("<BestOfferDetails><BestOfferEnabled>true"
+                     "</BestOfferEnabled></BestOfferDetails>")
 
     parts.append(f"<Country>{_esc(config.EBAY_MARKETPLACE_ID[-2:] or 'US')}</Country>")
     parts.append(f"<Currency>{_esc(listing.currency or config.EBAY_CURRENCY)}</Currency>")
@@ -1178,7 +1201,8 @@ _VERIFY_CALL = {"AddItem": "VerifyAddItem",
 
 def verify_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
-                   postal_code: str = "") -> None:
+                   postal_code: str = "",
+                   best_offer: bool = False) -> None:
     """Ask eBay whether it WOULD accept this listing. Nothing is listed.
 
     Returns None when eBay says it would take it, and raises TradingError —
@@ -1192,7 +1216,7 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
     the real publish it is diagnosing.
     """
     call, body = build_add_item(listing, image_urls, policies, postal_code,
-                                idempotency_key="")
+                                idempotency_key="", best_offer=best_offer)
     _call(_VERIFY_CALL[call], token, body)
 
 

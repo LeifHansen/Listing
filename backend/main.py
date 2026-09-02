@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
-               objstore, ratelimit, storage)
+               objstore, ratelimit, redact, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
@@ -55,6 +55,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
+from .services import errorlog
 from .services.background import run_in_background
 
 
@@ -100,6 +101,10 @@ app.add_middleware(
                    "https://localhost", "http://localhost"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the Capacitor shell cannot READ the header, so a crash
+    # reported from the native app would carry no reference and could not be
+    # joined to the request that caused it.
+    expose_headers=["X-Request-Id"],
     max_age=86400,
 )
 
@@ -185,6 +190,11 @@ def build_csp(index_html: Path) -> str:
 # The response headers a browser needs in order to defend the seller, none of
 # which were being sent. Assembled once — they are the same on every response.
 _CSP = build_csp(FRONTEND_DIR / "index.html")
+
+# An inbound X-Request-Id is echoed back and written into logs, so its shape
+# is checked before it is trusted with either: 8-32 hex characters, which is
+# what this app mints and nothing else.
+_REFERENCE_RE = re.compile(r"[0-9a-fA-F]{8,32}")
 
 _SECURITY_HEADERS = {
     "Content-Security-Policy": _CSP,
@@ -291,6 +301,57 @@ async def _out_of_space(request: Request, exc: OSError):
     )
 
 
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """The last resort: a crash answers with a reference somebody can quote.
+
+    Until this existed, anything nobody handled fell through to Starlette's
+    default and became a bare "Internal Server Error" — no reference, no
+    record, and nothing tying the seller's report to the traceback uvicorn
+    printed. The seller was shown a fault with no next step, which is the same
+    complaint the two handlers above were written for.
+
+    Two things about this are easy to get wrong.
+
+    It does NOT swallow. Starlette's ServerErrorMiddleware calls this handler
+    to build the response and then re-raises, so uvicorn still logs the
+    traceback and TestClient(raise_server_exceptions=True) still raises. The
+    handler is additive; no existing test changes behaviour because of it.
+
+    It runs OUTSIDE every @app.middleware("http"), including _security_headers
+    — ServerErrorMiddleware is the outermost layer Starlette installs. So the
+    headers have to be applied here by hand, or the one response an attacker
+    can most easily steer the app into would be the only one served without a
+    CSP. test_security_headers.py::test_an_error_response_is_protected_too
+    passes today only because a 404 is raised INSIDE the middleware stack.
+    """
+    reference = errorlog.current_reference() or errorlog.new_reference()
+    # error, not exception: ServerErrorMiddleware re-raises after this, so
+    # uvicorn prints the traceback anyway and log.exception would put a
+    # second copy of it in the Fly window. The row below keeps its own.
+    #
+    # errorlog_skip stops the capture handler recording this line as well:
+    # it would fingerprint on THIS function, so every unhandled error in the
+    # app would collapse into one row called "_unhandled". The explicit
+    # record() below fingerprints at the innermost frame instead — the place
+    # that actually broke.
+    log.error("unhandled error on %s %s [%s]: %s", request.method,
+              request.url.path, reference, exc,
+              extra={"errorlog_skip": True})
+    errorlog.record(kind="backend", level="ERROR", exc=exc, status=500,
+                    route=request.url.path, method=request.method,
+                    reference=reference)
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Something went wrong on our end. If you need "
+                           f"help, quote {reference}."},
+    )
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    response.headers.setdefault("X-Request-Id", reference)
+    return response
+
+
 class _DropDeletionAcks(logging.Filter):
     """Drop the access-log lines for successfully acked eBay account-deletion
     notifications. eBay sends them 1-2 times a MINUTE, around the clock, and
@@ -309,6 +370,15 @@ class _DropDeletionAcks(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(_DropDeletionAcks())
+
+# Mirror WARNING-and-above into error_events, so the Errors tab and the daily
+# triage job have something to read. Installed here, beside the other log
+# wiring, rather than in config.py — importing config must never start a
+# thread or open a database connection, since every test and every script
+# does it. See services/errorlog for why capture is at the handler and not at
+# the 400-odd call sites. This only fills an in-memory queue; the thread that
+# drains it into Postgres starts with the other daemons in _warm_models.
+errorlog.install()
 
 # The frontend is a Vite/React app; serve its build output. (The Dockerfile
 # builds it in a node stage; run.sh builds it for local dev.)
@@ -349,6 +419,36 @@ async def _cache_headers(request: Request, call_next):
         # debugging an account switch against yesterday's answer. no-store,
         # not no-cache: there is nothing here worth revalidating.
         response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.middleware("http")
+async def _request_context(request: Request, call_next):
+    """Give every request an id, and publish it as X-Request-Id.
+
+    Registered LAST on purpose. With @app.middleware("http") the last one
+    registered runs OUTERMOST, so this opens the context before
+    _cache_headers, _security_headers or any route can log a line — which is
+    the whole point, since a line logged before the context exists carries no
+    reference and joins to nothing.
+
+    The id is the same 8 hex characters _support_reference() has always
+    minted, and it is now the SAME VALUE the seller is shown. Before this,
+    each failure site minted its own, so the reference in a toast joined to
+    exactly one log line; it now joins to every line that request emitted,
+    plus its row in error_events.
+
+    An inbound X-Request-Id is honoured so the native shell (or a future
+    proxy) can carry one end to end. It is not a trusted value and never
+    reaches a query — it is a label, validated for shape only.
+    """
+    inbound = (request.headers.get("x-request-id") or "").strip()
+    reference = inbound if _REFERENCE_RE.fullmatch(inbound) else \
+        errorlog.new_reference()
+    errorlog.begin_request(method=request.method, path=request.url.path,
+                           reference=reference)
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-Id", reference)
     return response
 
 
@@ -573,6 +673,10 @@ def _warm_models() -> None:
     threading.Thread(target=objstore.probe, daemon=True).start()
     threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
+    # Drains the error queue into the database. Started here rather than at
+    # import, so a pytest run or a one-off script does not get a thread
+    # racing whatever it was about to assert.
+    errorlog.start_writer()
 
 
 def _base_url(request: Request) -> str:
@@ -1007,6 +1111,104 @@ def admin_run_compliance(request: Request) -> dict:
     return {"ok": True, "deletions": finished, "refunds_settled": refunds}
 
 
+def _require_error_feed(request: Request) -> None:
+    """The triage job's door. Fails CLOSED, like _require_admin.
+
+    A twin of _require_admin rather than a reuse of it, reading its own
+    ERROR_FEED_TOKEN. The distinction is the point: ADMIN_TOKEN also opens
+    /api/admin/diagnostics, which reports raw database and object-store
+    exception text — the Neon host, the role, the R2 account. A scheduled job
+    that reads which bugs are open has no business holding that, and a
+    credential in CI is the one most likely to leak.
+    """
+    expected = (config.ERROR_FEED_TOKEN or "").strip()
+    supplied = (request.headers.get("x-error-feed-token") or "").strip()
+    if not expected or not supplied or not secrets.compare_digest(supplied,
+                                                                 expected):
+        raise HTTPException(401, "Not authorised.")
+
+
+def _error_report(before: str = "", limit: int = 50, since_hours: int = 0,
+                  min_severity: str = "", include_resolved: bool = True
+                  ) -> dict:
+    """The distinct failures, newest-seen first. Shared by both doors below.
+
+    `sink` rides along because a queue that is dropping rows would otherwise
+    look exactly like a quiet day — the most dangerous thing a monitor can
+    do. It is the lesson check_health.py's docstring records, one layer down:
+    an alarm that cannot tell "nothing happened" from "I could not see" is
+    worse than no alarm.
+    """
+    limit = max(1, min(limit, 200))
+    cursor = _cursor_from(before) if before else None
+    rows = db.error_events_list(limit=limit + 1, before=cursor,
+                                since_hours=since_hours,
+                                min_severity=min_severity,
+                                include_resolved=include_resolved)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return {"errors": rows,
+            "sink": errorlog.stats(),
+            "next_cursor": (_admin_cursor(rows[-1].get("last_seen"),
+                                          rows[-1].get("id"))
+                            if truncated and rows else None)}
+
+
+@app.get("/api/admin/errors")
+def admin_errors(request: Request, before: str = "", limit: int = 50,
+                 since_hours: int = 0, severity: str = "",
+                 include_resolved: bool = True) -> dict:
+    """The console's Errors tab. Session-gated, like the rest of the console."""
+    _require_superadmin(request)
+    return _error_report(before=before, limit=limit, since_hours=since_hours,
+                         min_severity=severity,
+                         include_resolved=include_resolved)
+
+
+@app.get("/api/ops/error-feed")
+def ops_error_feed(request: Request, limit: int = 50, since_hours: int = 36,
+                   severity: str = "") -> dict:
+    """The same report, for the daily triage job. Token-gated.
+
+    Two doors onto one payload, exactly as /api/admin/system and
+    /api/admin/diagnostics already coexist: the session door authenticates a
+    PERSON, which is right for the console and wrong for a robot that would
+    have to hold a human's long-lived session to use it.
+
+    Under /api/ops rather than /api/admin, and that is not cosmetic.
+    test_every_console_route_is_gated walks app.routes and requires EVERY
+    /api/admin/ path to answer 404 to a non-superadmin — "the next admin route
+    is born tested". It carries exactly one exception, /api/admin/diagnostics,
+    described in its own docstring as the older door. Adding two more would
+    turn a guardrail that cannot be forgotten into a list somebody maintains,
+    which is how the next unreviewed cross-user read ships. Machine doors get
+    their own prefix instead, and the console's guarantee stays absolute.
+
+    Defaults to a 36-hour window rather than 24: the job runs on a daily cron,
+    and a calendar-day read drops anything that happened in the seam between
+    one run and the next. Overlap costs nothing, because the fingerprint
+    dedupes.
+    """
+    _require_error_feed(request)
+    return _error_report(limit=limit, since_hours=since_hours,
+                         min_severity=severity, include_resolved=False)
+
+
+@app.post("/api/ops/errors/{fingerprint}/fixed")
+def ops_error_fixed(fingerprint: str, request: Request,
+                    payload: Optional[dict] = None) -> dict:
+    """Mark a failure as having a fix proposed, so the job stops proposing one.
+
+    Token-gated, and under /api/ops for the reason the feed above gives. It
+    is never cleared automatically — if the bug returns, `last_seen` moves and
+    the row surfaces again on its own, which is a fact rather than a guess
+    about whether the fix worked.
+    """
+    _require_error_feed(request)
+    pr = str((payload or {}).get("pr") or "")[:200]
+    return {"ok": db.mark_error_fixed(fingerprint, pr)}
+
+
 @app.get("/api/admin/audit")
 def admin_audit_view(request: Request, before: str = "",
                      limit: int = 50) -> dict:
@@ -1026,6 +1228,92 @@ def admin_audit_view(request: Request, before: str = "",
 # as "not ready" is what lets a deploy or a load balancer act on it before a
 # seller loses a batch.
 READY_MIN_DISK_MB = int(os.getenv("READY_MIN_DISK_MB", "200") or 200)
+
+
+# A browser crash report. Everything about this route is shaped by one fact:
+# it cannot require a session. A throw inside the app shell means there may be
+# no session to authenticate with, and the crashes worth hearing about are
+# exactly the ones that stop the app working — so an authenticated ingest
+# would miss them. That makes it the only unauthenticated WRITE the app has,
+# and the guards below are what pay for it.
+CLIENT_ERROR_MAX_BYTES = 16 * 1024
+# A ceiling across ALL clients, not just each one. The per-IP limit stops one
+# broken browser; this stops a spray from many.
+CLIENT_ERROR_GLOBAL_MAX = 600
+
+
+@app.post("/api/client-errors", status_code=202)
+async def client_error(request: Request) -> dict:
+    """Record a crash the browser saw. Always answers 202, tells you nothing.
+
+    The frontend had no error reporting at all: no boundary, no window.onerror,
+    no ingest. A React render crash was a white screen that reached nobody.
+
+    It answers 202 and an empty ok whether it recorded the report, threw it
+    away for rate limiting, or could not parse it — deliberately. A 429 would
+    tell a prober where the limit is, and the client treats any answer as
+    final, which is what stops a failed report becoming the next report. The
+    client is never told whether it was heard; it is not a channel.
+
+    Nothing from the body is echoed back, and every field is truncated here as
+    well as in the browser — the browser's caps are a courtesy, not a control.
+    """
+    ok = {"ok": True}
+    try:
+        raw = request.headers.get("content-length")
+        if raw and int(raw) > CLIENT_ERROR_MAX_BYTES:
+            return ok
+    except (TypeError, ValueError):
+        return ok
+
+    ip = _client_ip(request)
+    if not ratelimit.check(f"clienterr:{ip}",
+                           max_attempts=config.CLIENT_ERROR_MAX_PER_WINDOW):
+        return ok
+    if not ratelimit.check("clienterr:_all",
+                           max_attempts=CLIENT_ERROR_GLOBAL_MAX):
+        return ok
+
+    try:
+        body = await request.body()
+        if len(body) > CLIENT_ERROR_MAX_BYTES:
+            return ok
+        payload = json.loads(body or b"{}")
+        if not isinstance(payload, dict):
+            return ok
+    except Exception:  # noqa: BLE001 - a malformed report is not an incident
+        return ok
+
+    def _text(key: str, cap: int) -> str:
+        value = payload.get(key)
+        return (value if isinstance(value, str) else "")[:cap]
+
+    message = _text("message", 500)
+    if not message:
+        return ok
+    stack = _text("stack", 8000)
+    component = _text("component_stack", 4000)
+    # Fingerprinted on the message and the component stack, never on the URL:
+    # /listing/abc and /listing/def are the same bug. The minified frame is
+    # useless for reading but stable within a build, so it separates two
+    # different crashes carrying the same message.
+    errorlog.record(
+        kind="frontend",
+        level="ERROR",
+        message=message,
+        template=f"{_text('name', 120)}: {message}",
+        module="browser",
+        func=(component.split("\n")[1].strip() if "\n" in component
+              else _text("kind", 40)) or "unknown",
+        route=_text("url", 200),
+        method="CLIENT",
+        reference=_text("request_id", 16),
+        sample={"stack": redact.scrub(stack, max_len=8000),
+                "component_stack": redact.scrub(component, max_len=4000),
+                "build": _text("build", 40),
+                "reported_as": _text("kind", 40)},
+    )
+    return ok
 
 
 @app.get("/api/ready")
@@ -1536,6 +1824,12 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
 
 def _uid(request: Request):
     user = auth.current_user(request)
+    # The one choke point where the seller's id is already resolved. Doing
+    # this in the request middleware instead would add a database read to
+    # every asset fetch — and auth.current_user RAISES StorageUnavailable on
+    # a database blip, which would turn one Neon hiccup into a failing
+    # liveness probe on the only machine.
+    errorlog.note_user(user["id"] if user else "")
     return user["id"] if user else None
 
 
@@ -2867,6 +3161,12 @@ _PREF_FIELDS = {
     # "Missing = ON", which is what the code did before P1-06 — left here it is
     # an invitation to restore it.
     "auto_promote": (int, 0, 1),
+    # Accept Best Offer on every new listing, with no minimum: eBay sends the
+    # seller every offer to accept or decline. OFF unless explicitly saved on
+    # — see services/listing_sync.offers_enabled, which is where the decision
+    # is actually made, and which also explains why it never touches a listing
+    # that is already live.
+    "allow_offers": (int, 0, 1),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 
@@ -2999,7 +3299,16 @@ _COMP_QUERY_WORDS = 5
 # below: it may name a work, fill a blank, raise a price and raise a question.
 # It may never downgrade an item, lower a price, or overwrite something the
 # seller can already see is right.
-RESEARCH_PASS = os.getenv("RESEARCH_PASS", "auto").strip().lower() or "auto"
+#
+# OFF unless asked for. The lookup is a second vision call with up to
+# RESEARCH_MAX_SEARCHES web searches inside it, and it runs INSIDE the
+# identify request — the seller (or the whole bulk batch) waits on it. The
+# gate below catches most of a thrift store ("edition", "rare", "book",
+# "record", "glass"...), so the morning it shipped on "auto" every identify
+# went from seconds to a minute or more and the app read as broken. Set
+# RESEARCH_PASS=auto (or always) to turn it on; the fix that lets it run
+# without holding the draft hostage is the one that earns "auto" back.
+RESEARCH_PASS = os.getenv("RESEARCH_PASS", "off").strip().lower() or "off"
 
 # Words in a draft that mean an identification decides the price. Any of them
 # and the item gets looked up: this is the "is this the expensive one?" list.
@@ -3331,8 +3640,17 @@ def _support_reference() -> str:
     Short because someone has to read it out or paste it into an email. It is
     not a secret and identifies nothing on its own — it exists so mapping a
     failure to a product state does not throw the evidence away.
+
+    It now returns the CURRENT REQUEST's id rather than minting a fresh one
+    per failure. Same alphabet, same width, and every existing call site is
+    unchanged — but the reference a seller quotes now identifies the whole
+    request, so it joins to every line that request logged and to its row in
+    error_events, instead of to the single line at one failure site.
+
+    Falls back to a fresh value off-request (a background sweep, a startup
+    task), where there is no context to belong to.
     """
-    return secrets.token_hex(4)
+    return errorlog.current_reference() or errorlog.new_reference()
 
 
 def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPException:
@@ -4729,6 +5047,18 @@ _register_bulk_job = jobstore.register
 _bulk_set = jobstore.update
 
 
+class _BatchStopped(Exception):
+    """The seller stopped this batch (POST /api/bulk/cancel/{job_id})."""
+
+
+def _stop_if_cancelled(job_id: str) -> None:
+    """Leave the batch if it has been called off. Placed only between whole
+    units of work — a photo, an item — because stopping inside one would throw
+    away AI the seller has already been charged for."""
+    if jobstore.cancel_requested(job_id):
+        raise _BatchStopped()
+
+
 # How many times one batch may be picked up again. A batch that dies, resumes,
 # and dies again is not unlucky — it is hitting something it will keep hitting
 # (a photo that OOMs the box, most likely), and a machine that restarts into
@@ -4793,6 +5123,10 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
         if record.get("kind") or not job_id or not staging:
             continue
         if record.get("phase") not in _RESUMABLE_PHASES:
+            continue
+        if record.get("_cancel"):
+            # Stopped on purpose. The restart is not a second chance to run
+            # work the seller has already said they don't want.
             continue
         resumes = int(record.get("_resumes") or 0)
         if resumes >= BULK_MAX_RESUMES:
@@ -4877,6 +5211,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     bg_refunded = 0
     n_photos = 0
     delivered = False
+    # Declared out here so a batch the seller stops can still report the items
+    # it had drafted by then — they are saved listings, not a partial result.
+    items: list[dict] = []
     try:
         # Bulk background removal is metered per photo, charged before the
         # engines run. Not enough tokens -> photos are kept as-is (with a
@@ -4898,12 +5235,16 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # by a full one would pay the user twice — so the accounting
                 # has to live here.
                 bg_charged = tokens.cost("image_ai", n_photos)
+        _stop_if_cancelled(job_id)
         _bulk_set(job_id, phase="optimizing", current=0)
         opt_results = images.optimize_all(
             storage.original_dir(staging_id), storage.optimized_dir(staging_id),
             strip_bg,
             progress=lambda done, total: _bulk_set(job_id, current=done,
-                                                   total_photos=total))
+                                                   total_photos=total),
+            # The photo pass is where a long batch spends its time, so the stop
+            # has to reach inside it rather than waiting for the whole pile.
+            should_stop=lambda: jobstore.cancel_requested(job_id))
         # Surface a background-removal failure (out of credits, bad key, rate
         # limit) on the job so the UI can say WHY the photos came back with
         # their backgrounds intact — silence here reads as "the feature is
@@ -4964,6 +5305,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # worst case a boundary item shows up as two entries to merge by hand.
         groups: list[dict] = []
         for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
+            _stop_if_cancelled(job_id)
             part = claude_ai.group_photos(
                 thumbs[base:base + BULK_GROUP_CHUNK], notes=notes)["groups"]
             groups.extend({"name": g["name"],
@@ -4971,8 +5313,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                           for g in part)
         _bulk_set(job_id, total_items=len(groups))
 
-        items: list[dict] = []
         for gi, group in enumerate(groups):
+            # Between items, never inside one: an item that has started has
+            # already been charged for, so it is finished and saved.
+            _stop_if_cancelled(job_id)
             _bulk_set(job_id, phase="identifying", current=gi + 1, items=list(items))
             sid = storage.new_session_id()
             item_dir = storage.optimized_dir(sid)
@@ -5047,6 +5391,22 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         delivered = True
         _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
         log.info("bulk %s: %d photos -> %d items", job_id, len(names), len(items))
+    except (_BatchStopped, images.Stopped):
+        # The seller stopped this batch. Every item it had already drafted was
+        # saved as it finished, so this reports them rather than throwing them
+        # away; the rest never ran, so it never charged. The job is already
+        # marked done by the request itself (see jobstore.request_cancel) —
+        # this is the worker agreeing, and handing over what it got to.
+        #
+        # `delivered` here is about the background-removal charge, which was
+        # taken per photo up front: cutouts that rode out on a saved draft were
+        # delivered and stand, and a stop before the first draft delivered
+        # nothing, so the `finally` below gives the whole remainder back.
+        delivered = bool(items)
+        _bulk_set(job_id, phase="stopped", done=True, cancelled=True,
+                  items=items, current=len(items))
+        log.info("bulk %s: stopped by the seller after %d item(s)",
+                 job_id, len(items))
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
         if exc.errno == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)
@@ -5180,6 +5540,29 @@ def bulk_status(job_id: str, request: Request) -> Response:
     if body is None:
         raise HTTPException(404, "Unknown bulk job.")
     return Response(content=body, media_type="application/json")
+
+
+@app.post("/api/bulk/cancel/{job_id}")
+def bulk_cancel(job_id: str, request: Request) -> dict:
+    """Stop a running batch.
+
+    The seller's way off a batch that is taking longer than they are willing to
+    wait — or one that has stopped moving. It settles the job for the client
+    straight away and asks the worker to stand down at its next checkpoint
+    (between photos, between items), so nothing is abandoned mid-item and
+    nothing is charged for work that never runs.
+
+    Nothing is deleted: every item the batch had already drafted is a saved
+    listing and stays in Drafts. 404 covers both an unknown id and someone
+    else's, exactly as the status endpoints do.
+    """
+    outcome = jobstore.request_cancel(job_id, _uid(request))
+    if outcome is None:
+        raise HTTPException(404, "Unknown bulk job.")
+    # "It had already finished" is not a failure — the seller asked for it to
+    # be over, and it is. Say which happened so the UI can word it honestly.
+    return {"ok": True, "stopped": outcome == "stopping",
+            "already_finished": outcome == "finished"}
 
 
 @app.get("/api/bulk/status/{job_id}/brief")
@@ -5694,7 +6077,7 @@ def duplicate_listings(request: Request) -> dict:
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, relist ended items, promote/reprice stale live ones. Folds in
+    finish drafts, promote/reprice stale live ones. Folds in
     eBay views/watchers and recommended ad rates when available. Returns an empty
     list for logged-out users. Never raises."""
     user = auth.current_user(request)

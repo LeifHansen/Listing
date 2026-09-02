@@ -31,8 +31,12 @@ def test_one_rec_per_listing_keeps_strongest():
 
 
 def test_sorted_by_priority_desc():
-    items = [_published(0), {"id": "e1", "status": "ended", "title": "Ended",
-                             "listing": {"title": "Ended"}}]
+    # An UNLISTED draft, not an ended listing: ended records earn nothing now
+    # (relisting was dropped as advice), so using one here would leave a
+    # single-element list and an assertion that cannot fail.
+    items = [_published(0), {"id": "d1", "status": "unlisted", "title": "Draft",
+                             "listing": {"title": "Draft"}}]
     recs = recommender.recommendations(items, limit=50)
     priorities = [r["priority"] for r in recs]
+    assert len(priorities) == 2, "the ordering is only tested if both items rank"
     assert priorities == sorted(priorities, reverse=True)

@@ -321,6 +321,73 @@ class AdminAuditLog(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ErrorEvent(Base):
+    """One row per DISTINCT failure, with a count — not one row per occurrence.
+
+    The app had no telemetry before this: stdout, a bounded Fly window, and a
+    human running a workflow to read it. This is the queryable half, feeding
+    the console's Errors tab and the daily triage job.
+
+    Aggregating on `fingerprint` is what makes both possible. A bug hit ten
+    thousand times is one row that says ten thousand, so the table is bounded
+    by how many DISTINCT things are broken rather than by traffic, and the
+    daily job gets a work-list it can read instead of a firehose. The unique
+    constraint is the same device Notification.dedupe_key uses: the database
+    guarantees the collapse, so two writers racing on a new bug produce one
+    row and a count of two rather than an error anybody has to handle.
+
+    `lineno`, `build` and `route` are stored but deliberately NOT part of the
+    fingerprint (see services/errorlog). They are here to be read; hashing
+    them would mint a fresh identity on every refactor and every deploy, and
+    the daily job would open the same pull request every morning forever.
+
+    Deliberately no ForeignKeys, matching the rest of the schema, and
+    `user_id` denormalized: a row has to outlive the account it came from,
+    or erasing a seller erases the evidence of the bug they hit.
+    """
+
+    __tablename__ = "error_events"
+    # The console reads newest-first with a keyset cursor on exactly this
+    # pair — same shape as the audit log and the listings pager. The upsert's
+    # own lookup is served by the unique constraint on fingerprint, so it
+    # needs no index of its own.
+    __table_args__ = (Index("ix_error_events_last_seen", "last_seen", "id"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # 16 hex characters from services.errorlog.fingerprint. Unique: this IS
+    # the deduplication.
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    kind: Mapped[str] = mapped_column(String(16), default="backend")  # backend|frontend
+    level: Mapped[str] = mapped_column(String(16), default="ERROR")
+    # high|medium|low, derived rather than taken from level — the fail-soft
+    # convention logs genuine crashes at WARNING. See errorlog.severity.
+    severity: Mapped[str] = mapped_column(String(8), default="low", index=True)
+    exc_type: Mapped[str] = mapped_column(String(120), default="")
+    message: Mapped[str] = mapped_column(String(2000), default="")
+    traceback: Mapped[str] = mapped_column(String(8000), default="")
+    route: Mapped[str] = mapped_column(String(200), default="")
+    method: Mapped[str] = mapped_column(String(8), default="")
+    status: Mapped[Optional[int]] = mapped_column(nullable=True)
+    # The support reference the seller was shown for the most recent
+    # occurrence, so a complaint joins straight to this row.
+    reference: Mapped[str] = mapped_column(String(16), default="")
+    build: Mapped[str] = mapped_column(String(40), default="")
+    module: Mapped[str] = mapped_column(String(120), default="")
+    func: Mapped[str] = mapped_column(String(120), default="")
+    lineno: Mapped[Optional[int]] = mapped_column(nullable=True)
+    user_id: Mapped[str] = mapped_column(String(64), default="")
+    count: Mapped[int] = mapped_column(default=1)
+    first_seen: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    # Set when a fix ships, so the daily job stops proposing one. Never
+    # cleared automatically: a bug that comes back gets a fresh look because
+    # last_seen moves, not because this was reset behind somebody's back.
+    resolved_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    fix_pr: Mapped[str] = mapped_column(String(200), default="")
+    data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
 def enabled() -> bool:
     return bool(config.DATABASE_URL)
 
@@ -2472,6 +2539,201 @@ def admin_audit_list(limit: int = 50,
         raise StorageUnavailable(
             "Couldn't read the audit log just now. Try again in a moment."
         ) from exc
+
+
+# --- error events -----------------------------------------------------------
+#
+# The one write path below this line that does NOT raise, and the exception is
+# deliberate. Everything else here follows the module read policy above: a
+# report that cannot be read says so rather than inventing a zero, and
+# admin_audit refuses to let an unrecordable action run. Recording an ERROR is
+# the opposite trade — the failure already happened to a seller, and turning it
+# into a second, unhandled failure to complain about the bookkeeping helps
+# nobody. So the writer swallows and the READER still raises.
+
+def record_error_event(*, fingerprint: str, kind: str = "backend",
+                       level: str = "ERROR", severity: str = "low",
+                       exc_type: str = "", message: str = "",
+                       traceback: str = "", route: str = "", method: str = "",
+                       status=None, reference: str = "", build: str = "",
+                       module: str = "", func: str = "", lineno=None,
+                       user_id: str = "", occurrences: int = 1,
+                       extra: Optional[dict] = None) -> bool:
+    """Upsert one distinct failure. Returns whether it landed. NEVER raises.
+
+    A new fingerprint inserts; a known one bumps `count` and moves
+    `last_seen`, keeping the FIRST message and traceback — the first
+    occurrence is the one that happened before anything else started failing
+    in response to it.
+
+    The IntegrityError branch is not theoretical: two writers racing on a
+    genuinely new bug both find nothing and both insert. The unique
+    constraint picks a winner and the loser takes the update path, which is
+    exactly the behaviour add_notification gets from its dedupe_key.
+    """
+    if not fingerprint:
+        return False
+    try:
+        # Inside the try: _get_engine() runs create_all on first call and
+        # RAISES when the database is unreachable, which is precisely the
+        # case this function promises to survive.
+        eng = _get_engine()
+        if eng is None:
+            return False
+        now = _now()
+        bump = max(1, int(occurrences or 1))
+        with Session(eng) as s:
+            row = s.execute(
+                select(ErrorEvent).where(
+                    ErrorEvent.fingerprint == fingerprint)).scalar_one_or_none()
+            if row is None:
+                s.add(ErrorEvent(
+                    id=_uuid.uuid4().hex, fingerprint=fingerprint[:64],
+                    kind=kind[:16], level=level[:16], severity=severity[:8],
+                    exc_type=exc_type[:120], message=message[:2000],
+                    traceback=traceback[:8000], route=route[:200],
+                    method=method[:8],
+                    status=int(status) if isinstance(status, int) else None,
+                    reference=reference[:16], build=build[:40],
+                    module=module[:120], func=func[:120],
+                    lineno=int(lineno) if isinstance(lineno, int) else None,
+                    user_id=user_id[:64], count=bump,
+                    first_seen=now, last_seen=now, data=extra or None))
+                try:
+                    s.commit()
+                    return True
+                except IntegrityError:
+                    s.rollback()
+                    row = s.execute(
+                        select(ErrorEvent).where(
+                            ErrorEvent.fingerprint == fingerprint)
+                    ).scalar_one_or_none()
+                    if row is None:
+                        return False
+            row.count = (row.count or 0) + bump
+            row.last_seen = now
+            row.severity = severity[:8] or row.severity
+            if reference:
+                row.reference = reference[:16]
+            if build:
+                row.build = build[:40]
+            if route:
+                row.route = route[:200]
+            # A traceback arriving later than the first sighting is strictly
+            # more than we had; take it. Never overwrite one we already hold.
+            if traceback and not row.traceback:
+                row.traceback = traceback[:8000]
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 - see the note above this function
+        log.debug(f"db: record_error_event failed: {exc}")
+        return False
+
+
+def error_events_list(limit: int = 50,
+                      before: Optional[tuple[_dt.datetime, str]] = None,
+                      since_hours: int = 0, min_severity: str = "",
+                      include_resolved: bool = True) -> list[dict]:
+    """Distinct failures, most recently seen first. RAISES on a read failure.
+
+    Keyset on (last_seen, id) — the same spelled-out OR shape as
+    admin_audit_list and list_listings, so the console's "load older" button
+    behaves identically here.
+    """
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            q = select(ErrorEvent)
+            if before is not None:
+                ts, last_id = before
+                q = q.where(or_(ErrorEvent.last_seen < ts,
+                                and_(ErrorEvent.last_seen == ts,
+                                     ErrorEvent.id < last_id)))
+            if since_hours:
+                cutoff = _now() - _dt.timedelta(hours=int(since_hours))
+                q = q.where(ErrorEvent.last_seen >= cutoff)
+            if min_severity == "high":
+                q = q.where(ErrorEvent.severity == "high")
+            elif min_severity == "medium":
+                q = q.where(ErrorEvent.severity.in_(("high", "medium")))
+            if not include_resolved:
+                q = q.where(ErrorEvent.resolved_at.is_(None))
+            q = q.order_by(ErrorEvent.last_seen.desc(),
+                           ErrorEvent.id.desc()).limit(limit)
+            return [_error_event_dict(r) for r in s.execute(q).scalars().all()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: error_events_list failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't read the error log just now. Try again in a moment."
+        ) from exc
+
+
+def _error_event_dict(r: "ErrorEvent") -> dict:
+    return {"id": r.id, "fingerprint": r.fingerprint, "kind": r.kind,
+            "level": r.level, "severity": r.severity, "exc_type": r.exc_type,
+            "message": r.message, "traceback": r.traceback, "route": r.route,
+            "method": r.method, "status": r.status, "reference": r.reference,
+            "build": r.build, "module": r.module, "func": r.func,
+            "lineno": r.lineno, "user_id": r.user_id, "count": r.count,
+            "first_seen": r.first_seen.isoformat() if r.first_seen else None,
+            "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+            "resolved_at": (r.resolved_at.isoformat()
+                            if r.resolved_at else None),
+            "fix_pr": r.fix_pr, "data": r.data or {}}
+
+
+def mark_error_fixed(fingerprint: str, pr: str = "") -> bool:
+    """Record that a fix has been proposed for this failure. Never raises.
+
+    Sets `resolved_at` so the daily job stops proposing another one. It is
+    never cleared automatically: if the bug comes back, `last_seen` moves and
+    the row surfaces again on its own, which is a fact rather than somebody's
+    guess about whether the fix worked.
+    """
+    if not fingerprint:
+        return False
+    try:
+        eng = _get_engine()  # raises when unreachable — see record_error_event
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            row = s.execute(
+                select(ErrorEvent).where(
+                    ErrorEvent.fingerprint == fingerprint)).scalar_one_or_none()
+            if row is None:
+                return False
+            row.resolved_at = _now()
+            row.fix_pr = (pr or "")[:200]
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"db: mark_error_fixed failed: {exc}")
+        return False
+
+
+def prune_error_events(ttl_days: int = 30) -> int:
+    """Drop failures nothing has seen in `ttl_days`. Returns rows removed.
+
+    Aggregation already bounds the table by how many DISTINCT things are
+    broken. This bounds how long a fixed one keeps being listed.
+    """
+    if ttl_days <= 0:
+        return 0
+    try:
+        eng = _get_engine()  # raises when unreachable — see record_error_event
+        if eng is None:
+            return 0
+        cutoff = _now() - _dt.timedelta(days=int(ttl_days))
+        with Session(eng) as s:
+            result = s.execute(
+                delete(ErrorEvent).where(ErrorEvent.last_seen < cutoff))
+            s.commit()
+            return int(result.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"db: prune_error_events failed: {exc}")
+        return 0
 
 
 def _as_float(value) -> Optional[float]:

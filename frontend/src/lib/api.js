@@ -2,6 +2,7 @@ import {
   ensureAiConsent, grantAiConsent, hasAiConsent,
 } from "@/lib/aiConsent";
 import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
+import { noteRequestId } from "@/lib/clientErrors";
 
 // Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
 // same-origin navigation, exactly as before. In the native shell the
@@ -188,6 +189,10 @@ export async function api(path, opts = {}) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+  // The reference this request was served under. Kept so that a crash a
+  // moment later can name the request that preceded it, which is the only
+  // way a client-side stack joins to anything on the server.
+  try { noteRequestId(res.headers.get("x-request-id")); } catch (e) {}
   if (!res.ok) {
     // `served` stays false when the body carried no `detail` of its own — a
     // proxy's HTML error page, a gateway timeout — and that is the only case
