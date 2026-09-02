@@ -226,3 +226,90 @@ def test_merge_keeps_an_app_records_own_edit_path():
     assert merged["source"] == ""
     # An imported record is Trading-routed, as before.
     assert listing_sync._merge({"title": "Mine"}, dict(DETAIL))["source"] == "ebay"
+
+
+# ------------------------------------------------- the account the sync runs as
+
+# What every listing this app PUBLISHES carries: eBay's immutable account id,
+# stamped at publish time (marketplaces/ebay_provider). `owns` decides on it
+# whenever a record has one, with NO username fallback — so a sync that knows
+# only the username matches none of these, and re-imports every one of them.
+ACCOUNT_ID = "1234567890"
+ACCOUNT_NAME = "thryftshop"
+CREDS = {"access_token": "token", "ebay_user_id": ACCOUNT_ID,
+         "ebay_username": ACCOUNT_NAME}
+
+
+def _published_record():
+    """An app-published listing as it really looks: stamped with both halves
+    of the account it went live on."""
+    return _app_record(ebay_account=ACCOUNT_NAME, ebay_account_id=ACCOUNT_ID)
+
+
+@pytest.fixture
+def synced_as(monkeypatch):
+    """`synced`, but running as a named eBay account."""
+    def run(records, account):
+        fake_db = FakeDb(records)
+        monkeypatch.setattr(listing_sync, "db", fake_db)
+        monkeypatch.setattr(listing_sync, "ebay_trading",
+                            FakeTrading(ITEM, DETAIL))
+        return fake_db, listing_sync.import_active("token", "u1",
+                                                   account=account)
+    return run
+
+
+def test_a_published_listing_is_matched_when_the_sync_knows_who_it_is(synced_as):
+    """The duplicate pair in its real form.
+
+    Every fixture above syncs with no account at all, which makes `owns` fall
+    back to the username and match anything. Production never looks like that:
+    the record carries an immutable id and the sync runs as a connected
+    account. Given the creds bundle, the id matches and the app's own record
+    is updated in place."""
+    fake_db, result = synced_as([_published_record()], CREDS)
+    assert set(fake_db.records) == {"sess-abc"}, "the app record must be reused"
+    assert result["imported"] == 0
+    assert result["updated"] == 1
+
+
+def test_a_name_alone_cannot_see_the_records_it_has_to_match(synced_as):
+    """Why the route had to change, held in place.
+
+    Passing the username is not a smaller version of passing the bundle — it
+    is a caller with no id, and `owns` refuses to match an id-stamped record
+    for one. The sync then imports the very listing it published as a second
+    card. If this ever passes, the dedupe has stopped depending on the
+    identity it is given and the fix has been undone somewhere."""
+    fake_db, result = synced_as([_published_record()], ACCOUNT_NAME)
+    assert result["imported"] == 1
+    assert listing_sync.record_id(ITEM) in fake_db.records
+
+
+def test_the_duplicates_already_in_the_store_are_cleaned_up(synced_as):
+    """The pairs a seller is looking at right now go on the next sync — the
+    fix has to heal the store, not just stop adding to it."""
+    fake_db, result = synced_as([_published_record(), _mirror_record()], CREDS)
+    assert listing_sync.record_id(ITEM) in fake_db.deleted
+    assert set(fake_db.records) == {"sess-abc"}
+    assert result["deduped"] == 1
+
+
+def test_the_mirror_it_writes_carries_the_immutable_id(synced_as):
+    """A mirror stamped with the username alone can only ever be matched by a
+    handle the seller can rename. The item came out of this account's own
+    selling lists, so the id is a fact about it."""
+    fake_db, _ = synced_as([], CREDS)
+    written = fake_db.records[listing_sync.record_id(ITEM)]["listing"]
+    assert written["ebay_account_id"] == ACCOUNT_ID
+    assert written["ebay_account"] == ACCOUNT_NAME
+
+
+def test_another_accounts_listing_is_still_left_alone(synced_as):
+    """The scoping this all rests on: a record stamped with a DIFFERENT id is
+    not matched, however similar it looks — it is another seller's."""
+    theirs = _app_record(ebay_account="someone-else",
+                         ebay_account_id="9999999999")
+    fake_db, result = synced_as([theirs], CREDS)
+    assert result["imported"] == 1
+    assert set(fake_db.records) == {"sess-abc", listing_sync.record_id(ITEM)}

@@ -7337,7 +7337,15 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     # Never end another eBay account's listing: the item id on this record was
     # minted by a store that isn't connected any more, and EndItem would either
     # fail confusingly or (worse) act on the wrong seller's item.
-    owner = listing_sync.account_of(listing)
+    #
+    # named_account_of, not account_of: a record whose owner could not be named
+    # carries the UNKNOWN_ACCOUNT sentinel, and comparing that as if it were a
+    # username refuses the ending with "this is on your other eBay account
+    # (@previous account)" — a store that does not exist and cannot be
+    # reconnected, leaving the listing un-endable here for good. Only a NAMED
+    # other account is evidence of a different store. The publish path already
+    # draws the line here (marketplaces/ebay_provider); this one did not.
+    owner = listing_sync.named_account_of(listing)
     connected = (creds or {}).get("ebay_username", "")
     if creds and owner and connected and owner != connected:
         raise HTTPException(
@@ -7529,7 +7537,8 @@ _IMPORT_JOBS: dict[str, str] = {}
 _IMPORT_LOCK = threading.Lock()
 
 
-def _run_import_job(job_id: str, token: str, uid: str, account: str = "") -> None:
+def _run_import_job(job_id: str, token: str, uid: str,
+                    account: "str | dict" = "") -> None:
     """Background worker for the store mirror. One GetItem per listing means a
     real store takes minutes — far longer than a browser (or the proxy in
     front of us) will hold a request open, which is why this is a job the
@@ -7608,7 +7617,14 @@ def import_listings(request: Request) -> dict:
     }, uid=uid)
     threading.Thread(
         target=_run_import_job,
-        args=(job_id, creds["access_token"], uid, creds.get("ebay_username", "")),
+        # The whole creds bundle, not just the username — the same argument the
+        # status sweep passes, and for the same reason. Ownership is decided on
+        # eBay's immutable account id wherever the record carries one
+        # (listing_sync.owns), and every listing this app publishes carries it.
+        # Handed a name alone, the sync matched NONE of its own records, so it
+        # re-imported each of them as an "ebay-<item>" mirror on every run —
+        # the duplicate pairs, one Thryft and one eBay, of the same listing.
+        args=(job_id, creds["access_token"], uid, creds),
         daemon=True,
     ).start()
     log.info("import-listings %s: started for user=%s", job_id, uid)

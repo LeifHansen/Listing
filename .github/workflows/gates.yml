@@ -224,6 +224,7 @@ jobs:
                  backend/tests/test_the_triage_job_reads_what_the_app_serves.py \
                  backend/tests/test_the_lookup_does_not_run_unless_asked_for.py \
                  backend/tests/test_a_batch_can_be_stopped.py \
+                 backend/tests/test_the_account_a_record_is_judged_against.py \
                  backend/tests/test_the_sellers_hints_reach_the_ai.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
