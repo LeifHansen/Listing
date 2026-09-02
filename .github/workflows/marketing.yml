@@ -170,6 +170,19 @@ jobs:
           echo "Files changed against $base:"
           echo "$changed" | sed 's/^/  /'
 
+          # An app pull request lands here too whenever it changes the brand
+          # token file: the path filter above asks for that, so the site is
+          # rebuilt against the new tokens. That pull request is the app's,
+          # not this site's, and gates.yml stands between it and production.
+          # The rule below is for this site's own pull requests, the ones
+          # that touch marketing/ — without this branch, every token change
+          # the filter exists to check would fail here for touching the very
+          # file that brought it in.
+          if ! echo "$changed" | grep -qE '^marketing/'; then
+            echo "OK: an app pull request (nothing under marketing/) — the site was rebuilt against its token file above, and gates.yml guards the app"
+            exit 0
+          fi
+
           outside=$(echo "$changed" \
             | grep -vE '^(marketing/|\.github/workflows/marketing|\.dockerignore$)' || true)
           if [ -n "$outside" ]; then
