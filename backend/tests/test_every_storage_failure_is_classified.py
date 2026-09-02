@@ -257,6 +257,13 @@ WHY_A_BLANK_IS_SAFE = {
     "load_listing":
         "None means 'no draft here', and the writer that reads it refuses rather "
         "than saving into a listing it could not read",
+    "save_notes":
+        "an unsaved hint costs a less-informed AI draft — exactly what the "
+        "seller got before the box existed — and no screen ever reads the "
+        "notes back, so nothing can claim they were kept",
+    "load_notes":
+        "\"\" means 'no hints for this session', which drafts from the photos "
+        "alone; it is an input to the AI, never a fact shown to the seller",
     "session_touched_at":
         "an unknown mtime makes the orphan sweep skip the dir rather than delete it",
     "sweep_orphan_sessions":
