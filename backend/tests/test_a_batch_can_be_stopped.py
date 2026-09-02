@@ -16,8 +16,16 @@ from __future__ import annotations
 
 import pytest
 
+# Both, because the module under test reaches the photo pass: backend.main
+# imports services.images, which imports Pillow at module scope. Without the
+# skip this file would fail COLLECTION in the lint+unit job, which installs
+# neither. It runs for real in the smoke job (see .github/workflows/gates.yml,
+# "API tests"), whose skip guard is what stops that turning into a file that
+# quietly never runs.
 pytest.importorskip("fastapi")
+pytest.importorskip("PIL")
 
+from PIL import Image  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from backend import config, main, storage  # noqa: E402
@@ -124,9 +132,6 @@ def test_the_photo_pass_stops_between_photos(tmp_path):
     """The cutouts are where a long batch spends its time — one local
     inference is ~100s — so the stop has to reach inside that pass rather
     than waiting for the whole pile."""
-    pytest.importorskip("PIL")
-    from PIL import Image
-
     src = tmp_path / "original"
     src.mkdir()
     for i in range(3):
