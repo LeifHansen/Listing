@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Coins, Lightbulb, Megaphone, TrendingDown, RotateCcw,
+  Tags, Coins, Lightbulb, Megaphone, TrendingDown,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
   ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2,
 } from "lucide-react";
@@ -52,12 +52,11 @@ const runCount = (n, total, noun) =>
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
   promote: Megaphone, lower_price: TrendingDown,
-  finish: PlusCircle, relist: RotateCcw, photos: Camera, specifics: ListChecks,
+  finish: PlusCircle, photos: Camera, specifics: ListChecks,
 };
 const REC_TONE = {
   promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
-  finish: "bg-blue-soft text-blue",
-  relist: "bg-red-soft text-error", photos: "bg-blue-soft text-blue",
+  finish: "bg-blue-soft text-blue", photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
@@ -66,7 +65,6 @@ const REC_GROUP_LABEL = {
   promote: "Promote listings",
   lower_price: "Lower prices",
   finish: "Finish & list",
-  relist: "Relist ended items",
   photos: "Add more photos",
   specifics: "Fill in details",
 };
@@ -121,9 +119,9 @@ function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
 // marks the one whose spinner is the per-listing `promoting` latch, because
 // its rows fire the very same action.
 //
-// Photos, finish and relist are deliberately absent: photos need a human
-// holding the item, and the last two create listings, which is not something
-// to hand a single button.
+// Photos and finish are deliberately absent: photos need a human holding
+// the item, and finishing creates a listing, which is not something to hand
+// a single button.
 const BULK_ACTIONS = {
   promote: {
     verb: "Promote all",

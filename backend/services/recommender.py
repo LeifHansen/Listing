@@ -2,8 +2,8 @@
 
 Rules over the signals we already have (listing status, age, price, photos,
 promotion, missing details) turn a pile of listings into a short, ranked list
-of concrete next actions: finish a draft, relist an ended item, promote a live
-one, drop a stale price, add a sale, add photos.
+of concrete next actions: finish a draft, promote a live one, drop a stale
+price, add photos.
 
 eBay traffic (views/watchers), when available, sharpens these: a listing with
 lots of views but no watchers is priced too high; one with watchers but no sale
@@ -65,8 +65,9 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             "Ready to sell — just a few fields from going live.", 60)
         return recs
     if status == "ended":
-        add("relist", "Relist",
-            "Ended without selling — relist it to give it another run.", 55)
+        # No relist nudge — removed on request. An ended listing is usually
+        # ended on purpose, so this nagged about every one of them forever,
+        # and Relist is already one tap away on the Inactive tab.
         return recs
     if status not in ("published", "live"):
         return recs

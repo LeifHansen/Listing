@@ -47,6 +47,10 @@ JOBS_MAX = 200
 MIRROR_FIELDS = (
     "id", "kind", "phase", "done", "error", "current", "total_items",
     "total_photos", "bg_error", "bg_failed", "tokens_exhausted", "_uid",
+    # Stopped on purpose. Mirrored so a restart can tell a batch the seller
+    # called off from one the machine took away — the first must never be
+    # picked back up (see main._resume_interrupted_batches).
+    "cancelled", "_cancel",
     # What a restart needs to pick a photo batch back up: where the uploaded
     # originals live, whether the seller asked for cutouts, and how many times
     # we have already tried. See main._resume_interrupted_batches.
@@ -135,6 +139,52 @@ def update(job_id: str, **fields) -> None:
         # every progress tick in the batch would otherwise queue behind it.
         record = _record(job)
     _write_mirror(job_id, record)
+
+
+def request_cancel(job_id: str, uid: Optional[str] = None) -> Optional[str]:
+    """Stop a running job at the seller's request.
+
+    Returns "stopping" when the job was running and is now marked stopped,
+    "finished" when it had already ended, and None when the caller may not see
+    this job at all — unknown id or someone else's, which the endpoint answers
+    as 404 for the same reason `snapshot` does.
+
+    The job is marked DONE here, by the request, rather than when the worker
+    notices the flag. That is the whole point: the batch a seller wants to stop
+    is usually the one that stopped answering, and a worker wedged in a
+    provider call that never returns would leave them on the same frozen
+    progress bar this exists to escape. `_cancel` is what the worker reads at
+    its next checkpoint; `done` is what frees the client immediately.
+
+    A worker that finishes the item already in flight and only then stops
+    writes its drafts onto this finished record. That is honest — those drafts
+    are real, and they are saved either way — and it cannot un-finish the job:
+    nothing here goes back to done=False.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            return None
+        owner = job.get("_uid")
+        if owner and owner != uid:
+            return None
+        if job.get("done"):
+            return "finished"
+        job["_cancel"] = True
+        job.update(done=True, cancelled=True, phase="stopped")
+        job["_rev"] = job.get("_rev", 0) + 1
+        record = _record(job)
+    _write_mirror(job_id, record)
+    return "stopping"
+
+
+def cancel_requested(job_id: str) -> bool:
+    """Whether this job has been asked to stop. Workers check it between units
+    of work they can afford to walk away from — never mid-item, where stopping
+    would throw away AI that has already been paid for."""
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        return bool(job and job.get("_cancel"))
 
 
 def snapshot(job_id: str, uid: Optional[str] = None) -> Optional[dict]:

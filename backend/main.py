@@ -4718,6 +4718,18 @@ _register_bulk_job = jobstore.register
 _bulk_set = jobstore.update
 
 
+class _BatchStopped(Exception):
+    """The seller stopped this batch (POST /api/bulk/cancel/{job_id})."""
+
+
+def _stop_if_cancelled(job_id: str) -> None:
+    """Leave the batch if it has been called off. Placed only between whole
+    units of work — a photo, an item — because stopping inside one would throw
+    away AI the seller has already been charged for."""
+    if jobstore.cancel_requested(job_id):
+        raise _BatchStopped()
+
+
 # How many times one batch may be picked up again. A batch that dies, resumes,
 # and dies again is not unlucky — it is hitting something it will keep hitting
 # (a photo that OOMs the box, most likely), and a machine that restarts into
@@ -4782,6 +4794,10 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
         if record.get("kind") or not job_id or not staging:
             continue
         if record.get("phase") not in _RESUMABLE_PHASES:
+            continue
+        if record.get("_cancel"):
+            # Stopped on purpose. The restart is not a second chance to run
+            # work the seller has already said they don't want.
             continue
         resumes = int(record.get("_resumes") or 0)
         if resumes >= BULK_MAX_RESUMES:
@@ -4861,6 +4877,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     bg_refunded = 0
     n_photos = 0
     delivered = False
+    # Declared out here so a batch the seller stops can still report the items
+    # it had drafted by then — they are saved listings, not a partial result.
+    items: list[dict] = []
     try:
         # Bulk background removal is metered per photo, charged before the
         # engines run. Not enough tokens -> photos are kept as-is (with a
@@ -4882,12 +4901,16 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # by a full one would pay the user twice — so the accounting
                 # has to live here.
                 bg_charged = tokens.cost("image_ai", n_photos)
+        _stop_if_cancelled(job_id)
         _bulk_set(job_id, phase="optimizing", current=0)
         opt_results = images.optimize_all(
             storage.original_dir(staging_id), storage.optimized_dir(staging_id),
             strip_bg,
             progress=lambda done, total: _bulk_set(job_id, current=done,
-                                                   total_photos=total))
+                                                   total_photos=total),
+            # The photo pass is where a long batch spends its time, so the stop
+            # has to reach inside it rather than waiting for the whole pile.
+            should_stop=lambda: jobstore.cancel_requested(job_id))
         # Surface a background-removal failure (out of credits, bad key, rate
         # limit) on the job so the UI can say WHY the photos came back with
         # their backgrounds intact — silence here reads as "the feature is
@@ -4948,14 +4971,17 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # worst case a boundary item shows up as two entries to merge by hand.
         groups: list[dict] = []
         for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
+            _stop_if_cancelled(job_id)
             part = claude_ai.group_photos(thumbs[base:base + BULK_GROUP_CHUNK])["groups"]
             groups.extend({"name": g["name"],
                            "indices": [base + i for i in g["indices"]]}
                           for g in part)
         _bulk_set(job_id, total_items=len(groups))
 
-        items: list[dict] = []
         for gi, group in enumerate(groups):
+            # Between items, never inside one: an item that has started has
+            # already been charged for, so it is finished and saved.
+            _stop_if_cancelled(job_id)
             _bulk_set(job_id, phase="identifying", current=gi + 1, items=list(items))
             sid = storage.new_session_id()
             item_dir = storage.optimized_dir(sid)
@@ -5022,6 +5048,22 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         delivered = True
         _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
         log.info("bulk %s: %d photos -> %d items", job_id, len(names), len(items))
+    except (_BatchStopped, images.Stopped):
+        # The seller stopped this batch. Every item it had already drafted was
+        # saved as it finished, so this reports them rather than throwing them
+        # away; the rest never ran, so it never charged. The job is already
+        # marked done by the request itself (see jobstore.request_cancel) —
+        # this is the worker agreeing, and handing over what it got to.
+        #
+        # `delivered` here is about the background-removal charge, which was
+        # taken per photo up front: cutouts that rode out on a saved draft were
+        # delivered and stand, and a stop before the first draft delivered
+        # nothing, so the `finally` below gives the whole remainder back.
+        delivered = bool(items)
+        _bulk_set(job_id, phase="stopped", done=True, cancelled=True,
+                  items=items, current=len(items))
+        log.info("bulk %s: stopped by the seller after %d item(s)",
+                 job_id, len(items))
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
         if exc.errno == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)
@@ -5148,6 +5190,29 @@ def bulk_status(job_id: str, request: Request) -> Response:
     if body is None:
         raise HTTPException(404, "Unknown bulk job.")
     return Response(content=body, media_type="application/json")
+
+
+@app.post("/api/bulk/cancel/{job_id}")
+def bulk_cancel(job_id: str, request: Request) -> dict:
+    """Stop a running batch.
+
+    The seller's way off a batch that is taking longer than they are willing to
+    wait — or one that has stopped moving. It settles the job for the client
+    straight away and asks the worker to stand down at its next checkpoint
+    (between photos, between items), so nothing is abandoned mid-item and
+    nothing is charged for work that never runs.
+
+    Nothing is deleted: every item the batch had already drafted is a saved
+    listing and stays in Drafts. 404 covers both an unknown id and someone
+    else's, exactly as the status endpoints do.
+    """
+    outcome = jobstore.request_cancel(job_id, _uid(request))
+    if outcome is None:
+        raise HTTPException(404, "Unknown bulk job.")
+    # "It had already finished" is not a failure — the seller asked for it to
+    # be over, and it is. Say which happened so the UI can word it honestly.
+    return {"ok": True, "stopped": outcome == "stopping",
+            "already_finished": outcome == "finished"}
 
 
 @app.get("/api/bulk/status/{job_id}/brief")
