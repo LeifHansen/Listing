@@ -147,6 +147,18 @@ def test_a_required_aspect_holding_only_whitespace_is_still_missing():
     assert "Color" in issues[0]["title"]
 
 
+def test_the_missing_aspects_are_named_for_the_editor_to_ring():
+    """The title lists at most six of them and the card holds forty inputs.
+    `fields` is the machine-readable half — what the editor marks."""
+    from backend.models import ItemSpecific
+
+    bare = listing(item_specifics=[ItemSpecific(name="Color", value="Red")])
+    issues = preflight.errors_only(preflight.validate(
+        bare, "live", **ACCOUNT_READY,
+        required_aspects=["Color", "Brand", "Size Type"]))
+    assert [i["fields"] for i in issues] == [["Brand", "Size Type"]]
+
+
 def test_draft_mode_only_checks_what_a_draft_needs():
     """Saving a draft isn't publishing: price, category and weight aren't
     blocking anything yet, so they must not be reported as if they were."""

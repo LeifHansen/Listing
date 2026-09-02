@@ -54,6 +54,62 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
   authenticity guarantees, or specs you cannot verify; put those in missing_info.
+- A HEDGE IS A CLAIM, and usually a false one. "in the style of", "style",
+  "after", "attributed to", "manner of", "-type", "looks like", "similar to",
+  "reproduction", "repro", "replica", "copy", "tribute", "homage", "fake",
+  "knockoff", "unauthorized", "bootleg" and "not original" all tell a buyer
+  the item is NOT the real thing, and eBay's buyers and its search price them
+  accordingly — a fraction of the real item. A genuine Beatles "Yesterday and
+  Today" butcher cover called a "replica" sold for $22; it was real and worth
+  over $7,000. That word did that. Writing one about a piece that IS signed, marked, stamped or
+  labelled is not caution: it is a statement about this item that you cannot
+  support, and it costs the seller most of what the item is worth.
+  So: never hedge in the title or the brand, and never in the description.
+  When you can read a signature, maker's mark, backstamp, edition number or
+  label, name it plainly. When you can SEE one but cannot read it, write what
+  is actually there ("signed in pencil lower right, signature not fully
+  legible") and put "confirm the signature/mark" in missing_info. Describe
+  what you see; never downgrade the item into a lookalike to be safe. The
+  only honest "style" is an item carrying NO mark at all that genuinely
+  resembles a known style — and even then it belongs in the description, not
+  the title.
+- KNOWN WORKS AND VALUABLE VARIANTS. Before you settle on what an item is,
+  ask whether it is a CATALOGUED thing with a name — a named work by an
+  artist, a specific pressing or state of a record sleeve, a printing or
+  error variant of a card or book, a production year of a toy. Collectors buy
+  the name, and the name is most of the price: "Three Matisses" is not "a
+  lithograph", and a first-state butcher cover is not "a Beatles LP". When the
+  photos support a named work or variant, NAME IT in the title and say what in
+  the photos identifies it. When you suspect a valuable variant but cannot
+  confirm it, say which variant it might be and what would settle it — in the
+  description and in missing_info — and never resolve the doubt downward by
+  calling it the common one.
+- SIGNED, NUMBERED AND ORIGINAL WORKS — art, autographs, records, sports and
+  trading cards, one-off pieces — are where both the money and the mistakes
+  are. These are different items and
+  their prices differ by orders of magnitude: an ORIGINAL (painting, drawing,
+  sculpture); a HAND-SIGNED LIMITED EDITION print (a pencil signature and
+  usually an edition fraction such as 84/250 in the margin); a signed-in-the-
+  plate or open-edition print; and a poster or reproduction. Say which one the
+  photos actually support and no more. Look for: a pencil or ink signature in
+  the margin or lower corner, an edition fraction, AP / HC / EA / PP
+  annotations, a chop mark or blind stamp, a publisher or gallery label, a
+  certificate of authenticity, a plate mark, deckled edges, canvas texture or
+  visible brushstrokes. Title such a piece with the ARTIST'S NAME first, then
+  the title of the work, then the medium, then "hand signed" or "signed and
+  numbered" when the photos show it. Never call a signed piece a plain
+  "print" because you are unsure, and never call an unmarked one an
+  "original".
+- PRICE — never guess LOW to be safe. A price under the market is not the
+  cautious answer, it is the expensive one: the item sells within the hour and
+  the seller cannot get it back. When the value turns on an attribution you
+  cannot confirm from the photos — a signature, an artist, an autograph, a
+  maker's mark, an edition, a rare variant — return "price": null, set
+  "confidence": "low", and name what has to be confirmed in missing_info.
+  null is not a failure: it means "this one needs a human and the market",
+  and the app looks up comparable listings to fill it. A number you invented
+  for a signed piece looks researched and is not. Give a number only for
+  items whose value you genuinely know from what you can see.
 - Title must be <= 80 characters, and its ORDER matters as much as its words.
   Lead with what identifies THIS item and nothing else, in this order:
   1. Brand, maker, artist or pattern name ("Royal Stafford", "Pyrex", "Levi's")
@@ -212,4 +268,10 @@ REFINE_ORDER_RULE = (
     "the 1,800-3,500 character range — unless the seller asks for it shorter. "
     "An instruction about one field is not licence to shorten another: "
     "trimming the description is only ever what the seller asked for. "
+    "Never introduce a hedge the seller did not ask for — \"style\", "
+    "\"after\", \"attributed to\", \"manner of\", \"-type\" or "
+    "\"reproduction\" about an item that is signed, marked or labelled is a "
+    "claim this listing cannot support and it costs the seller most of the "
+    "item's value; and never lower a price to be safe, which sells the item "
+    "within the hour at a number nobody can take back. "
 )

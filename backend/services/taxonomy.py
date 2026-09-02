@@ -848,6 +848,14 @@ def fix_size_specifics(listing, aspects: Optional[list[dict]] = None) -> list[st
         log.info("size fix: %s", done[-1])
         return done
 
+    # The L eBay wants on an extra-large size, before the waist/inseam split
+    # below: a bare "4X" is not a measurement pair and never will be.
+    spelled = xl_size_spelling(raw, size_aspect, aspects)
+    if spelled and spelled != raw:
+        row.value = spelled
+        done.append(f"Size {raw!r} -> {spelled!r} (eBay spells it with the L)")
+        raw = spelled
+
     size, inseam = size_for_aspect(raw, size_aspect)
     if size != raw:
         row.value = size
@@ -958,6 +966,52 @@ def offered_big_and_tall(aspect: dict) -> str:
         if matched:
             return matched
     return ""
+
+
+# eBay spells a men's extra-large size with the L on the end. Its Size list
+# for a big & tall category carries "4XL" and "5XL" and no bare "4X" / "5X",
+# so a tag read as "Mens 4X" goes out as a value eBay refuses and the whole
+# listing comes back an item-specifics error.
+#
+# The bare form is not wrong everywhere, which is why this is not a blanket
+# rewrite: women's PLUS sizes are spelled exactly that way — "1X", "2X" and
+# "3X" are eBay's own values there. So the category decides. Where it
+# publishes a Size list, a value that list already carries is left alone and
+# anything else is rewritten to whichever spelling the list does carry ("2X"
+# -> "XXL" in a category that says it that way). With no list to consult, the
+# rewrite fires only where Size Type offers Big & Tall — the same men's test
+# the rule below leans on.
+_BARE_X_SIZE_RE = re.compile(r"^(\d)\s*X(T)?$", re.I)
+
+
+def xl_size_spelling(value: str, size_aspect: Optional[dict],
+                     aspects: Optional[list[dict]] = None) -> str:
+    """eBay's spelling for an X-size written without the L ("4X" -> "4XL"), or
+    "" when the value isn't one, is already legal here, or is a size this
+    category genuinely spells bare."""
+    m = _BARE_X_SIZE_RE.match((value or "").strip())
+    if not m:
+        return ""
+    count, tall = int(m.group(1)), bool(m.group(2))
+    # "1X" is a women's plus size in its own right, not an XL missing its L.
+    if count < 2:
+        return ""
+    spellings = [f"{count}XL", "X" * count + "L"]
+    if tall:
+        spellings = [f"{s}T" for s in spellings] + spellings
+    values = [v for v in ((size_aspect or {}).get("values") or []) if v]
+    if values:
+        if match_selection_value(value, values, allow_partial=False):
+            return ""      # the category lists it exactly as written
+        for spelling in spellings:
+            matched = match_selection_value(spelling, values, allow_partial=False)
+            if matched:
+                return matched
+        return ""          # not a spelling this category knows — leave it be
+    size_type = _aspect_named(aspects or [], SIZE_TYPE_ASPECT)
+    if size_type is None or not offered_big_and_tall(size_type):
+        return ""
+    return spellings[0]
 
 
 def apply_big_and_tall(listing, aspects: Optional[list[dict]] = None) -> str:

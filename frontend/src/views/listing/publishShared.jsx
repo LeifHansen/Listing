@@ -177,6 +177,22 @@ export function publishTally(res, fallback) {
            reason: blockedReason(res, fallback) };
 }
 
+// Every issue a publish attempt raised, in both shapes it can arrive in: a
+// single-marketplace result carries them at the top, a multi-marketplace one
+// keeps a set per marketplace under `results`.
+export function allIssues(res) {
+  return [
+    ...(res?.issues || []),
+    ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),
+  ].filter(Boolean);
+}
+
+// The errors that point at ONE card's fields — what that card has to show,
+// and show without being asked, when a publish came back refused.
+export function issuesFor(res, target) {
+  return allIssues(res).filter((i) => i.target === target && i.level !== "warn");
+}
+
 // What to TELL the seller when a publish did not go live.
 //
 // res.message is eBay's own sentence, and for its catch-all rejections that
@@ -202,10 +218,7 @@ export function publishTally(res, fallback) {
 // drafts, seven identical "eBay is blocking new listings on this account", and
 // the sentence naming the actual hold never on screen. It now goes last.
 export function blockedReason(res, fallback) {
-  const issues = [
-    ...(res?.issues || []),
-    ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),
-  ];
+  const issues = allIssues(res);
   const errors = issues.filter((i) => i && i.level !== "warn" && i.title);
   const named = errors.filter((i) => !i.placeholder);
   const best = named.find((i) => i.target && i.target !== "generic")

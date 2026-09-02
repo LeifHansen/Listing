@@ -167,6 +167,10 @@ def explain(err: dict) -> dict:
                        and not v.endswith((".", "!")) and len(v.split()) <= 5), "")
         issue.update(
             target="specifics",
+            # The aspect by NAME, not only inside the sentence: the editor
+            # rings the field eBay named instead of leaving the seller to
+            # find it among forty of them. See SpecificsCard.
+            fields=[aspect] if aspect else [],
             title=(f"“{aspect}” needs a plain number" if aspect
                    else "An item specific needs a plain number"),
             fix="Under Item specifics, make it just a number (one decimal at "
@@ -178,6 +182,7 @@ def explain(err: dict) -> dict:
                      fix="Enter the package weight (lb / oz) in the listing, then publish again.")
     elif has("brandmpn", "brand/mpn"):
         issue.update(target="specifics",
+                     fields=["Brand", "MPN"],
                      title="eBay needs Brand and MPN for this category",
                      fix=("Set a Brand (use “Unbranded” if there isn’t one) and add an "
                           "item specific “MPN” — “Does Not Apply” works for items "
@@ -185,6 +190,7 @@ def explain(err: dict) -> dict:
     elif (has("product identifier", "does not apply")
           or has_word("upc", "ean", "isbn", "gtin")):
         issue.update(target="specifics",
+                     fields=["UPC"],
                      title="eBay wants a product identifier (UPC/EAN)",
                      fix="Add an item specific “UPC” set to “Does not apply” for vintage/handmade items.")
     elif has("item specific", "aspect", "required attribute", "missing value"):
@@ -200,6 +206,7 @@ def explain(err: dict) -> dict:
             "height", "length", "width", "depth", "diameter", "weight")
         issue.update(
             target="specifics",
+            fields=[aspect] if aspect else [],
             title=("Missing required item specific" + (f": {aspect}" if aspect else "")),
             fix=((f"Add “{aspect}” under Item specifics with a number and unit "
                   f"(e.g. “3 in”). Note: the shipping Package size fields don’t "

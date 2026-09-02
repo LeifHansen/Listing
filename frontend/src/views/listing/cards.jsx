@@ -21,6 +21,7 @@ import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
 import { TITLE_MAX } from "./blockers";
+import { issuesFor } from "./publishShared";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
@@ -491,10 +492,31 @@ export function SpecificsCard({ w }) {
     (a) => !a.required && DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
   const recommendedAll = aspects.filter(
     (a) => !a.required && !DIMENSION_ASPECTS.has(a.name.trim().toLowerCase()));
+  // What the last publish attempt was REFUSED over, in this card's own
+  // fields. A failed listing is the moment these matter most, and it was the
+  // moment they were hardest to find: the card could be sitting collapsed,
+  // the aspect eBay named could be one of the unfilled recommended ones
+  // hidden behind "Show all", and the only pointer to any of it was one
+  // sentence in the publish banner at the bottom of the page. So the card
+  // opens itself, stops hiding fields, repeats what eBay said where the
+  // inputs are, and rings the ones it named.
+  //
+  // It opens via `expand` rather than `flagged` because eBay can name a field
+  // in here while the FIRST error it returned points at another card, and
+  // only one card may own the scroll. See WorkflowCard.
+  const refused = issuesFor(w.publishResult, "specifics");
+  const refusedNames = new Set(refused.flatMap((i) => i.fields || [])
+    .map((n) => (n || "").trim().toLowerCase()).filter(Boolean));
+  // The pre-publish check raises the same issues in the same shape, and it is
+  // worth showing them the same way — but eBay has not answered yet, so the
+  // field must not claim it refused anything.
+  const saidByEbay = !w.publishResult?.preflight;
   // Every filled recommended aspect is always visible (a hidden ⚠ would be an
-  // un-reviewable flag); unfilled ones show the first 8 until "Show all".
+  // un-reviewable flag); unfilled ones show the first 8 until "Show all" —
+  // except after a refusal, when nothing in here stays hidden.
   const [showAll, setShowAll] = useState(false);
-  const recommended = showAll ? recommendedAll
+  const showEvery = showAll || refused.length > 0;
+  const recommended = showEvery ? recommendedAll
     : recommendedAll.filter((a, i) => i < 8 || w.getSpecific(a.name));
   const hiddenCount = recommendedAll.length - recommended.length;
   const aspectNames = new Set(
@@ -566,7 +588,12 @@ export function SpecificsCard({ w }) {
     // row was pure noise — and a "Recommended" pill on twenty rows made the
     // two rows that actually needed attention impossible to spot.
     const missing = a.required && !shown.trim();
-    const ringCls = missing ? "ring-2 ring-warning/60" : undefined;
+    // eBay named THIS field in the refusal. Red beats the amber "required and
+    // empty" ring: one is a rule we are predicting, the other is the answer
+    // the marketplace already gave about this listing.
+    const refusedHere = refusedNames.has(a.name.trim().toLowerCase());
+    const ringCls = refusedHere ? "ring-2 ring-error/70"
+      : missing ? "ring-2 ring-warning/60" : undefined;
     // An inference the seller hasn't looked at yet. This is the one thing in
     // the card that can put a WRONG value on a live listing, so it gets the
     // only interactive affordance on a field label: read it, tap ✓, done.
@@ -584,7 +611,11 @@ export function SpecificsCard({ w }) {
             <Check size={10} aria-hidden /> Looks right
           </button>
         )}
-        {missing && (
+        {refusedHere ? (
+          <span className="text-[12px] font-semibold text-error">
+            {saidByEbay ? "eBay refused this" : "Fix this to publish"}
+          </span>
+        ) : missing && (
           <span className="text-[12px] font-semibold text-warning">Required</span>
         )}
       </span>
@@ -647,8 +678,37 @@ export function SpecificsCard({ w }) {
           + ". A wrong specific is worse than a missing one, so check anything flagged."
         : "Details buyers filter by — only the required ones gate publishing"}
       state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
+      expand={refused.length > 0}
     >
       <div className="flex flex-col gap-6">
+        {/* What eBay said, on the card that holds the fields it said it
+            about. The publish banner has the same words, but it sits at the
+            bottom of a long page and names an aspect among forty inputs; this
+            is the one place a seller can read the complaint and fix it
+            without looking away. */}
+        {refused.length > 0 && (
+          <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
+            {refused.map((issue, i) => (
+              <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
+                <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
+                <span className="text-[13px] text-ink flex-1 min-w-0">
+                  <strong className="font-bold">{issue.title}</strong>
+                  {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
+                  {(issue.fields || []).length > 0 && (
+                    <span className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                      {issue.fields.map((name) => (
+                        <span key={name}
+                          className="inline-flex items-center rounded-full border border-error/40 bg-card px-2 py-0.5 text-[12px] font-bold text-error">
+                          {name}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         {/* What still needs a human, in two banners rather than one.
 
             These are the card's two jobs and they are NOT the same job: an

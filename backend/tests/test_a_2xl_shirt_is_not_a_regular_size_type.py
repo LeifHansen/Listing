@@ -212,3 +212,98 @@ def test_a_lookup_that_fails_does_not_take_the_listing_with_it(monkeypatch):
     assert taxonomy.apply_big_and_tall(listing) == ""
     assert _size_type(listing) == ["Regular"]
     assert taxonomy.apply_big_and_tall(_listing([], category_id="")) == ""
+
+
+# --- the L eBay wants on the size itself -------------------------------------
+# The tag says "Mens 4X" and so did the listing. eBay's Size list for a big &
+# tall category carries "4XL" and no bare "4X", so the value was refused and
+# the whole listing came back an item-specifics error. The bare spelling IS
+# right in women's plus ("1X", "2X", "3X" are eBay's own values there), so the
+# category decides rather than a blanket rewrite.
+
+def _size(listing) -> list[str]:
+    return [s.value for s in listing.item_specifics
+            if s.name.strip().lower() == "size"]
+
+
+@pytest.mark.parametrize("tag, sent", [
+    ("4X", "4XL"),      # spelled the way this category spells it
+    ("3X", "3XL"),
+    ("2X", "XXL"),      # ...which here is the repeated-X form
+    ("4x", "4XL"),      # off the tag in lower case
+    ("4 X", "4XL"),
+])
+def test_a_size_written_without_the_l_is_sent_with_it(tag, sent):
+    listing = _listing([ItemSpecific(name="Size", value=tag)])
+    taxonomy.fix_size_specifics(listing, MENS)
+    assert _size(listing) == [sent]
+
+
+def test_a_size_this_category_does_not_offer_in_any_spelling_stands():
+    """MENS stops at 4XL, so neither "5X" nor "5XL" is a value it takes.
+    Inventing one would not get the listing published — it would only hide
+    what the seller actually wrote from them."""
+    listing = _listing([ItemSpecific(name="Size", value="5X")])
+    assert taxonomy.fix_size_specifics(listing, MENS) == []
+    assert _size(listing) == ["5X"]
+
+
+def test_a_5x_shirt_is_spelled_5xl():
+    """The report this came from: eBay accepts 5XL, never 5X."""
+    big = [_aspect("Size", values=["XL", "2XL", "3XL", "4XL", "5XL", "6XL"]),
+           _aspect("Size Type", values=["Regular", "Big & Tall"])]
+    listing = _listing([ItemSpecific(name="Size", value="5X")])
+    taxonomy.fix_size_specifics(listing, big)
+    assert _size(listing) == ["5XL"]
+    # ...and it is still read as a big & tall size afterwards.
+    assert taxonomy.apply_big_and_tall(listing, big) == "Big & Tall"
+
+
+def test_a_womens_plus_size_is_left_exactly_as_it_is():
+    """"3X" is eBay's own value in women's plus. Adding the L there would
+    invent a size the category does not offer — the same bug pointing the
+    other way."""
+    listing = _listing([ItemSpecific(name="Size", value="3X")])
+    taxonomy.fix_size_specifics(listing, WOMENS)
+    assert _size(listing) == ["3X"]
+
+
+def test_a_1x_is_a_size_not_a_missing_l():
+    listing = _listing([ItemSpecific(name="Size", value="1X")])
+    taxonomy.fix_size_specifics(listing, [_aspect("Size", values=["1X", "2X"])])
+    assert _size(listing) == ["1X"]
+
+
+def test_a_free_text_size_takes_the_l_only_where_big_and_tall_is_offered():
+    """With no list to check the value against, the men's test is the same one
+    the size type rule uses: does this category offer Big & Tall at all."""
+    mens = [_aspect("Size", values=[], mode="FREE_TEXT"),
+            _aspect("Size Type", values=["Regular", "Big & Tall"])]
+    listing = _listing([ItemSpecific(name="Size", value="4X")])
+    taxonomy.fix_size_specifics(listing, mens)
+    assert _size(listing) == ["4XL"]
+
+    womens = [_aspect("Size", values=[], mode="FREE_TEXT"),
+              _aspect("Size Type", values=["Regular", "Plus"])]
+    other = _listing([ItemSpecific(name="Size", value="4X")])
+    taxonomy.fix_size_specifics(other, womens)
+    assert _size(other) == ["4X"]
+
+
+def test_a_waist_by_inseam_is_not_an_x_size():
+    """"32 X 34" is a measurement pair, and the split that handles it must not
+    be handed a value this rule has rewritten."""
+    pants = [_aspect("Size", values=["30", "32", "34"]),
+             _aspect("Inseam", values=["32", "34"])]
+    listing = _listing([ItemSpecific(name="Size", value="32 X 34")])
+    taxonomy.fix_size_specifics(listing, pants)
+    assert _size(listing) == ["32"]
+    assert [s.value for s in listing.item_specifics
+            if s.name.strip().lower() == "inseam"] == ["34"]
+
+
+def test_a_size_the_category_already_lists_is_not_rewritten():
+    """Nothing to fix: the value is already one of eBay's own strings."""
+    listing = _listing([ItemSpecific(name="Size", value="4XL")])
+    assert taxonomy.fix_size_specifics(listing, MENS) == []
+    assert _size(listing) == ["4XL"]
