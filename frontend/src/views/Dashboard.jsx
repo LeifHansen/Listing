@@ -4,7 +4,7 @@ import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, Megaphone, TrendingDown,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2,
+  ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2, ClipboardCheck,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -53,12 +53,14 @@ const runCount = (n, total, noun) =>
 const REC_ICON = {
   promote: Megaphone, lower_price: TrendingDown,
   finish: PlusCircle, photos: Camera, specifics: ListChecks,
+  verify: ClipboardCheck,
 };
 const REC_TONE = {
   promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
   finish: "bg-blue-soft text-blue",
   photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
+  verify: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
 // imperative for one listing ("Lower the price"); groups need the noun form.
@@ -68,6 +70,10 @@ const REC_GROUP_LABEL = {
   finish: "Finish & list",
   photos: "Add more photos",
   specifics: "Fill in details",
+  // What the AI left for a person: a price it changed, a title it suggests,
+  // an edition to check. No group verb -- nothing here is an edit the AI can
+  // make, which is exactly why it is not under "Fill in details".
+  verify: "Check details",
 };
 
 // One suggestion row. Every row carries a dismiss control, because this list
@@ -684,8 +690,19 @@ export function Dashboard() {
       if (res.failed) parts.push(`${res.failed} failed`);
       if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
       if (res.stopped) parts.push(res.stopped);
-      toast(parts.join(" · ") || "Nothing to fill in.", {
+      // The counts say how many. What the seller actually asks afterwards is
+      // "did it do anything?", and for a listing it could not finish the
+      // answer is the reason it gave -- which the job reports per listing
+      // and which a bare "1 need you" hid.
+      const undone = [...((res.results || {}).skipped || []),
+                      ...((res.results || {}).failed || [])];
+      const lines = undone.slice(0, 3).map(
+        (r) => `• ${r.title || "A listing"}: ${r.message}`);
+      const more = undone.length - lines.length;
+      if (more > 0) lines.push(`• …and ${more} more`);
+      toast([parts.join(" · ") || "Nothing to fill in.", ...lines].join("\n"), {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
+        ttl: lines.length ? 12000 : undefined,
       });
       refreshInsights();
       loadListings({ quiet: true });

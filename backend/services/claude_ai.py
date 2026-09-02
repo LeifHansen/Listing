@@ -1200,6 +1200,116 @@ def research_item(image_paths: list[Path], listing: Listing,
     return data
 
 
+# --- the art lookup: name the artist and the work ---------------------------
+#
+# A print is worth what its NAME is worth, and the identify pass can only
+# read a name that is printed on it. This pass is for the print that carries
+# none: read whatever text there is, recognise the image, take a reverse
+# image search's matches as leads, and confirm against a catalogue, a museum
+# page or an auction record before naming anyone. Same web-search tool and
+# the same never-downward rule as the research pass; main.py folds the answer
+# in under rules that can name an artist and a work and can never demote a
+# print to a poster.
+_ART_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{
+  "artist": "the artist's name as catalogued, or \"\" if not established",
+  "work": "the title of this specific work, or \"\" if not established",
+  "kind": "original | hand-signed limited edition print | open edition print | poster or reproduction -- or \"\" if the photos cannot say",
+  "year": "the year or period of the work or of this edition, or \"\"",
+  "publisher": "the publisher, printer or gallery named on the print, or \"\"",
+  "read_from_print": "the text you could actually read ON the print -- signature, printed title, edition number, publisher or copyright line -- or \"\"",
+  "evidence": "one or two sentences: what settled the artist and the work (text on the print, a reverse-image match, a composition you recognised) and which source confirmed it",
+  "title": "an eBay title <= 80 chars that LEADS with the artist's name, then the work's title, then what kind of print it is -- or \"\" if unresolved",
+  "verify": ["what the SELLER must physically check: an edition number, a pencil signature, a blind stamp, a plate mark, a watermark, the paper"],
+  "sources": ["urls you actually used"],
+  "confidence": "low|medium|high"
+}
+Rules:
+- READ THE PRINT FIRST. A signature, a printed title or caption, a publisher
+  or gallery line, an edition number, a copyright notice: transcribe what is
+  there before anything else. When the print names its artist and its work,
+  that is the answer -- confirm it with one search and stop.
+- When the print carries no name, IDENTIFY THE IMAGE. A well-known work is
+  recognisable by its composition, palette and subject; name the work you
+  recognise, then SEARCH to confirm it against the artist's catalogue, a
+  museum page, or a gallery or auction record. If a reverse image search
+  found matches they are listed below: read them as LEADS, not as the
+  answer. A match titled for the work is strong evidence; a match to a poster
+  shop says something about the edition, not about the artist.
+- Tell an ORIGINAL from a hand-signed LIMITED EDITION from an OPEN EDITION
+  print from a POSTER. Their prices differ by orders of magnitude. Say which
+  the photos support and put what would settle it in verify. NEVER resolve a
+  doubt downward: an unsigned print is not proof of a poster and a familiar
+  image is not proof of a reproduction -- the seller is holding it and you
+  are not.
+- If nothing settled the artist, leave artist and work "" and say so with
+  confidence "low". A guessed attribution is worse than a blank.
+- Cite what you used in sources. A name with no source is a guess.
+"""
+
+
+def identify_artwork(image_paths: list[Path], listing: Listing,
+                     leads: Optional[list[dict]] = None,
+                     observations: str = "") -> Optional[dict]:
+    """Name the artist and the work behind a print, with web search and any
+    reverse-image leads the caller found. Returns the parsed dict, or None
+    when the pass did not run or produced nothing usable.
+
+    Best-effort by contract, like research_item: every caller treats a
+    failure as "no answer". Raises nothing.
+    """
+    if not image_paths:
+        return None
+    try:
+        client = _client()
+        imgs = [_image_block(p) for p in image_paths[:4]]
+        lead_lines = "\n".join(
+            f"  - {lead.get('title')}"
+            + (f" ({lead.get('source')})" if lead.get("source") else "")
+            + (f" {lead.get('link')}" if lead.get("link") else "")
+            for lead in (leads or [])[:12] if lead.get("title"))
+        context = (
+            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE and "
+            "could not name the artist or the work. Establish both.\n\n"
+            f"Drafted title: {listing.title}\n"
+            f"Drafted artist/brand: {listing.brand or '(none)'}\n"
+            f"Category: {listing.category_suggestion or '(unknown)'}\n"
+            f"What the first pass saw: {(observations or '')[:600]}\n"
+            + (f"\nReverse image search matches for the first photo:\n"
+               f"{lead_lines}\n" if lead_lines
+               else "\nNo reverse image search was available for this photo.\n")
+            + _ART_SCHEMA)
+        messages = [{"role": "user", "content": imgs + [{"type": "text",
+                                                         "text": context}]}]
+        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+                  "max_uses": RESEARCH_MAX_SEARCHES}]
+        resp = client.messages.create(
+            model=config.VISION_MODEL, max_tokens=4096,
+            tools=tools, messages=messages)
+        resumes = 0
+        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
+            resumes += 1
+            messages = messages + [{"role": "assistant", "content": resp.content}]
+            resp = client.messages.create(
+                model=config.VISION_MODEL, max_tokens=4096,
+                tools=tools, messages=messages)
+        _log_usage("artwork", resp)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        data = _extract_json(text)
+    except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
+        log.info("art lookup skipped: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    searches = sum(1 for b in resp.content
+                   if getattr(b, "type", "") == "server_tool_use")
+    log.info("art lookup: %d searches -> %r by %r (confidence=%s)", searches,
+             str(data.get("work", ""))[:80], str(data.get("artist", ""))[:60],
+             data.get("confidence"))
+    return data
+
+
 _MAKER_HUNT_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 {

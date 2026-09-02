@@ -454,6 +454,16 @@ def pixian_ready() -> bool:
     return bool(PIXIAN_API_ID and PIXIAN_API_SECRET)
 
 
+# Reverse image search for the art lookup: SerpApi's Google Lens engine. Off
+# without the key -- the lookup then runs on the model's own recognition plus
+# web search. See services/imagesearch.py.
+SERPAPI_KEY = _env("SERPAPI_KEY")
+
+
+def serpapi_ready() -> bool:
+    return bool(SERPAPI_KEY)
+
+
 def bg_engine_chain() -> list[str]:
     """Background-removal engines to try, in order. Always non-empty: the
     local model needs no credentials, so it's the floor. An explicit BG_ENGINE
@@ -785,6 +795,7 @@ def _watched_names() -> list[tuple[str, str]]:
         ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
         ("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET),
         ("PHOTOROOM_API_KEY", PHOTOROOM_API_KEY),
+        ("SERPAPI_KEY", SERPAPI_KEY),
         ("EBAY_VERIFICATION_TOKEN", EBAY_VERIFICATION_TOKEN),
         ("R2_ACCOUNT_ID", R2_ACCOUNT_ID),
         ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),

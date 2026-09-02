@@ -192,6 +192,7 @@ export function UploadPhase() {
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
               : stage.phase === "maker" ? "Double-checking the brand…"
+                : stage.phase === "artwork" ? "Naming the artist and the work…"
                 // The web lookup. It is the slowest stage and the one worth
                 // waiting for, so it says what it is doing rather than
                 // hiding behind "Finishing up".

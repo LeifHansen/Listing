@@ -47,7 +47,7 @@ from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
-                       ebay_trading, image_import, images, jobstore,
+                       ebay_trading, image_import, images, imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
                        orient, owed_refunds, preflight, pricing, promotions,
@@ -3371,6 +3371,216 @@ _RESEARCH_CATEGORIES = (
 )
 
 
+# --- the art lookup: name the artist and the work ---------------------------
+#
+# A print by a known artist is worth what its NAME is worth, and the identify
+# pass can only read a name that is printed on it. Prints by well-known
+# artists were drafted as "vintage art print" -- a title no collector
+# searches for -- because nothing on the print said who made it. So a draft
+# that is artwork and does not yet name its artist is looked up: a reverse
+# image search (Google Lens through SerpApi, when SERPAPI_KEY is set) says
+# what the web already calls this picture, and a vision call with web search
+# reads the print first, recognises the image second, takes those matches as
+# leads, and confirms against a catalogue, a museum page or an auction record
+# before naming anyone. Off with ART_LOOKUP=off.
+#
+# Gated on the draft being art, not on RESEARCH_PASS: that gate is wide (most
+# of a thrift store trips it) and costs a minute per item, which is why it is
+# off. This one is narrow, and it is the lookup the seller asked for.
+ART_LOOKUP = os.getenv("ART_LOOKUP", "auto").strip().lower() or "auto"
+_ART_CATEGORY_WORDS = ("art prints", "paintings", "posters & prints",
+                       "art posters", "prints & posters", "mixed media art",
+                       "drawings", "art photographs")
+_ART_WORDS = (
+    "art print", "giclee", "giclée", "lithograph", "serigraph", "screenprint",
+    "screen print", "silkscreen", "etching", "engraving", "woodblock",
+    "woodcut", "linocut", "poster", "painting", "watercolor", "watercolour",
+    "gouache", "canvas print", "framed print", "artwork", "fine art",
+    "exhibition print", "museum print",
+)
+
+
+def _artwork_category(listing: Listing) -> bool:
+    category = (listing.category_suggestion or "").lower()
+    return (category.split(">")[0].strip() == "art"
+            or any(w in category for w in _ART_CATEGORY_WORDS))
+
+
+def _is_artwork(listing: Listing, observations: str = "") -> bool:
+    """Whether a draft is a picture with an artist behind it."""
+    if _artwork_category(listing):
+        return True
+    haystack = " ".join([
+        listing.title or "", observations or "",
+        " ".join(f"{s.name} {s.value}" for s in (listing.item_specifics or [])),
+    ]).lower()
+    return any(w in haystack for w in _ART_WORDS)
+
+
+def _artist_on(listing: Listing) -> str:
+    """The artist the draft already names: the Artist specific, else the
+    brand (the identify pass writes a maker there). "" for a placeholder."""
+    for s in listing.item_specifics or []:
+        if s.name.strip().lower() == "artist" and (s.value or "").strip():
+            return s.value.strip()
+    brand = (listing.brand or "").strip()
+    return "" if brand.lower() in _GENERIC_MAKERS else brand
+
+
+def _artwork_named(listing: Listing) -> bool:
+    """Whether the draft already leads with its artist, unhedged. One that
+    does read the name off the print and earned its title; the lookup is for
+    the one that could not."""
+    artist = _artist_on(listing)
+    if not artist:
+        return False
+    title = (listing.title or "").lower()
+    if any(h in title for h in _RESEARCH_HEDGES):
+        return False
+    return artist.split()[-1].lower() in title
+
+
+def _reverse_image_leads(session_id: str, path) -> list[dict]:
+    """What a reverse image search says about one photo, as leads for the
+    lookup. The engine fetches the image itself, so it needs a URL it can
+    reach: the copy in the bucket. The upload path mirrors every optimized
+    photo there; one the mirror has not reached yet is uploaded here, the
+    way the reclaim pass backfills. [] without SERPAPI_KEY or the bucket."""
+    if not imagesearch.enabled() or not objstore.enabled():
+        return []
+    try:
+        key = objstore.key_for(session_id, path.name)
+        if not objstore.exists(key) and objstore.upload(path, key) is None:
+            return []
+        url = objstore.url_for(key)
+    except Exception as exc:  # noqa: BLE001 - a lead is optional
+        log.info("art lookup: no fetchable URL for %s: %s", path.name, exc)
+        return []
+    return imagesearch.reverse_image(url) if url else []
+
+
+def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
+                    observations: str = "") -> Optional[dict]:
+    """Name the artist and the work behind a drafted print, in place.
+
+    Runs when the draft is artwork and does not yet lead with its artist.
+    What it may do, at medium or high confidence: fill an empty brand and a
+    blank Artist specific with the artist; at high confidence, replace a
+    title that names neither the artist nor the work with one that leads
+    with both (at medium, suggest that title in a note); and add what the
+    seller must check -- an edition number, a pencil signature, a blind
+    stamp. What it may never do: demote a print, touch a price, or overwrite
+    a title that already names the artist. Never raises.
+    """
+    if ART_LOOKUP == "off" or not config.anthropic_ready():
+        return None
+    if not _is_artwork(listing, observations) or _artwork_named(listing):
+        return None
+    paths = [p for p in image_paths if p.is_file()]
+    if not paths:
+        return None
+    leads = _reverse_image_leads(session_id, paths[0]) if session_id else []
+    log.info("art lookup: %r with %d reverse-image lead(s)",
+             (listing.title or "")[:60], len(leads))
+    try:
+        found = claude_ai.identify_artwork(paths, listing, leads=leads,
+                                          observations=observations)
+    except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
+        log.info("art lookup failed: %s", exc)
+        return None
+    if not found:
+        return None
+    return _apply_artwork(listing, found)
+
+
+def _same_artist(a: str, b: str) -> bool:
+    """Whether two spellings name one artist: "Hokusai" and "Katsushika
+    Hokusai" do; "Hokusai" and "Hiroshige" do not."""
+    a, b = a.strip().lower(), b.strip().lower()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a or a.split()[-1] == b.split()[-1]
+
+
+def _set_artist_specific(listing: Listing, artist: str, conf: str) -> bool:
+    """Write the artist to the Artist specific when it is blank. eBay's art
+    categories carry that aspect and buyers filter on it. Returns whether
+    anything was written."""
+    for s in listing.item_specifics:
+        if s.name.strip().lower() == "artist":
+            if (s.value or "").strip():
+                return False
+            s.value = artist
+            s.confidence = conf
+            return True
+    listing.item_specifics.append(
+        ItemSpecific(name="Artist", value=artist, confidence=conf))
+    return True
+
+
+def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
+    """Fold a lookup's answer into the draft under _lookup_artwork's rules.
+    Returns `found` when anything was applied or noted, else None."""
+    conf = str(found.get("confidence") or "low").strip().lower()
+    artist = str(found.get("artist") or "").strip()[:65]
+    work = str(found.get("work") or "").strip()[:80]
+    notes: list[str] = []
+    applied = False
+    known = _artist_on(listing)
+    if artist and conf in ("medium", "high") and known and \
+            not _same_artist(known, artist):
+        # The draft names someone else. Two attributions on one listing is a
+        # question for the seller, not a coin for this pass to flip.
+        notes.append(f"The lookup reads the artist as {artist}"
+                     + (f" ({work})" if work else "")
+                     + f"; the draft says {known} -- check which is right.")
+    elif artist and conf in ("medium", "high"):
+        if not known:
+            listing.brand = artist
+            applied = True
+        has_row = any(s.name.strip().lower() == "artist"
+                      for s in listing.item_specifics)
+        if (has_row or _artwork_category(listing)) and \
+                _set_artist_specific(listing, artist, conf):
+            applied = True
+        current = listing.title or ""
+        lower = current.lower()
+        names_it = (artist.split()[-1].lower() in lower
+                    and (not work or work.lower() in lower))
+        hedged = any(h in lower for h in _RESEARCH_HEDGES)
+        proposed = str(found.get("title") or "").strip()[:TITLE_MAX_CHARS]
+        if not proposed and work:
+            proposed = f"{artist} {work}"[:TITLE_MAX_CHARS]
+        if proposed and (hedged or not names_it) and proposed.lower() != lower:
+            if conf == "high":
+                log.info("art lookup: title %r -> %r", current, proposed)
+                listing.title = proposed
+                applied = True
+            else:
+                notes.append(f"The lookup suggests this title: \u201c{proposed}\u201d.")
+        if applied:
+            # The artist is settled; the nag to find one is answered.
+            listing.missing_info = [m for m in listing.missing_info
+                                    if "artist" not in m.lower()]
+    elif artist or work:
+        reading = ", ".join(x for x in (artist, work) if x)
+        notes.append(f"The lookup wasn't sure -- its best reading: {reading}")
+    for item in (found.get("verify") or [])[:3]:
+        text = str(item or "").strip()
+        if text:
+            notes.append(f"Verify: {text}")
+    sources = [str(u).strip() for u in (found.get("sources") or [])[:3] if u]
+    if sources and (applied or notes):
+        notes.append("Looked up from: " + ", ".join(sources))
+    if notes:
+        listing.missing_info = [*(listing.missing_info or []), *notes]
+    if not (applied or notes):
+        return None
+    log.info("art lookup: %r by %r (%s confidence, applied=%s)",
+             work or "?", artist or "?", conf, applied)
+    return found
+
+
 def _research_reason(listing: Listing, observations: str = "") -> str:
     """Why this draft needs looking up, or "" when it doesn't.
 
@@ -5564,6 +5774,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # first pass — one consolidated call on chain v2.
                 _enrich_listing(listing, [item_dir / n for n in item_names],
                                 tags=result.tags)
+                # A note the fill just answered must not outlive it: it is
+                # what the dashboard's "Fill in details" reads, and a fresh
+                # draft carrying "size" beside a filled Size was suggested
+                # for a fill that then found nothing to do.
+                _drop_answered_missing_info(listing)
+                _lookup_artwork(listing, [item_dir / n for n in item_names],
+                                sid, result.raw_observations)
                 _research_draft(listing, [item_dir / n for n in item_names],
                                 result.raw_observations, result.confidence)
                 _price_against_comps(listing, uid, prefs)
@@ -5820,6 +6037,12 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # filled and stood the fallback down over a draft with every required
         # specific still blank.
         result.specifics_autofilled = _specifics_were_filled(added)
+        # See the bulk path: a note the fill answered stops being asked here,
+        # not on the next "Fill in details" press.
+        _drop_answered_missing_info(result.listing)
+        _beat("artwork")
+        _lookup_artwork(result.listing, [opt_dir / n for n in names],
+                        session_id, result.raw_observations)
         _beat("research")
         _research_draft(result.listing, [opt_dir / n for n in names],
                         result.raw_observations, result.confidence)
@@ -6509,11 +6732,16 @@ def _drop_answered_missing_info(listing: Listing) -> int:
               if (s.value or "").strip() and s.name.strip()}
     if (listing.brand or "").strip():
         filled.add("brand")
-    if not filled:
-        return 0
-    kept = [note for note in listing.missing_info
-            if not any(re.search(rf"\b{re.escape(name)}\b", note.lower())
-                       for name in filled)]
+    kept = list(listing.missing_info)
+    # _needs_a_category's own note, answered by the category it asked for:
+    # the fill resolves one before it runs, and a draft that now has a
+    # category must stop saying it has none.
+    if str(listing.category_id or "").strip():
+        kept = [note for note in kept if "ebay category" not in note.lower()]
+    if filled:
+        kept = [note for note in kept
+                if not any(re.search(rf"\b{re.escape(name)}\b", note.lower())
+                           for name in filled)]
     settled = len(listing.missing_info) - len(kept)
     listing.missing_info = kept
     return settled
