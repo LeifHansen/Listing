@@ -146,7 +146,13 @@ jobs:
             out=$(check)
             echo "--- attempt $i ---"
             printf '%s\n' "$out" | sed 's/^/    /'
-            if printf '%s' "$out" | grep -qiE 'is valid|has been issued|awaiting certificates? issuance is complete|Status *= *Ready'; then
+            # Matched against flyctl's REAL output, captured from the
+            # 2026-09-01 22:10 deploy, not from memory: `fly certs check`
+            # prints "Status = Issued" and "✓ Certificate is verified and
+            # active". Two earlier versions of this line guessed at the wording
+            # ("been issued", "Status = Ready") and matched neither, so the step
+            # warned on a certificate that was perfectly healthy.
+            if printf '%s' "$out" | grep -qiE 'Status *= *Issued|verified and active'; then
               echo "OK: https://$CERT_HOST is serving a valid certificate"
               exit 0
             fi
