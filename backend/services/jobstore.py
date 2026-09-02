@@ -55,6 +55,13 @@ MIRROR_FIELDS = (
     # originals live, whether the seller asked for cutouts, and how many times
     # we have already tried. See main._resume_interrupted_batches.
     "_staging_id", "_strip_bg", "_resumes",
+    # What a restart needs to pick a batch back up while it is DRAFTING: the
+    # grouping and the photo order it was working from, every item finished
+    # so far (a saved listing — never drafted or billed again), and the one
+    # in flight, named before its AI is charged for. Ids and titles only,
+    # never the drafts themselves, so a 250-photo batch's mirror stays a few
+    # KB. See main._resume_interrupted_batches.
+    "_names", "_groups", "_done", "_inflight",
     # AI charges this job took UP FRONT and has not yet earned. See `update`
     # for the invariant, and main._settle_interrupted_jobs for who reads them.
     "_refunds",

@@ -390,6 +390,15 @@ function BulkItemCard({
   );
 }
 
+// How long the queue keeps polling a batch it cannot reach before it gives
+// up watching. Long enough to ride out a deploy: the app runs on ONE machine,
+// a deploy replaces it, and the new one answers about a minute later with the
+// batch picked back up where it stopped (main._resume_interrupted_batches).
+// Six polls at three seconds gave up inside that window every time, and the
+// seller was told the connection was lost while the batch went on without
+// them.
+const RESTART_GRACE_MS = 4 * 60 * 1000;
+
 export function BulkQueue({ jobId, onExit, onSettled }) {
   const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
@@ -430,6 +439,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   const [stopping, setStopping] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
+  // When the polls started failing. A deploy restarts the only server and
+  // takes it away for a minute or two while the new one warms up; a batch
+  // that was running is picked straight back up by the next boot, so the
+  // watch has to outlast that window rather than a fixed count of polls.
+  const failingSince = useRef(0);
   const notFound = useRef(0);
   // Items merged away client-side — the still-running job's status would
   // otherwise resurrect them on the next poll.
@@ -444,6 +458,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     if (!jobId) return;
     stopped.current = false;
     fails.current = 0;
+    failingSince.current = 0;
     notFound.current = 0;
     // Resets "we stopped watching" for the NEW job. It cannot cascade — the
     // effect keys on jobId and this writes neither jobId nor anything jobId
@@ -458,6 +473,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         const j = await api(`/api/bulk/status/${jobId}`);
         if (stopped.current) return;
         fails.current = 0;
+        failingSince.current = 0;
         notFound.current = 0;
         setJob(j);
         if (j.items?.length) {
@@ -505,6 +521,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       } catch (e) {
         if (stopped.current) return;
         fails.current += 1;
+        if (!failingSince.current) failingSince.current = Date.now();
         // A 404 means the server has no record of this job at all. Confirm it
         // with a second poll before believing it: a status check can 404 on a
         // blip (an auth hiccup mid-batch does it) while the batch itself is
@@ -536,8 +553,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           }));
           toast("This batch was interrupted (the server restarted). Any items it finished are saved in Drafts.",
             { kind: "warning" });
-        } else if (fails.current < 6) {
-          timer = setTimeout(poll, 3000);  // transient — the job is likely still running
+        } else if (Date.now() - failingSince.current < RESTART_GRACE_MS) {
+          // Transient, or the server is restarting under a deploy. Either
+          // way the batch is most likely still running (or about to be
+          // picked back up), so keep asking rather than walking away.
+          timer = setTimeout(poll, 3000);
         } else {
           setUnwatched(true);
           // Give up watching but KEEP it persisted — the batch may still be
@@ -556,6 +576,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       if (document.visibilityState !== "visible" || stopped.current) return;
       clearTimeout(timer);
       fails.current = 0;
+      failingSince.current = 0;
       poll();
     };
     document.addEventListener("visibilitychange", onVisible);
