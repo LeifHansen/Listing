@@ -9,8 +9,29 @@
 
 export const SITE_URL = import.meta.env?.SITE || "https://thryftshop.com";
 
-/** The live product. Real today; becomes app.<domain> when the domain lands. */
-export const APP_URL = "https://listing-lfwjrg.fly.dev";
+/**
+ * The live product. Every CTA on the site is this constant — including the one
+ * place it is shown as visible text (mobile.astro), so there is no second copy
+ * to forget.
+ *
+ * The app answers on BOTH this hostname and listing-lfwjrg.fly.dev; the Fly
+ * certificate that makes the handshake succeed here is created by the app's own
+ * deploy workflow (.github/workflows/deploy.yml), not by hand.
+ */
+export const APP_URL = "https://app.thryftshop.com";
+
+/**
+ * The two ways in. The app's auth dialog has Log in / Sign up tabs and opens on
+ * Log in, so a visitor who came here to create an account would land on the
+ * wrong one — hence a separate entry point rather than one "open the app".
+ *
+ * `?signup=1` is what the app reads to select the Sign up tab. Until the
+ * app-side change ships it is simply an unknown query param: the link still
+ * works and still opens the dialog, just on Log in — the same place "Open the
+ * app" used to land, so nothing is worse in the meantime.
+ */
+export const LOGIN_URL = APP_URL;
+export const SIGNUP_URL = `${APP_URL}/?signup=1`;
 
 export const site = {
   name: "Thryft Shop",

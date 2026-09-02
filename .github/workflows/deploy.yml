@@ -118,31 +118,47 @@ jobs:
           CERT_HOST: app.thryftshop.com
         run: |
           app=$(grep -m1 "^app " fly.toml | cut -d"'" -f2)
-          status() { flyctl certs show "$CERT_HOST" -a "$app" 2>/dev/null || true; }
 
-          if [ -n "$(status)" ]; then
-            echo "$CERT_HOST is already registered on $app"
-          else
+          # 2>&1, not 2>/dev/null. The first version of this step hid stderr
+          # and then grepped the result for wording guessed at without ever
+          # running flyctl: on 2026-09-01 it polled twelve times in silence,
+          # matched neither branch, and reported "no certificate had been
+          # issued" when what had actually happened is that it never found
+          # out. A check that cannot tell "bad" from "no answer" is worse than
+          # none, because it is believed.
+          check() { flyctl certs check "$CERT_HOST" -a "$app" 2>&1 || true; }
+
+          if ! flyctl certs show "$CERT_HOST" -a "$app" >/dev/null 2>&1; then
             echo "Registering $CERT_HOST on $app"
             if ! flyctl certs add "$CERT_HOST" -a "$app" 2>&1; then
               echo "::warning::Could not register $CERT_HOST on $app. Run 'fly certs add $CERT_HOST -a $app' once by hand; https://$app.fly.dev is unaffected."
               exit 0
             fi
+          else
+            echo "$CERT_HOST is already registered on $app"
           fi
 
-          # Issuance is asynchronous, so "asked for" is not "works". Poll, and
-          # report which of the two this run actually achieved.
-          for i in $(seq 1 12); do
-            out=$(status)
-            if printf '%s' "$out" | grep -qi "not been issued\|awaiting\|pending"; then
-              echo "attempt $i: not issued yet"
-            elif printf '%s' "$out" | grep -qi "been issued\|ready"; then
+          # Issuance is asynchronous, so "asked for" is not "works". Whatever
+          # Fly says is ECHOED every round: the pattern below is a convenience
+          # for the exit code, never the only record. If it stops matching a
+          # future flyctl, the log still shows a human the real answer.
+          for i in $(seq 1 18); do
+            out=$(check)
+            echo "--- attempt $i ---"
+            printf '%s\n' "$out" | sed 's/^/    /'
+            # Matched against flyctl's REAL output, captured from the
+            # 2026-09-01 22:10 deploy, not from memory: `fly certs check`
+            # prints "Status = Issued" and "✓ Certificate is verified and
+            # active". Two earlier versions of this line guessed at the wording
+            # ("been issued", "Status = Ready") and matched neither, so the step
+            # warned on a certificate that was perfectly healthy.
+            if printf '%s' "$out" | grep -qiE 'Status *= *Issued|verified and active'; then
               echo "OK: https://$CERT_HOST is serving a valid certificate"
               exit 0
             fi
             sleep 10
           done
-          echo "::warning::$CERT_HOST is registered on $app but no certificate had been issued after two minutes. Check 'fly certs show $CERT_HOST -a $app' -- issuance needs the DNS record to resolve."
+          echo "::warning::$CERT_HOST is registered on $app but issuance was not confirmed after three minutes. The full output of each 'fly certs check' is above -- read it rather than trusting this line, and see https://fly.io/docs/networking/custom-domain/"
 
       - name: Deploy to Fly
         run: |

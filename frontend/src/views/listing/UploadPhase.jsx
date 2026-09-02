@@ -166,7 +166,12 @@ export function UploadPhase() {
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
               : stage.phase === "maker" ? "Double-checking the brand…"
-                : "Finishing up…";
+                // The web lookup. It is the slowest stage and the one worth
+                // waiting for, so it says what it is doing rather than
+                // hiding behind "Finishing up".
+                : stage.phase === "research"
+                  ? "Looking it up online — what it is and what it's worth…"
+                  : "Finishing up…";
     return (
       <div className="flex flex-col gap-5">
         <AIStatusCard messages={[stageLine]} />

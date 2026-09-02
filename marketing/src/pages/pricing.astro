@@ -6,7 +6,7 @@ import Button from "../components/Button.astro";
 import CTA from "../components/CTA.astro";
 import {
   site, packs, tokenCosts, perToken, draftsFor,
-  FREE_TOKENS_PER_MONTH, APP_URL,
+  FREE_TOKENS_PER_MONTH, SIGNUP_URL,
 } from "../lib/site.js";
 
 const description =
@@ -67,7 +67,7 @@ const jsonLd = {
           <li>· Two-way eBay sync and duplicate detection</li>
           <li>· Web, iOS and Android</li>
         </ul>
-        <Button href={APP_URL} variant="primary" size="lg" class="mt-8">Start free</Button>
+        <Button href={SIGNUP_URL} variant="primary" size="lg" class="mt-8">Start free</Button>
       </div>
     </div>
   </Container>
