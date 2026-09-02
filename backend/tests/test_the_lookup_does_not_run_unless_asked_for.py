@@ -13,6 +13,12 @@ flips it back to "auto" has to change a test that says why not.
 """
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
+
 from backend import main
 from backend.models import Listing
 
