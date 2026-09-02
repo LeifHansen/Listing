@@ -206,25 +206,48 @@ def severity(*, level: str, exc_type: str, has_traceback: bool,
     return "low"
 
 
+# The package this repository's code lives in ("backend"). origin() prefers
+# the deepest frame under it: a row naming a dependency's file is a row that
+# nothing in this tree can be pointed at.
+_OWN_PACKAGE = __name__.split(".")[0]
+
+
+def _is_own(tb) -> bool:
+    name = tb.tb_frame.f_globals.get("__name__", "") or ""
+    return name == _OWN_PACKAGE or name.startswith(_OWN_PACKAGE + ".")
+
+
 def origin(exc: Optional[BaseException]) -> tuple[str, str, Optional[int]]:
-    """(module, function, line) of the INNERMOST frame — where it broke.
+    """(module, function, line) of the innermost frame IN THIS CODEBASE.
 
     The alternative, and the first thing tried, was to fingerprint an
     unhandled error on the request path. That is wrong: `/api/listings/abc`
     and `/api/listings/def` are the same bug, and a path with an id in it
     mints a fresh fingerprint per seller. The deepest frame is the actual
     crash site and is the same for every occurrence.
+
+    "Deepest" stops at this package's own frames, though. A bad argument
+    into Pillow breaks inside PIL; a client that hangs up mid-upload breaks
+    inside starlette. The deepest frame of all then names a dependency's
+    file, and the daily triage read every such row as "recorded by an older
+    build" because starlette/requests.py is not in the tree. The deepest
+    frame of OURS is where the bad call was made, which is the line a fix
+    goes on. A traceback with no frame of ours at all (a dependency's own
+    thread) still reports its true innermost frame rather than nothing.
     """
     tb = getattr(exc, "__traceback__", None)
-    last = None
+    last = own = None
     while tb is not None:
         last = tb
+        if _is_own(tb):
+            own = tb
         tb = tb.tb_next
-    if last is None:
+    pick = own or last
+    if pick is None:
         return "", "", None
-    frame = last.tb_frame
+    frame = pick.tb_frame
     return (frame.f_globals.get("__name__", "") or "",
-            frame.f_code.co_name or "", last.tb_lineno)
+            frame.f_code.co_name or "", pick.tb_lineno)
 
 
 def new_reference() -> str:

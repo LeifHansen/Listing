@@ -188,6 +188,15 @@ class CutoutBusy(RuntimeError):
 # evidence anyone ever has.
 INFER_SLOW_SECONDS = float(os.getenv("REMBG_SLOW_SECONDS", "20") or 20)
 _last_infer_seconds: float = 0.0
+# The one-time cost, kept apart from the inference number on purpose:
+# importing onnxruntime and building the session around a 176MB model file.
+# The first call used to time both under one clock, so every boot's warm-up
+# reported itself as a ~107s "inference" on /api/ready, fired the
+# slow-inference warning below into the error feed (six deploys in a day
+# counted six), and then sat there as the last reading until a real photo
+# came through -- which on a quiet day is never. Nothing anywhere could then
+# say what an inference actually costs on the box.
+_model_load_seconds: float = 0.0
 _model_ready = False
 
 
@@ -195,7 +204,8 @@ def engine_state() -> dict:
     """What the readiness probe needs to know about the local model."""
     return {"model": _REMBG_MODEL, "loaded": _model_ready,
             "busy": _INFER_LOCK.locked(),
-            "last_inference_seconds": round(_last_infer_seconds, 2)}
+            "last_inference_seconds": round(_last_infer_seconds, 2),
+            "model_load_seconds": round(_model_load_seconds, 2)}
 # Draw a soft contact shadow under the cut-out subject so the white-background
 # result still reads like a studio product shot. Pure Pillow, no external API.
 # Disable with BG_SHADOW=off.
@@ -674,16 +684,16 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
     # One inference at a time — concurrent runs would stack peak memory and OOM
     # — but with a deadline on the wait, so a caller who cannot afford to queue
     # is told "busy" instead of hanging.
-    global _last_infer_seconds, _model_ready
+    global _last_infer_seconds, _model_load_seconds, _model_ready
     if not _INFER_LOCK.acquire(
             timeout=BATCH_INFER_WAIT_SECONDS if wait is None else wait):
         raise CutoutBusy(
             "The background remover is working through another batch. "
             "Give it a moment and try again.")
-    started = time.monotonic()
     try:
         # Imported inside the lock, after the wait: a machine that is already
         # full answers "busy" without paying to pull in onnxruntime first.
+        loading = time.monotonic()
         from rembg import new_session, remove
         if _rembg_session is None:
             # Set before the session is built, not after — rembg reads this
@@ -691,13 +701,21 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
             os.environ.setdefault("OMP_NUM_THREADS", str(_infer_threads()))
             _rembg_session = new_session(_REMBG_MODEL)
             _model_ready = True
-            log.info("bg-removal: model %s ready (%s inference thread(s), "
-                     "%dpx, %d photo workers)", _REMBG_MODEL,
+            _model_load_seconds = time.monotonic() - loading
+            log.info("bg-removal: model %s ready in %.1fs (%s inference "
+                     "thread(s), %dpx, %d photo workers)", _REMBG_MODEL,
+                     _model_load_seconds,
                      os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE,
                      _LOCAL_BATCH_WORKERS)
-        alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+        # The clock starts here, not when the lock was taken: the load above
+        # is paid once per process and is not what "inference" means to the
+        # probe or to the slow-inference warning below.
+        started = time.monotonic()
+        try:
+            alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+        finally:
+            _last_infer_seconds = time.monotonic() - started
     finally:
-        _last_infer_seconds = time.monotonic() - started
         _INFER_LOCK.release()
     if _last_infer_seconds > INFER_SLOW_SECONDS:
         log.warning("bg-removal: inference took %.1fs at %dpx (model=%s, "
@@ -1510,10 +1528,11 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
 def warm() -> None:
     """Pre-load the rembg model + trigger numba's JIT on a tiny image.
 
-    The very first background removal otherwise pays a ~60-70s one-time cost
-    (importing scipy/numba/onnxruntime + JIT). Called in a background thread at
-    startup so the machine is reachable immediately while this warms up, and
-    real uploads hit a warm (~1s) path."""
+    The very first background removal otherwise pays a one-time cost of a
+    minute or two (importing scipy/numba/onnxruntime + JIT; /api/ready
+    reports what it came to as model_load_seconds). Called in a background
+    thread at startup so the machine is reachable immediately while this
+    warms up, and real uploads hit a warm path."""
     try:
         # Warm the LOCAL model directly (the default engine, and it powers the
         # subject masks either way) — never via _studio_and_cutout,

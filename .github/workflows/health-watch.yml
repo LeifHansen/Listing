@@ -26,7 +26,10 @@ on:
 env:
   SITE: https://listing-lfwjrg.fly.dev
   # Warn ABOVE main.py's _LOW_DISK_BYTES (250MB) so this fires while reclaim is
-  # still coping, rather than after it has gone desperate.
+  # still coping, rather than after it has gone desperate. main.py's
+  # _TRIM_DISK_BYTES mirrors this number: below it the app's own daemon trims
+  # on a short interval, so the app is acting at the level this pages at
+  # rather than idling until the emergency line. Change both together.
   MIN_FREE_MB: '400'
 
 jobs:

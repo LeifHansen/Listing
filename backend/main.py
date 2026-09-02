@@ -498,6 +498,19 @@ _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # 250 MB is roughly one full bulk batch of headroom, which is the amount that
 # actually predicts an ENOSPC.
 _LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
+# Above that but below this, the volume is not yet one batch from breaking,
+# and the slow pass used to be all it got -- while the health-watch alarm
+# (.github/workflows/health-watch.yml, whose MIN_FREE_MB this mirrors) paged
+# the operator every two hours. From 2026-08-31 it did so for three days
+# straight, at 281-393 MB free on the 1 GB volume, with the app idling on
+# week-long TTLs because 250 MB had not been reached. In this band the daemon
+# TRIMS instead: photos the bucket already holds go after a day rather than
+# a week, originals after two hours rather than twelve, and it comes back
+# every fifteen minutes. That costs a seller at most a round trip to R2 for
+# an edit on a day-old listing; what it buys is a volume that keeps itself
+# above the line the alarm draws. Keep the two numbers in step: an alarm
+# that fires above the level the app acts at is one the app can never answer.
+_TRIM_DISK_BYTES = int(os.getenv("TRIM_DISK_MB", "400") or "400") * 1024 * 1024
 # How long the housekeeping daemon waits between passes. A volume with room to
 # spare only needs the slow pass; one that is low - or that will not answer how
 # much is left - has to be revisited soon, because the next bulk batch is what
@@ -567,27 +580,37 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
     return freed
 
 
-def reclaim_space(aggressive: bool = False) -> int:
+def reclaim_space(aggressive: bool = False, trim: bool = False) -> int:
     """Free volume space and return the bytes reclaimed. Runs the orphan sweep,
     prunes source uploads and old edit snapshots, and (when R2 is configured)
     drops local photo copies that the bucket already holds. `aggressive` (used
     when the disk is nearly full, or right after an ENOSPC) shortens the TTLs
-    so a wedged volume can recover without a human."""
+    so a wedged volume can recover without a human. `trim` (the band between
+    _LOW_DISK_BYTES and _TRIM_DISK_BYTES) sits between the two: sooner than
+    the slow pass, without the fifteen-minute originals that make every edit
+    on a fresh upload go back to R2. Aggressive wins when both are set."""
     _sweep_orphans()
-    orig_ttl = 900 if aggressive else _ORIGINALS_TTL      # 15 min when desperate
-    hist_ttl = 86400 if aggressive else _HISTORY_TTL      # 1 day when desperate
+    if aggressive:            # 15-minute originals, 1-day history, 1-hour rest
+        orig_ttl, hist_ttl, export_ttl, offload_ttl = 900, 86400, 3600, 3600
+    elif trim:                # 2-hour originals, 3-day history, 1-day rest
+        orig_ttl, hist_ttl = 2 * 3600, 3 * 86400
+        export_ttl = offload_ttl = 86400
+    else:
+        orig_ttl, hist_ttl = _ORIGINALS_TTL, _HISTORY_TTL
+        export_ttl, offload_ttl = 2 * 86400, 7 * 86400
     freed = storage.prune_originals(orig_ttl) + storage.prune_history(hist_ttl)
     # Dry-run export payloads: debug artifacts, never read back.
-    freed += storage.prune_exports(3600 if aggressive else 2 * 86400)
-    freed += _offload_to_r2(3600 if aggressive else 7 * 86400)
+    freed += storage.prune_exports(export_ttl)
+    freed += _offload_to_r2(offload_ttl)
     if freed:
-        log.info("reclaim: freed %.1f MB from the volume (aggressive=%s)",
-                 freed / 1e6, aggressive)
+        log.info("reclaim: freed %.1f MB from the volume (aggressive=%s, "
+                 "trim=%s)", freed / 1e6, aggressive, trim)
     return freed
 
 
-def _reclaim_plan(free: int) -> tuple[bool, int]:
-    """Decide (aggressive, seconds until the next pass) from a free-space reading.
+def _reclaim_plan(free: int) -> tuple[bool, bool, int]:
+    """Decide (aggressive, trim, seconds until the next pass) from a free-space
+    reading.
 
     `free` is storage.disk_free_bytes(), which reports 0 both for a genuinely
     full volume and for a stat it could not take (it swallows the error and
@@ -600,9 +623,15 @@ def _reclaim_plan(free: int) -> tuple[bool, int]:
     A stat that fails on a healthy volume therefore reclaims early rather than
     late. That trade is deliberate: short TTLs cost a round trip to R2 for an
     edit, while being wrong the other way is ENOSPC, which fails every upload.
+
+    `trim` is the band above that and below _TRIM_DISK_BYTES, where the
+    health-watch alarm is already paging: revisited on the short interval,
+    reclaimed on the middle TTLs, never the desperate ones.
     """
     low = free < _LOW_DISK_BYTES
-    return low, (_RECLAIM_INTERVAL_LOW if low else _RECLAIM_INTERVAL)
+    trim = not low and free < _TRIM_DISK_BYTES
+    soon = low or trim
+    return low, trim, (_RECLAIM_INTERVAL_LOW if soon else _RECLAIM_INTERVAL)
 
 
 def _reclaim_loop() -> None:
@@ -613,8 +642,8 @@ def _reclaim_loop() -> None:
         delay = _RECLAIM_INTERVAL_LOW
         try:
             free = storage.disk_free_bytes()
-            aggressive, delay = _reclaim_plan(free)
-            freed = reclaim_space(aggressive=aggressive)
+            aggressive, trim, delay = _reclaim_plan(free)
+            freed = reclaim_space(aggressive=aggressive, trim=trim)
             # The one state this daemon cannot fix by itself: the volume is
             # low and there is nothing left to free. Nothing else reports it
             # - reclaim_space only logs when it actually frees something - and

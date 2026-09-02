@@ -93,6 +93,20 @@ def module_file(module: str) -> str | None:
     return module.replace(".", "/") + ".py"
 
 
+def is_dependency(module: str, repo_root: str) -> bool:
+    """Whether a recorded module is a dependency's rather than this tree's.
+
+    Decided on the top-level package: `starlette.requests` was never in this
+    repository, so its absence is not evidence of an older build. Older rows
+    were recorded at the deepest frame of all, which for a client hanging up
+    mid-upload is starlette's and for a bad argument into Pillow is PIL's;
+    the app now records the deepest frame of its own, so a fresh occurrence
+    names a line in this tree and this branch stops being taken.
+    """
+    top = module.split(".", 1)[0]
+    return bool(top) and not os.path.isdir(os.path.join(repo_root, top))
+
+
 def why_not(row: dict, known: dict, repo_root: str) -> str | None:
     """The reason this row is not worth a pull request, or None if it is."""
     fingerprint = row.get("fingerprint") or ""
@@ -112,9 +126,14 @@ def why_not(row: dict, known: dict, repo_root: str) -> str | None:
     # An error recorded by an image that no longer matches the tree cannot be
     # fixed against the tree. Same reasoning as health-watch.yml's build-drift
     # step, one layer in: acting on a stale fact is worse than not acting.
-    path = module_file(str(row.get("module") or ""))
-    if path and not os.path.exists(os.path.join(repo_root, path)):
-        return f"{path} is not in the tree - recorded by an older build"
+    module = str(row.get("module") or "")
+    path = module_file(module)
+    if path:
+        if is_dependency(module, repo_root):
+            return (f"{module} is a dependency, not this repository's code - "
+                    "nothing in the tree is named by this row")
+        if not os.path.exists(os.path.join(repo_root, path)):
+            return f"{path} is not in the tree - recorded by an older build"
     return None
 
 
