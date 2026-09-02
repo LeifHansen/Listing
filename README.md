@@ -23,6 +23,7 @@ payload when you don't have eBay credentials yet).
 |-------|--------------|------|
 | Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (when removal is on), square-frame on the item at the photo's own scale — never a zoom — resize to 1600px, finishing sharpen | Pillow |
 | Identify | Photos sent to Claude vision; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + confidence + "missing info" to verify | Anthropic API |
+| Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
 | Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
@@ -288,10 +289,10 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/health` | Liveness, the build sha, and the capability flags the UI reads (AI / eBay / taxonomy). Public, and nothing else — the operator detail is on `/api/admin/diagnostics` |
 | `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
 | `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
-| `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id` |
+| `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id`. `notes=` carries the seller's comma-separated hints, saved with the session so every later re-draft still has them |
 | `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
-| `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id` |
+| `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id`. Takes the same `notes=` hints, which tell the grouping pass how many separate items to expect |
 | `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |

@@ -48,9 +48,10 @@ from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
 from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
                        ebay_trading, image_import, images, jobstore,
-                       listing_merge, listing_sync, metrics, notifications,
-                       orient, owed_refunds, preflight, pricing, promotions,
-                       recommender, sync_guard, sync_merge, taxonomy, tokens)
+                       listing_merge, listing_prompt, listing_sync, metrics,
+                       notifications, orient, owed_refunds, preflight, pricing,
+                       promotions, recommender, sync_guard, sync_merge,
+                       taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -3585,6 +3586,7 @@ async def upload(
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
     pipeline: str = Form("false"),
+    notes: str = Form(""),
 ) -> dict:
     """Accept images, optimize them, and return a session id.
 
@@ -3596,6 +3598,12 @@ async def upload(
     job ({session_id, job_id}; poll /api/bulk/status/{job_id}). The seller
     watches per-stage progress instead of a request that blocks through the
     whole photo pass; the old synchronous shape is unchanged when absent.
+
+    notes: the seller's own comma-separated hints about what is in the photos
+    ("one vintage ralph lauren polo, two lacoste polos different size color").
+    Saved with the session rather than consumed here, so every later re-run of
+    the identify chain — Start over most of all — gets the same hints the
+    first pass did.
     """
     if not files:
         raise HTTPException(400, "No files uploaded")
@@ -3614,6 +3622,8 @@ async def upload(
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
+    await run_in_threadpool(storage.save_notes, session_id,
+                            listing_prompt.clean_seller_notes(notes))
     try:
         for i, f in enumerate(files):
             data = await f.read()
@@ -4097,7 +4107,8 @@ def identify(session_id: str, request: Request) -> dict:
     spent = _charge_ai(request, "identify")
     try:
         result = claude_ai.identify(paths, names,
-                                    strategy=_pricing_strategy(_uid(request)))
+                                    strategy=_pricing_strategy(_uid(request)),
+                                    notes=storage.load_notes(session_id))
     except errors.StorageUnavailable:
         # Refund first, then let it keep its own name: an AI error message
         # sends the seller to retry the model or re-shoot their photos, and
@@ -4849,6 +4860,11 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     strategy = _pricing_strategy(uid, prefs)
     auto_promote = _auto_promote_enabled(uid)  # ditto
     billing = tokens.enabled() and uid is not None
+    # The seller's hints for this pile, saved with the staging session by the
+    # endpoint. Read from disk rather than passed in so a batch RESUMED after
+    # a restart is grouped with the same hints as the first attempt — the
+    # resume re-runs grouping, and grouping is where they matter most.
+    notes = storage.load_notes(staging_id)
     # Background-removal billing, tracked across the whole job: what was
     # debited up front, and how much has already gone back. A batch that never
     # reaches the end returns the whole un-refunded remainder (see finally) —
@@ -4948,7 +4964,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # worst case a boundary item shows up as two entries to merge by hand.
         groups: list[dict] = []
         for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
-            part = claude_ai.group_photos(thumbs[base:base + BULK_GROUP_CHUNK])["groups"]
+            part = claude_ai.group_photos(
+                thumbs[base:base + BULK_GROUP_CHUNK], notes=notes)["groups"]
             groups.extend({"name": g["name"],
                            "indices": [base + i for i in g["indices"]]}
                           for g in part)
@@ -4966,6 +4983,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 shutil.copyfile(src, item_dir / dst_name)
                 item_names.append(dst_name)
             objstore.upload_optimized(sid, item_dir, item_names)
+            # Each item inherits the WHOLE pile's hints, not just the line it
+            # was grouped under: the split is the model's guess, and the
+            # identify prompt already tells it to use only the lines matching
+            # the photos in front of it. The staging session (where they live
+            # now) is purged when this batch ends, so without the copy a
+            # "Start over" on any of these drafts loses them.
+            storage.save_notes(sid, notes)
 
             item = {"session_id": sid, "name": group["name"], "status": "draft",
                     "error": None, "listing_id": None,
@@ -4991,7 +5015,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 continue
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names],
-                                            item_names, strategy=strategy)
+                                            item_names, strategy=strategy,
+                                            notes=notes)
                 listing = _apply_listing_defaults(result.listing, uid, prefs)
                 # Carry the account's Promote default onto the draft itself, so
                 # the queue card shows what will actually happen at publish
@@ -5058,10 +5083,15 @@ async def bulk_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
+    notes: str = Form(""),
 ) -> dict:
     """Bulk mode: accept a photo dump spanning multiple items, then process in
     the background (poll /api/bulk/status/{job_id}). Every item queues as a
-    draft for review — publishing stays an explicit, per-listing action."""
+    draft for review — publishing stays an explicit, per-listing action.
+
+    notes: the seller's comma-separated inventory of the pile. Saved with the
+    staging session, which is also what makes it survive a restart — a resumed
+    batch re-reads it from disk exactly like the first run did."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # The worker thread can't return a 401, so the login requirement (billing
@@ -5078,6 +5108,8 @@ async def bulk_upload(
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
+    await run_in_threadpool(storage.save_notes, staging_id,
+                            listing_prompt.clean_seller_notes(notes))
     batch_bytes = 0
     try:
         for i, f in enumerate(files):
@@ -5189,8 +5221,14 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
 
         prefs = _load_prefs(uid)  # once — strategy and defaults both read it
         _beat("identifying")
+        # The seller's hints were saved with the session at upload time, so
+        # they are read here rather than passed in: this worker also runs
+        # "Start over", which re-drafts months later with no request to carry
+        # them — and a re-run that has forgotten what the seller told it makes
+        # exactly the mistake they typed the note to prevent.
         result = claude_ai.identify([opt_dir / n for n in names], names,
-                                    strategy=_pricing_strategy(uid, prefs))
+                                    strategy=_pricing_strategy(uid, prefs),
+                                    notes=storage.load_notes(session_id))
         _apply_listing_defaults(result.listing, uid, prefs)
         _beat("category")
         _resolve_category(result.listing)
