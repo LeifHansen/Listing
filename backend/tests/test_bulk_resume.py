@@ -15,7 +15,23 @@ pytest.importorskip("fastapi")
 
 from PIL import Image  # noqa: E402
 
-from backend import main, storage  # noqa: E402
+from backend import config, main, storage  # noqa: E402
+from backend.services import jobstore  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_job_outlives_its_test(monkeypatch, tmp_path):
+    """Mirrors in a data root of this test's own, and every job finished
+    before the test ends. A job "resumed" here with a stubbed worker was
+    otherwise left running in its mirror file, and the next TestClient in
+    this process adopted it at startup and ran the real worker over it in
+    the background of whatever test happened to be next."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    jobstore.reset()
+    yield
+    for job_id in list(jobstore._JOBS):
+        jobstore.update(job_id, done=True)
+    jobstore.reset()
 
 
 def _photos(dir_, n=3):

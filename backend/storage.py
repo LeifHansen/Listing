@@ -153,6 +153,41 @@ def save_listing(session_id: str, listing: Listing) -> None:
     (d / "listing.json").write_text(listing.model_dump_json(indent=2))
 
 
+NOTES_FILE = "notes.txt"
+
+
+def save_notes(session_id: str, notes: str) -> None:
+    """Remember the seller's own hints for this session's photos.
+
+    They ride the session directory rather than the listing record because
+    they are an INPUT to the AI, not part of the draft: nothing publishes
+    them, nothing syncs them to a marketplace, and a re-run of the identify
+    chain ("Start over") needs them just as much as the first pass did — which
+    is the whole reason they are written down instead of being read once off
+    the upload request and thrown away.
+
+    Best-effort: a hint that cannot be saved must never fail the upload the
+    seller is actually waiting on.
+    """
+    text = (notes or "").strip()
+    try:
+        path = ensure_session(session_id) / NOTES_FILE
+        if text:
+            path.write_text(text)
+        else:
+            path.unlink(missing_ok=True)
+    except (OSError, InvalidSessionId) as exc:
+        log.warning(f"storage: could not save notes for {session_id}: {exc}")
+
+
+def load_notes(session_id: str) -> str:
+    """The seller's hints for this session, or "" when there are none."""
+    try:
+        return (session_dir(session_id) / NOTES_FILE).read_text().strip()
+    except (OSError, InvalidSessionId):
+        return ""
+
+
 def load_listing(session_id: str) -> dict | None:
     """The saved draft as a plain dict, or None when this session has none.
 

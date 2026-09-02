@@ -1890,10 +1890,27 @@ _PHOTO_BATCH_WORKERS = int(os.getenv("PHOTO_BATCH_WORKERS", "8") or "8")
 _LOCAL_BATCH_WORKERS = int(os.getenv("PHOTO_LOCAL_WORKERS", "2") or "2")
 
 
+class Stopped(Exception):
+    """Raised inside a photo batch that its caller called off mid-run.
+
+    Cutouts are the longest thing this app does — one local inference is ~100s
+    on the production box, so a 40-photo batch is an hour — which is why "stop
+    this batch" has to reach INSIDE the photo pass instead of waiting politely
+    for it. Nothing is left half-written: optimize() renames its result into
+    place, so the photos already finished stay valid and a stopped run is
+    still a resumable one.
+    """
+
+
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
-                 progress=None) -> list[dict]:
+                 progress=None, should_stop=None) -> list[dict]:
     """Optimize every image in src_dir. `progress(done, total)` (optional) is
     called after each photo so long bulk jobs can show a live count.
+
+    `should_stop()` (optional) is asked before each photo starts; when it
+    answers True the run raises `Stopped` rather than working through the rest
+    of the pile. Unlike `progress`, it is NOT display-only — a caller passing
+    it is asking to be able to abandon the batch.
 
     Photos whose output already exists are left alone and reported as
     {"file", "reused"}. That is what lets a batch that died halfway — a deploy,
@@ -1946,7 +1963,7 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
             pass
     results.update(zip(pending, optimize_batch(
         [(src, dst, rotations.get(src.name, 0)) for _i, src, dst in todo],
-        remove_bg=remove_bg, progress=progress,
+        remove_bg=remove_bg, progress=progress, should_stop=should_stop,
         done_already=len(results), grand_total=len(jobs))))
     # Back into source order, so results still line up with the filenames.
     return [results[i] for i, _src in jobs]
@@ -1954,7 +1971,7 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
 
 def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
                    progress=None, done_already: int = 0,
-                   grand_total: int = 0) -> list[dict]:
+                   grand_total: int = 0, should_stop=None) -> list[dict]:
     """Optimize (src, dst, clockwise-rotation) jobs, pooled to fit the engine.
 
     A chain led by a remote API (Pixian/Photoroom/Adobe) gets a wide pool —
@@ -1984,6 +2001,10 @@ def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
 
     def _one(job: tuple[Path, Path, int]) -> dict:
         src, dst, rotate = job
+        # Asked before the photo starts, so a stop costs at most the one
+        # cutout already running rather than the whole rest of the pile.
+        if should_stop is not None and should_stop():
+            raise Stopped()
         try:
             result = optimize(src, dst, remove_bg, rotate=rotate)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image

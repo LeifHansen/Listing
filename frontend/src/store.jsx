@@ -962,7 +962,7 @@ export function AppProvider({ children }) {
   // unmounts the moment the batch screen takes over, so without handing the
   // photos back the seller would return to an empty drop zone and have to
   // pick every one of them again.
-  const [bulkRetry, setBulkRetry] = useState(null); // { files, removeBg }
+  const [bulkRetry, setBulkRetry] = useState(null); // { files, removeBg, notes }
   const clearBulkRetry = useCallback(() => setBulkRetry(null), []);
 
   // Job finished: stop persisting (a reload shouldn't restore a done batch) but
@@ -1028,21 +1028,25 @@ export function AppProvider({ children }) {
   // The whole bulk upload — screen flip first, then the slow part. It lives
   // here rather than in the uploader because that flip unmounts the uploader
   // while the downscale + POST are still running.
-  const runBulkUpload = useCallback(async (files, removeBg) => {
+  const runBulkUpload = useCallback(async (files, removeBg, notes = "") => {
     beginBulk();
     try {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
       fd.append("remove_bg", removeBg ? "true" : "false");
+      // The seller's hints about what is in the pile — what to expect and how
+      // many items. Sent even when empty so the field is always present.
+      fd.append("notes", notes || "");
       const { job_id } = await api("/api/bulk/upload",
         // A whole batch of photos over a phone connection: minutes, legitimately.
         { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       files.forEach((f) => URL.revokeObjectURL(f.url));
       startBulk(job_id);
     } catch (e) {
-      // Back to the uploader with the pile intact, so retrying is one click.
-      setBulkRetry({ files, removeBg });
+      // Back to the uploader with the pile intact, so retrying is one click —
+      // the notes with it, or the seller retypes every hint they just wrote.
+      setBulkRetry({ files, removeBg, notes });
       clearBulk();
       toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
     }

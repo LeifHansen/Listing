@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Rocket, PenLine, ExternalLink, CheckCircle2, AlertTriangle, Combine, Trash2,
-  ArrowRight, X,
+  ArrowRight, CircleStop, X,
 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
@@ -390,6 +390,15 @@ function BulkItemCard({
   );
 }
 
+// How long the queue keeps polling a batch it cannot reach before it gives
+// up watching. Long enough to ride out a deploy: the app runs on ONE machine,
+// a deploy replaces it, and the new one answers about a minute later with the
+// batch picked back up where it stopped (main._resume_interrupted_batches).
+// Six polls at three seconds gave up inside that window every time, and the
+// seller was told the connection was lost while the batch went on without
+// them.
+const RESTART_GRACE_MS = 4 * 60 * 1000;
+
 export function BulkQueue({ jobId, onExit, onSettled }) {
   const { setSession, loadListings, connectedMarketplaces } = useApp();
   const { toast, confirm } = useToast();
@@ -424,8 +433,17 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // Watching was given up on (job gone, or too many failed polls). Without it
   // the pre-first-poll "Uploading…" state below would spin forever.
   const [unwatched, setUnwatched] = useState(false);
+  // "Stop batch" has been sent and accepted. Latched so the button can't be
+  // hit twice in the up-to-1.5s before the next poll brings back the finished
+  // job — and so it can say "Stopping…" instead of looking ignored.
+  const [stopping, setStopping] = useState(false);
   const stopped = useRef(false);
   const fails = useRef(0);
+  // When the polls started failing. A deploy restarts the only server and
+  // takes it away for a minute or two while the new one warms up; a batch
+  // that was running is picked straight back up by the next boot, so the
+  // watch has to outlast that window rather than a fixed count of polls.
+  const failingSince = useRef(0);
   const notFound = useRef(0);
   // Items merged away client-side — the still-running job's status would
   // otherwise resurrect them on the next poll.
@@ -440,6 +458,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     if (!jobId) return;
     stopped.current = false;
     fails.current = 0;
+    failingSince.current = 0;
     notFound.current = 0;
     // Resets "we stopped watching" for the NEW job. It cannot cascade — the
     // effect keys on jobId and this writes neither jobId nor anything jobId
@@ -454,6 +473,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         const j = await api(`/api/bulk/status/${jobId}`);
         if (stopped.current) return;
         fails.current = 0;
+        failingSince.current = 0;
         notFound.current = 0;
         setJob(j);
         if (j.items?.length) {
@@ -501,6 +521,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       } catch (e) {
         if (stopped.current) return;
         fails.current += 1;
+        if (!failingSince.current) failingSince.current = Date.now();
         // A 404 means the server has no record of this job at all. Confirm it
         // with a second poll before believing it: a status check can 404 on a
         // blip (an auth hiccup mid-batch does it) while the batch itself is
@@ -532,8 +553,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           }));
           toast("This batch was interrupted (the server restarted). Any items it finished are saved in Drafts.",
             { kind: "warning" });
-        } else if (fails.current < 6) {
-          timer = setTimeout(poll, 3000);  // transient — the job is likely still running
+        } else if (Date.now() - failingSince.current < RESTART_GRACE_MS) {
+          // Transient, or the server is restarting under a deploy. Either
+          // way the batch is most likely still running (or about to be
+          // picked back up), so keep asking rather than walking away.
+          timer = setTimeout(poll, 3000);
         } else {
           setUnwatched(true);
           // Give up watching but KEEP it persisted — the batch may still be
@@ -552,6 +576,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       if (document.visibilityState !== "visible" || stopped.current) return;
       clearTimeout(timer);
       fails.current = 0;
+      failingSince.current = 0;
       poll();
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -563,6 +588,27 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
       window.removeEventListener("focus", onVisible);
     };
   }, [jobId, loadListings, toast, onSettled]);
+
+  // Stop the batch. Nothing is deleted and nothing is lost: every item the
+  // batch has already drafted was saved as it finished and stays in Drafts, so
+  // this doesn't stop to ask — a seller who wants out of a batch that isn't
+  // moving should be out of it on the first tap. The server settles the job
+  // immediately and the worker stands down at its next item, so the screen
+  // lets go even when the batch itself is wedged somewhere it can't answer
+  // from, which is the case this exists for.
+  const stopBatch = useCallback(async () => {
+    setStopping(true);
+    try {
+      await postJson(`/api/bulk/cancel/${jobId}`, {});
+      toast("Stopping the batch — anything it already drafted is saved in Drafts.",
+            { kind: "info" });
+    } catch (e) {
+      // Still running, so the button goes back rather than leaving the seller
+      // looking at a "Stopping…" that never happened.
+      setStopping(false);
+      toast(`Couldn't stop the batch: ${e.message}`, { kind: "error" });
+    }
+  }, [jobId, toast]);
 
   const updateItem = (sid, listing) => {
     setItems((cur) => cur.map((it) =>
@@ -920,6 +966,18 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
               ? `${items.length} item${items.length === 1 ? "" : "s"} drafted so far`
               : null}
           />
+          {/* Only once the server has the batch: before the job id lands there
+              is nothing to stop yet, and the photos are still on their way. */}
+          {jobId && (
+            <div className="flex justify-end">
+              <Button
+                variant="ghost" size="sm" onClick={stopBatch} disabled={stopping}
+                title="Stop this batch. Items already drafted stay in Drafts; the rest won't run."
+              >
+                <CircleStop aria-hidden /> {stopping ? "Stopping…" : "Stop batch"}
+              </Button>
+            </div>
+          )}
         </div>
       )}
       {job?.done && (
@@ -928,6 +986,15 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             <p className="text-sm font-semibold text-ink flex items-center gap-2 flex-1 min-w-0">
               {job.error
                 ? <><AlertTriangle size={17} className="text-warning" aria-hidden /> {job.error}</>
+                : job.cancelled
+                ? <>
+                    <CircleStop size={17} className="text-ink-secondary shrink-0" aria-hidden />
+                    <span title="The rest of the batch never ran, so it wasn't charged for.">
+                      You stopped this batch{items.length
+                        ? ` — the ${items.length} item${items.length === 1 ? "" : "s"} it finished ${items.length === 1 ? "is" : "are"} saved in Drafts`
+                        : " before it drafted anything"}.
+                    </span>
+                  </>
                 : <>
                     <CheckCircle2 size={17} className="text-success" aria-hidden />
                     <span title="Also saved in Drafts — review below or come back anytime.">

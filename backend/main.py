@@ -48,9 +48,10 @@ from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
 from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
                        ebay_trading, image_import, images, jobstore,
-                       listing_merge, listing_sync, messages as messages_service,
-                       metrics, notifications, orient, owed_refunds, preflight,
-                       pricing, promotions, recommender, sync_guard, sync_merge,
+                       listing_merge, listing_prompt, listing_sync,
+                       messages as messages_service, metrics, notifications,
+                       orient, owed_refunds, preflight, pricing, promotions,
+                       recommender, sync_guard, sync_merge,
                        taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services import deletion_queue
@@ -3908,6 +3909,7 @@ async def upload(
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
     pipeline: str = Form("false"),
+    notes: str = Form(""),
 ) -> dict:
     """Accept images, optimize them, and return a session id.
 
@@ -3919,6 +3921,12 @@ async def upload(
     job ({session_id, job_id}; poll /api/bulk/status/{job_id}). The seller
     watches per-stage progress instead of a request that blocks through the
     whole photo pass; the old synchronous shape is unchanged when absent.
+
+    notes: the seller's own comma-separated hints about what is in the photos
+    ("one vintage ralph lauren polo, two lacoste polos different size color").
+    Saved with the session rather than consumed here, so every later re-run of
+    the identify chain — Start over most of all — gets the same hints the
+    first pass did.
     """
     if not files:
         raise HTTPException(400, "No files uploaded")
@@ -3937,6 +3945,8 @@ async def upload(
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
+    await run_in_threadpool(storage.save_notes, session_id,
+                            listing_prompt.clean_seller_notes(notes))
     try:
         for i, f in enumerate(files):
             data = await f.read()
@@ -4420,7 +4430,8 @@ def identify(session_id: str, request: Request) -> dict:
     spent = _charge_ai(request, "identify")
     try:
         result = claude_ai.identify(paths, names,
-                                    strategy=_pricing_strategy(_uid(request)))
+                                    strategy=_pricing_strategy(_uid(request)),
+                                    notes=storage.load_notes(session_id))
     except errors.StorageUnavailable:
         # Refund first, then let it keep its own name: an AI error message
         # sends the seller to retry the model or re-shoot their photos, and
@@ -5041,18 +5052,109 @@ _register_bulk_job = jobstore.register
 _bulk_set = jobstore.update
 
 
+class _BatchStopped(Exception):
+    """The seller stopped this batch (POST /api/bulk/cancel/{job_id})."""
+
+
+def _stop_if_cancelled(job_id: str) -> None:
+    """Leave the batch if it has been called off. Placed only between whole
+    units of work — a photo, an item — because stopping inside one would throw
+    away AI the seller has already been charged for."""
+    if jobstore.cancel_requested(job_id):
+        raise _BatchStopped()
+
+
 # How many times one batch may be picked up again. A batch that dies, resumes,
 # and dies again is not unlucky — it is hitting something it will keep hitting
 # (a photo that OOMs the box, most likely), and a machine that restarts into
 # the same doomed batch forever never gets to serve anyone else.
 BULK_MAX_RESUMES = int(os.getenv("BULK_MAX_RESUMES", "2") or 2)
-# The phases a batch can be picked up from. All of them are BEFORE the first
-# draft is written, which is what makes resuming safe: re-running them creates
-# nothing, so there is nothing to duplicate and no second charge to make. Once
-# "identifying" starts, each finished item is already saved as a draft and the
-# per-item AI has already been billed, so a resume would draft and charge
-# those items twice — that case keeps the honest "run the rest again" message.
+# The phases a batch can be picked up from by simply running it again. All of
+# them are BEFORE the first draft is written, which is what makes that safe:
+# re-running them creates nothing, so there is nothing to duplicate and no
+# second charge to make.
+#
+# "identifying" is resumable too, but not by re-running: each finished item
+# is already saved as a draft and its AI already billed, so the batch writes
+# its plan down as it goes (the grouping, each item as it lands, the one in
+# flight) and a restart continues from the first item without a draft. See
+# _drafting_plan. A mirror from before the plan was written down — no
+# grouping to continue from — keeps the honest "run the rest again" message.
 _RESUMABLE_PHASES = ("uploading", "optimizing", "grouping")
+_DRAFTING_PHASE = "identifying"
+
+
+def _compact_item(item: dict) -> dict:
+    """The part of a drafted item worth mirroring: enough to rebuild the
+    queue's row from disk after a restart, and nothing that is already in
+    the item's own listing.json."""
+    return {"session_id": item.get("session_id"), "name": item.get("name"),
+            "status": item.get("status"), "error": item.get("error"),
+            "title": item.get("title")}
+
+
+def _bulk_items_from_disk(done: list[dict]) -> list[dict]:
+    """The queue rows for items finished before a restart, rebuilt from their
+    saved listings. The same shape _run_bulk_job produces, so the poller
+    cannot tell a resumed batch from one that never stopped."""
+    items: list[dict] = []
+    for rec in done:
+        sid = str(rec.get("session_id") or "")
+        listing = storage.load_listing(sid) if sid else None
+        photos = (listing or {}).get("images") or []
+        items.append({
+            "session_id": sid, "name": rec.get("name") or "",
+            "status": rec.get("status") or "draft", "error": rec.get("error"),
+            "listing_id": None,
+            "thumb": f"/media/{sid}/optimized/{photos[0]}" if photos else "",
+            "listing": listing,
+            "title": (rec.get("title") or (listing or {}).get("title")
+                      or rec.get("name") or ""),
+        })
+    return items
+
+
+def _drafting_plan(record: dict, staging: str) -> Optional[dict]:
+    """What a batch interrupted while drafting needs to carry on, or None.
+
+    None means the honest "run the rest again" message stands: no plan was
+    written (a mirror from before this existed), or the pile the remaining
+    items' photos are copied from is gone — swept, or on a volume that did
+    not come back. list_optimized is read-only on purpose: asking must never
+    re-create the tree the orphan sweep just removed.
+
+    The item in flight is the one judgement call. Its draft can land and the
+    process die before the job ticks, in which case its listing.json is on
+    disk and it is finished (and billed) — drafting it again would duplicate
+    both. With photos in its session but no draft, it is finished IN that
+    session, without a second charge: the first one bought nothing, and the
+    receipt died with the process. With neither, it never really started and
+    is drafted like any other remaining item.
+    """
+    names = [n for n in (record.get("_names") or []) if isinstance(n, str)]
+    groups = [g for g in (record.get("_groups") or [])
+              if isinstance(g, dict) and isinstance(g.get("indices"), list)]
+    if not names or not groups:
+        return None
+    if not storage.list_optimized(staging):
+        return None
+    done = [dict(d) for d in (record.get("_done") or [])
+            if isinstance(d, dict) and d.get("session_id")]
+    if len(done) > len(groups):
+        return None
+    inflight = record.get("_inflight") or None
+    if inflight:
+        listing = storage.load_listing(inflight)
+        if listing is not None and len(done) < len(groups):
+            group = groups[len(done)]
+            done.append({"session_id": inflight, "name": group.get("name") or "",
+                         "status": "draft", "error": None,
+                         "title": listing.get("title") or group.get("name") or ""})
+            inflight = None
+        elif listing is not None or not storage.list_optimized(inflight):
+            inflight = None
+    return {"names": names, "groups": groups, "done": done,
+            "inflight": inflight, "items": _bulk_items_from_disk(done)}
 
 
 def _settle_interrupted_jobs(records: list[dict]) -> None:
@@ -5104,12 +5206,45 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
         # each have their own worker and their own resume story.
         if record.get("kind") or not job_id or not staging:
             continue
-        if record.get("phase") not in _RESUMABLE_PHASES:
+        phase = record.get("phase")
+        drafting = phase == _DRAFTING_PHASE
+        if phase not in _RESUMABLE_PHASES and not drafting:
+            continue
+        if record.get("_cancel"):
+            # Stopped on purpose. The restart is not a second chance to run
+            # work the seller has already said they don't want.
             continue
         resumes = int(record.get("_resumes") or 0)
         if resumes >= BULK_MAX_RESUMES:
             log.warning("bulk %s: interrupted %d time(s) — not picking it up "
                         "again", job_id, resumes)
+            continue
+        uid = record.get("_uid")
+        strip_bg = bool(record.get("_strip_bg"))
+        if drafting:
+            plan = _drafting_plan(record, staging)
+            if plan is None:
+                continue
+            _register_bulk_job(job_id, {
+                "id": job_id, "phase": _DRAFTING_PHASE, "done": False,
+                "error": None, "items": plan["items"],
+                "total_items": len(plan["groups"]),
+                "current": min(len(plan["done"]) + 1, len(plan["groups"])),
+                "total_photos": record.get("total_photos") or len(plan["names"]),
+                "resumed": True, "remove_bg": strip_bg,
+                "_staging_id": staging, "_strip_bg": strip_bg,
+                "_resumes": resumes + 1,
+                "_names": plan["names"], "_groups": plan["groups"],
+                "_done": plan["done"], "_inflight": plan["inflight"],
+            }, uid=uid)
+            threading.Thread(
+                target=_run_bulk_job, args=(job_id, staging, strip_bg, uid),
+                kwargs={"resumed": True, "resume_from": plan}, daemon=True,
+            ).start()
+            resumed.add(job_id)
+            log.info("bulk %s: resuming drafting after a restart (attempt %d, "
+                     "%d of %d items already saved)", job_id, resumes + 1,
+                     len(plan["done"]), len(plan["groups"]))
             continue
         # session_dir, NOT storage.original_dir: that one calls ensure_session
         # and would CREATE the tree it is being asked about — re-making the
@@ -5120,8 +5255,6 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
             # Swept, or the volume it lived on is gone. Nothing to resume from,
             # and re-running would just optimize an empty directory.
             continue
-        uid = record.get("_uid")
-        strip_bg = bool(record.get("_strip_bg"))
         _register_bulk_job(job_id, {
             "id": job_id, "phase": "optimizing", "done": False,
             "error": None, "items": [], "total_items": 0, "current": 0,
@@ -5156,7 +5289,8 @@ def _adopt_job_mirrors() -> None:
 
 
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
-                  uid: Optional[str], resumed: bool = False) -> None:
+                  uid: Optional[str], resumed: bool = False,
+                  resume_from: Optional[dict] = None) -> None:
     """Background worker: optimize -> group -> per-item identify. Every item
     lands as a draft for review; publishing is always an explicit choice.
 
@@ -5167,11 +5301,24 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     refund them — the receipt that made a refund possible died with the
     process — but the work is being finished rather than abandoned, which is
     what that charge was for. Everything else re-runs as normal, because a
-    resume only ever restarts phases that had drafted nothing."""
+    resume of the photo phases restarts nothing that had drafted anything.
+
+    `resume_from` is a batch picked up while DRAFTING (see _drafting_plan):
+    the grouping and photo order it was working from, the items already
+    saved, and the one in flight. The photo pass and the grouping are skipped
+    — the pile is still on the volume, the plan says how it was split — and
+    drafting continues from the first item without a draft. The in-flight
+    item is finished in the session that already holds its photos, without
+    being charged again."""
     prefs = _load_prefs(uid)                   # one DB read for the whole batch
     strategy = _pricing_strategy(uid, prefs)
     auto_promote = _auto_promote_enabled(uid)  # ditto
     billing = tokens.enabled() and uid is not None
+    # The seller's hints for this pile, saved with the staging session by the
+    # endpoint. Read from disk rather than passed in so a batch RESUMED after
+    # a restart is grouped with the same hints as the first attempt — the
+    # resume re-runs grouping, and grouping is where they matter most.
+    notes = storage.load_notes(staging_id)
     # Background-removal billing, tracked across the whole job: what was
     # debited up front, and how much has already gone back. A batch that never
     # reaches the end returns the whole un-refunded remainder (see finally) —
@@ -5184,111 +5331,167 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     bg_refunded = 0
     n_photos = 0
     delivered = False
+    # Declared out here so a batch the seller stops can still report the items
+    # it had drafted by then — they are saved listings, not a partial result.
+    items: list[dict] = []
+    # Where drafting starts, and the item a restart cut off mid-draft. A fresh
+    # batch starts at the first item with nothing in flight.
+    start, inflight = 0, None
     try:
-        # Bulk background removal is metered per photo, charged before the
-        # engines run. Not enough tokens -> photos are kept as-is (with a
-        # visible reason) rather than failing the whole batch.
-        if strip_bg and billing and not resumed:
-            n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
-                           if p.is_file())
-            bg_spent = tokens.spend(uid, "image_ai", units=n_photos)
-            if bg_spent is not None and not bg_spent.get("ok"):
-                strip_bg = False
-                _bulk_set(job_id, bg_error=(
-                    "Not enough tokens for background removal — photos were "
-                    "kept as shot. " + tokens.insufficient_message(bg_spent)))
-                bg_spent = None
-            elif bg_spent is not None:
-                # What was actually debited, so the settlement below can give
-                # back exactly the unused remainder. db.token_refund does not
-                # remember earlier partial refunds — a partial refund followed
-                # by a full one would pay the user twice — so the accounting
-                # has to live here.
-                bg_charged = tokens.cost("image_ai", n_photos)
-        _bulk_set(job_id, phase="optimizing", current=0)
-        opt_results = images.optimize_all(
-            storage.original_dir(staging_id), storage.optimized_dir(staging_id),
-            strip_bg,
-            progress=lambda done, total: _bulk_set(job_id, current=done,
-                                                   total_photos=total))
-        # Surface a background-removal failure (out of credits, bad key, rate
-        # limit) on the job so the UI can say WHY the photos came back with
-        # their backgrounds intact — silence here reads as "the feature is
-        # broken" when the photo was deliberately kept unchanged.
-        # A photo that failed to process AT ALL (corrupt/truncated file, a
-        # decoder that gave up) got no cutout either and owes nothing — count
-        # it the same way /api/upload does. Photos the batch never even looked
-        # at (a .mov in the pile: optimize_all filters by extension) never
-        # reach opt_results, and the settlement below returns those.
-        bg_failed = [r for r in opt_results
-                     if r.get("bg_error") or r.get("error")]
-        # Files the charge counted but optimize_all never looked at — it takes
-        # only known image extensions, while the charge counts everything in
-        # the staging dir, so a video or PDF in the pile was billed and could
-        # not even fail visibly.
-        unprocessed = max(0, n_photos - len(opt_results))
-        owed_now = (len(bg_failed) + unprocessed) * tokens.COSTS.get("image_ai", 1)
-        if bg_failed:
-            reason = next((r["bg_error"] for r in bg_failed if r.get("bg_error")), None)
-            _bulk_set(job_id, bg_failed=len(bg_failed),
-                      **({"bg_error": reason} if reason else {}))
-        if owed_now:
-            # Photos that kept their background weren't the AI they paid for.
-            #
-            # Counted only if it actually LANDED. `bg_refunded` is subtracted
-            # from the final settlement below, so counting a refund that did
-            # not commit would shrink the remainder by money the seller never
-            # got. A failure here is also queued for a later pass (see
-            # services/owed_refunds), and db.token_refund caps every refund at
-            # what the spend has left — so the two paths converge on the right
-            # total and neither can over-pay.
-            if tokens.refund(bg_spent, units=owed_now):
-                bg_refunded += owed_now
-        names = storage.list_optimized(staging_id)
-        if not names:
-            _bulk_set(job_id, done=True, error="No usable photos in the upload.")
-            return
-        opt_dir = storage.optimized_dir(staging_id)
+        if resume_from is not None:
+            # Picked back up mid-draft. The pile is still on the volume and
+            # the plan says how it was split, so neither the photo pass nor
+            # the grouping runs again; what is left is the drafting.
+            names = list(resume_from["names"])
+            groups = list(resume_from["groups"])
+            done = list(resume_from.get("done") or [])
+            inflight = resume_from.get("inflight") or None
+            opt_dir = storage.optimized_dir(staging_id)
+            items = _bulk_items_from_disk(done)
+            start = len(done)
+            _bulk_set(job_id, total_items=len(groups), total_photos=len(names),
+                      items=list(items), _names=names, _groups=groups,
+                      _done=[_compact_item(it) for it in items],
+                      _inflight=inflight)
+        else:
+            # Bulk background removal is metered per photo, charged before the
+            # engines run. Not enough tokens -> photos are kept as-is (with a
+            # visible reason) rather than failing the whole batch.
+            if strip_bg and billing and not resumed:
+                n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
+                               if p.is_file())
+                bg_spent = tokens.spend(uid, "image_ai", units=n_photos)
+                if bg_spent is not None and not bg_spent.get("ok"):
+                    strip_bg = False
+                    _bulk_set(job_id, bg_error=(
+                        "Not enough tokens for background removal — photos were "
+                        "kept as shot. " + tokens.insufficient_message(bg_spent)))
+                    bg_spent = None
+                elif bg_spent is not None:
+                    # What was actually debited, so the settlement below can give
+                    # back exactly the unused remainder. db.token_refund does not
+                    # remember earlier partial refunds — a partial refund followed
+                    # by a full one would pay the user twice — so the accounting
+                    # has to live here.
+                    bg_charged = tokens.cost("image_ai", n_photos)
+            _stop_if_cancelled(job_id)
+            _bulk_set(job_id, phase="optimizing", current=0)
+            opt_results = images.optimize_all(
+                storage.original_dir(staging_id), storage.optimized_dir(staging_id),
+                strip_bg,
+                progress=lambda done, total: _bulk_set(job_id, current=done,
+                                                       total_photos=total),
+                # The photo pass is where a long batch spends its time, so the stop
+                # has to reach inside it rather than waiting for the whole pile.
+                should_stop=lambda: jobstore.cancel_requested(job_id))
+            # Surface a background-removal failure (out of credits, bad key, rate
+            # limit) on the job so the UI can say WHY the photos came back with
+            # their backgrounds intact — silence here reads as "the feature is
+            # broken" when the photo was deliberately kept unchanged.
+            # A photo that failed to process AT ALL (corrupt/truncated file, a
+            # decoder that gave up) got no cutout either and owes nothing — count
+            # it the same way /api/upload does. Photos the batch never even looked
+            # at (a .mov in the pile: optimize_all filters by extension) never
+            # reach opt_results, and the settlement below returns those.
+            bg_failed = [r for r in opt_results
+                         if r.get("bg_error") or r.get("error")]
+            # Files the charge counted but optimize_all never looked at — it takes
+            # only known image extensions, while the charge counts everything in
+            # the staging dir, so a video or PDF in the pile was billed and could
+            # not even fail visibly.
+            unprocessed = max(0, n_photos - len(opt_results))
+            owed_now = (len(bg_failed) + unprocessed) * tokens.COSTS.get("image_ai", 1)
+            if bg_failed:
+                reason = next((r["bg_error"] for r in bg_failed if r.get("bg_error")), None)
+                _bulk_set(job_id, bg_failed=len(bg_failed),
+                          **({"bg_error": reason} if reason else {}))
+            if owed_now:
+                # Photos that kept their background weren't the AI they paid for.
+                #
+                # Counted only if it actually LANDED. `bg_refunded` is subtracted
+                # from the final settlement below, so counting a refund that did
+                # not commit would shrink the remainder by money the seller never
+                # got. A failure here is also queued for a later pass (see
+                # services/owed_refunds), and db.token_refund caps every refund at
+                # what the spend has left — so the two paths converge on the right
+                # total and neither can over-pay.
+                if tokens.refund(bg_spent, units=owed_now):
+                    bg_refunded += owed_now
+            names = storage.list_optimized(staging_id)
+            if not names:
+                _bulk_set(job_id, done=True, error="No usable photos in the upload.")
+                return
+            opt_dir = storage.optimized_dir(staging_id)
 
-        _bulk_set(job_id, phase="grouping", total_photos=len(names), current=0)
-        # One unreadable photo must not sink the whole batch (it did: a
-        # truncated upload failed the job right here) — drop it and group
-        # the rest.
-        thumbs, readable = [], []
-        for n in names:
-            try:
-                thumbs.append(images.thumb_jpeg(opt_dir / n))
-                readable.append(n)
-            except Exception as exc:  # noqa: BLE001 - skip one bad photo
-                log.warning("bulk %s: skipping unreadable photo %s: %s",
-                            job_id, n, exc)
-        names = readable
-        if not names:
-            _bulk_set(job_id, done=True, error="No usable photos in the upload.")
-            return
-        # Group in API-sized chunks. Resellers shoot item-by-item, so photos of
-        # the same item land in the same chunk except right at a boundary —
-        # worst case a boundary item shows up as two entries to merge by hand.
-        groups: list[dict] = []
-        for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
-            part = claude_ai.group_photos(thumbs[base:base + BULK_GROUP_CHUNK])["groups"]
-            groups.extend({"name": g["name"],
-                           "indices": [base + i for i in g["indices"]]}
-                          for g in part)
-        _bulk_set(job_id, total_items=len(groups))
+            _bulk_set(job_id, phase="grouping", total_photos=len(names), current=0)
+            # One unreadable photo must not sink the whole batch (it did: a
+            # truncated upload failed the job right here) — drop it and group
+            # the rest.
+            thumbs, readable = [], []
+            for n in names:
+                try:
+                    thumbs.append(images.thumb_jpeg(opt_dir / n))
+                    readable.append(n)
+                except Exception as exc:  # noqa: BLE001 - skip one bad photo
+                    log.warning("bulk %s: skipping unreadable photo %s: %s",
+                                job_id, n, exc)
+            names = readable
+            if not names:
+                _bulk_set(job_id, done=True, error="No usable photos in the upload.")
+                return
+            # Group in API-sized chunks. Resellers shoot item-by-item, so photos of
+            # the same item land in the same chunk except right at a boundary —
+            # worst case a boundary item shows up as two entries to merge by hand.
+            groups: list[dict] = []
+            for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
+                _stop_if_cancelled(job_id)
+                part = claude_ai.group_photos(
+                    thumbs[base:base + BULK_GROUP_CHUNK], notes=notes)["groups"]
+                groups.extend({"name": g["name"],
+                               "indices": [base + i for i in g["indices"]]}
+                              for g in part)
+            # The plan, written down before the first draft: this is what lets a
+            # restart continue from the next item instead of ending the batch.
+            _bulk_set(job_id, total_items=len(groups), _names=names, _groups=groups,
+                      _done=[], _inflight=None)
 
-        items: list[dict] = []
-        for gi, group in enumerate(groups):
-            _bulk_set(job_id, phase="identifying", current=gi + 1, items=list(items))
-            sid = storage.new_session_id()
-            item_dir = storage.optimized_dir(sid)
-            item_names = []
-            for j, idx in enumerate(group["indices"]):
-                src = opt_dir / names[idx]
-                dst_name = f"img_{j:03d}.jpg"
-                shutil.copyfile(src, item_dir / dst_name)
-                item_names.append(dst_name)
-            objstore.upload_optimized(sid, item_dir, item_names)
+        for gi in range(start, len(groups)):
+            group = groups[gi]
+            # Between items, never inside one: an item that has started has
+            # already been charged for, so it is finished and saved.
+            _stop_if_cancelled(job_id)
+            # Every finished item written down as it lands, so a restart here
+            # continues from the next one rather than drafting these again.
+            _bulk_set(job_id, phase="identifying", current=gi + 1,
+                      items=list(items),
+                      _done=[_compact_item(it) for it in items], _inflight=None)
+            # The item a restart cut off already has its photos in a session
+            # of its own, and its AI was charged for. Finish it there, and
+            # don't charge twice for what the first attempt never delivered.
+            charged = bool(inflight) and gi == start
+            if charged:
+                sid = inflight
+                item_dir = storage.optimized_dir(sid)
+                item_names = storage.list_optimized(sid)
+            else:
+                sid = storage.new_session_id()
+                item_dir = storage.optimized_dir(sid)
+                item_names = []
+                for j, idx in enumerate(group["indices"]):
+                    src = opt_dir / names[idx]
+                    dst_name = f"img_{j:03d}.jpg"
+                    shutil.copyfile(src, item_dir / dst_name)
+                    item_names.append(dst_name)
+                objstore.upload_optimized(sid, item_dir, item_names)
+                # Each item inherits the WHOLE pile's hints, not just the line
+                # it was grouped under: the split is the model's guess, and the
+                # identify prompt already tells it to use only the lines
+                # matching the photos in front of it. The staging session
+                # (where they live now) is purged when this batch ends, so
+                # without the copy a "Start over" on any of these drafts loses
+                # them. An item picked back up after a restart already has its
+                # copy from the first attempt.
+                storage.save_notes(sid, notes)
 
             item = {"session_id": sid, "name": group["name"], "status": "draft",
                     "error": None, "listing_id": None,
@@ -5298,7 +5501,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             # stub draft (retryable via "Start over" after a top-up), no AI
             # spend happens for it, and the batch keeps going so the count of
             # what's left is honest.
-            spent = tokens.spend(uid, "identify") if billing else None
+            # Named BEFORE the charge, once its photos are in place: a restart
+            # between here and the draft landing finishes this item in this
+            # session, charged once.
+            _bulk_set(job_id, _inflight=sid)
+            spent = (tokens.spend(uid, "identify")
+                     if billing and not charged else None)
             if spent is not None and not spent.get("ok"):
                 stub = Listing(images=item_names, missing_info=[
                     "Out of AI tokens when this item's turn came — your photos "
@@ -5314,7 +5522,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 continue
             try:
                 result = claude_ai.identify([item_dir / n for n in item_names],
-                                            item_names, strategy=strategy)
+                                            item_names, strategy=strategy,
+                                            notes=notes)
                 listing = _apply_listing_defaults(result.listing, uid, prefs)
                 # Carry the account's Promote default onto the draft itself, so
                 # the queue card shows what will actually happen at publish
@@ -5343,8 +5552,25 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             items.append(item)
 
         delivered = True
-        _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups))
+        _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups),
+                  _done=[_compact_item(it) for it in items], _inflight=None)
         log.info("bulk %s: %d photos -> %d items", job_id, len(names), len(items))
+    except (_BatchStopped, images.Stopped):
+        # The seller stopped this batch. Every item it had already drafted was
+        # saved as it finished, so this reports them rather than throwing them
+        # away; the rest never ran, so it never charged. The job is already
+        # marked done by the request itself (see jobstore.request_cancel) —
+        # this is the worker agreeing, and handing over what it got to.
+        #
+        # `delivered` here is about the background-removal charge, which was
+        # taken per photo up front: cutouts that rode out on a saved draft were
+        # delivered and stand, and a stop before the first draft delivered
+        # nothing, so the `finally` below gives the whole remainder back.
+        delivered = bool(items)
+        _bulk_set(job_id, phase="stopped", done=True, cancelled=True,
+                  items=items, current=len(items))
+        log.info("bulk %s: stopped by the seller after %d item(s)",
+                 job_id, len(items))
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
         if exc.errno == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)
@@ -5381,10 +5607,15 @@ async def bulk_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
+    notes: str = Form(""),
 ) -> dict:
     """Bulk mode: accept a photo dump spanning multiple items, then process in
     the background (poll /api/bulk/status/{job_id}). Every item queues as a
-    draft for review — publishing stays an explicit, per-listing action."""
+    draft for review — publishing stays an explicit, per-listing action.
+
+    notes: the seller's comma-separated inventory of the pile. Saved with the
+    staging session, which is also what makes it survive a restart — a resumed
+    batch re-reads it from disk exactly like the first run did."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # The worker thread can't return a 401, so the login requirement (billing
@@ -5401,6 +5632,8 @@ async def bulk_upload(
 
     staging_id = storage.new_session_id()
     orig = storage.original_dir(staging_id)
+    await run_in_threadpool(storage.save_notes, staging_id,
+                            listing_prompt.clean_seller_notes(notes))
     batch_bytes = 0
     try:
         for i, f in enumerate(files):
@@ -5473,6 +5706,29 @@ def bulk_status(job_id: str, request: Request) -> Response:
     return Response(content=body, media_type="application/json")
 
 
+@app.post("/api/bulk/cancel/{job_id}")
+def bulk_cancel(job_id: str, request: Request) -> dict:
+    """Stop a running batch.
+
+    The seller's way off a batch that is taking longer than they are willing to
+    wait — or one that has stopped moving. It settles the job for the client
+    straight away and asks the worker to stand down at its next checkpoint
+    (between photos, between items), so nothing is abandoned mid-item and
+    nothing is charged for work that never runs.
+
+    Nothing is deleted: every item the batch had already drafted is a saved
+    listing and stays in Drafts. 404 covers both an unknown id and someone
+    else's, exactly as the status endpoints do.
+    """
+    outcome = jobstore.request_cancel(job_id, _uid(request))
+    if outcome is None:
+        raise HTTPException(404, "Unknown bulk job.")
+    # "It had already finished" is not a failure — the seller asked for it to
+    # be over, and it is. Say which happened so the UI can word it honestly.
+    return {"ok": True, "stopped": outcome == "stopping",
+            "already_finished": outcome == "finished"}
+
+
 @app.get("/api/bulk/status/{job_id}/brief")
 def bulk_status_brief(job_id: str, request: Request) -> Response:
     """Just "is this batch finished?" — the same status without the drafted
@@ -5512,8 +5768,14 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
 
         prefs = _load_prefs(uid)  # once — strategy and defaults both read it
         _beat("identifying")
+        # The seller's hints were saved with the session at upload time, so
+        # they are read here rather than passed in: this worker also runs
+        # "Start over", which re-drafts months later with no request to carry
+        # them — and a re-run that has forgotten what the seller told it makes
+        # exactly the mistake they typed the note to prevent.
         result = claude_ai.identify([opt_dir / n for n in names], names,
-                                    strategy=_pricing_strategy(uid, prefs))
+                                    strategy=_pricing_strategy(uid, prefs),
+                                    notes=storage.load_notes(session_id))
         _apply_listing_defaults(result.listing, uid, prefs)
         _beat("category")
         _resolve_category(result.listing)
