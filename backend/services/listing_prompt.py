@@ -166,8 +166,10 @@ Rules:
      honest wear sells better than a vague "good condition", and it must agree
      with the condition field you returned.
   d. "Measurements:" — ONLY measurements you can actually read off a tag, box,
-     or a ruler/tape in the photos, each labelled with its units. If none are
-     legible, leave this section out entirely and put "exact measurements" in
+     or a ruler/tape in the photos, each labelled with its units. Write the
+     unit as a word or abbreviation (34 in, 28 inches, 12 cm) — NEVER the "
+     inch mark, which is a quote and breaks the JSON. If none are legible,
+     leave this section out entirely and put "exact measurements" in
      missing_info — never estimate a measurement here.
   e. "Why You'll Love It:" — 3-5 sentences on how the item is worn, used,
      displayed, collected or gifted: the outfits and occasions, the rooms and

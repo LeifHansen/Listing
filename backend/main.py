@@ -5868,7 +5868,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 tokens.refund(spent)
                 log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
                 item["status"] = "error"
-                item["error"] = str(exc)
+                # The card shows this. A decoder's complaint about the
+                # model's JSON is not something a seller can act on; the
+                # sentence ai_error_message gives it is.
+                item["error"] = (claude_ai.ai_error_message(exc)[1]
+                                 if isinstance(exc, json.JSONDecodeError)
+                                 else str(exc))
                 item["listing"] = None
                 item["title"] = group["name"]
             items.append(item)

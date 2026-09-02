@@ -185,3 +185,70 @@ def test_border_flood_reaches_around_obstacles():
     reached = images._border_connected(sealed)
     assert not reached[30, 30]        # now the cavity really is enclosed
     assert reached[0, 0]
+
+
+# --- a picture in its frame ----------------------------------------------
+#
+# The colour rule above cannot see this one: a dark painting in its frame on a
+# dark table matches the table, so the model's "background" verdict on the
+# picture stood, the frame survived alone, and a seller's abstract painting
+# was drafted as an empty frame. A gap shows the flat wall behind the item; a
+# picture shows edges. Detail decides, not colour.
+
+TABLE = (28, 26, 30)
+FRAME = (170, 140, 90)
+
+
+def _painting(w, h, cell=4):
+    """Two dark colours in a fine check: within the colour tolerance of the
+    table on every pixel, edges everywhere."""
+    arr = np.zeros((h, w, 3), np.uint8)
+    dark, light = np.array(TABLE, np.uint8), np.array((48, 44, 52), np.uint8)
+    ys, xs = np.mgrid[0:h, 0:w]
+    on = ((xs // cell) + (ys // cell)) % 2 == 0
+    arr[on] = dark
+    arr[~on] = light
+    return Image.fromarray(arr, "RGB")
+
+
+def _framed(interior):
+    photo = Image.new("RGB", (SIZE, SIZE), TABLE)
+    photo.paste(Image.new("RGB", (240, 240), FRAME), (80, 80))
+    photo.paste(interior, (100, 100))
+    alpha = Image.new("L", (SIZE, SIZE), 0)
+    alpha.paste(255, (80, 80, 320, 320))
+    alpha.paste(0, (100, 100, 300, 300))     # the model kept only the frame
+    return photo, alpha
+
+
+def test_a_dark_painting_in_its_frame_is_put_back():
+    photo, alpha = _framed(_painting(200, 200))
+    fixed, added = images._fill_interior_holes(alpha, photo)
+
+    assert added is not None
+    assert _at(fixed, (200, 200)) == 255            # the picture is back
+    assert _at(fixed, (90, 90)) == 255              # the frame was never in doubt
+    assert _at(fixed, (10, 10)) == 0                # the table stays removed
+
+
+def test_a_wreath_on_the_same_wall_keeps_its_hole():
+    """Same shape of matte, but the hole shows the flat wall: a real gap."""
+    photo, alpha = _framed(Image.new("RGB", (200, 200), TABLE))
+    fixed, added = images._fill_interior_holes(alpha, photo)
+
+    assert added is None
+    assert _at(fixed, (200, 200)) == 0
+
+
+def test_a_small_detailed_hole_is_still_judged_by_colour():
+    """A handle-sized gap that happens to show a patterned wallpaper is not a
+    picture: the detail rule only speaks for holes the size of one."""
+    photo, alpha = _framed(Image.new("RGB", (200, 200), TABLE))
+    # A 30x30 patterned gap, sealed inside the frame's top bar.
+    photo.paste(_painting(30, 30), (150, 82))
+    alpha.paste(0, (150, 82, 180, 98))
+    alpha.paste(255, (100, 100, 300, 300))   # solid interior this time
+    fixed, added = images._fill_interior_holes(alpha, photo)
+
+    assert added is None
+    assert _at(fixed, (165, 90)) == 0

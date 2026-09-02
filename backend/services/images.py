@@ -220,6 +220,19 @@ _FILL_HOLES = os.getenv("BG_FILL_HOLES", "on").strip().lower() not in (
 # see-through gap. ~26 per channel: comfortably above JPEG noise and backdrop
 # vignetting, well below a printed graphic or a glossy panel.
 _HOLE_BG_TOL = float(os.getenv("BG_HOLE_TOLERANCE", "45") or "45")
+# A sealed hole the size of a picture, full of detail, IS a picture. The
+# colour test above cannot see that: a dark painting in its frame, on a dark
+# table, matches the table -- the model called the picture background, the
+# frame survived on its own, and a seller's abstract painting was drafted as
+# an empty frame (2026-09-02). A see-through gap shows the flat wall behind
+# the item; a picture, a print, a printed panel show edges. So an enclosed
+# hole at least this fraction of the item's footprint is put back whatever
+# its colour when it carries clearly more detail (mean luma gradient) than
+# the backdrop around the item: the larger of a floor above JPEG noise and a
+# multiple of the backdrop's own.
+_HOLE_PICTURE_FRACTION = float(os.getenv("BG_HOLE_PICTURE_FRACTION", "0.12") or "0.12")
+_HOLE_DETAIL_RATIO = float(os.getenv("BG_HOLE_DETAIL_RATIO", "2.0") or "2.0")
+_HOLE_DETAIL_FLOOR = float(os.getenv("BG_HOLE_DETAIL_FLOOR", "4.0") or "4.0")
 # Hole analysis runs on a downscaled copy: the regions we're looking for are
 # blobs, not hairlines, and 512px keeps a 1600px photo at a few milliseconds.
 # Scaling down can only bridge a thin subject wall (which makes a hole read as
@@ -935,6 +948,7 @@ def _interior_fill_mask(alpha: Image.Image,
                 else np.array([255, 255, 255], dtype=np.int16))
     off_backdrop = np.sqrt(((rgb - backdrop) ** 2).sum(axis=2))
     keep = holes & (off_backdrop > _HOLE_BG_TOL)
+    keep |= _detailed_holes(rgb, holes, reached, kept=~bg)
     if not keep.any():
         return None
 
@@ -950,6 +964,45 @@ def _interior_fill_mask(alpha: Image.Image,
              "of the item's interior", 100.0 * grown.sum() / grown.size)
     out = Image.fromarray(np.where(grown, 255, 0).astype(np.uint8), "L")
     return out if out.size == alpha.size else out.resize(alpha.size, Image.BILINEAR)
+
+
+def _detailed_holes(rgb, holes, reached, kept):
+    """The sealed holes that are pictures: each connected hole at least
+    _HOLE_PICTURE_FRACTION of the item's footprint (kept plus holes) whose
+    mean luma gradient beats the backdrop's by _HOLE_DETAIL_RATIO and the
+    floor. Colour plays no part -- that is the point. Without SciPy the holes
+    are judged as one region, which only matters when a picture and a handle
+    are both sealed inside one item."""
+    import numpy as np
+
+    if not holes.any():
+        return np.zeros_like(holes)
+    luma = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1]
+            + 0.114 * rgb[..., 2]).astype(np.float32)
+    detail = np.zeros_like(luma)
+    detail[:, 1:] += np.abs(np.diff(luma, axis=1))
+    detail[1:, :] += np.abs(np.diff(luma, axis=0))
+    backdrop_detail = float(detail[reached].mean()) if reached.any() else 0.0
+    bar = max(_HOLE_DETAIL_FLOOR, _HOLE_DETAIL_RATIO * backdrop_detail)
+    footprint = max(1, int(kept.sum()) + int(holes.sum()))
+    ndimage = matte._ndimage()
+    if ndimage is None:
+        regions = [holes]
+    else:
+        labels, count = ndimage.label(holes)
+        regions = [labels == i for i in range(1, count + 1)]
+    out = np.zeros_like(holes)
+    for region in regions:
+        area = int(region.sum())
+        if area / footprint < _HOLE_PICTURE_FRACTION:
+            continue
+        seen = float(detail[region].mean())
+        if seen > bar:
+            log.info("bg-removal: a %.0f%%-of-item hole carries detail (%.1f vs "
+                     "backdrop %.1f) — a picture, not a gap; putting it back",
+                     100.0 * area / footprint, seen, backdrop_detail)
+            out |= region
+    return out
 
 
 def _fill_interior_holes(alpha: Image.Image,

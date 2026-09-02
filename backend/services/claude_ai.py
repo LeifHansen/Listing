@@ -83,6 +83,11 @@ def ai_error_message(exc: Exception) -> tuple[int, str]:
     if "connection" in body or "timed out" in body or "timeout" in body:
         return 503, ("Couldn't reach the AI service — check the connection and "
                      "try again in a moment.")
+    if isinstance(exc, json.JSONDecodeError):
+        # Its own message ("Expecting ',' delimiter: line 1 column 3644") is
+        # about a document the seller never sees. What they can do is retry.
+        return 502, ("The AI's answer couldn't be read this time — try it "
+                     "again.")
     return 502, f"AI request failed: {str(exc)[:200]}"
 
 
@@ -124,7 +129,86 @@ def _extract_json(text: str) -> dict:
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end != -1:
         text = text[start : end + 1]
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        # The model's answer, not ours, and it reads a listing: a description
+        # that says the jeans are 34" x 28" has put two unescaped quotes in
+        # the middle of a JSON string, and a batch item died on 'Expecting
+        # ',' delimiter: line 1 column 3644'. Repair what a person would
+        # repair before giving up.
+        repaired = _repair_json(text)
+        if repaired == text:
+            raise
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError:
+            raise exc from None
+        log.info("ai: repaired the model's JSON (%s)", exc.msg)
+        return data
+
+
+_CLOSERS = frozenset(",}]:")
+
+
+def _repair_json(text: str) -> str:
+    """The most common ways a model breaks its own JSON, undone.
+
+    A quote INSIDE a string that was never escaped -- the inch mark in
+    34" x 28", a quoted name in a description -- is told apart from the
+    string's closing quote by what follows it: a real closing quote is
+    followed (after whitespace) by a comma, a colon, a closing bracket or the
+    end; an inner one by prose. A raw newline or tab inside a string is
+    escaped. A trailing comma before a closing bracket is dropped. Everything
+    else is left exactly as it was, and the caller decides.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                out.append(ch)
+                escaped = True
+            elif ch == '"':
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] in _CLOSERS:
+                    out.append(ch)
+                    in_string = False
+                else:
+                    out.append('\\"')
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ch == "\r":
+                pass
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+            elif ch == ",":
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j < n and text[j] in "}]":
+                    pass                     # trailing comma
+                else:
+                    out.append(ch)
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 # Public aliases for other services (orient.py) — cross-module callers
