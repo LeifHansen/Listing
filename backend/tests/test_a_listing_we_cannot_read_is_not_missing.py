@@ -76,6 +76,15 @@ def _listing_routes():
         path = getattr(route, "path", "")
         if not path.startswith("/api/"):
             continue
+        if path.startswith("/api/admin/"):
+            # The console's cross-user read. Its 404 to THIS sweep's caller
+            # (an ordinary seller) is the access gate speaking — deliberately
+            # indistinguishable from the route not existing — not a claim
+            # about the listing. The claim this sweep polices is pinned for
+            # the caller who can actually reach the route, in
+            # test_admin_requires_a_superadmin.py: a superadmin over an
+            # unreadable store gets 503, never "not found".
+            continue
         if "{listing_id}" not in path and "{session_id}" not in path:
             continue
         for method in sorted((getattr(route, "methods", None) or set())

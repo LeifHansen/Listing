@@ -128,6 +128,12 @@ def current_user(request: Request) -> Optional[dict]:
         revoked = user is not None and _revoked(payload, user)
     except Exception:  # noqa: BLE001 - unplaceable token -> not authenticated
         revoked = True
+    # A disabled account's live sessions end at the same chokepoint a revoked
+    # one's do. Checked after the revocation logic on purpose: this only ever
+    # converts a VALID session to None, never a failure to None — the
+    # StorageUnavailable path above is untouched.
+    if user is not None and user.get("disabled_at"):
+        revoked = True
     request.state.auth_user = None if revoked else user
     return request.state.auth_user
 
@@ -234,6 +240,14 @@ def login(email: str, password: str) -> Optional[dict]:
     stored = (rec or {}).get("password_hash") or _ABSENT_PASSWORD_HASH
     if not verify_password(password, stored) or not rec:
         return None
+    # A disabled account gets the same generic refusal as a wrong password.
+    # Deliberately after bcrypt ran and deliberately not its own message:
+    # naming the real reason (or answering in a different amount of time)
+    # confirms the account exists, which is the one thing this endpoint's
+    # error is careful not to say.
+    if rec.get("disabled_at"):
+        return None
     return {"id": rec["id"], "email": rec["email"],
             "display_name": rec.get("display_name", ""),
+            "role": rec.get("role") or "user",
             "created_at": rec.get("created_at")}

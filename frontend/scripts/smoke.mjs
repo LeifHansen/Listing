@@ -290,17 +290,22 @@ if (signedIn) {
     await settle(page);
 
     const body = (await page.textContent('body')) || '';
-    // Three panels each render this, so it survives one of them regressing --
-    // which is what the fallback check below is for. Together they cover both
-    // "no panel said anything" and "one panel said it anyway".
+    // Every defaults panel renders this, so it survives one of them
+    // regressing -- which is what the fallback check below is for. Together
+    // they cover both "no panel said anything" and "one panel said it
+    // anyway".
     if (!/couldn.t load your saved defaults/i.test(body)) {
       prefsOut.push('the defaults could not be read and the panels did not say so');
     }
     // The fallbacks, verbatim from the controls those panels render. Any of
     // them on screen means a value the seller never chose is being shown as
     // one they did -- and it is one Save away from being stored as such.
+    // 'Allow offers on new listings' is a switch, which is the worst of
+    // these to render after a failed read: an unchecked box is a statement
+    // that this account is not taking offers, made having failed to find out.
     for (const fallback of ['Off — only when I toggle Promote on a listing',
-                            'Median Pricing', 'Package weight — lb']) {
+                            'Median Pricing', 'Package weight — lb',
+                            'Allow offers on new listings']) {
       if (body.includes(fallback)) {
         prefsOut.push(`a default is shown as saved after a failed read: "${fallback}"`);
       }

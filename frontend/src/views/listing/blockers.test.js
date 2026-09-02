@@ -141,6 +141,102 @@ describe("required item specifics", () => {
     // that the editor then can't explain.
     expect(ebayBlockers(draft(), { aspects: null })).toEqual([]);
   });
+
+  it("counts an answer held in a later row, not just the first one", () => {
+    // The bug this pins down: a blank row for the aspect sitting in FRONT of
+    // the row holding its value. The seller sees Color filled in as
+    // Multi-Color, the server (which reads every row) publishes it happily,
+    // and the browser called the aspect empty and told them a required field
+    // was missing. Any row with a value answers the aspect.
+    const filled = draft({
+      brand: "Nike",
+      item_specifics: [
+        { name: "US Shoe Size", value: "10.5" },
+        { name: "Color", value: "" },
+        { name: "Color", value: "Multi-Color" },
+      ],
+    });
+    expect(ebayBlockers(filled, {
+      aspects: [...aspects, { name: "Color", required: true }],
+    })).toEqual([]);
+  });
+
+  it("still blocks when every row for the aspect is empty", () => {
+    const blank = draft({
+      brand: "Nike",
+      item_specifics: [
+        { name: "US Shoe Size", value: "10.5" },
+        { name: "Color", value: "  " },
+      ],
+    });
+    expect(ebayBlockers(blank, {
+      aspects: [...aspects, { name: "Color", required: true }],
+    }).map((b) => b.key)).toEqual(["specifics"]);
+  });
+});
+
+/* Editing a listing eBay is ALREADY showing.
+ *
+ * The defect: the editor held a revise to the CREATE contract, so a seller
+ * who opened a live listing to fix a price was told a package weight and the
+ * category's required item specifics were missing — on a listing eBay had
+ * accepted and was selling. The server never asked for those on a revise
+ * (see preflight.validate's "revise" mode: a revise doesn't resend them), so
+ * the browser was inventing a blocker the publish itself did not have.
+ */
+describe("the revise contract", () => {
+  const aspects = [{ name: "Color", required: true }];
+  const live = () => draft({ package_weight_lb: 0, item_specifics: [] });
+
+  it("does not demand a package weight the live listing never carried", () => {
+    expect(ebayBlockers(live(), { mode: "revise" })).toEqual([]);
+  });
+
+  it("does not demand the category's required specifics", () => {
+    expect(ebayBlockers(live(), { mode: "revise", aspects })).toEqual([]);
+  });
+
+  it("still holds the content the edit actually sends to eBay", () => {
+    expect(keys(draft({ title: "", price: null, category_id: "" }),
+                { mode: "revise", aspects }))
+      .toEqual(["title", "price", "category"]);
+  });
+
+  it("demands the full contract for a new listing, as before", () => {
+    expect(keys(live(), { aspects })).toEqual(["weight", "specifics"]);
+  });
+
+  it("demands the full contract for a relist, which is a create", () => {
+    expect(keys(live(), { mode: "live", aspects })).toEqual(["weight", "specifics"]);
+  });
+});
+
+describe("a condition the category doesn't offer", () => {
+  // eBay publishes a different condition ladder per category and refuses
+  // anything else with error 25021, after the whole publish. "Used - Good"
+  // (5000) exists in media categories and almost nowhere else — which is
+  // exactly the grade an AI reaches for on a worn item.
+  const conditions = [{ enum: "NEW", label: "New" },
+    { enum: "NEW_OTHER", label: "New other" },
+    { enum: "USED_EXCELLENT", label: "Used" }];
+
+  it("blocks, and names what the category does take", () => {
+    const blockers = ebayBlockers(draft(), { conditions });
+    expect(blockers.map((b) => b.key)).toEqual(["condition"]);
+    expect(blockers[0].why).toContain("Used");
+  });
+
+  it("passes a condition the category offers", () => {
+    expect(ebayBlockers(draft({ condition: "USED_EXCELLENT" }), { conditions }))
+      .toEqual([]);
+  });
+
+  it("stays quiet when nobody asked eBay", () => {
+    // A card with no taxonomy loaded, or a lookup that failed. Blocking on a
+    // list we never fetched would strand every draft on a network blip.
+    expect(ebayBlockers(draft(), { conditions: null })).toEqual([]);
+    expect(ebayBlockers(draft(), { conditions: [] })).toEqual([]);
+  });
 });
 
 describe("marketplaces other than eBay", () => {

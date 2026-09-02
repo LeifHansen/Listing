@@ -153,6 +153,30 @@ def save_listing(session_id: str, listing: Listing) -> None:
     (d / "listing.json").write_text(listing.model_dump_json(indent=2))
 
 
+def load_listing(session_id: str) -> dict | None:
+    """The saved draft as a plain dict, or None when this session has none.
+
+    The mirror of save_listing, and the reason it exists: a database is
+    OPTIONAL (README: set DATABASE_URL "to persist every listing"), so the
+    routes that read-modify-write a listing cannot treat "no row" as "no
+    listing" -- on a machine without a database that is every listing, and
+    on one with a database it is any listing whose upsert never landed.
+
+    Never raises: an unreadable or half-written listing.json answers None,
+    which leaves the caller where it would have been without a disk copy.
+    """
+    try:
+        raw = (session_dir(session_id) / "listing.json").read_text()
+    except (OSError, InvalidSessionId):
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        log.warning(f"storage: listing.json unreadable for {session_id}: {exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def natural_key(name: str) -> list:
     """Sort key that orders embedded numbers numerically, so "img_2" comes
     before "img_10". Plain lexicographic sorting scrambles photo order past

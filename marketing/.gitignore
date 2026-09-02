@@ -1,0 +1,8 @@
+# Build output and Astro's generated content types. Both are derived from the
+# source in this directory.
+#
+# These live here rather than in the root .gitignore so that a change to the
+# marketing site is contained entirely within marketing/ — which is what the
+# "App is untouched" gate in .github/workflows/marketing.yml checks for.
+dist/
+.astro/

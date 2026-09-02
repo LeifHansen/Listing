@@ -1,0 +1,35 @@
+---
+import Base from "./Base.astro";
+import Container from "../components/Container.astro";
+import { site } from "../lib/site.js";
+
+const { entry } = Astro.props;
+const updated = entry.data.updated.toLocaleDateString("en-US", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+---
+<Base title={entry.data.title} description={entry.data.description}>
+  <div class="brand-wash border-b border-line">
+    <Container>
+      <div class="max-w-3xl py-16 sm:py-20">
+        <h1 class="text-4xl sm:text-5xl">{entry.data.title}</h1>
+        <p class="mt-4 text-ink-secondary">
+          {site.name} · Last updated {updated}
+        </p>
+      </div>
+    </Container>
+  </div>
+  <Container>
+    <article class="prose max-w-3xl py-14 sm:py-16">
+      <slot />
+    </article>
+    <div class="max-w-3xl pb-20">
+      <div class="rule-fade"></div>
+      <p class="pt-6 text-sm text-ink-secondary">
+        Questions about this page: <a class="font-semibold text-blue-ink hover:underline" href={`mailto:${site.supportEmail}`}>{site.supportEmail}</a>
+      </p>
+    </div>
+  </Container>
+</Base>

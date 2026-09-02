@@ -4,6 +4,7 @@
   "webDir": "dist",
   "server": {
     "allowNavigation": [
+      "app.thryftshop.com",
       "listing-lfwjrg.fly.dev",
       "auth.ebay.com",
       "signin.ebay.com",

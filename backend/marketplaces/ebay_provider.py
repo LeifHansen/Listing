@@ -422,6 +422,80 @@ def has_stored_connection(uid: Optional[str]) -> bool:
     return bool(acct and acct.get("refresh_token"))
 
 
+def allowed_conditions_for(listing: Listing,
+                           creds: Optional[dict] = None) -> Optional[list[dict]]:
+    """The conditions eBay offers for this listing's category, or None when we
+    could not ask. None is not "no restriction": every caller here treats the
+    difference as the difference between checking and guessing."""
+    cid = (listing.category_id or "").strip()
+    if not cid.isdigit() or not config.taxonomy_ready():
+        return None
+    try:
+        got = taxonomy.item_conditions(
+            cid, access_token=(creds or {}).get("access_token"))
+    except Exception as exc:  # noqa: BLE001 - an optional check, never a blocker
+        log.info("conditions: eBay's list for category %s failed: %s: %s",
+                 cid, type(exc).__name__, exc)
+        return None
+    return got.get("conditions") or None
+
+
+def fit_condition_to_category(listing: Listing,
+                              creds: Optional[dict] = None) -> str:
+    """Move a condition the category doesn't offer onto the closest one it
+    does. Returns the condition it replaced (empty string when nothing
+    changed), so a caller can say what it did.
+
+    The substitution never crosses the new/used line — see
+    taxonomy.nearest_allowed_condition. Where the category offers nothing in
+    the item's family, the listing keeps what it has and the preflight blocks
+    the publish, because there is no honest grade to move it to.
+    """
+    current = (listing.condition or "").strip().upper()
+    allowed = allowed_conditions_for(listing, creds)
+    if not current or not allowed:
+        return ""
+    enums = [c["enum"] for c in allowed if c.get("enum")]
+    if current in enums:
+        return ""
+    fitted = taxonomy.nearest_allowed_condition(current, enums)
+    if not fitted or fitted == current:
+        return ""
+    log.info("condition: %s isn't offered in category %s — publishing as %s",
+             current, listing.category_id, fitted)
+    listing.condition = fitted
+    return current
+
+
+def fit_paired_aspects_to_category(listing: Listing) -> list[tuple]:
+    """Make the listing's item specifics legal beside each other.
+
+    eBay refuses a Size Type that its own aspect list does not pair with the
+    Size ("“Regular” is not a valid Size Type for the Size “33”. Select a
+    compatible Size Type and Size combination") — after the photos are up,
+    with no listing and nothing on screen the seller can act on. eBay
+    publishes the pairing per category; this applies it rather than guessing.
+
+    Best-effort in every direction: no category, no aspect list, or a Taxonomy
+    call that fails all leave the listing exactly as it was. A convenience,
+    never a blocker.
+    """
+    cid = (listing.category_id or "").strip()
+    if not cid.isdigit() or not config.taxonomy_ready():
+        return []
+    try:
+        aspects = taxonomy.item_aspects(cid).get("aspects", [])
+        fixed = taxonomy.fit_paired_aspects(listing, aspects)
+    except Exception as exc:  # noqa: BLE001 - a convenience, never a blocker
+        log.info("aspect pairing: category %s failed: %s: %s",
+                 cid, type(exc).__name__, exc)
+        return []
+    for name, was, now in fixed:
+        log.info("aspect pairing: %s %s -> %s (category %s)",
+                 name, was or "(blank)", now, cid)
+    return fixed
+
+
 def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     creds = creds_for(uid)
@@ -465,7 +539,8 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
         listing, mode,
         has_fulfillment=bool(fulfillment), has_payment=has_payment,
         has_return=has_return, has_location=has_location, connected=connected,
-        policy_services=services, required_aspects=required)
+        policy_services=services, required_aspects=required,
+        allowed_conditions=allowed_conditions_for(listing, creds))
     # A slot still empty after the sync above means eBay has none of that kind
     # -- there is nothing to sync from, and no dropdown in this app can fix it.
     # Saying "choose one in Settings" here sends the seller to an empty list;
@@ -680,6 +755,18 @@ class EbayProvider:
         session_id, listing, mode = ctx.session_id, ctx.listing, ctx.mode
         prev_rec = ctx.prev_record
         already_live = prev_rec.get("status") in ("published", "live")
+        # eBay decides which conditions a category offers, and a draft made
+        # before this app asked (or before the seller changed the category)
+        # can be carrying one it doesn't — which eBay answers with 25021 and
+        # no listing. Move it onto the nearest grade the category does offer
+        # first; anything that can't be fitted honestly is left alone and the
+        # checklist below reports it.
+        fit_condition_to_category(listing, creds)
+        # Same shape of failure one field over: eBay pairs Size Type with
+        # Size, and refuses a combination it does not publish. Runs here, on
+        # the way out, so a draft already carrying a refused pairing is
+        # rescued without the seller re-doing anything.
+        fit_paired_aspects_to_category(listing)
         # Which of the three publish routes this request takes is the single
         # most useful thing to know when a publish "does nothing" — create,
         # revise, or the Inventory fallback, and what decided it. One line,
@@ -830,10 +917,19 @@ class EbayProvider:
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
                                                  creds))
+                # Refused, or never answered for? ebay_errors already writes
+                # the right sentence from this; the flag is how a CLIENT can
+                # tell without reading it. Both places: the dataclass field
+                # for the fan-out's results map, and `raw` because the legacy
+                # single-eBay body is returned verbatim and is what the bulk
+                # queues read. See PublishOutcome.
+                unknown = bool(getattr(exc, "outcome_unknown", False))
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
+                    outcome_unknown=unknown,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc), "issues": issues})
+                         "message": str(exc), "issues": issues,
+                         **({"outcome_unknown": True} if unknown else {})})
             # The record's owner. Publishing through this account's creds IS
             # the ownership fact, so write it down — without this the record's
             # ebay_account stayed empty forever and the account-switch
@@ -998,10 +1094,18 @@ class EbayProvider:
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
                                                  creds))
+                # The create is the call where this matters most: an
+                # unanswered AddFixedPriceItem may have minted a live listing
+                # the record cannot point at, and the record above stays a
+                # draft precisely because we do not know. Saying "refused" to
+                # that seller is what produces the second one.
+                unknown = bool(getattr(exc, "outcome_unknown", False))
                 return PublishOutcome(
                     ok=False, message=str(exc), issues=issues,
+                    outcome_unknown=unknown,
                     raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc), "issues": issues})
+                         "message": str(exc), "issues": issues,
+                         **({"outcome_unknown": True} if unknown else {})})
             # Record the item id FIRST. Everything below is optional extra work
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:
@@ -1111,7 +1215,11 @@ class EbayProvider:
             listing, urls,
             policies={"fulfillment_policy_id": config.EBAY_FULFILLMENT_POLICY_ID,
                       "payment_policy_id": config.EBAY_PAYMENT_POLICY_ID,
-                      "return_policy_id": config.EBAY_RETURN_POLICY_ID})
+                      "return_policy_id": config.EBAY_RETURN_POLICY_ID},
+            # The seller's "Allow offers" switch reaches the preview too. A
+            # dry run whose whole job is to show the request a publish would
+            # make cannot leave out a field the real publish sends.
+            best_offer=listing_sync.offers_enabled(ctx.uid))
         # No postal code: a dry run has no connected account to read a
         # ship-from ZIP from, and build_add_item omits the element rather than
         # inventing one. create_listing is what refuses a real publish without

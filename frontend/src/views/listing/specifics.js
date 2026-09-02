@@ -7,6 +7,36 @@
 
 const key = (s) => (s || "").trim().toLowerCase();
 
+/* WHICH row holds an aspect's answer.
+
+   One aspect name can own several rows — eBay's multi-selects legitimately do,
+   and empty leftovers accumulate beside them: a cleared field leaves its row
+   behind, an identify pass can return a name with no value, and the server's
+   specifics enrichment appends its value as a NEW row when the one already
+   there is blank. So "the row for this aspect" is the first one carrying a
+   VALUE, not simply the first one with the name.
+
+   Reading the first row was the bug behind "Color is required" on a listing
+   whose Color the seller could plainly see filled in as Multi-Color: the
+   answer sat in the second row, an empty leftover sat in the first, and every
+   reader that stopped at the first row called the aspect empty — while the
+   server, which looks at every row, published it happily. Returns -1 when the
+   aspect has no row at all. */
+export function specificRowIndex(specifics, name) {
+  const rows = specifics || [];
+  const want = key(name);
+  const named = (s) => key(s.name) === want;
+  const filled = rows.findIndex((s) => named(s) && (s.value || "").trim());
+  return filled >= 0 ? filled : rows.findIndex(named);
+}
+
+// The value an aspect actually holds — "" when it holds none. Same rule as
+// specificRowIndex: any row with a value counts, whichever row it is.
+export function specificValue(specifics, name) {
+  const i = specificRowIndex(specifics, name);
+  return i >= 0 ? (specifics[i].value || "").trim() : "";
+}
+
 // Every value held under one aspect name, in list order.
 export function specificValues(specifics, name) {
   return specifics

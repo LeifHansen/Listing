@@ -22,7 +22,7 @@ payload when you don't have eBay credentials yet).
 | Stage | What happens | Tech |
 |-------|--------------|------|
 | Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (when removal is on), square-frame on the item at the photo's own scale — never a zoom — resize to 1600px, finishing sharpen | Pillow |
-| Identify | Photos sent to Claude vision; returns structured listing draft + confidence + "missing info" to verify | Anthropic API |
+| Identify | Photos sent to Claude vision; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + confidence + "missing info" to verify | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
 | Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
@@ -46,6 +46,87 @@ cp .env.example .env
 
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
+
+## Reading production errors
+
+`flyctl logs` used to be the telemetry, and `.github/workflows/fly-logs.yml`
+said so. Failures are now recorded as they happen, so there is something to
+read that outlives Fly's retained window and can be queried.
+
+**One row per distinct failure, with a count** — not one per occurrence. A bug
+hit ten thousand times is one row that says ten thousand. That is what keeps
+the list readable during an incident, and what bounds the table by how many
+things are broken rather than by traffic. The collapsing is done by a
+`fingerprint` built from the module, the function, the exception type and the
+message TEMPLATE — deliberately not the line number and not the release, so a
+refactor or a deploy does not make every open bug look new.
+
+**Where to look:**
+
+| | |
+|---|---|
+| The console | **Admin → Errors.** Newest-seen first, click a row for the traceback. |
+| A specific complaint | The 8-character reference the app showed the seller is the row's `reference`, and the `X-Request-Id` on the response. One value, three places. |
+| Programmatically | `curl -H "x-error-feed-token: $ERROR_FEED_TOKEN" $SITE/api/ops/error-feed` |
+| Months later | `ops/errors/YYYY/MM/DD.jsonl.gz` in R2 — written daily, before the table is pruned. |
+
+Capture starts at **WARNING**, not ERROR, because this codebase fails soft:
+there are ~240 `log.warning` calls against 7 `log.error`, so the real failures
+are at warning level. "Is this serious" is answered by a derived `severity`
+instead. A warning logged inside an `except` block gets the live traceback
+attached automatically, so those rows are actionable without their call sites
+being touched.
+
+Everything recorded is scrubbed — Stripe keys, JWTs, emails, IPs, OAuth codes
+in URLs — on the way to stdout as well as into the table. The shape survives so
+the line stays readable (`sk_live_<redacted>`, not nothing). The support
+reference is deliberately *not* redacted: it identifies nothing on its own and
+is the only join between a complaint and a cause.
+
+`ERROR_CAPTURE_ENABLED=0` turns the whole thing off without a code change.
+
+### The daily triage job
+
+`.github/workflows/error-triage.yml` runs at 09:41 UTC, reads the feed, and
+picks the failures worth a fix using `.github/scripts/triage_errors.py` — where
+the thresholds live so they are reviewable in a diff.
+
+**It ships inert.** It collects, triages and writes a run summary; it opens
+nothing. To let it propose fixes:
+
+1. `fly secrets set --stage ERROR_FEED_TOKEN="$(openssl rand -hex 32)"` and add
+   the same value as the GitHub Actions secret `ERROR_FEED_TOKEN`. (`--stage`
+   because this app runs a single machine — an unstaged set restarts
+   production immediately.)
+2. Add `ANTHROPIC_API_KEY` as an Actions secret. It exists today only as a Fly
+   app secret.
+3. Add `AUTOFIX_GITHUB_TOKEN` — a fine-grained PAT or GitHub App token with
+   contents and pull-requests write. **This one is not optional.** A pull
+   request opened with the default `GITHUB_TOKEN` does not trigger
+   `pull_request` workflows, so `ci.yml` never runs and the four required
+   `Gates / …` checks sit unstarted forever. An autofix PR that looks green
+   because nothing ran is worse than no autofix at all.
+4. Set the repository **variable** `ERROR_AUTOFIX_ENABLED` to `1`.
+
+Run it once by hand from the Actions tab before trusting the schedule.
+
+Two properties are deliberate and worth not "fixing":
+
+**A clean day is silent and green.** It opens nothing and notifies nobody. The
+only thing that fails the run is being unable to *read* the feed — "I could not
+look" and "I looked and it was clean" are different outcomes. This is the
+opposite of `health-watch.yml`, which fails to alert, and the difference is on
+purpose: a job that goes red every morning that production has a bug is a
+notification nobody reads by the second week.
+
+**The agent gets no network and no Fly token.** Error text comes from
+production, and some of it from people's browsers, so it is attacker-controlled
+input. The workflow is split in two jobs for that reason alone: `collect` holds
+the credentials, `fix` reads the text. Its pull requests are drafts.
+
+To silence a failure permanently, add its fingerprint to
+`.github/known-errors.json`. A checked-in file, so muting an alarm shows up in
+a diff.
 
 ## Shipping an update
 
@@ -116,10 +197,21 @@ alerting floor in `health-watch.yml` is 400MB free and the volume runs near
 500MB. `fly volumes list -a <app>` reports the size; `fly volumes extend
 <id> --size 3` raises it without a redeploy.
 
-Everything else worth checking, production answers itself:
+Everything else worth checking, production answers itself — but mind **which**
+endpoint, because that changed. `/api/health` is anonymous and unrate-limited,
+so it was cut back to liveness plus the capability flags the UI reads; it no
+longer carries a single field below. The operator detail moved behind
+`ADMIN_TOKEN`, and the operational numbers are on the public readiness probe:
 
 ```bash
-curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
+# Disk, object storage and the database. Public — no token, and what the
+# health-watch alarm reads.
+curl -s https://<app>.fly.dev/api/ready | python3 -m json.tool
+
+# Everything else: config_warnings, bg_engines, the R2 bucket and the missing
+# variables by name, tokens/Stripe, the raw db and objstore errors.
+curl -s -H "x-admin-token: $ADMIN_TOKEN" \
+  https://<app>.fly.dev/api/admin/diagnostics | python3 -m json.tool
 ```
 
 - **`config_warnings`** is the field to read first. It names the two
@@ -152,8 +244,14 @@ curl -s https://<app>.fly.dev/api/health | python3 -m json.tool
   into the key already there instead. Either turns ~107s per photo into a
   couple of seconds; both cost money per image, which is exactly why neither
   switches itself on.
-- **`disk_free_mb`**, **`db`**, **`objstore_*`** and **`build`** cover the rest;
-  `health-watch.yml` already alerts on them every two hours.
+- **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
+  cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
+  on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
+  it at the latter is what left it failing on every schedule for four days
+  against a production that was entirely healthy, and an alarm that is always
+  red cannot report the real thing. `object_storage` there is two booleans on
+  purpose (`configured`, `degraded`): the bucket name and the raw reason name
+  the R2 account, so they stay on the diagnostics endpoint.
 
 The app listens on `$PORT` (8080) and runs uvicorn with `--proxy-headers` so it
 sees Fly's HTTPS origin. The `[mounts]` block is active and required, not
@@ -268,7 +366,9 @@ Without them, you can still type a category ID manually in the preview.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET`  | `/api/health` | Config status (AI / eBay) |
+| `GET`  | `/api/health` | Liveness, the build sha, and the capability flags the UI reads (AI / eBay / taxonomy). Public, and nothing else — the operator detail is on `/api/admin/diagnostics` |
+| `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
+| `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id` |
 | `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
@@ -291,6 +391,8 @@ Without them, you can still type a category ID manually in the preview.
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
+| `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
+| `POST` | `/api/enrich/{session_id}` | Fill ONE listing's blanks from its own photos — category if missing, the category's item specifics, the maker. The last step of the editor before Publish; fills blanks only, never overwrites |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 | `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |
@@ -378,14 +480,20 @@ one failing never rolls back the others — and per-marketplace state
   documents 4; deeper review) → **Commercial Access** (unlimited, and only
   on an *approved* Personal app). Reaching that page proves
   `ETSY_CLIENT_ID` and `ETSY_REDIRECT_URI` are registered correctly — a
-  wrong one fails before the consent screen. While that approval is pending,
-  set `ETSY_OWNER_EMAILS` to the owner's login for *this* app (not their Etsy
-  one — it's matched against the account record): they keep connecting, and
-  every other seller gets a "Pending approval" card instead of being sent to
-  Etsy to be refused. It takes a comma-separated list, which is what makes a
-  Personal-app beta possible — name the handful of shops you're onboarding
-  and everyone else keeps the card. `ETSY_COMMERCIAL_ACCESS=true` retires the
-  gate once Etsy grants it. Details in `.env.example`.
+  wrong one fails before the consent screen. `ETSY_ACCESS_TIER` records
+  which tier you're on (`seller` if unset, and an unreadable value reads the
+  same, so a typo can't hand Connect Etsy to sellers Etsy will refuse).
+  **This app is on `personal`: Etsy approved it 2026-08-31**, so the seats
+  are real and `ETSY_OWNER_EMAILS` is now the beta roster rather than a list
+  of one — the app logins (not the Etsy ones; they're matched against the
+  account record) of the shops you're onboarding. They connect; every other
+  seller gets a "Pending approval" card that says which wait they're in,
+  instead of being sent to Etsy to be refused. Naming **more sellers than
+  Etsy seats** puts the overflow back in front of that refusal, so
+  `config_warnings()` counts the roster against the tier's ceiling
+  (`ETSY_APP_SEATS` overrides it if Etsy moves it). Setting the tier to
+  `commercial` — or the older `ETSY_COMMERCIAL_ACCESS=true` — retires the
+  gate the day Etsy grants it. Details in `.env.example`.
 - **Depop** — official Selling API, which is **partner-gated**: apply via
   Depop partnerships, then set the five `DEPOP_*` vars from onboarding
   (`.env.example`). Until then Depop simply stays hidden. No drafts or
@@ -418,8 +526,10 @@ errors on a DB problem. Tables are auto-created on first use.
    Only `R2_ACCOUNT_ID` + `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` are
    needed — the bucket is auto-created (override with `R2_BUCKET`) and photos
    are served via presigned URLs, or straight from the bucket if you set
-   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset; `/api/health`
-   shows `objstore_missing` when partially configured.
+   `R2_PUBLIC_BASE_URL`. Falls back to local disk when unset;
+   `/api/admin/diagnostics` shows `objstore_missing` when partially
+   configured, and `/api/ready` says `object_storage.configured` without a
+   token.
 7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
    reuses every `/api/*` endpoint.
 8. **Item Identifier (mobile-only)** — double-layer identification: Claude's
@@ -643,8 +753,9 @@ one listing, behind a confirm, through the usual `/api/ebay/end-listing`.
 The Dashboard's **Suggested actions** card is `services/recommender.py` over the
 signals the app already has — listing status, age, price, photo count, promotion
 state, plus eBay views/watchers when the scope is granted. Rules turn a store
-into a short ranked list: finish a draft, relist an ended item, promote a live
-one, drop a stale price, add photos, fill in specifics. Suggestions are grouped
+into a short ranked list: finish a draft, promote a live one, drop a stale
+price, add photos, fill in specifics. An ended listing earns nothing: relisting
+is done by hand, and the ended bucket picks up sold items. Suggestions are grouped
 by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
 listing so the list spans the portfolio instead of piling onto one item.
 
@@ -657,11 +768,24 @@ problem:
   eBay through the same revise path a single edit uses.
 - **Promote listings → "Promote all"** promotes every live, unpromoted listing at
   eBay's recommended ad rate.
+- **Fill in details → "Enrich all"** fills every listing in the group in one
+  pass: eBay's required and recommended item specifics for that listing's
+  category, read off its own photos (the same enrichment a fresh AI draft
+  gets, `_enrich_listing`), merged in **without** overwriting anything the
+  seller wrote, then pushed to the live listing. Notes in `missing_info` that
+  the fill actually answered are dropped, so the suggestion goes away instead
+  of sitting there after the work is done; a note nothing filled is kept, and
+  that listing is reported as one that still needs a human. Because a vision
+  pass per listing takes minutes, this one runs as a **background job**
+  (`POST /api/listings/enrich` → `job_id`, polled on `/api/bulk/status/{id}`),
+  one per account at a time, capped at `BULK_ENRICH_CAP` (default 25) per run.
+  It spends AI tokens per listing, so the button confirms the count and the
+  cost first, and a listing it can't reach (no category, photos gone, eBay not
+  connected) is skipped **before** it is charged for.
 
-Photos, specifics, finish and relist deliberately have none: the first two need a
-human looking at each item, and the last two create listings, which isn't
-something to put behind a single button. The rules bulk runs follow —
-`services/bulk_actions.py`:
+Photos, finish and relist deliberately have none: photos need a human holding
+the item, and the last two create listings, which isn't something to put behind
+a single button. The rules bulk runs follow — `services/bulk_actions.py`:
 
 - **Scope is never implicit.** The client sends the group's own listing ids, so a
   group of twelve can't turn into the whole store.
@@ -669,9 +793,19 @@ something to put behind a single button. The rules bulk runs follow —
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
   listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
-- **The run is bounded** (`BULK_PRICE_CAP`, default 40) because each listing is
-  its own serial eBay revise; the remainder comes back as `deferred` for another
-  pass instead of the request outliving the gateway.
+- **The run is bounded** (`BULK_PRICE_CAP`, default 40; `BULK_ENRICH_CAP`,
+  default 25) because each listing is its own serial eBay revise; the remainder
+  comes back as `deferred` for another pass instead of the request outliving
+  the gateway.
+
+Every row also carries a **dismiss** (×). The engine rebuilds this list from
+scratch on every load, so advice the seller has already considered and decided
+against otherwise comes back for good — and a to-do list that will not shrink
+stops being read. A dismissal is per listing **and** per suggestion kind, kept
+in the browser (`lib/dismissedRecs.js`, bounded so it can't grow without
+limit), and undone in one tap from **Restore N dismissed** on the section
+header — which stays on screen even when every suggestion has been dismissed,
+so the X is never a one-way door.
 
 ## What a sale actually made
 

@@ -18,6 +18,16 @@ const AppContext = createContext(null);
 const NO_METRICS = {};
 const NO_METRICS_STATUS = { trafficOk: false, needsReconnect: false };
 
+// How long a freshly loaded page of listings is trusted without asking for
+// it again. Only the passive refreshes read it (coming back to a tab that has
+// been open a while); every WRITE goes through invalidateListings, which
+// refetches regardless of how recent the last load was.
+const LISTINGS_FRESH_MS = 60000;
+// How long invalidateListings waits before refetching, so a burst of small
+// writes (drag three photos, then save) costs one /api/listings instead of
+// four. Short enough that a card is corrected before anyone looks away.
+const INVALIDATE_DEBOUNCE_MS = 350;
+
 // The rest of "nobody is signed in": the shapes each per-account cache starts
 // at, and the shapes logout() puts them back to. They are the same values, so
 // they are written once — a signed-out app has to look identical whether it
@@ -188,13 +198,24 @@ export function AppProvider({ children }) {
   // ---------- auth ----------
   const [user, setUser] = useState(null);
   const [authOpen, setAuthOpen] = useState(false);
+  // Which tab the auth dialog opens on. Lifted out of AuthDialog so arriving
+  // from the marketing site's "Sign up" can choose it before the dialog mounts.
+  const [authMode, setAuthMode] = useState("login");
+  // The marketing site's Sign up links land on /?signup=1. Read once, at the
+  // first render, because loadAuth removes it from the URL once it has acted.
+  const signupIntent = useRef(
+    typeof window !== "undefined"
+    && new URLSearchParams(window.location.search).get("signup") === "1",
+  );
   // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
   const afterLogin = useRef(null);
 
   const loadAuth = useCallback(async () => {
+    let signedIn = false;
     try {
       const res = await api("/api/auth/me");
       setUser(res.user);
+      signedIn = !!res.user;
     } catch (e) {
       // A server that cannot ANSWER is not a server saying "not signed in".
       // /api/auth/me is 503 when the session lookup itself fails (a database
@@ -209,6 +230,28 @@ export function AppProvider({ children }) {
       // cold load there is nothing to keep, so a first-time visitor still
       // lands on the signed-out app.
       if (e.status && e.status < 500) setUser(null);
+    } finally {
+      // Someone who clicked "Sign up" on the marketing site should land in the
+      // signup form, not on a signed-out app with nothing open.
+      //
+      // This lives here, after the answer, rather than in an effect watching
+      // `user`: `user` is null both before /api/auth/me replies and when it
+      // says nobody is signed in, so an effect cannot tell those apart without
+      // a second state to track it — and a seller who is ALREADY signed in and
+      // follows the same link (a bookmark, a pasted URL) must never get a
+      // signup box thrown over their own dashboard while the request is still
+      // in flight. The param is then dropped, so a refresh does not reopen it
+      // forever.
+      if (signupIntent.current) {
+        signupIntent.current = false;
+        if (!signedIn) {
+          setAuthMode("signup");
+          setAuthOpen(true);
+        }
+        const url = new URL(window.location.href);
+        url.searchParams.delete("signup");
+        window.history.replaceState({}, "", url.toString());
+      }
     }
   }, []);
 
@@ -216,6 +259,12 @@ export function AppProvider({ children }) {
     afterLogin.current = resume || null;
     setAuthOpen(true);
   }, []);
+
+  // The operator console gate, for RENDERING only (the Admin nav entry and
+  // the admin view). The server re-checks the role on every /api/admin call,
+  // so this can never grant anything — and because /api/auth/me re-reads the
+  // role from the database, a revoked admin loses the nav on the next poll.
+  const isSuperadmin = user?.role === "superadmin";
 
   // ---------- AI tokens (monetization) ----------
   // Balance + catalog from /api/tokens. `enabled: false` (dev/self-hosted
@@ -333,6 +382,9 @@ export function AppProvider({ children }) {
     setMetricsStatus(NO_METRICS_STATUS);
   }
 
+  // When the copy we hold stops being worth trusting. 0 = stale right now.
+  const listingsFreshUntil = useRef(0);
+
   const loadListings = useCallback(async ({ quiet = false } = {}) => {
     // `quiet` suppresses the spinner for background refreshes — but the FIRST
     // load is quiet too (the boot effect), and suppressing it there meant the
@@ -365,6 +417,7 @@ export function AppProvider({ children }) {
         nextCursor: res.next_cursor || null,
         loadingMore: false,
       });
+      listingsFreshUntil.current = Date.now() + LISTINGS_FRESH_MS;
     } catch (e) {
       // Recorded, not just toasted: the toast is gone in seconds, the view
       // stays, and without this it goes on saying the store is empty.
@@ -392,6 +445,58 @@ export function AppProvider({ children }) {
       return items === s.items ? s : { ...s, items };
     });
   }, []);
+
+  // ---------- keeping the cache honest ----------
+  // Every screen — Dashboard, Listings, the drafts strip, the tab counts —
+  // renders from `listingsState.items`, and nothing else re-reads the store
+  // on its own. So a write that isn't followed by a refetch leaves the app
+  // showing what the store USED to be: a photo still sideways on its card
+  // after a rotate, a draft under the title it had before it was renamed, a
+  // listing just created missing from Drafts entirely until something
+  // unrelated happened to refresh.
+  //
+  // The rule here is the ordinary one every data-backed site follows: a
+  // mutation invalidates the cache. Callers say "this changed" and this owns
+  // the refetch — coalesced, because a burst of small writes (drag three
+  // photos, then save) is one change as far as any card is concerned and one
+  // /api/listings shows all of it.
+  //
+  // patchListing above is the other half and not a substitute: it applies one
+  // change we already know the answer to, so a card doesn't wait on a round
+  // trip. This is what makes the record itself authoritative again.
+  const invalidateTimer = useRef(null);
+  const invalidateListings = useCallback(() => {
+    listingsFreshUntil.current = 0;
+    if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
+    invalidateTimer.current = setTimeout(() => {
+      invalidateTimer.current = null;
+      loadListings({ quiet: true });
+    }, INVALIDATE_DEBOUNCE_MS);
+  }, [loadListings]);
+  useEffect(() => () => {
+    if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
+  }, []);
+
+  // The passive half: a tab (or the native shell) can sit in the background
+  // for hours while the seller edits on their phone, and what it holds is a
+  // snapshot from whenever it was last looked at. Coming back re-reads it
+  // once it has gone stale — the refresh-on-focus every list-backed app does.
+  // Gated on freshness so flicking between tabs isn't a fetch each time, and
+  // on `user` because signed out there is nothing of theirs to load.
+  useEffect(() => {
+    if (!user) return undefined;
+    const refreshIfStale = () => {
+      if (document.hidden) return;
+      if (Date.now() < listingsFreshUntil.current) return;
+      loadListings({ quiet: true });
+    };
+    document.addEventListener("visibilitychange", refreshIfStale);
+    window.addEventListener("focus", refreshIfStale);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfStale);
+      window.removeEventListener("focus", refreshIfStale);
+    };
+  }, [user, loadListings]);
 
   // ---------- eBay store mirror ----------
   // The app mirrors the seller's WHOLE eBay store, not just what it created,
@@ -925,9 +1030,9 @@ export function AppProvider({ children }) {
     }
     else if (e === "error") toast(EBAY_CONNECT_ERRORS[params.get("why")] || EBAY_CONNECT_ERRORS.unknown, { kind: "error" });
     // Generic marketplaces land on ?connected=etsy / ?connect_error=etsy, or
-    // ?connect_pending=etsy when the marketplace hasn't approved us for this
-    // seller's shop yet (Etsy's seller-app wall) and we turned them back at
-    // the door rather than letting the marketplace refuse them off-site.
+    // ?connect_pending=etsy when the marketplace hasn't cleared this seller's
+    // shop yet (Etsy's app-tier wall) and we turned them back at the door
+    // rather than letting the marketplace refuse them off-site.
     const ok = params.get("connected");
     const bad = params.get("connect_error");
     const pending = params.get("connect_pending");
@@ -940,8 +1045,11 @@ export function AppProvider({ children }) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMarketplaces();
     } else if (pending) {
-      // Not "try again" — trying again cannot work until they approve us.
-      toast(`${label(pending)} hasn't approved us for other shops yet. `
+      // Not "try again" — trying again cannot work until they clear the shop.
+      // Deliberately vaguer than the roster's per-marketplace note, which is
+      // the one that knows whether the app is unapproved or approved with the
+      // seats already taken: this line has only the marketplace's name.
+      toast(`${label(pending)} hasn't opened this app up to your shop yet. `
         + `Cross-posting switches on as soon as they do — nothing for you to do.`,
         { kind: "warning" });
       // The roster is what disables the button; this landing means theirs was
@@ -1048,7 +1156,8 @@ export function AppProvider({ children }) {
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     listingsLayout, setListingsLayout,
     health, loadHealth,
-    user, setUser, authOpen, setAuthOpen, openAuth, afterLogin, loadAuth, logout,
+    user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
+    isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -1056,6 +1165,7 @@ export function AppProvider({ children }) {
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
     listingsState, loadListings, loadMoreListings, patchListing,
+    invalidateListings,
     metricsById, metricsStatus,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
@@ -1063,7 +1173,8 @@ export function AppProvider({ children }) {
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
   }), [
-    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, openAuth,
+    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
+    isSuperadmin,
     listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
     marketplaces, loadMarketplaces, connectedMarketplaces,
@@ -1071,6 +1182,7 @@ export function AppProvider({ children }) {
     notifications, loadNotifications, markNotificationsRead,
     shipping, openShipping, closeShipping,
     listingsState, loadListings, loadMoreListings, patchListing,
+    invalidateListings,
     metricsById, metricsStatus,
     storeSync, syncStore,
     session, startNew, openListing,

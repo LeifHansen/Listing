@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { listingsView, storeTotal } from "./listingsView.js";
+import { listingsView, recentListings, storeTotal } from "./listingsView.js";
 
 const USER = { id: "u1" };
 
@@ -163,5 +163,65 @@ describe("the sentence shown when the store could not be read", () => {
     // real store with an error card.
     expect(listingsView({ loaded: true, user: USER, count: 4, error: SERVER }).kind)
       .toBe("list");
+  });
+});
+
+describe("the dashboard's Recent listings strip", () => {
+  // The defect: a sale left the Sell screen (archived under Inactive, hidden
+  // from every other tab) and stayed on the dashboard. Worse than staying —
+  // `updated_at` is what the strip sorts on and a sale is the last thing that
+  // touches a row, so the sold item went straight to the FRONT of the strip
+  // and pushed a live listing out of it.
+  const at = (status, updated_at) => ({ id: status + updated_at, status, updated_at });
+
+  it("drops a sold listing", () => {
+    const items = [at("sold", "2026-03-04"), at("live", "2026-03-01")];
+    expect(recentListings(items).map((i) => i.status)).toEqual(["live"]);
+  });
+
+  it("keeps everything the seller can still act on", () => {
+    for (const status of ["draft", "dry_run", "published", "live", "unlisted", "ended"]) {
+      expect(recentListings([at(status, "2026-03-01")])).toHaveLength(1);
+    }
+  });
+
+  it("still shows four cards when the newest listings are sales", () => {
+    // Filtering AFTER the slice is the tempting one-liner, and it hands back
+    // a one-card strip to a seller with five live listings and four sales.
+    const items = [
+      at("sold", "2026-03-09"), at("sold", "2026-03-08"),
+      at("sold", "2026-03-07"), at("sold", "2026-03-06"),
+      at("live", "2026-03-05"), at("live", "2026-03-04"),
+      at("live", "2026-03-03"), at("live", "2026-03-02"),
+      at("live", "2026-03-01"),
+    ];
+    expect(recentListings(items)).toHaveLength(4);
+  });
+
+  it("puts the most recently touched first", () => {
+    const items = [
+      at("live", "2026-03-01"), at("draft", "2026-03-05"), at("live", "2026-03-03"),
+    ];
+    expect(recentListings(items).map((i) => i.updated_at))
+      .toEqual(["2026-03-05", "2026-03-03", "2026-03-01"]);
+  });
+
+  it("leaves the caller's array alone", () => {
+    // It sorts, and the store's `items` is the array React renders from.
+    const items = [at("live", "2026-03-01"), at("live", "2026-03-05")];
+    recentListings(items);
+    expect(items.map((i) => i.updated_at)).toEqual(["2026-03-01", "2026-03-05"]);
+  });
+
+  it("survives a listing that has never been updated", () => {
+    expect(recentListings([{ id: "a", status: "live" }])).toHaveLength(1);
+    expect(recentListings()).toEqual([]);
+  });
+
+  it("comes back empty for a store that has only sold items", () => {
+    // Which the dashboard renders as "Everything's sold", not "No listings
+    // yet" — the same rule as `unavailable` above: don't tell a seller they
+    // have no listings when the reason the strip is empty is something else.
+    expect(recentListings([at("sold", "2026-03-01")])).toEqual([]);
   });
 });

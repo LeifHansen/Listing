@@ -1,0 +1,180 @@
+name: Marketing site
+
+# The marketing site is a separate static build with its own deploy target, so
+# it gets its own workflow rather than a job inside gates.yml. That is
+# deliberate: gates.yml is what stands between a commit and production, and a
+# broken landing page must never be able to block shipping a fix to sellers.
+#
+# The path filter includes the app's token file because the marketing site
+# imports it directly (marketing/src/styles/global.css) — a change to the brand
+# tokens rebuilds this site, which is the whole point of the bridge, and it
+# should be checked when it happens.
+
+on:
+  pull_request:
+    paths:
+      - 'marketing/**'
+      - 'frontend/src/styles/tokens.css'
+      - '.github/workflows/marketing.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build + link check
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a commit SHA, with the release in the comment, matching the
+      # convention in gates.yml — a tag is a mutable pointer the action's owner
+      # can move.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history. The "App is untouched" gate below diffs this branch
+          # against the base, and the default shallow checkout leaves the two
+          # with no common ancestor — which made that diff fail, and a failed
+          # diff produces no output, which reads exactly like "nothing
+          # changed". The gate passed twice while verifying nothing.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: marketing/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: marketing
+
+      - name: Build
+        run: npm run build
+        working-directory: marketing
+
+      # Every internal href resolves, every page carries its title, description,
+      # canonical, og:image and a single h1, and the files search engines and
+      # app deep links need are present.
+      - name: Link + SEO check
+        run: npm run links
+        working-directory: marketing
+
+      # The bridge is the load-bearing idea of this site: the brand comes from
+      # the app's token file, not a copy. If that import ever stops resolving,
+      # the build still succeeds and the site silently renders unstyled — so
+      # assert the tokens actually made it into the CSS.
+      - name: Brand tokens reached the bundle
+        shell: bash
+        run: |
+          css=$(find dist/_astro -name '*.css' | head -1)
+          if [ -z "$css" ]; then echo "::error::no stylesheet was emitted"; exit 1; fi
+          for token in '--brand-blue' '--bg' '--radius-card' '--shadow-card'; do
+            if ! grep -q -- "$token" "$css"; then
+              echo "::error::$token missing from the built CSS — the import of frontend/src/styles/tokens.css is broken"
+              exit 1
+            fi
+          done
+          echo "brand tokens present in $css"
+        working-directory: marketing
+
+      # The riskiest part of self-hosting this site is the server config, and
+      # it fails in a way nothing else would catch: get try_files wrong and
+      # EVERY page 404s while the build, the links check and the deploy all
+      # report success. So build the real image and drive it.
+      - name: Serve the real image and check it
+        shell: bash
+        run: |
+          docker build -t marketing-test .
+          docker run -d --name marketing-test -p 8099:8080 marketing-test
+          for i in $(seq 1 20); do
+            curl -fsS -o /dev/null http://127.0.0.1:8099/ && break
+            sleep 1
+          done
+
+          fail=0
+          check() {  # path, expected status
+            got=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099$1")
+            if [ "$got" != "$2" ]; then
+              echo "::error::$1 returned $got, expected $2"; fail=1
+            fi
+          }
+
+          # Clean URLs. Astro emits /pricing.html; everything links to /pricing.
+          for p in / /pricing /how-it-works /mobile /security /faq /about \
+                   /blog /changelog /privacy /terms /blog/how-many-photos; do
+            check "$p" 200
+          done
+
+          # Files search engines and the app stores fetch.
+          for p in /robots.txt /sitemap-index.xml /rss.xml /og-default.png \
+                   /.well-known/apple-app-site-association; do
+            check "$p" 200
+          done
+
+          # A missing page must be a real 404, not a 200 that tells a crawler
+          # the URL exists.
+          check /this-page-does-not-exist 404
+
+          # www must not serve a second copy of the site.
+          code=$(curl -s -o /dev/null -H 'Host: www.thryftshop.com' -w '%{http_code}' http://127.0.0.1:8099/pricing)
+          [ "$code" = "301" ] || { echo "::error::www did not redirect (got $code)"; fail=1; }
+
+          # Security headers, including on a hashed asset — nginx's add_header
+          # does not inherit into a location that sets its own, so this is a
+          # real regression risk rather than a formality.
+          css=$(curl -s http://127.0.0.1:8099/ | grep -o '/_astro/[^"]*\.css' | head -1)
+          for target in / "$css"; do
+            for h in content-security-policy strict-transport-security \
+                     x-frame-options x-content-type-options referrer-policy; do
+              curl -sI "http://127.0.0.1:8099$target" | grep -qi "^$h:" \
+                || { echo "::error::$h missing on $target"; fail=1; }
+            done
+          done
+
+          docker logs marketing-test 2>&1 | tail -20
+          docker rm -f marketing-test >/dev/null
+          exit $fail
+        working-directory: marketing
+
+      # This site must never take the app down with it. Nothing outside
+      # marketing/ and its own workflows belongs in one of its pull requests.
+      #
+      # .dockerignore is the one deliberate exception, and it is on the list
+      # rather than waived: adding a top-level directory to this repo means the
+      # Fly build context would upload it on every app deploy, since the
+      # Dockerfile never copies marketing/ but docker sends the whole context.
+      # Excluding it is part of adding it. Everything that actually decides how
+      # the app builds, tests, and ships — backend/, frontend/, the Dockerfile,
+      # fly.toml, gates.yml, deploy.yml — stays blocked.
+      - name: App is untouched
+        shell: bash
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags origin "${{ github.base_ref }}"
+
+          # The diff must SUCCEED before its emptiness means anything. This
+          # gate previously piped `git diff` straight into grep with a
+          # `|| true`, so when the shallow checkout left no merge base, git
+          # printed "fatal: no merge base", produced nothing on stdout, and
+          # the gate read that silence as "no files outside marketing/".
+          # Green, and verifying nothing.
+          if ! changed=$(git diff --name-only "$base...HEAD"); then
+            echo "::error::cannot diff against $base — this gate can verify nothing, so it fails"
+            exit 1
+          fi
+
+          # This workflow only runs on pull requests that touch marketing/**,
+          # so a diff of zero files is not a small PR — it is a broken
+          # comparison. Fail on it rather than call it clean.
+          if [ -z "$changed" ]; then
+            echo "::error::diff against $base returned no files at all — the comparison is wrong"
+            exit 1
+          fi
+
+          echo "Files changed against $base:"
+          echo "$changed" | sed 's/^/  /'
+
+          outside=$(echo "$changed" \
+            | grep -vE '^(marketing/|\.github/workflows/marketing|\.dockerignore$)' || true)
+          if [ -n "$outside" ]; then
+            echo "::error::this pull request touches files outside marketing/:"
+            echo "$outside"
+            exit 1
+          fi
+          echo "OK: nothing outside marketing/ (plus its workflows and .dockerignore)"

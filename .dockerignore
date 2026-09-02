@@ -15,3 +15,9 @@ fly.toml
 .DS_Store
 .idea
 .vscode
+
+# The marketing site. It has its own build and its own host; the Dockerfile
+# never copies it, so shipping it in the app's build context is pure upload
+# cost on every deploy — and node_modules/ and dist/ in there would make that
+# cost large.
+marketing

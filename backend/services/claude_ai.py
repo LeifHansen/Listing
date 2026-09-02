@@ -286,7 +286,13 @@ def identify(image_paths: list[Path], image_names: list[str],
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=4096,
+        # The description alone is now a 300-600 word SEO body, and it shares
+        # the budget with the specifics, the tag boxes and the observations.
+        # A draft that runs past the cap is not a truncated description — it
+        # is unparseable JSON, raised below as an error the seller has to
+        # retry, so the headroom is worth more than the unused tokens (only
+        # what is generated is billed).
+        max_tokens=8192,
         system=[{"type": "text", "text": _IDENTIFY_SYSTEM,
                  "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content}],
@@ -565,7 +571,9 @@ def refine(listing: Listing, prompt: str) -> Listing:
     )
     resp = client.messages.create(
         model=config.CONTENT_MODEL,
-        max_tokens=4096,
+        # A refine echoes the WHOLE listing back, long description included,
+        # so it needs at least as much room as the draft that produced it.
+        max_tokens=8192,
         messages=[{"role": "user", "content": msg}],
     )
     if resp.stop_reason == "max_tokens":
@@ -835,10 +843,16 @@ def _aspect_lines(named: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# Enough of the description to carry the Key Details block, where the values
+# an aspect fill is looking for (material, colour, size, year, markings) are
+# spelled out. 500 characters stopped inside the opening paragraph.
+_CONTEXT_DESCRIPTION_CHARS = 2_000
+
+
 def _listing_context(listing: Listing) -> str:
     return (f"Title: {listing.title}\nBrand: {listing.brand}\n"
             f"Category: {listing.category_suggestion}\n"
-            f"Description: {(listing.description or '')[:500]}")
+            f"Description: {(listing.description or '')[:_CONTEXT_DESCRIPTION_CHARS]}")
 
 
 # Separators a model reaches for when it comma-joins a repeatable aspect's
@@ -1043,6 +1057,136 @@ def fill_aspects_combined(
 # Only a candidate that survives both layers is written to the listing —
 # accuracy over coverage, since a wrong maker is worse than a blank one.
 # ---------------------------------------------------------------------------
+
+# --- research: look the item UP, instead of remembering it ------------------
+#
+# Everything above this point asks a vision model what it thinks an item is.
+# That is a memory test, and the two ways it fails both cost the seller the
+# item: a piece it half-recognizes gets hedged into a lookalike ("Fanch Ledan
+# STYLE lithograph", a genuine butcher cover called a "replica"), and a piece
+# it cannot value gets a low number. Neither failure announces itself — the
+# draft reads exactly as confident as a correct one.
+#
+# So the app now looks things up. This pass runs Claude with Anthropic's
+# server-side WEB SEARCH tool over the same photos plus the draft, and its job
+# is the one the identify pass cannot do from memory: is this a CATALOGUED
+# thing with a name, is there a valuable variant it could be, and what do real
+# examples actually go for. The answer is advice, not authority — main.py
+# merges it under rules that can raise a price and name a work, and can never
+# downgrade an item or lower a price.
+#
+# The tool type is pinned but overridable: web_search_20260209 needs Opus
+# 4.6+/5 or Sonnet 4.6+ (which VISION_MODEL is by default). A deployment on an
+# older model sets WEB_SEARCH_TOOL=web_search_20250305 rather than losing the
+# pass to a 400.
+WEB_SEARCH_TOOL = os.getenv("WEB_SEARCH_TOOL", "web_search_20260209").strip()
+# How many searches one item may run, and how many times a paused server-tool
+# turn may be resumed. Both bound the cost of a pass that is otherwise open.
+RESEARCH_MAX_SEARCHES = int(os.getenv("RESEARCH_MAX_SEARCHES", "6") or "6")
+_RESEARCH_MAX_RESUMES = 2
+
+_RESEARCH_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{
+  "identified": "one line: what this item specifically IS, or \"\" if the search could not settle it",
+  "maker": "artist, author, manufacturer or brand — \"\" if unresolved",
+  "work": "the name of the specific work, pattern, model or release — \"\" if unresolved",
+  "variant": "the specific edition/state/pressing/printing this appears to be, with what in the photos says so — \"\" if unresolved",
+  "title": "an eBay title <= 80 chars for what you actually established, or \"\" to leave the draft's alone",
+  "value_low": number or null,
+  "value_high": number or null,
+  "value_basis": "what those figures come from — sold listings, auction records, dealer prices — and their date if you saw one",
+  "high_value_variant": "if a MORE VALUABLE variant of this item exists and the photos cannot rule it out: name it, what it is worth, and what physically distinguishes it. \"\" when there is no such trap",
+  "verify": ["what the SELLER must physically check to settle the above — specific, checkable things"],
+  "sources": ["urls you actually used"],
+  "confidence": "low|medium|high"
+}
+Rules:
+- SEARCH before you answer. You are here because memory alone already got this
+  wrong. Search the maker and the work, the identifying marks, and what
+  comparable examples SOLD for. Prefer sold/auction records over asking prices.
+- Your job is the name and the money, in that order. Collectors buy the name:
+  a named work ("Three Matisses"), a state or pressing (a first-state stereo
+  butcher cover), a printing or error variant, a production year. Find it.
+- NEVER resolve a doubt downward. You may not conclude "replica", "reprint",
+  "style of", "tribute" or "not authentic" from the photos and a search — the
+  seller has the item in their hands and you do not. When you cannot confirm,
+  leave the fields "" and put what to check in verify. Absence of proof is not
+  proof, and calling a real thing a copy is the expensive direction of wrong.
+- high_value_variant is the most important field. Ask: what is the version of
+  this item that is worth 10x or 100x, and could THIS be it? A genuine Beatles
+  butcher cover called a "replica" sold for $22 and was worth over $7,000 —
+  that is the failure this field exists to prevent. Fill it whenever the trap
+  exists, even at low confidence, and say what would settle it.
+- value_low/value_high describe what THIS item is worth as best you can
+  establish, in USD. If the range depends on which variant it is, use the range
+  for the variant the photos support and name the other one in
+  high_value_variant. null when the search genuinely could not price it —
+  never a placeholder number.
+- Cite what you used in sources. A finding with no source is a guess wearing a
+  suit, and it will be treated as one.
+"""
+
+
+def research_item(image_paths: list[Path], listing: Listing,
+                  observations: str = "") -> Optional[dict]:
+    """Look the drafted item up on the web. Returns the parsed research dict,
+    or None when the pass did not run or produced nothing usable.
+
+    Best-effort by contract: every caller treats a failure as "no research".
+    Raises nothing.
+    """
+    if not image_paths:
+        return None
+    try:
+        client = _client()
+        imgs = [_image_block(p) for p in image_paths[:4]]
+        specifics = "; ".join(
+            f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
+            if (s.value or "").strip())
+        context = (
+            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with no "
+            "lookup of any kind. Check it.\n\n"
+            f"Drafted title: {listing.title}\n"
+            f"Drafted brand: {listing.brand or '(none)'}\n"
+            f"Drafted price: {'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
+            f"Category: {listing.category_suggestion or '(unknown)'}\n"
+            f"Specifics: {specifics or '(none)'}\n"
+            f"What the first pass saw: {(observations or '')[:600]}\n\n"
+            "Establish what this actually is and what it is actually worth."
+            + _RESEARCH_SCHEMA)
+        messages = [{"role": "user", "content": imgs + [{"type": "text",
+                                                         "text": context}]}]
+        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+                  "max_uses": RESEARCH_MAX_SEARCHES}]
+        resp = client.messages.create(
+            model=config.VISION_MODEL, max_tokens=4096,
+            tools=tools, messages=messages)
+        # A server-tool loop that hits its iteration limit comes back paused,
+        # not finished. Resending the turn resumes it; the API needs no extra
+        # user message and adding one would derail it.
+        resumes = 0
+        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
+            resumes += 1
+            messages = messages + [{"role": "assistant", "content": resp.content}]
+            resp = client.messages.create(
+                model=config.VISION_MODEL, max_tokens=4096,
+                tools=tools, messages=messages)
+        _log_usage("research", resp)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        data = _extract_json(text)
+    except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
+        log.info("research skipped: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    searches = sum(1 for b in resp.content
+                   if getattr(b, "type", "") == "server_tool_use")
+    log.info("research: %d searches -> %r (confidence=%s, %s-%s)", searches,
+             str(data.get("identified", ""))[:80], data.get("confidence"),
+             data.get("value_low"), data.get("value_high"))
+    return data
+
 
 _MAKER_HUNT_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):

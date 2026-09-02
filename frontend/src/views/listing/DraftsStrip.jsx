@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
 } from "lucide-react";
@@ -11,17 +11,23 @@ import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
-import { CategoryQuickPick } from "./CategoryQuickPick";
+import { DraftCategoryEdit } from "./CategoryQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
-import { MarketTargetChips, publishListing, usePublishTargets, blockedReason } from "./publishShared";
+import {
+  MarketTargetChips, publishListing, usePublishTargets, publishTally,
+  UNCONFIRMED_PUBLISH,
+} from "./publishShared";
 import { blockerLabels, ebayBlockers } from "./blockers";
+import {
+  liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
+  withCelebrating,
+} from "./publishCelebration";
+import { isDraft } from "@/lib/listingsView";
 
 /* The drafts experience on the merged Sell screen: every draft one click
    from Publish or Review & List, plus select-mode bulk publish/delete.
    Renders nothing when there are no (matching) drafts — the upload box
    directly above is the empty-state CTA. */
-
-const isDraft = (item) => item.status === "draft" || item.status === "dry_run";
 
 // Shipping policy right on a draft's card — the same one control the editor
 // and the bulk queue use (see ShippingPolicySelect). Saves on change.
@@ -66,30 +72,6 @@ function DraftShipping({ item, className }) {
   );
 }
 
-// Category display + quick fix right on the draft card — a miscategorized
-// item is the AI misfire that costs most once it's published, so the pick
-// has to be visible (and fixable) without opening the full editor.
-function DraftCategory({ item }) {
-  const { loadListings } = useApp();
-  const { toast } = useToast();
-  const [saving, setSaving] = useState(false);
-  const save = async (patch) => {
-    setSaving(true);
-    try {
-      // Same reason as DraftShipping above: the patch names the two category
-      // fields and leaves everything else as stored.
-      await patchJson(`/api/listings/${item.id}`, patch);
-      // Refresh the cache so the card (and its Publish gate) sees the change.
-      await loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't save the category: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
-  };
-  return <CategoryQuickPick listing={item.listing} onPick={save} saving={saving} />;
-}
-
 // A multi-marketplace publish response as one toast line: "eBay ✓ · Etsy ✗".
 function resultSummary(res) {
   if (!res.multi) return null;
@@ -114,7 +96,23 @@ export function DraftsStrip({ search = "" }) {
   const [selecting, setSelecting] = useState(false);
   const [sel, setSel] = useState({});
   const [publishing, setPublishing] = useState({});   // id -> bool
+  // Drafts eBay REFUSED, and what it said. A refusal is the seller's to fix —
+  // a field to fill in, an account hold to clear — and until this existed the
+  // only place it was ever said was a toast that is gone in seconds. The card
+  // it belongs to now carries it: amber background, the reason underneath,
+  // and it stays there until the next publish attempt answers differently.
+  // Keyed by id and in-memory, like `publishing` — a reload re-asks eBay
+  // rather than showing a verdict from an hour ago. (An unconfirmed publish
+  // is NOT in here: nobody established that it was refused, and painting it
+  // "needs info" would send the seller to edit and republish a listing that
+  // may already be live.)
+  const [refused, setRefused] = useState({});        // id -> reason
   const [startingOver, setStartingOver] = useState(null);
+  // The send-off a card gets on its way live (see publishCelebration): a
+  // burst of confetti, then it lifts off the grid. What is left when a batch
+  // finishes is exactly the drafts that still need the seller.
+  const { celebrating, celebrate } = usePublishCelebration();
+  const reduced = useReducedMotion();
   // Bulk publish runs one listing at a time (eBay's API is per-item), which on
   // a big selection is a long wait — so the button counts it off out loud.
   const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
@@ -128,7 +126,14 @@ export function DraftsStrip({ search = "" }) {
       || (i.listing?.description || "").toLowerCase().includes(q))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
 
-  if (!drafts.length) return null;
+  // What the grid actually renders. A published card is out of `drafts` the
+  // instant the server confirms it (publishItem patches the record), so its
+  // snapshot is spliced back at the position it held for as long as the
+  // animation runs — including when it was the last one, which is why the
+  // strip is kept mounted on `cards` rather than on `drafts`.
+  const cards = withCelebrating(drafts, celebrating);
+
+  if (!cards.length) return null;
 
   // Both bulk actions work on the drafts you can actually see: narrowing the
   // search after selecting must not publish or delete something off-screen.
@@ -158,13 +163,42 @@ export function DraftsStrip({ search = "" }) {
   // rather than one per item.
   const publishItem = async (item) => {
     setPublishing((p) => ({ ...p, [item.id]: true }));
+    // Last run's verdict is not this run's. Cleared up front so a retry never
+    // shows the old refusal beside the new attempt.
+    setRefused((r) => (r[item.id] ? { ...r, [item.id]: undefined } : r));
     try {
       const res = await publishListing(item.id, item.listing || {}, effectiveTargets);
       // Move the card out of Drafts on the spot — the refresh below confirms
       // it, but a live listing must never linger under Drafts waiting for one.
-      if (res.published) patchListing(item.id, { status: "published" });
-      return { published: !!res.published, res };
+      // The send-off is purely visual and runs alongside: it holds the card's
+      // PLACE in the grid for a beat, never its draft status.
+      if (res.published) {
+        celebrate(item.id, item, drafts.findIndex((d) => d.id === item.id));
+        patchListing(item.id, { status: "published" });
+      }
+      // The same three-way read the batch queue uses. An outcome the server
+      // could not establish stays a draft here (it may not be one on eBay,
+      // which is exactly why the seller is sent to look) but it is never
+      // counted or worded as a refusal.
+      const tally = publishTally(
+        res, "Publish blocked — open the draft to see what to fix.");
+      // Refused: mark the card so the reason outlives the toast.
+      if (!tally.published && !tally.unconfirmed) {
+        setRefused((r) => ({ ...r, [item.id]: tally.reason }));
+      }
+      return { published: tally.published, res, reason: tally.reason,
+               unconfirmed: tally.unconfirmed,
+               ...(tally.unconfirmed ? { error: UNCONFIRMED_PUBLISH } : {}) };
     } catch (e) {
+      // publishListing has already asked the server what became of a publish
+      // whose answer was lost; still flagged here means it could not tell.
+      // Not a refusal, and not something to retry blind — see BulkMode.
+      if (e?.unknownOutcome) {
+        return { published: false, unconfirmed: true, error: UNCONFIRMED_PUBLISH };
+      }
+      // The server (or eBay through it) said no, with a reason. Same
+      // treatment as a refusal in the body above — it is the seller's to fix.
+      setRefused((r) => ({ ...r, [item.id]: e.message }));
       return { published: false, error: e.message };
     } finally {
       setPublishing((p) => ({ ...p, [item.id]: false }));
@@ -181,9 +215,16 @@ export function DraftsStrip({ search = "" }) {
       message: `"${name}" goes straight to ${targetNames}.`,
       confirmLabel: "Publish live",
     }))) return false;
-    const { published, res, error } = await publishItem(item);
+    const { published, res, error, reason, unconfirmed } = await publishItem(item);
     if (error) {
-      toast(`Publish error: ${error}`, { kind: "error" });
+      // "Publish error" is the wrong headline for a publish that may have
+      // worked — the sentence already says what to do, and calling it an
+      // error is what makes someone press the button again.
+      toast(unconfirmed ? error : `Publish error: ${error}`,
+        { kind: unconfirmed ? "warning" : "error" });
+      // The listings refresh still runs: if it DID land, the card should
+      // leave Drafts on its own rather than sit there inviting a retry.
+      if (unconfirmed) await loadListings({ quiet: true });
       return false;
     }
     const summary = resultSummary(res);
@@ -195,10 +236,11 @@ export function DraftsStrip({ search = "" }) {
         : (res.message || "Published! It's live now."),
         { kind: partial ? "warning" : "success" });
     } else {
-      // blockedReason, not res.message — see publishShared: eBay's catch-all
-      // for an account-level hold blames the title.
-      toast(blockedReason(res, "Publish blocked — open the draft to see what to fix."),
-        { kind: "warning" });
+      // The reason publishItem worked out, not res.message — see
+      // publishShared: eBay's catch-all for an account-level hold blames the
+      // title. (An unanswered publish never reaches here; it left through the
+      // `error` branch above with its own sentence.)
+      toast(reason, { kind: "warning" });
     }
     await loadListings({ quiet: true });
     return published;
@@ -223,13 +265,18 @@ export function DraftsStrip({ search = "" }) {
           : ""),
       confirmLabel: "Publish live",
     }))) return;
-    let ok = 0, failed = 0;
+    let ok = 0, failed = 0, unconfirmed = 0;
     const reasons = [];
     setBulkProgress({ done: 0, total: readyToPublish.length });
     try {
       for (const item of readyToPublish) {
         const out = await publishItem(item);
         if (out.published) ok++;
+        // A publish nobody got an answer to is its own outcome. Counting it
+        // as a refusal tells the seller to open a draft and fix it, when the
+        // listing may well be live on eBay already and the only safe next
+        // step is to look.
+        else if (out.unconfirmed) unconfirmed++;
         else {
           failed++;
           // WHY, not just how many. publishItem hands back the response and
@@ -237,10 +284,9 @@ export function DraftsStrip({ search = "" }) {
           // one account-level hold reported "5 need attention — open them to
           // fix" and sent the seller to inspect five listings that were never
           // the problem. That is the shape of the failures in production.
-          reasons.push(out.error
-            || blockedReason(out.res, "Publish blocked — open the draft to see what to fix."));
+          reasons.push(out.error || out.reason);
         }
-        setBulkProgress((p) => ({ ...p, done: ok + failed }));
+        setBulkProgress((p) => ({ ...p, done: ok + failed + unconfirmed }));
       }
     } finally {
       setBulkProgress(null);
@@ -254,8 +300,12 @@ export function DraftsStrip({ search = "" }) {
           ? (shared ? ` All ${failed} were refused: ${shared}`
                     : ` ${failed} need attention — open them to fix.`)
           : "")
+      + (unconfirmed
+          ? ` ${unconfirmed} didn't answer in time and may already be live — `
+            + `check your eBay store before publishing ${unconfirmed === 1 ? "it" : "them"} again.`
+          : "")
       + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
-      { kind: failed || notReady ? "warning" : "success" });
+      { kind: failed || unconfirmed || notReady ? "warning" : "success" });
   };
 
   const deleteSelected = async () => {
@@ -307,7 +357,10 @@ export function DraftsStrip({ search = "" }) {
     <div className="flex flex-col gap-3">
       <SectionHeader
         icon={FilePen}
-        title={`Drafts (${drafts.length})`}
+        // Counts what the grid is SHOWING: a card mid-send-off is still on
+        // screen, and a count that dropped a second before the card did read
+        // as a miscount rather than as the animation it is.
+        title={`Drafts (${cards.length})`}
         action={
           <div className="flex flex-wrap items-center justify-end gap-2">
             <MarketTargetChips selected={selected} toggle={toggle}
@@ -366,15 +419,44 @@ export function DraftsStrip({ search = "" }) {
       <div className={cn(list
         ? "flex flex-col gap-3"
         : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4")}>
-        {drafts.map((item, i) => {
+        {cards.map((item, i) => {
           const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
+          // Two ways a draft ends up needing the seller, and the card looks
+          // the same for both: fields a browser can already see eBay will
+          // refuse it over, and a publish eBay actually turned down. The
+          // second is the one the seller could previously miss entirely —
+          // the toast said it once and the card went on looking publishable.
+          const refusal = refused[item.id];
+          const needsInfo = blockers.length > 0 || !!refusal;
+          // Worded as a verdict on the LAST ATTEMPT, not on the draft as it
+          // stands: the flag is cleared by the next publish, not by an edit,
+          // so "eBay refuses this" could outlive the fix. "The last publish
+          // was refused" stays true either way.
+          const needsInfoWhy = blockers.length
+            ? `Needs info before it can go on eBay — ${blockerLabels(blockers)}.`
+            : refusal ? `The last publish was refused: ${refusal}` : null;
+          // Live, and on its way off the grid. Its controls come off with it:
+          // a click landing on a departing card would open, publish or delete
+          // a listing the seller never chose.
+          const leaving = celebrating[item.id];
+          const motionProps = publishedCardMotion(
+            leaving?.phase, { reduced: !!reduced, index: i });
           return (
             <motion.div
               key={item.id}
+              /* Position only. A full layout animation scales the card's
+                 CONTENTS while the grid closes the gap, which smears the
+                 title and the price of every card that moves up. */
+              layout="position"
+              className={cn("relative", leaving && "pointer-events-none")}
               initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
+              animate={motionProps.animate}
+              transition={motionProps.transition}
             >
+              {leaving && (
+                <PublishedBurst label={liveLabel(effectiveTargets)}
+                  reduced={!!reduced} />
+              )}
               {/* Delete lives in the labeled row below, not as another tiny
                   icon in the card's corner cluster. */}
               <ListingCard item={item} layout={listingsLayout} onOpen={openListing}
@@ -383,10 +465,12 @@ export function DraftsStrip({ search = "" }) {
                 onSkip={() => toggleSkipDraft(item.id)}
                 skipped={skippedDraftIds.has(item.id)}
                 metrics={metricsById[item.id]}
-                selectable={selecting}
+                needsInfo={needsInfo && !leaving}
+                needsInfoWhy={needsInfoWhy}
+                selectable={selecting && !leaving}
                 selected={!!sel[item.id]}
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
-              {!selecting && (
+              {!selecting && !leaving && (
                 <div className={cn(list
                   ? "mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 pl-1"
                   : "contents")}>
@@ -413,14 +497,21 @@ export function DraftsStrip({ search = "" }) {
                   {/* In a list row this drops to the end of the wrapped line
                       (order-last); stacked cards keep it under the buttons,
                       where it reads as the reason Publish is disabled. */}
-                  {blockers.length > 0 && (
+                  {(blockers.length > 0 || refusal) && (
                     <p className={cn(
                       "flex items-start gap-1.5 text-[12px] font-semibold text-warning",
                       list ? "w-full order-last" : "mt-1.5")}
-                      title={blockers.map((b) => `${b.label}: ${b.why}`).join("\n")}>
+                      title={blockers.length
+                        ? blockers.map((b) => `${b.label}: ${b.why}`).join("\n")
+                        : refusal}>
                       <AlertTriangle size={13} className="shrink-0 mt-px" aria-hidden />
                       <span className="min-w-0">
-                        Keeping this off eBay: {blockerLabels(blockers)}
+                        {blockers.length
+                          ? `Keeping this off eBay: ${blockerLabels(blockers)}`
+                          /* eBay's verdict, kept on the card. Nothing local is
+                             blocking, so without this the amber card would
+                             have no reason on it at all. */
+                          : `Last publish refused: ${refusal}`}
                       </span>
                     </p>
                   )}
@@ -428,7 +519,7 @@ export function DraftsStrip({ search = "" }) {
                       a wrong category is the AI misfire that costs most, and
                       hiding it behind a layout switch would bury it. */}
                   <div className={cn(list && "min-w-0 w-full sm:w-56")}>
-                    <DraftCategory item={item} />
+                    <DraftCategoryEdit item={item} />
                   </div>
                   <DraftShipping item={item} className={cn(list ? "min-w-0" : undefined)} />
                 </div>

@@ -17,7 +17,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
-import { listingsView } from "@/lib/listingsView";
+import { ARCHIVED_STATUSES, isDraft, listingsView } from "@/lib/listingsView";
+import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -53,7 +54,7 @@ export const TABS = [
     },
   },
   {
-    id: "all", label: "All", statuses: null, hide: ["sold"],
+    id: "all", label: "All", statuses: null, hide: ARCHIVED_STATUSES,
     sub: "A live mirror of your whole eBay store — every status still in play "
       + "(sold items are archived under Inactive)",
     empty: {
@@ -67,7 +68,9 @@ export const TABS = [
 // Which items a tab shows. `statuses` is a whitelist; `hide` subtracts from
 // the everything-tab. Sold items are hidden outside Inactive on purpose — a
 // finished sale is not something the seller can still act on, and leaving it
-// among the live listings is what made a sold item look publishable.
+// among the live listings is what made a sold item look publishable. The list
+// it subtracts is ARCHIVED_STATUSES, shared with the dashboard's "Recent
+// listings" strip so a sale leaves both screens at once.
 export const inTab = (tab, item) => (tab.statuses
   ? tab.statuses.includes(item.status)
   : !(tab.hide || []).includes(item.status));
@@ -295,6 +298,14 @@ export function ListingsView({ search = "" }) {
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
               metrics={metricsById[item.id]} />
+            {/* Drafts carry their category on the card here too — the "All"
+                tab mixes them in with live listings, and a draft is exactly
+                where the category is still wrong and still free to fix. It
+                also decides which conditions eBay accepts, so it is the one
+                field worth fixing before Publish. */}
+            {isDraft(item) && (
+              <DraftCategoryEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
+            )}
           </motion.div>
         ))}
       </div>

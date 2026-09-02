@@ -14,9 +14,10 @@ import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ShopMode } from "@/views/ShopMode";
 import { SettingsView } from "@/views/SettingsView";
+import { AdminView } from "@/views/AdminView";
 
 function Main() {
-  const { view, setView, health, activeBulk, clearBulk } = useApp();
+  const { view, setView, health, activeBulk, clearBulk, isSuperadmin } = useApp();
   const [search, setSearch] = useState("");
 
   return (
@@ -62,6 +63,10 @@ function Main() {
             {/* "ebay" was a separate account mirror; it's part of Settings now,
                 so old links/bookmarks land there instead of a blank page. */}
             {(view === "settings" || view === "ebay") && <SettingsView />}
+            {/* Defensive against a role revoked mid-session: the nav entry is
+                already gone, and a stale `view` falls back to Home rather
+                than a blank screen (the server 404s the data either way). */}
+            {view === "admin" && (isSuperadmin ? <AdminView /> : <Dashboard />)}
           </motion.main>
         </AnimatePresence>
       </div>

@@ -300,6 +300,31 @@ def _esc(value: Any) -> str:
     return html.escape(str(value if value is not None else ""), quote=False)
 
 
+# Any tag at all. eBay renders <Description> as HTML, so a description that
+# already carries markup — everything GetItem imports, and anything a seller
+# typed by hand — has to go back exactly as it came.
+_HTML_TAG_RE = re.compile(r"<[a-zA-Z][^>]*>")
+
+
+def _description_html(text: str) -> str:
+    """A listing description as the HTML eBay will render.
+
+    The AI writes the description as plain text in labelled sections separated
+    by blank lines, and the editor is a plain textarea, but eBay renders the
+    field as markup: newlines collapse, so a 400-word description arrives as
+    one unbroken wall. Plain text is escaped and rebuilt as paragraphs;
+    anything already containing a tag is left alone.
+    """
+    text = (text or "").strip()
+    if not text or _HTML_TAG_RE.search(text):
+        return text
+    blocks = [b for b in (b.strip() for b in re.split(r"\n\s*\n", text)) if b]
+    return "".join(
+        "<p>" + "<br>".join(_esc(line.strip()) for line in block.split("\n"))
+        + "</p>"
+        for block in blocks)
+
+
 def _cdata(value: str) -> str:
     """Wrap text in CDATA so listing HTML survives intact.
 
@@ -530,7 +555,13 @@ _CONDITION_TO_ID = {
     # — a missing key silently dropped <ConditionID>, and eBay then rejected
     # with "condition is required" (architect finding #5).
     "LIKE_NEW": "2750",
-    "USED_EXCELLENT": "3000", "USED_VERY_GOOD": "4000", "USED_GOOD": "5000",
+    # eBay's Pre-loved Apparel grades. Clothing categories accept these and
+    # NOT 4000/5000/6000, which is what made "Used - Good" on a t-shirt come
+    # back as error 25021 — see taxonomy.nearest_allowed_condition, which is
+    # what puts a listing on the grade its category actually offers.
+    "PRE_OWNED_EXCELLENT": "2990",
+    "USED_EXCELLENT": "3000", "PRE_OWNED_FAIR": "3010",
+    "USED_VERY_GOOD": "4000", "USED_GOOD": "5000",
     "USED_ACCEPTABLE": "6000", "FOR_PARTS_OR_NOT_WORKING": "7000",
 }
 
@@ -869,7 +900,9 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
         parts.append(f"<SubTitle>{_esc(listing.subtitle[:SUBTITLE_MAX_CHARS])}"
                      "</SubTitle>")
     if listing.description and wanted("description"):
-        parts.append(f"<Description>{_cdata(listing.description)}</Description>")
+        parts.append("<Description>"
+                     f"{_cdata(_description_html(listing.description))}"
+                     "</Description>")
     if listing.category_id and wanted("category_id"):
         parts.append("<PrimaryCategory><CategoryID>"
                      f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
@@ -992,7 +1025,8 @@ def _package_details(listing: Listing) -> str:
 def create_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
-                   idempotency_key: str = "") -> dict:
+                   idempotency_key: str = "",
+                   best_offer: bool = False) -> dict:
     """Publish a NEW listing through the Trading API.
 
     This is what keeps a listing editable everywhere. A listing published via
@@ -1016,6 +1050,9 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     listing findable by GetItem afterwards -- so a caller that loses the
     response can still find what it made. A collision raises
     AlreadyListedError instead of duplicating. Pass "" to opt out.
+
+    `best_offer` enables Best Offer on the new listing, with no minimum —
+    see build_add_item.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -1025,7 +1062,7 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
             "eBay needs to know where this ships from. Add your ship-from ZIP "
             "in Settings → Listing settings and publish again.")
     call, body = build_add_item(listing, image_urls, policies, postal_code,
-                                idempotency_key)
+                                idempotency_key, best_offer=best_offer)
     try:
         root = _call(call, token, body)
     except TradingError as exc:
@@ -1062,13 +1099,23 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
 def build_add_item(listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
-                   idempotency_key: str = "") -> tuple[str, str]:
+                   idempotency_key: str = "",
+                   best_offer: bool = False) -> tuple[str, str]:
     """(call name, <Item> XML) for a NEW listing.
 
     Exactly the body create_listing sends, built without touching the network
     or validating anything — so the dry-run preview and the real publish can
     never describe two different requests. An empty postal_code simply omits
     the element here; create_listing is what refuses to publish without one.
+
+    `best_offer` turns eBay's Best Offer on for this listing — the seller's
+    "Allow offers" account default (see listing_sync.offers_enabled). It is
+    deliberately the whole of the feature: no MinimumBestOfferPrice and no
+    BestOfferAutoAcceptPrice go with it, so no offer is auto-declined and none
+    is auto-accepted. Every offer reaches the seller to answer. Those two
+    prices are eBay's auto-decline / auto-accept thresholds, and picking
+    either on the seller's behalf would sell an item, or bin a buyer, at a
+    number they never named.
     """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
@@ -1088,6 +1135,15 @@ def build_add_item(listing: Listing, image_urls: list[str],
         parts.append("<ListingType>FixedPriceItem</ListingType>"
                      "<ListingDuration>GTC</ListingDuration>"
                      f"<Quantity>{max(1, int(listing.quantity or 1))}</Quantity>")
+
+    # Best Offer, fixed-price only. eBay does not offer it on auction-format
+    # listings (a Chinese auction already has a bidding mechanism), and asking
+    # for it there is a rejection of the whole publish rather than a listing
+    # without offers — so an auction drafted while "Allow offers" is on still
+    # publishes, as an ordinary auction. AUCTION_BIN is an auction too.
+    if best_offer and not is_auction:
+        parts.append("<BestOfferDetails><BestOfferEnabled>true"
+                     "</BestOfferEnabled></BestOfferDetails>")
 
     parts.append(f"<Country>{_esc(config.EBAY_MARKETPLACE_ID[-2:] or 'US')}</Country>")
     parts.append(f"<Currency>{_esc(listing.currency or config.EBAY_CURRENCY)}</Currency>")
@@ -1145,7 +1201,8 @@ _VERIFY_CALL = {"AddItem": "VerifyAddItem",
 
 def verify_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
-                   postal_code: str = "") -> None:
+                   postal_code: str = "",
+                   best_offer: bool = False) -> None:
     """Ask eBay whether it WOULD accept this listing. Nothing is listed.
 
     Returns None when eBay says it would take it, and raises TradingError —
@@ -1159,7 +1216,7 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
     the real publish it is diagnosing.
     """
     call, body = build_add_item(listing, image_urls, policies, postal_code,
-                                idempotency_key="")
+                                idempotency_key="", best_offer=best_offer)
     _call(_VERIFY_CALL[call], token, body)
 
 

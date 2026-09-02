@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
-import { postJson } from "@/lib/api";
+import { api, postJson, PUBLISH_TIMEOUT_MS } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -66,7 +66,131 @@ export async function publishListing(id, listing, effectiveTargets, mode = "live
       && !(effectiveTargets.length === 1 && effectiveTargets[0] === "ebay")) {
     body.marketplaces = effectiveTargets;
   }
-  return postJson("/api/publish", body);
+  // The save above keeps the default deadline: it is a local write, and a
+  // slow one is a real problem. Only the publish itself waits on eBay.
+  try {
+    return await postJson("/api/publish", body,
+                          { timeoutMs: PUBLISH_TIMEOUT_MS });
+  } catch (e) {
+    // Refused → the seller has something to fix, and this is their error.
+    // Answer lost → the server is very probably still publishing, and
+    // reporting a failure here is what sends someone back to publish a
+    // listing that is already live. Ask instead.
+    if (!e?.unknownOutcome || mode !== "live") throw e;
+    const settled = await resolveLostPublish(id);
+    if (!settled.published) throw e;   // api.js already says the right thing
+    return {
+      published: true,
+      listing_id: settled.listing_id,
+      message: "Your listing is live on eBay. The publish outran the wait, "
+        + "so this was confirmed from your store rather than from the "
+        + "publish itself.",
+    };
+  }
+}
+
+// A record whose listing is on eBay right now. Both spellings are in the
+// data: the publish path writes "published", the store sync writes "live".
+const LIVE_STATUSES = new Set(["published", "live"]);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// What actually became of a publish whose answer never arrived.
+//
+// A client giving up on a request does not stop the server: the publish runs
+// to the end, and the moment eBay accepts the listing the record carries its
+// item id — the create path writes that BEFORE it does anything else, exactly
+// so an id can never be the thing that goes missing. So the question "did it
+// go live?" has an answer on the server within a few seconds of the timeout,
+// and nothing in the app was asking it.
+//
+// Reads only, and a read that fails proves nothing either way, so a failed
+// poll just waits for the next one. Sound because both bulk queues publish
+// DRAFTS: a record that now reads published is this publish's doing and
+// nothing else's.
+//
+// It answers for the RECORD, not per marketplace — a fan-out whose eBay half
+// landed reads as published here with no word on the rest. That is the right
+// answer to the only question being asked ("is this on eBay, or am I about to
+// list it twice?"), and the listings refresh that follows carries the
+// per-marketplace state the queue renders from.
+//
+// Resolves { published: true, listing_id } once the record settles, or
+// { published: false } when it has not within the window — which is "still
+// unknown", not "refused", and is why the caller rethrows the original error
+// instead of inventing a rejection.
+export async function resolveLostPublish(id, { attempts = 6, waitMs = 5000,
+                                               wait = sleep } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    await wait(waitMs);
+    let rec;
+    try {
+      rec = await api(`/api/listings/${id}`);
+    } catch (e) {
+      continue;
+    }
+    const listingId = String(rec?.listing?.ebay_listing_id || "");
+    if (LIVE_STATUSES.has(rec?.status) && listingId) {
+      return { published: true, listing_id: listingId };
+    }
+  }
+  return { published: false };
+}
+
+// What to tell the seller about a publish that never came back with an
+// answer. Not a refusal — there is nothing to open and fix — so it does not
+// go through blockedReason, which would dress a timeout up as eBay's verdict
+// on the listing.
+export const UNCONFIRMED_PUBLISH =
+  "eBay didn't answer in time. This may already be live — check your store "
+  + "before publishing it again.";
+
+// Did the SERVER say it could not establish what the marketplace did?
+//
+// The other half of the same question `err.unknownOutcome` answers for this
+// client. When the request reaches eBay and the reply is lost on the server
+// side, the app is not left guessing: services/ebay_trading raises its own
+// UnknownOutcome, and the providers now stamp `outcome_unknown` on the
+// publish body (top level on the legacy single-eBay response, per
+// marketplace on a fan-out). Before that flag existed this arrived as an
+// ordinary unsuccessful publish, and the bulk summaries called it "refused".
+export function outcomeUnknown(res) {
+  if (!res) return false;
+  if (res.outcome_unknown) return true;
+  return Object.values(res.results || {}).some((r) => r?.outcome_unknown);
+}
+
+// How one publish lands in a bulk run's tally, and what its card says.
+//
+// Three outcomes, not two, and the third is the one that matters: a listing
+// eBay refused (open it, fix the field), a listing that went live, and a
+// listing nobody can say either way about — which must be CHECKED, never
+// republished on the strength of a summary line. Both queues ask this rather
+// than each writing the ternary themselves; they are the two screens where a
+// wrong answer is repeated across a whole batch.
+export function publishTally(res, fallback) {
+  if (res?.published) return { published: true, unconfirmed: false, reason: null };
+  if (outcomeUnknown(res)) {
+    return { published: false, unconfirmed: true, reason: UNCONFIRMED_PUBLISH };
+  }
+  return { published: false, unconfirmed: false,
+           reason: blockedReason(res, fallback) };
+}
+
+// Every issue a publish attempt raised, in both shapes it can arrive in: a
+// single-marketplace result carries them at the top, a multi-marketplace one
+// keeps a set per marketplace under `results`.
+export function allIssues(res) {
+  return [
+    ...(res?.issues || []),
+    ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),
+  ].filter(Boolean);
+}
+
+// The errors that point at ONE card's fields — what that card has to show,
+// and show without being asked, when a publish came back refused.
+export function issuesFor(res, target) {
+  return allIssues(res).filter((i) => i.target === target && i.level !== "warn");
 }
 
 // What to TELL the seller when a publish did not go live.
@@ -94,10 +218,7 @@ export async function publishListing(id, listing, effectiveTargets, mode = "live
 // drafts, seven identical "eBay is blocking new listings on this account", and
 // the sentence naming the actual hold never on screen. It now goes last.
 export function blockedReason(res, fallback) {
-  const issues = [
-    ...(res?.issues || []),
-    ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),
-  ];
+  const issues = allIssues(res);
   const errors = issues.filter((i) => i && i.level !== "warn" && i.title);
   const named = errors.filter((i) => !i.placeholder);
   const best = named.find((i) => i.target && i.target !== "generic")

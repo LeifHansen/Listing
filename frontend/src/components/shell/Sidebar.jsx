@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Settings,
+  LayoutDashboard, PlusCircle, Store, Settings, ShieldCheck,
   Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,13 @@ const NAV = [
   { id: "shop", label: "Shop", icon: Store },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+// The operator console — appended to the sidebar only for a superadmin
+// (the server re-checks the role on every /api/admin call, so this gates
+// what renders, never what is reachable). Deliberately NOT in BottomNav:
+// the console is a desktop tool, and the 4-slot-plus-FAB thumb bar has no
+// room for a fifth target.
+const ADMIN_NAV = { id: "admin", label: "Admin", icon: ShieldCheck };
 
 const byId = (id) => NAV.find((n) => n.id === id);
 
@@ -87,7 +94,7 @@ function NavItem({ item, active, collapsed, badge, onClick }) {
 // Sidebar — rounded, floating, detached from the screen edges. Hidden on
 // mobile (BottomNav takes over there).
 export function Sidebar() {
-  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout, listingsState } = useApp();
+  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout, listingsState, isSuperadmin } = useApp();
   const [collapsed, setCollapsed] = useState(false);
 
   // Drafts live at the top of the Sell screen, so its badge is the
@@ -96,6 +103,7 @@ export function Sidebar() {
     new: listingsState.items.filter(
       (i) => i.status === "draft" || i.status === "dry_run").length,
   };
+  const items = isSuperadmin ? [...NAV, ADMIN_NAV] : NAV;
 
   return (
     <motion.aside
@@ -110,7 +118,7 @@ export function Sidebar() {
       <Brand collapsed={collapsed} />
 
       <nav className="flex flex-col gap-1 mt-4 flex-1 overflow-y-auto" aria-label="Main">
-        {NAV.map((item) => (
+        {items.map((item) => (
           <NavItem
             key={item.id}
             item={item}

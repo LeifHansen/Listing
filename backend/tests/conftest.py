@@ -44,7 +44,8 @@ _SCRUBBED = (
     # Etsy's seller-app gate: which sellers may reach Etsy's consent screen.
     # Inherited from a developer's shell it would gate (or un-gate) the tests
     # for reasons unrelated to the code.
-    "ETSY_COMMERCIAL_ACCESS", "ETSY_OWNER_EMAILS",
+    "ETSY_COMMERCIAL_ACCESS", "ETSY_ACCESS_TIER", "ETSY_APP_SEATS",
+    "ETSY_OWNER_EMAILS",
 )
 
 
@@ -92,6 +93,26 @@ def dbmod(monkeypatch, tmp_path):
     importlib.reload(db)
     monkeypatch.setattr(db.config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     return db
+
+
+@pytest.fixture(autouse=True)
+def _drain_error_queue():
+    """Start every test with an empty error queue.
+
+    Importing backend.main installs the capture handler process-wide, so from
+    then on EVERY log.warning in the suite — including ones a test deliberately
+    provokes — leaves a payload queued. Without this, a test that asserts on
+    what was recorded sees the previous test's failures too, and which ones
+    depends on collection order.
+    """
+    from backend.services import errorlog
+
+    while True:
+        try:
+            errorlog._queue.get_nowait()
+        except Exception:  # noqa: BLE001 - Empty, or the queue is not in use
+            break
+    yield
 
 
 # --- no test may talk to the internet ---------------------------------------

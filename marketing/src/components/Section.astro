@@ -1,0 +1,36 @@
+---
+import Container from "./Container.astro";
+
+const {
+  eyebrow,
+  title,
+  lede,
+  id,
+  align = "center",
+  tone = "default",
+  class: className = "",
+} = Astro.props;
+
+const tones = {
+  default: "",
+  sunken: "bg-bg-sunken",
+  card: "bg-card",
+};
+const alignment = align === "center" ? "text-center mx-auto" : "";
+---
+<section id={id} class={`py-20 sm:py-28 ${tones[tone]} ${className}`}>
+  <Container>
+    {(eyebrow || title || lede) && (
+      <div class={`max-w-2xl ${alignment}`}>
+        {eyebrow && (
+          <p class="font-display text-xs font-semibold uppercase tracking-[0.14em] text-blue-ink">
+            {eyebrow}
+          </p>
+        )}
+        {title && <h2 class="mt-3 text-3xl sm:text-4xl">{title}</h2>}
+        {lede && <p class="mt-4 text-lg text-ink-secondary">{lede}</p>}
+      </div>
+    )}
+    <slot />
+  </Container>
+</section>

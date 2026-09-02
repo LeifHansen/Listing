@@ -105,11 +105,49 @@ def check_weight_vs_services(listing: Listing, services: list[dict]) -> list[dic
     return issues
 
 
+def condition_label(enum: str) -> str:
+    """"USED_GOOD" -> "Used Good". eBay's own wording for the grade is better
+    and the checklist uses it wherever the lookup supplied one; this is for
+    the value the listing is carrying, which by definition eBay did not."""
+    return (enum or "").replace("_", " ").title()
+
+
+def _check_condition_fits_category(listing: Listing,
+                                   allowed_conditions: Optional[list[dict]],
+                                   add) -> None:
+    """The condition has to be one the CATEGORY offers, not just one eBay has.
+
+    eBay publishes a different ladder per category — Very Good / Good /
+    Acceptable only in media, the pre-owned grades only in apparel, one plain
+    "Used" across most of the rest — and rejects anything else with error
+    25021 ("condition id is invalid for the selected primary category"). That
+    rejection costs a whole publish and names nothing the seller can act on,
+    so it is worth catching here, where the fix is a dropdown away.
+
+    `allowed_conditions` is eBay's own answer for this category
+    ([{enum, id, label}]) or None when we could not ask — and None means the
+    check is skipped, never that the category allows everything.
+    """
+    if not allowed_conditions:
+        return
+    cond = (listing.condition or "").strip().upper()
+    if any(cond == (c.get("enum") or "").upper() for c in allowed_conditions):
+        return
+    names = ", ".join(c.get("label") or condition_label(c.get("enum", ""))
+                      for c in allowed_conditions[:8])
+    add("condition",
+        f"eBay doesn't offer “{condition_label(cond)}” in this category",
+        f"Pick one of the conditions this category takes: {names}. "
+        "(Categories differ — clothing has its own pre-owned grades, and "
+        "Very Good / Good / Acceptable exist only for media.)")
+
+
 def validate(listing: Listing, mode: str, *,
              has_fulfillment: bool, has_payment: bool, has_return: bool,
              has_location: bool, connected: bool,
              policy_services: Optional[list[dict]] = None,
-             required_aspects: Optional[list[str]] = None) -> list[dict]:
+             required_aspects: Optional[list[str]] = None,
+             allowed_conditions: Optional[list[dict]] = None) -> list[dict]:
     """Everything eBay will reject at publish time, as UI-ready issues.
 
     Draft mode checks only what createOrReplaceInventoryItem needs (title,
@@ -123,7 +161,7 @@ def validate(listing: Listing, mode: str, *,
     issues: list[dict] = []
 
     def add(target: str, title: str, fix: str, level: str = "error",
-            field: str = "") -> None:
+            field: str = "", fields: Optional[list[str]] = None) -> None:
         """One checklist entry.
 
         `blocking` is the whole point of the list: True means eBay refuses
@@ -134,10 +172,16 @@ def validate(listing: Listing, mode: str, *,
 
         `field` is the short name of the thing to fix ("Title", "Package
         weight") — what the publish bar's jump chips are labelled with.
+
+        `fields` is different, and only some checks can fill it: the NAMES of
+        the individual inputs at fault ("Sleeve Length", "Size Type"), which
+        the editor rings so a seller isn't left comparing a sentence against
+        forty item specifics to work out which one it means.
         """
         issues.append({"target": target, "level": level,
                        "blocking": level != "warn",
                        "field": field or FIELD_LABELS.get(target, ""),
+                       "fields": list(fields or []),
                        "title": title, "fix": fix})
 
     # A listing with eBay variations, and nothing else. This app has no
@@ -176,6 +220,8 @@ def validate(listing: Listing, mode: str, *,
             f"Shorten the title to {TITLE_MAX_CHARS} characters or fewer.")
     if not (listing.condition or "").strip():
         add("condition", "A condition is required", "Pick a condition on the Pricing card.")
+    else:
+        _check_condition_fits_category(listing, allowed_conditions, add)
 
     if mode not in ("live", "revise"):
         return issues
@@ -245,7 +291,12 @@ def validate(listing: Listing, mode: str, *,
 
     # --- category-required item specifics ---
     if required_aspects:
-        have = {(s.name or "").strip().lower() for s in listing.item_specifics if s.value}
+        # Any row for the aspect that carries a value answers it — an aspect
+        # can own several rows (eBay's multi-selects) and a blank one can sit
+        # in front of the real answer. A value of nothing but spaces is not an
+        # answer, and eBay does not accept it as one.
+        have = {(s.name or "").strip().lower() for s in listing.item_specifics
+                if (s.value or "").strip()}
         if listing.brand:
             have.add("brand")
         missing = [a for a in required_aspects if a.strip().lower() not in have]
@@ -253,7 +304,8 @@ def validate(listing: Listing, mode: str, *,
             add("specifics",
                 "Missing required item specifics: " + ", ".join(missing[:6])
                 + ("…" if len(missing) > 6 else ""),
-                "Fill these on the Item specifics card — eBay requires them for this category.")
+                "Fill these on the Item specifics card — eBay requires them for this category.",
+                fields=missing)
     return issues
 
 

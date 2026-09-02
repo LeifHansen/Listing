@@ -4,12 +4,14 @@ import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
+import { nearestCondition } from "@/lib/conditions";
 import {
   publishListing, usePublishTargets, blockedReason, fixTargetFor,
 } from "./publishShared";
 import { ebayBlockers, weightOz } from "./blockers";
 import {
-  confirmSpecificRows, specificValues, toggleSpecificValue as toggleValue,
+  confirmSpecificRows, specificRowIndex, specificValues,
+  toggleSpecificValue as toggleValue,
 } from "./specifics";
 
 /* All state + actions for the listing workflow. The form object mirrors the
@@ -69,7 +71,8 @@ function fromListing(l) {
 
 export function useListingForm() {
   const {
-    session, setSession, health, loadListings, openListings, patchListing,
+    session, setSession, health, loadListings, invalidateListings,
+    openListings, patchListing,
   } = useApp();
   const { toast } = useToast();
 
@@ -150,18 +153,33 @@ export function useListingForm() {
       package_length_in: num(form.package_length_in),
       package_width_in: num(form.package_width_in),
       package_height_in: num(form.package_height_in),
-      item_specifics: form.item_specifics
-        .map((s) => ({ name: s.name.trim(), value: s.value.trim(), confidence: s.confidence || "" }))
-        .filter((s) => s.name),
+      // Blank rows are kept (a specific being typed still needs its row) —
+      // except where the SAME aspect already has an answer elsewhere in the
+      // list. Those are pure leftovers, and a blank row sitting in front of
+      // the answer is what made a filled aspect read as empty.
+      item_specifics: (() => {
+        const rows = form.item_specifics
+          .map((s) => ({ name: s.name.trim(), value: s.value.trim(),
+                         confidence: s.confidence || "" }))
+          .filter((s) => s.name);
+        const answered = new Set(
+          rows.filter((s) => s.value).map((s) => s.name.toLowerCase()));
+        return rows.filter((s) => s.value || !answered.has(s.name.toLowerCase()));
+      })(),
       images: form.images || [],
       currency: form.currency || "USD",
     };
   }, [form, session]);
 
   // ---------- item specifics (single source of truth) ----------
-  const getSpecificRow = useCallback((name) => form.item_specifics.find(
-    (s) => s.name.trim().toLowerCase() === name.toLowerCase()) || null,
-  [form.item_specifics]);
+  // The aspect's ANSWER row — the first one holding a value, not just the
+  // first one carrying the name (see specifics.js). An empty leftover row
+  // used to shadow the real value: the field rendered blank and the blocker
+  // list called a filled aspect missing.
+  const getSpecificRow = useCallback((name) => {
+    const i = specificRowIndex(form.item_specifics, name);
+    return i >= 0 ? form.item_specifics[i] : null;
+  }, [form.item_specifics]);
 
   const getSpecific = useCallback(
     (name) => getSpecificRow(name)?.value || "", [getSpecificRow]);
@@ -185,7 +203,9 @@ export function useListingForm() {
   const upsertSpecific = useCallback((name, value) => {
     setForm((f) => {
       const specs = [...f.item_specifics];
-      const i = specs.findIndex((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+      // The same row getSpecificRow shows, so an edit lands on the value the
+      // seller is looking at rather than on an empty row hiding above it.
+      const i = specificRowIndex(specs, name);
       if (i >= 0) specs[i] = { ...specs[i], value, confidence: "" };
       else if (value) specs.push({ name, value, confidence: "" });
       return { ...f, item_specifics: specs };
@@ -239,11 +259,19 @@ export function useListingForm() {
     const conditions = cond.conditions || [];
     setCategoryMeta({ conditions, aspects: asp.aspects || [],
                       conditionsChecked: cond.checked !== false });
-    // If the current condition isn't valid for this category, snap to the
-    // first allowed one so we never submit a condition eBay rejects (25021).
+    // If the current condition isn't one this category offers, move it to the
+    // CLOSEST one that is, so we never submit a condition eBay rejects
+    // (25021). Closest, not first: eBay lists "New" first almost everywhere,
+    // and snapping a worn item to it — which is what this did — swaps a
+    // publish error for a listing that lies about the item. nearestCondition
+    // never crosses the new/used line, and returns null when the category
+    // offers nothing honest, in which case the listing keeps what it has and
+    // the Condition card flags it.
     if (conditions.length) {
-      setForm((f) => conditions.some((c) => c.enum === f.condition)
-        ? f : { ...f, condition: conditions[0].enum });
+      setForm((f) => {
+        const fitted = nearestCondition(f.condition, conditions.map((c) => c.enum));
+        return !fitted || fitted === f.condition ? f : { ...f, condition: fitted };
+      });
     }
   }, [form.category_id, health.taxonomy_configured]);
 
@@ -333,13 +361,15 @@ export function useListingForm() {
       // listing while the refine was in flight, since it re-armed a re-seed
       // against a session that had already moved on.)
       toast("Listing refined ✨", { kind: "success" });
+      // A refine rewrites the title and price the cards are showing.
+      invalidateListings();
       return true;
     } catch (e) {
       toast(`Refine error: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, toast]);
+  }), [collect, sessionId, setSession, invalidateListings, toast]);
 
   // ---------- images ----------
   // Cache-bust per PHOTO, not globally: a global counter made one rotate
@@ -351,18 +381,37 @@ export function useListingForm() {
   }, []);
 
   // One-tap 90° clockwise rotate; only the rotated tile refreshes.
+  //
+  // RETHROWS after the toast. The tile turns its photo the moment the button
+  // is pressed and undoes that turn if the rotate fails (see PhotoTile) — and
+  // swallowing the error here meant the undo never ran. The photo stayed
+  // turned on screen while the saved file was untouched, and since a failed
+  // rotate also bumps no version, nothing else came along to correct it: the
+  // seller was left looking at an orientation that did not exist, on a tile
+  // that would keep it until the editor was reopened.
   const rotateImage = useCallback(async (name) => {
     try {
       await postJson("/api/rotate-image", { session_id: sessionId, name });
       bumpImageVersion(name);
+      // The saved file changed, so every card showing this listing is now
+      // showing a photo that no longer exists. See store.invalidateListings.
+      invalidateListings();
     } catch (e) {
       toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
+      throw e;
     }
-  }, [sessionId, bumpImageVersion, toast]);
+  }, [sessionId, bumpImageVersion, invalidateListings, toast]);
 
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
   // server delete fails.
+  //
+  // The SESSION is updated alongside the form, and the server's remaining
+  // list is applied on top. Both matter beyond tidiness: the delete is now
+  // persisted server-side (see /api/delete-image), so its answer is the list
+  // the next reorder is checked against — and a form and session that
+  // disagree about the photos are what made a delete followed by a drag come
+  // back as "this listing's photos changed somewhere else".
   const deleteImage = useCallback(async (name, confirmFn) => {
     const prev = form.images || [];
     if (prev.length <= 1) {
@@ -375,14 +424,23 @@ export function useListingForm() {
       confirmLabel: "Delete",
       danger: true,
     }))) return;
-    setForm((f) => ({ ...f, images: f.images.filter((n) => n !== name) }));
+    const setImages = (imgs) => {
+      setForm((f) => ({ ...f, images: imgs }));
+      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+    };
+    const next = prev.filter((n) => n !== name);
+    setImages(next);
     try {
-      await postJson("/api/delete-image", { session_id: sessionId, name });
+      const res = await postJson("/api/delete-image", { session_id: sessionId, name });
+      const saved = Array.isArray(res?.images) && res.images.length ? res.images : next;
+      if (saved.join("|") !== next.join("|")) setImages(saved);
+      // Deleting the FIRST photo changes the thumbnail every card renders.
+      invalidateListings();
     } catch (e) {
-      setForm((f) => ({ ...f, images: prev }));
+      setImages(prev);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, toast]);
+  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
 
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
@@ -411,12 +469,15 @@ export function useListingForm() {
         setForm((f) => ({ ...f, images: saved }));
         setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: saved } } : s));
       }
+      // The first image is the card's thumbnail, so a reorder can change what
+      // every listing card is showing.
+      invalidateListings();
     } catch (e) {
       setForm((f) => ({ ...f, images: previous }));
       setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: previous } } : s));
       toast(`Photo order not saved: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, toast]);
+  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
 
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
@@ -466,19 +527,31 @@ export function useListingForm() {
           toast(`${kept.length} photo${kept.length === 1 ? " kept its" : "s kept their"} `
                 + `background: ${kept[0].bg_error}`, { kind: "warning" });
         }
+        // New photos were saved onto the listing — and if it had none, the
+        // card was rendering the no-photo placeholder.
+        invalidateListings();
       }
     } catch (e) {
       toast(`Couldn't add photos: ${e.message}`, { kind: "error" });
     } finally {
       setAddingPhotos(false);
     }
-  }, [sessionId, form.images, collect, setForm, setSession, toast]);
+  }, [sessionId, form.images, collect, setForm, setSession,
+      invalidateListings, toast]);
 
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
     setAiBusy(["Checking everything the marketplaces require…"]);
     try {
-      const body = { session_id: sessionId, listing: collect(), mode: "live" };
+      // The mode the PUBLISH will actually run in: an edit to a live listing
+      // is a revise, and the server checks a revise against what it resends,
+      // not against the full create contract (see preflight.validate). Asking
+      // for the create checklist here reported a package weight and category
+      // aspects the live listing had already satisfied on eBay.
+      const body = {
+        session_id: sessionId, listing: collect(),
+        mode: isLive ? "revise" : "live",
+      };
       if (chipTargets) body.marketplaces = chipTargets;
       const res = await postJson("/api/publish-preflight", body);
       // Marketplace-specific checklists ride along under by_marketplace —
@@ -503,7 +576,7 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }, [collect, sessionId, toast, chipTargets]);
+  }, [collect, sessionId, toast, chipTargets, isLive]);
 
   // ---------- publish ----------
   const publish = useMemo(() => once("publish", async (mode) => {
@@ -570,7 +643,17 @@ export function useListingForm() {
       // Reflect the outcome on the card immediately. loadListings is the
       // authority and lands a moment later, but a listing that just went
       // live must never still be sitting under Drafts while it does.
-      if (result.published) patchListing(sessionId, { status: "published" });
+      //
+      // The open SESSION carries a status too, and it was the one thing here
+      // that never moved: it stayed "draft" for the rest of the visit, so the
+      // dashboard went on offering "Continue <title>" for a listing that was
+      // already live — the one screen that reads the session rather than the
+      // listings cache. Both are updated, or neither should be.
+      if (result.published) {
+        patchListing(sessionId, { status: "published" });
+        setSession((s) => (s && s.sessionId === sessionId
+          ? { ...s, status: "published" } : s));
+      }
       // The listing went live but our own record of it didn't move. Say it
       // plainly — the danger here is the seller publishing a second time.
       const recordWarning = result.record_warning
@@ -696,12 +779,74 @@ export function useListingForm() {
         ? `Filled ${res.added} item specific${res.added === 1 ? "" : "s"} from your photos.`
         : "Nothing new to add — your item specifics already look complete.",
         { kind: "success" });
+      // Saved server-side, so the record behind every card has changed — and
+      // the drafts strip counts unreviewed specifics off it.
+      invalidateListings();
     } catch (e) {
       toast(`Couldn't auto-fill specifics: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [form.category_id, sessionId, collect, setForm, toast]);
+  }), [form.category_id, sessionId, collect, setForm, invalidateListings, toast]);
+
+  // ---------- fill in everything, one step before publishing ----------
+  // The last thing worth doing to a listing before it goes live: one pass
+  // that settles the eBay category if it is still missing, fills every item
+  // specific the photos can answer, and double-checks the maker.
+  //
+  // This is the same enrichment the dashboard's "Enrich all" runs, moved to
+  // where it can actually land. There it has to reach a listing eBay is
+  // already showing — which means a resolvable category, photos still on the
+  // server (an imported listing's live on eBay), a connected account, and a
+  // ReviseItem that eBay accepts — and any one of those missing comes back
+  // as "skipped" with the blanks still blank. Here the listing has not been
+  // published yet: nothing to revise, the photos are right there, and the
+  // answer is saved locally.
+  //
+  // It fills BLANKS. Anything already written is left exactly as it is, so
+  // this is safe to press on a listing that is nearly finished.
+  const fillInDetails = useMemo(() => once("enrich-listing", async () => {
+    const before = collect();
+    setAiBusy([
+      "Reading your photos for everything eBay asks for…",
+      "Filling in the details buyers filter by…",
+      "Double-checking the maker…",
+    ]);
+    try {
+      const res = await postJson(`/api/enrich/${sessionId}`, {
+        session_id: sessionId, listing: before, mode: "draft",
+      });
+      // The server merged onto the copy we just sent, so its answer is this
+      // form plus the fills — adopting it whole cannot lose an edit.
+      if (res.listing) {
+        setSession((s) => (s ? { ...s, listing: res.listing } : s));
+        setForm(fromListing(res.listing));
+      }
+      const gotCategory = !before.category_id.trim()
+        && !!(res.listing?.category_id || "");
+      const parts = [];
+      if (gotCategory) parts.push("picked the eBay category");
+      if (res.added) {
+        parts.push(`filled ${res.added} detail${res.added === 1 ? "" : "s"}`);
+      }
+      toast(parts.length
+        ? `${parts.join(" and ")} from your photos.`
+            .replace(/^./, (c) => c.toUpperCase())
+        // A pass that ran and found nothing is a real answer, not a failure —
+        // and it is the seller's cue that the rest is theirs to write.
+        : "Nothing more the photos could answer — anything still blank needs you.",
+        { kind: res.added || gotCategory ? "success" : "info" });
+      invalidateListings();
+      return true;
+    } catch (e) {
+      // Warning, not error: the listing is untouched and still publishable
+      // by hand. Nothing was lost and nothing is broken.
+      toast(`Couldn't fill in the details: ${e.message}`, { kind: "warning" });
+      return false;
+    } finally {
+      setAiBusy(null);
+    }
+  }), [collect, sessionId, setSession, setForm, invalidateListings, toast]);
 
   // Auto-populate item specifics right after a fresh AI identify (session has a
   // confidence score), so listings come SEO-ready with no manual step. Runs
@@ -731,12 +876,19 @@ export function useListingForm() {
   // categoryMeta. Everything downstream — the card chips, the publish bar,
   // the jump buttons — reads this and nothing else, so a card can only be
   // flagged for a reason that genuinely blocks a publish.
+  // Checked against the contract this listing will actually publish under:
+  // "revise" for one that is already live on eBay (the Update button), "live"
+  // for a draft or a relist. Editing a live listing was being held to the
+  // create contract, so a seller could be locked out of fixing a typo by a
+  // package weight eBay never asked them for.
   const blockers = useMemo(
     () => ebayBlockers(collect(), {
       targets: chipTargets,
       aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
+      conditions: categoryMeta.conditions.length ? categoryMeta.conditions : null,
+      mode: isLive ? "revise" : "live",
     }),
-    [collect, categoryMeta.aspects, chipTargets]);
+    [collect, categoryMeta.aspects, categoryMeta.conditions, chipTargets, isLive]);
 
   // ---------- completion per workflow card ----------
   // Three states, and the distinction between the last two is the whole
@@ -781,7 +933,7 @@ export function useListingForm() {
     publish, publishResult, setPublishResult, runPreflight,
     fixTarget, setFixTarget,
     refine,
-    autofillSpecifics,
+    autofillSpecifics, fillInDetails,
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData, setPriceData,
     categoryMeta, loadCategoryMeta,

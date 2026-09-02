@@ -2,17 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
-  PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck,
+  PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck, Handshake,
   Trash2, Clock, LogOut,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
-import { CONDITIONS, conditionLabel } from "@/lib/utils";
+import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { useApp } from "@/store";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { SiteLink } from "@/components/ui/SiteLink";
-import { Field, Input, Select } from "@/components/ui/fields";
+import { Field, Input, Select, Toggle } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { AccountIllustration } from "@/components/ui/illustrations";
@@ -401,6 +401,41 @@ export function SettingsView() {
           )}
         </div>
 
+        {/* ── Allow offers (Best Offer) ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={Handshake}
+            title="Offers"
+            /* "No minimum" is the whole setting, so it is stated where the
+               seller decides — not left for them to discover from the first
+               $5 offer on a $200 item. eBay's auto-decline and auto-accept
+               thresholds are what a minimum would be, and this app does not
+               pick either: every offer comes to the seller to answer. The
+               last sentence is not padding either — eBay has no Best Offer
+               on auction-format listings, so an auction publishes without
+               it, and saying so here is what keeps that from reading as a
+               bug. */
+            hint="Let buyers send you an offer on every new listing you publish. There’s no minimum: eBay passes every offer to you to accept, counter, or decline — nothing is auto-declined and nothing is auto-accepted on your behalf. Listings that are already live are left as they are, and auctions don’t take offers."
+          />
+          {prefsError ? (
+            <PanelUnavailable
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
+              onRetry={loadPrefs}
+            />
+          ) : prefs === null ? (
+            <div className="ai-shimmer h-10 rounded-tile" aria-hidden />
+          ) : (
+            <div className="max-w-lg">
+              <Toggle
+                checked={Boolean(prefs.allow_offers)}
+                onChange={(on) => setPref("allow_offers", on ? 1 : 0)}
+                label="Allow offers on new listings"
+                help="Applies when a listing is published. Turning it off later leaves listings already on eBay accepting offers — end or edit those on eBay if you want them changed."
+              />
+            </div>
+          )}
+        </div>
+
         {/* ── Auto-promote on publish ── */}
         <div className="mt-7 pt-7 border-t border-line">
           <SectionHeader
@@ -647,8 +682,8 @@ export function SettingsView() {
 
 // Cross-posting marketplaces — every registered marketplace except eBay
 // (which keeps its own card above). One section per marketplace: connected →
-// account + Disconnect; the marketplace hasn't approved us for this seller's
-// shop yet (Etsy's seller-app wall) → a "Pending approval" pill and the wait
+// account + Disconnect; the marketplace hasn't cleared this seller's shop yet
+// (Etsy's app-tier wall) → a "Pending approval" pill and the wait
 // explained, with the Connect button held back rather than walking them into
 // the marketplace's own error page; configured but not connected → Connect
 // button; coming soon (credentials pending on the marketplace's side) → a
@@ -713,7 +748,7 @@ function MarketplaceConnections() {
                 ) : m.access_pending ? (
                   <p className="text-sm text-ink-secondary">
                     {m.access_pending_note
-                      || `${m.label} hasn’t approved this app for other shops yet — cross-posting turns on as soon as they do.`}
+                      || `${m.label} hasn’t opened this app up to your shop yet — cross-posting turns on as soon as they do.`}
                   </p>
                 ) : m.oauth_ready ? (
                   <p className="text-sm text-ink-secondary">

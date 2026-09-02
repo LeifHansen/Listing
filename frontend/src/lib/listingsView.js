@@ -99,3 +99,41 @@ export function storeTotal(kind, value, sub) {
   }
   return { value, sub };
 }
+
+
+/* A listing still in the seller's hands: an AI draft, or a dry-run one made
+   without eBay connected. The cards that offer draft-only controls (the
+   category quick-pick, the publish button) all ask this, so "draft" means the
+   same thing on the Sell screen, the dashboard and the listings manager. */
+export const isDraft = (item) => item?.status === "draft"
+  || item?.status === "dry_run";
+
+
+/* The statuses that have left the pipeline. A sale is finished business: the
+   listings manager files it under Inactive and subtracts it from the
+   everything-tab, because a sold item among the live ones is the one thing in
+   that grid the seller cannot act on.
+
+   It lives here rather than inline in the tab table because the dashboard's
+   "Recent listings" strip has to ask the same question, and the two used to
+   disagree — an item that sold left the Sell screen and stayed on the
+   dashboard, still offering "Edit live" on a listing that was already gone.
+   One list, both readers. */
+export const ARCHIVED_STATUSES = ["sold"];
+
+export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
+
+
+/* The newest listings the seller can still do something about, most recently
+   touched first — what the dashboard shows under "Recent listings".
+
+   The archived ones are dropped BEFORE the slice, not after. Filtering the top
+   four would hand back two cards to a seller whose last two events were sales,
+   and nothing at all to one who just cleared out a batch, while older live
+   listings sat there waiting to be shown. */
+export function recentListings(items, limit = 4) {
+  return (items || [])
+    .filter((i) => !isArchived(i))
+    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
+    .slice(0, limit);
+}

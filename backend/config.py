@@ -9,19 +9,52 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+# No dependencies and no import-time work of its own, so importing it here
+# cannot cycle back through this module. See redact.py's docstring.
+from .redact import RedactingFormatter
+
 load_dotenv()
 
 # --- Logging ---------------------------------------------------------------
 # One app-wide logger ("thryft") with a consistent format, independent of
 # uvicorn's config so our lines are easy to grep in the Fly logs. Level via
 # LOG_LEVEL (default INFO).
+#
+# The formatter redacts. It sits on the HANDLER, so it also covers lines from
+# the sub-loggers (thryft.promotions, thryft.metrics) that propagate up here,
+# and it scrubs the interpolated result — which is the only thing that works,
+# because in `log.warning("...: %s", exc)` the secret is in the args, not the
+# format string. See redact.py for why this is a formatter and not a filter.
 log = logging.getLogger("thryft")
 if not log.handlers:
     _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s thryft: %(message)s"))
+    _handler.setFormatter(
+        RedactingFormatter("%(asctime)s %(levelname)s thryft: %(message)s"))
     log.addHandler(_handler)
     log.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     log.propagate = False
+
+# --- Error capture ---------------------------------------------------------
+# Whether failures are recorded to the error_events table for the Errors tab
+# and the daily triage job. Off turns the capture handler into a no-op and
+# leaves stdout logging exactly as it was; the app is otherwise unaffected.
+ERROR_CAPTURE_ENABLED = os.getenv(
+    "ERROR_CAPTURE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+# How long a recorded error is kept. Rows are aggregated per fingerprint, so
+# this bounds the number of DISTINCT failures retained, not the traffic —
+# pruning runs from the reclaim daemon that already sweeps the volume.
+ERROR_TTL_DAYS = int(os.getenv("ERROR_TTL_DAYS", "30") or 30)
+# Browser error reports accepted per client per rate-limit window. Generous
+# enough for a genuinely broken page, low enough that the unauthenticated
+# ingest route cannot be used to fill the table.
+CLIENT_ERROR_MAX_PER_WINDOW = int(
+    os.getenv("CLIENT_ERROR_MAX_PER_WINDOW", "20") or 20)
+# The daily triage job's own door onto the error report. Deliberately NOT
+# ADMIN_TOKEN: that one also opens /api/admin/diagnostics, whose payload names
+# the Neon host, the database role and the R2 account in raw exception text.
+# A robot that only needs to read which bugs are open should not hold a
+# credential to that. Unset means CLOSED, like ADMIN_TOKEN.
+ERROR_FEED_TOKEN = os.getenv("ERROR_FEED_TOKEN", "").strip()
 
 # --- Paths -----------------------------------------------------------------
 # DATA_DIR can be pointed at a mounted volume (e.g. on Fly.io) so uploaded and
@@ -195,6 +228,43 @@ def r2_public_urls() -> bool:
 # capacitor://localhost; Android uses https://localhost (override there).
 # Used for CORS and to send OAuth flows back into the app when they finish.
 NATIVE_APP_ORIGIN = os.getenv("NATIVE_APP_ORIGIN", "capacitor://localhost").strip().rstrip("/")
+
+
+# --- The hostnames this app answers on -------------------------------------
+# The app is reachable on more than one origin (app.thryftshop.com and its
+# listing-*.fly.dev host). That is invisible to almost everything -- URLs are
+# built from the incoming request -- with one exception: an OAuth flow.
+#
+# A marketplace sends the seller back to the ONE callback URL registered
+# against the credential (eBay resolves a RuName to a single accepted URL;
+# Etsy and Depop match redirect_uri exactly). The CSRF nonce cookie set when
+# the flow starts is host-only, so a connect begun on one origin and returned
+# to another arrives with no cookie and is rejected as "expired" -- on a
+# hostname where the seller's session cookie does not exist either, so they
+# also look logged out.
+#
+# OAUTH_ORIGIN names the origin those callback URLs point at. When a connect
+# starts anywhere else, it is bounced there first (carrying a 60-second ticket,
+# since the session cookie cannot cross) and the seller is returned to the
+# origin they started on when the flow ends. Leave it unset and none of that
+# happens -- the single-origin behaviour every self-hoster and local dev has.
+OAUTH_ORIGIN = os.getenv("OAUTH_ORIGIN", "").strip().rstrip("/")
+
+# Every origin this app is served on. The ONLY values a connect flow will send
+# a seller back to, which is what keeps the return trip from becoming an open
+# redirect: the Host header is client-controlled (Fly forwards what it is
+# given), so neither the origin a connect arrives on nor the one asked for in
+# the bounce is trusted unless it is named here.
+APP_ORIGINS = tuple(
+    o.strip().rstrip("/")
+    for o in os.getenv("APP_ORIGINS", "").split(",")
+    if o.strip()
+)
+
+
+def oauth_return_ok(origin: str) -> bool:
+    """Is `origin` one this app is served on, and safe to return a flow to?"""
+    return bool(origin) and origin in APP_ORIGINS
 
 # --- Anthropic / Claude ----------------------------------------------------
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -559,21 +629,88 @@ def etsy_oauth_ready() -> bool:
 
 
 # Etsy app TYPE, which is a separate gate from the credentials above and the
-# one that actually stops sellers. Etsy registers apps as *Seller apps* by
-# default, and a Seller app can only ever be authorized by the single Etsy
-# account that owns the keystring; every other seller is turned away by Etsy
-# itself, on Etsy's page, after leaving this site — "Only the app owner may
-# authorize a seller app". Nothing redirects back, so the app cannot catch it
-# after the fact; the only kind fix is not sending them there.
+# one that actually stops sellers. Etsy tiers API access in THREE steps, and
+# the tier — not the credentials — decides who may authorize this app:
 #
-# Commercial Access (Etsy reviews the app) is what lifts the wall. Until it is
-# granted, naming the owner's login here lets them keep connecting while
-# everyone else gets a pending-review card instead of that dead end.
+#   seller      What Etsy registers by default. Authorizable by the single
+#               Etsy account that owns the keystring and nobody else; every
+#               other seller is turned away by Etsy itself, on Etsy's page,
+#               after leaving this site — "Only the app owner may authorize a
+#               seller app". Nothing redirects back, so the app cannot catch
+#               it after the fact; the only kind fix is not sending them there.
+#   personal    Reviewed and approved by Etsy for a handful of shops (Etsy
+#               documents the ceiling as 4). The wall still stands, but the
+#               named sellers can now genuinely authorize, so ETSY_OWNER_EMAILS
+#               stops being a list of one and becomes a real beta roster.
+#   commercial  Unlimited sellers. Granted on an APPROVED personal app, and
+#               the end of this gate: nothing left to hold anyone back for.
+#
+# Unset reads as `seller` — that is what Etsy hands out by default, and it is
+# the answer that keeps the gate up. ETSY_COMMERCIAL_ACCESS=true is the older
+# way to say `commercial` and still means exactly that.
+ETSY_ACCESS_TIERS = ("seller", "personal", "commercial")
+# Shops Etsy lets authorize the app, by tier; 0 means no ceiling. Etsy's
+# numbers, not ours — ETSY_APP_SEATS overrides them the day Etsy moves them,
+# without waiting for a deploy of this file.
+_ETSY_TIER_SEATS = {"seller": 1, "personal": 4, "commercial": 0}
+
 ETSY_COMMERCIAL_ACCESS = os.getenv(
     "ETSY_COMMERCIAL_ACCESS", "").strip().lower() in ("1", "true", "yes", "on")
+# Kept as typed, and lowered only where it is compared: the warning below has
+# to echo the value the operator will be searching their secrets dashboard
+# for, not a tidied copy of it.
+_ETSY_ACCESS_TIER = os.getenv("ETSY_ACCESS_TIER", "").strip()
+_ETSY_APP_SEATS = os.getenv("ETSY_APP_SEATS", "").strip()
 ETSY_OWNER_EMAILS = tuple(
     e.strip().lower()
     for e in os.getenv("ETSY_OWNER_EMAILS", "").split(",") if e.strip())
+
+
+def etsy_access_tier() -> str:
+    """Which of Etsy's three access tiers this deployment is on.
+
+    Fails closed twice over: unset and unparseable both read as `seller`, the
+    tier that holds back the most, so a typo cannot quietly hand Connect Etsy
+    to sellers Etsy is going to refuse. The two are indistinguishable from
+    out here, which is why config_warnings() names the typo.
+    """
+    if ETSY_COMMERCIAL_ACCESS:
+        return "commercial"
+    if _ETSY_ACCESS_TIER.lower() in ETSY_ACCESS_TIERS:
+        return _ETSY_ACCESS_TIER.lower()
+    return "seller"
+
+
+def _etsy_seats_override() -> Optional[int]:
+    """ETSY_APP_SEATS as a number, or None when it is unset or unusable.
+
+    try/except rather than a string predicate: `.isdigit()` is true for
+    Unicode digits int() then refuses (a superscript "\u00b2" pasted out of a
+    rendered doc), and this is read from config_warnings(), which runs at
+    module import — so a value that raises here does not cost the seat
+    ceiling, it stops the app from booting. env_float above carries the same
+    warning about the same trap.
+
+    A negative count is unusable rather than clamped: 0 already means "no
+    ceiling" here, so clamping -1 to 0 would turn a typo into the one answer
+    that gates nobody.
+    """
+    try:
+        seats = int(_ETSY_APP_SEATS)
+    except ValueError:
+        return None
+    return seats if seats >= 0 else None
+
+
+def etsy_seat_ceiling() -> int:
+    """How many shops may authorize this app at the current tier; 0 = no cap.
+
+    An unreadable ETSY_APP_SEATS falls back to the tier's own number rather
+    than to "no cap": the override exists to track Etsy's ceiling, and a typo
+    in it must not read as permission to add sellers without one.
+    """
+    override = _etsy_seats_override()
+    return override if override is not None else _ETSY_TIER_SEATS[etsy_access_tier()]
 
 
 def etsy_gate_active() -> bool:
@@ -588,7 +725,7 @@ def etsy_gate_active() -> bool:
     Its own predicate so callers can skip the user lookup behind
     etsy_access_pending(), which is a database round-trip per roster build.
     """
-    return bool(ETSY_OWNER_EMAILS) and not ETSY_COMMERCIAL_ACCESS
+    return bool(ETSY_OWNER_EMAILS) and etsy_access_tier() != "commercial"
 
 
 def etsy_access_pending(email: Optional[str]) -> bool:
@@ -669,6 +806,43 @@ def config_warnings() -> list[str]:
             f"ETSY_COMMERCIAL_ACCESS={stray!r} is not one of 1/true/yes/on, so "
             f"Etsy is still gated to ETSY_OWNER_EMAILS — which reads the same "
             f"as never setting it.")
+    # The tier fails closed the same way, and its typo is the quieter one: a
+    # misspelled tier reads as `seller`, so the operator believes their
+    # approved app is seating a beta while every named seller but one is
+    # still being held back by this app.
+    if _ETSY_ACCESS_TIER and _ETSY_ACCESS_TIER.lower() not in ETSY_ACCESS_TIERS:
+        warnings.append(
+            f"ETSY_ACCESS_TIER={_ETSY_ACCESS_TIER!r} is not one of "
+            f"{'/'.join(ETSY_ACCESS_TIERS)}, so Etsy is treated as an "
+            f"unapproved seller app — which reads the same as never setting "
+            f"it.")
+    if _ETSY_APP_SEATS and _etsy_seats_override() is None:
+        warnings.append(
+            f"ETSY_APP_SEATS={_ETSY_APP_SEATS!r} is not a seat count (a whole "
+            f"number, 0 for no ceiling), so the ceiling for the "
+            f"{etsy_access_tier()} tier is used instead.")
+    # And the one that puts sellers back in front of Etsy's error page. Naming
+    # more sellers than Etsy seats does not seat them: it waves the overflow
+    # past THIS app's gate, and Etsy refuses them on its own page, off-site,
+    # with nothing redirected back — the exact dead end the gate exists to
+    # prevent. Nobody finds that out from the roster, because from in here a
+    # named seller and a seated one look identical.
+    # Keyed on the gate being up, not just on the list being long: at
+    # commercial tier the roster gates nobody, so a stale list left behind
+    # there is untidy rather than harmful — and warning about it would train
+    # the operator to ignore the line that means something.
+    seats = etsy_seat_ceiling()
+    if etsy_gate_active() and seats and len(ETSY_OWNER_EMAILS) > seats:
+        tier, over = etsy_access_tier(), len(ETSY_OWNER_EMAILS) - seats
+        detail = ("a seller app is authorizable by the keystring's owner "
+                  "alone" if tier == "seller" else
+                  f"Etsy's {tier} tier seats {seats}")
+        warnings.append(
+            f"ETSY_OWNER_EMAILS names {len(ETSY_OWNER_EMAILS)} sellers and "
+            f"{detail}, so {over} of them skip this app's pending card and "
+            f"are refused on Etsy's own page instead — the dead end the gate "
+            f"exists to prevent. Trim the list, or set ETSY_APP_SEATS if Etsy "
+            f"has moved the ceiling.")
     # A Stripe key that is present but is not a SECRET key. Worth its own line
     # now that the secret is read from either of two names: a publishable
     # pk_... sitting in the slot satisfies every "is it configured?" check in

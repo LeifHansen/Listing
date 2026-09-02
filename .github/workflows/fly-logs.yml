@@ -1,11 +1,18 @@
 name: Fetch Fly logs
 
 # Ops helper: run it from the Actions tab to dump production logs plus
-# live-site ground truth into the run output. This is the only way to read
-# production right now — the app logs to a bare stdout handler (see
-# backend/config.py) with no Sentry/OTel/Datadog anywhere, so `flyctl logs` IS
-# the telemetry, and the "Errors and warnings only" step below is the pass
-# that makes it readable.
+# live-site ground truth into the run output.
+#
+# This used to be the ONLY way to read production. It is not any more: failures
+# are recorded to `error_events` and served at Admin → Errors and at
+# /api/ops/error-feed, which outlive Fly's retained window and can be queried
+# (see README, "Reading production errors").
+#
+# What this still has that the table does not is everything the app never got
+# to record — a process killed before the handler ran, an OOM, uvicorn's own
+# tracebacks, Fly machine events — plus the raw lines either side of a
+# failure. So it stays, as the margin note rather than the record, and the
+# "Errors and warnings only" step below is the pass that makes it readable.
 #
 # Manual-dispatch only. It shares the deploy concurrency group so a log run
 # can never interleave with a deploy of the same app.
@@ -79,11 +86,18 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       # Compact tail so a reader only needs the LAST few lines of this job.
-      # Config and disk headroom come from /api/health and /api/ready rather
-      # than a hardcoded secrets grep: health already reports objstore state,
-      # disk_free_mb, the AI engines, tokens_missing, stripe_live_mode and db,
-      # so it cannot drift out of date the way a fixed key list did (that grep
-      # never learned about STRIPE_* or DATABASE_URL).
+      # Config and disk headroom come from the endpoints rather than a
+      # hardcoded secrets grep, so they cannot drift out of date the way a
+      # fixed key list did (that grep never learned about STRIPE_* or
+      # DATABASE_URL).
+      #
+      # WHICH endpoint has what has changed: /api/health is now liveness plus
+      # the UI's capability flags only. Disk, object storage and the database
+      # are on /api/ready (public, dumped below); the bucket name, the missing
+      # variables' names, tokens_missing, stripe_live_mode and the raw errors
+      # are on /api/admin/diagnostics, behind ADMIN_TOKEN. This job only
+      # prints, so it never broke -- the health-watch alarm read the same
+      # stale assumption as a fact and failed on every schedule for four days.
       - name: SUMMARY
         run: |
           echo "===== SUMMARY ====="
