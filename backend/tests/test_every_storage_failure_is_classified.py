@@ -134,6 +134,21 @@ WHY_A_BLANK_IS_SAFE = {
     "save_ebay_account_best_effort":
         "returns False, which the caller checks; it never reports a save",
 
+    # --- the error sink, whose whole job is not to make things worse ------
+    # These are the ONE write family below db.py's admin_ line that swallows,
+    # and it is deliberate. Recording a failure must never manufacture a
+    # second one: the seller is already living through the first, and raising
+    # here would turn a handled error into an unhandled one to complain about
+    # the bookkeeping. Nothing reads their return as a fact about a seller —
+    # the reader, error_events_list, still raises like every other report.
+    "record_error_event":
+        "returns False; a failure that cannot be recorded is still a failure, "
+        "not a new one",
+    "mark_error_fixed":
+        "returns False; the row simply stays unresolved and surfaces again",
+    "prune_error_events":
+        "returns 0; housekeeping that skipped a pass runs again tomorrow",
+
     # --- writes that hand the caller a verdict to check -------------------
     "upsert_listing":
         "returns False for a write that did not land, and the publish path checks it",

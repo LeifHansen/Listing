@@ -9,6 +9,7 @@ import { AdminListings } from "@/views/admin/AdminListings";
 import { AdminCompliance } from "@/views/admin/AdminCompliance";
 import { AdminSystem } from "@/views/admin/AdminSystem";
 import { AdminAudit } from "@/views/admin/AdminAudit";
+import { AdminErrors } from "@/views/admin/AdminErrors";
 
 // The operator console. Tabs, not routes — the app has no router, and the
 // pill strip is the same pattern the listings manager uses. Every tab
@@ -21,6 +22,7 @@ const TABS = [
   { id: "listings", label: "Listings", panel: AdminListings },
   { id: "compliance", label: "Compliance", panel: AdminCompliance },
   { id: "system", label: "System", panel: AdminSystem },
+  { id: "errors", label: "Errors", panel: AdminErrors },
   { id: "audit", label: "Audit", panel: AdminAudit },
 ];
 
