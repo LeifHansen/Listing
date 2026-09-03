@@ -14,7 +14,9 @@
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi,
+} from "vitest";
 
 import { MotionGlobalConfig } from "framer-motion";
 
@@ -23,12 +25,6 @@ import { ToastProvider } from "@/components/ui/Toaster";
 import { UploadPhase } from "./UploadPhase";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-// The tiles leave through AnimatePresence, and in jsdom an exit animation
-// never gets the frames it needs to finish — so a deleted tile stays in the
-// DOM and the grid reads back unchanged however long the test waits. Skipping
-// animations makes a removal land in the DOM the way it does for a seller
-// once the 180ms is up.
-MotionGlobalConfig.skipAnimations = true;
 
 let root;
 let host;
@@ -86,6 +82,20 @@ function shown() {
 }
 
 const text = () => host.textContent || "";
+
+// The tiles leave through AnimatePresence, and in jsdom an exit animation
+// never gets the frames it needs to finish — so a deleted tile stays in the
+// DOM and the grid reads back unchanged however long the test waits. Skipping
+// animations makes a removal land in the DOM the way it does for a seller
+// once the 180ms is up. Set and restored around this file only: it is a
+// library-wide global, and a test file that leaves one set has changed how
+// every other file's components behave.
+let motionWasSkipping;
+beforeAll(() => {
+  motionWasSkipping = MotionGlobalConfig.skipAnimations;
+  MotionGlobalConfig.skipAnimations = true;
+});
+afterAll(() => { MotionGlobalConfig.skipAnimations = motionWasSkipping; });
 
 beforeEach(() => {
   localStorage.clear();

@@ -142,10 +142,17 @@ async function click(el) {
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 }
 
-/** Open a collapsed suggestion group so its rows are on screen. */
+/** Open a suggestion group so its rows are on screen — and leave an already
+ *  open one open. This used to click the toggle unconditionally, which made
+ *  the second call CLOSE the group; the assertion after it passed only
+ *  because the rows were still mid-exit-animation in the DOM, so the same
+ *  test passed here and failed on CI's timing. */
 async function expand(label) {
-  await click(buttons().find((b) => (b.textContent || "").includes(label)
-                                    && b.getAttribute("aria-expanded") !== null));
+  const toggle = buttons().find((b) => (b.textContent || "").includes(label)
+                                       && b.getAttribute("aria-expanded") !== null);
+  expect(toggle).toBeTruthy();
+  if (toggle.getAttribute("aria-expanded") === "true") return;
+  await click(toggle);
 }
 
 describe("filling in a whole group at once", () => {
