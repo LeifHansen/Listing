@@ -1,19 +1,26 @@
 """A "Fill in details" suggestion is only made where the fill can do something.
 
-The dashboard read any missing_info note as "some fields buyers filter by are
-still blank" and offered "Enrich all" for it. But the app appends its own
-notes to that list beside the AI's -- a price it raised, a title it suggests,
-what to check before listing, where it looked, a category it could not match
--- and none of those is a blank an item specific answers. A seller pressed the
-button on such a group on 2026-09-02, paid for a pass that came back "nothing
-the photos could answer", and could not tell whether anything had worked,
-because the suggestion it was meant to retire never moved.
+"Fill in details" fills ONE thing: eBay's item specifics for the listing's
+category, read off its own photos. The dashboard decided whether to offer it
+by looking at missing_info instead -- any note the AI or the app had left --
+and that could not work, because a note is evidence of the OPPOSITE. Every
+draft runs the same fill at draft time and then drops the notes it answered,
+so a note still sitting on a listing is one the fill has already failed to
+answer once.
 
-Two halves. The recommender offers the fill only for notes a specific could
-answer, and offers a LOOK ("Check details", which opens the listing and has
-no bulk verb) for the rest. And a fresh draft stops carrying notes that its
-own draft-time fill already answered, so the suggestion is not made for a
-listing whose Size is filled beside a note saying "size".
+The loop that made: the listing is in the group because of the note, the
+seller presses "Enrich all", the pass re-runs and adds nothing, the note is
+kept (rightly -- a blank the AI cannot settle is real), so the listing is
+still in the group. The count never moved, the seller was charged per
+listing, and on 2026-09-03 the report was that the feature "doesn't work at
+all" with 35 listings stuck in it. Narrowing WHICH notes counted (2026-09-02)
+made the group smaller without breaking the loop.
+
+Membership is now the count of filled item specifics -- what the button
+actually fills. A listing whose specifics are blank earns the fill; one whose
+specifics are filled earns a nudge to LOOK ("Check details"), whatever notes
+it still carries. The fill still drops the notes it answers, so a draft never
+asks for what its own draft-time fill settled.
 """
 from __future__ import annotations
 
@@ -41,6 +48,20 @@ ADVICE = [
     "item condition — eBay doesn't offer that condition in this category; pick one",
 ]
 
+# What the AI leaves on a listing it HAS filled in: the things only the person
+# holding the item can answer. These are the notes that kept 35 listings in
+# the group forever.
+FOR_A_PERSON = [
+    "Measurements — I can't measure from photos",
+    "Authentication for this designer piece",
+    "Any chips or cracks not visible in the photos",
+]
+
+
+def _filled(n: int = 4) -> list[dict]:
+    """A listing's worth of answered item specifics."""
+    return [{"name": f"Aspect {i}", "value": f"value {i}"} for i in range(n)]
+
 
 def _recs(listing: dict, status: str = "published") -> dict:
     """type -> rec, for one published listing with no eBay metrics."""
@@ -52,35 +73,57 @@ def _recs(listing: dict, status: str = "published") -> dict:
 
 # ------------------------------------------------------- the recommender
 
-def test_a_note_a_specific_could_answer_earns_the_fill():
-    recs = _recs({"title": "Camera", "missing_info": ["exact model number"]})
-    assert "specifics" in recs
+def test_a_listing_with_blank_specifics_earns_the_fill():
+    recs = _recs({"title": "Camera", "item_specifics": []})
     assert recs["specifics"]["label"] == "Fill in details"
+    assert "None of eBay's item specifics" in recs["specifics"]["reason"]
     assert "verify" not in recs
 
 
-@pytest.mark.parametrize("note", ADVICE)
-def test_advice_to_a_person_earns_a_look_not_a_button(note):
-    recs = _recs({"title": "Print", "missing_info": [note]})
+def test_a_thin_set_of_specifics_still_earns_the_fill():
+    recs = _recs({"title": "Camera", "item_specifics": _filled(1)})
+    assert "specifics" in recs
+    assert "Only 1 of eBay's item specifics is filled" in recs["specifics"]["reason"]
+
+
+@pytest.mark.parametrize("note", ADVICE + FOR_A_PERSON)
+def test_a_filled_listing_earns_a_look_not_a_button(note):
+    """The loop, closed. Whatever the note says, a listing whose specifics
+    are filled has nothing for the fill to add -- so it is never offered a
+    button that would charge for an empty pass and leave the note in place."""
+    recs = _recs({"title": "Print", "item_specifics": _filled(),
+                  "missing_info": [note]})
     assert "specifics" not in recs, note
     assert recs["verify"]["label"] == "Check details"
     assert recs["verify"]["action"] == "open"
     assert "1 thing the AI left" in recs["verify"]["reason"]
 
 
-def test_a_mix_still_offers_the_fill_and_counts_the_rest_as_answered_by_it():
-    recs = _recs({"title": "Print", "missing_info": ["size", *ADVICE[:2]]})
-    assert "specifics" in recs
-    assert "verify" not in recs   # one nudge per cause, never both
-
-
-def test_no_notes_is_no_nudge():
-    recs = _recs({"title": "Print", "missing_info": []})
+def test_a_filled_listing_with_no_notes_is_no_nudge():
+    recs = _recs({"title": "Print", "item_specifics": _filled(),
+                  "missing_info": []})
     assert "specifics" not in recs and "verify" not in recs
 
 
+def test_a_blank_listing_earns_the_fill_even_with_nothing_to_check():
+    """The fill is offered for the blank, not for the note -- so a listing
+    nobody left a note on still gets it. This is the population the button
+    was always meant for: listings synced from eBay that never went through
+    an AI draft."""
+    recs = _recs({"title": "Print", "item_specifics": [], "missing_info": []})
+    assert "specifics" in recs
+
+
+def test_a_specific_with_no_value_does_not_count_as_filled():
+    recs = _recs({"title": "Print",
+                  "item_specifics": [{"name": "Brand", "value": "  "},
+                                     {"name": "Type", "value": ""}]})
+    assert "specifics" in recs
+
+
 def test_the_wording_counts():
-    recs = _recs({"title": "Print", "missing_info": ADVICE[:3]})
+    recs = _recs({"title": "Print", "item_specifics": _filled(),
+                  "missing_info": ADVICE[:3]})
     assert "3 things the AI left" in recs["verify"]["reason"]
 
 

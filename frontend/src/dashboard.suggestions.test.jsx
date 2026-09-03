@@ -30,6 +30,31 @@ const RECS = [
     action: "open", priority: 45, rate: null },
 ];
 
+// The dismissal tests need a group that still LISTS its rows. "Fill in
+// details" no longer does — it is one button over the whole group, because
+// filling a blank item specific is the same wanted edit on every listing and
+// there was nothing for the seller to choose between. "Check details" is the
+// opposite: every row is a different thing only a person can settle.
+const VERIFY_RECS = [
+  { listing_id: "a", listing_title: "Nike hoodie", type: "verify",
+    label: "Check details", reason: "2 things the AI left for you to check.",
+    action: "open", priority: 40, rate: null },
+  { listing_id: "b", listing_title: "Canon AE-1", type: "verify",
+    label: "Check details", reason: "1 thing the AI left for you to check.",
+    action: "open", priority: 40, rate: null },
+];
+
+// A group with rows AND a bulk verb, for the one test about a dismissal
+// narrowing what the button reaches.
+const PRICE_RECS = [
+  { listing_id: "a", listing_title: "Nike hoodie", type: "lower_price",
+    label: "Lower the price", reason: "Live 30 days — a price drop can restart interest.",
+    action: "open", priority: 68, rate: null },
+  { listing_id: "b", listing_title: "Canon AE-1", type: "lower_price",
+    label: "Lower the price", reason: "Live 30 days — a price drop can restart interest.",
+    action: "open", priority: 68, rate: null },
+];
+
 const BASE = {
   "/api/auth/me": { user: { id: 7, email: "seller@example.com" } },
   "/api/health": { anthropic_configured: true, ebay_configured: true },
@@ -56,6 +81,10 @@ function server(calls, { jobResult, recs, bulkCaps, running, statuses } = {}) {
   let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
+    if (path === "/api/ebay/lower-prices") {
+      calls.push({ path, body: JSON.parse(opts.body || "{}") });
+      return json({ changed: 1, skipped: 0, failed: 0, deferred: 0 });
+    }
     if (path === "/api/listings/enrich") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
       return json(running
@@ -285,8 +314,8 @@ describe("dismissing a suggestion", () => {
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
   it("takes that row off the list", async () => {
-    const { root, text } = await mount();
-    await expand("Fill in details");
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    await expand("Check details");
     expect(text()).toContain("Nike hoodie");
 
     await click(buttons().find(
@@ -299,27 +328,27 @@ describe("dismissing a suggestion", () => {
 
   it("stays dismissed when the list is rebuilt", async () => {
     // The whole point: /api/insights has no idea and returns both every time.
-    const first = await mount();
-    await expand("Fill in details");
+    const first = await mount([], { recs: VERIFY_RECS });
+    await expand("Check details");
     await click(buttons().find(
       (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
     await act(async () => { first.root.unmount(); });
 
-    const { root, text } = await mount();
-    await expand("Fill in details");
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    await expand("Check details");
     expect(text()).not.toContain("Nike hoodie");
     await act(async () => { root.unmount(); });
   });
 
   it("can be undone — an X is not a one-way door", async () => {
-    const { root, text } = await mount();
-    await expand("Fill in details");
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    await expand("Check details");
     await click(buttons().find(
       (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
     expect(text()).toContain("Restore 1 dismissed");
 
     await click(byText("Restore 1 dismissed"));
-    await expand("Fill in details");
+    await expand("Check details");
     expect(text()).toContain("Nike hoodie");
     await act(async () => { root.unmount(); });
   });
@@ -327,8 +356,8 @@ describe("dismissing a suggestion", () => {
   it("keeps the way back when the last suggestion goes", async () => {
     // Gating the section on the VISIBLE list would take the undo away with
     // the thing it undoes, and the seller could never get the list back.
-    const { root, text } = await mount();
-    await expand("Fill in details");
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    await expand("Check details");
     for (const title of ["Nike hoodie", "Canon AE-1"]) {
       await click(buttons().find(
         (b) => (b.getAttribute("aria-label") || "").includes(title)));
@@ -340,14 +369,35 @@ describe("dismissing a suggestion", () => {
 
   it("leaves the group action pointed at what is still on the list", async () => {
     const calls = [];
-    const { root } = await mount(calls);
-    await expand("Fill in details");
+    const { root } = await mount(calls, { recs: PRICE_RECS });
+    await expand("Lower prices");
     await click(buttons().find(
       (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
 
-    await click(byText("Enrich all"));
-    await click(byText("Fill them in"));
-    expect(calls[0].body).toEqual({ listing_ids: ["b"] });
+    await click(byText("Lower all…"));
+    await click(buttons().find(
+      (b) => (b.textContent || "").startsWith("Lower 1 price")));
+    expect(calls[0].body.listing_ids).toEqual(["b"]);
+    await act(async () => { root.unmount(); });
+  });
+});
+
+
+describe("the fill is one button, not a list to pick from", () => {
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("shows the count and the button, and nothing to expand", async () => {
+    const { root, text } = await mount();
+    expect(text()).toContain("Fill in details");
+    expect(byText("Enrich all")).toBeTruthy();
+    // No toggle promising a list: every listing in this group wants the same
+    // edit, so there is nothing to choose between.
+    expect(buttons().find((b) => (b.textContent || "").includes("Fill in details")
+                                 && b.getAttribute("aria-expanded") !== null))
+      .toBeFalsy();
+    // ...and the names are not on screen.
+    expect(text()).not.toContain("Nike hoodie");
     await act(async () => { root.unmount(); });
   });
 });

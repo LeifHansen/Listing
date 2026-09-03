@@ -144,6 +144,13 @@ const BULK_ACTIONS = {
   specifics: {
     verb: "Enrich all",
     icon: Sparkles,
+    // No row list behind this one. Every other group asks the seller to pick
+    // (which price, which listing to open); this one has nothing to choose
+    // between -- filling a blank item specific is the same wanted edit on
+    // every listing in the group -- so the expanding list of names was a
+    // decision it was pretending the seller had to make. Header, count,
+    // button.
+    soloButton: true,
     run: (ctx) => ctx.enrichAll(ctx.group, ctx.cap),
   },
   lower_price: {
@@ -228,6 +235,29 @@ function BulkAmountPanel({ amount, count, total, busy, onSubmit, onCancel }) {
   );
 }
 
+// The icon, name and count every group header shows — shared so the version
+// inside the expand toggle and the plain one on a button-only group stay the
+// same thing.
+function GroupHead({ group, Icon }) {
+  return (
+    <>
+      <span className={cn(
+        "grid place-items-center size-10 rounded-[13px] shrink-0",
+        REC_TONE[group.type] || "bg-blue-soft text-blue",
+      )}>
+        <Icon size={19} strokeWidth={2} aria-hidden />
+      </span>
+      <span className="font-semibold text-sm text-ink truncate">
+        {REC_GROUP_LABEL[group.type] || group.recs[0].label}
+      </span>
+      <span className="grid place-items-center font-display tabular-nums text-[11px] font-bold rounded-full bg-bg-sunken px-1.5 min-w-5 h-5 text-ink-secondary">
+        {group.recs.length}
+      </span>
+    </>
+  );
+}
+
+
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
@@ -244,38 +274,37 @@ function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
   // would have gone busy because a promote was running elsewhere.
   const actionBusy = action?.shared ? !!promoting : busy;
   const ActionIcon = action?.icon;
+  const solo = !!action?.soloButton;
   // What one tap on this group's button reaches. The badge above it is the
   // whole group; this is the part of it a single run touches.
   const perRun = runSize(group.recs.length, cap);
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          className="flex-1 min-w-0 flex items-center gap-3.5 p-4 text-left cursor-pointer"
-        >
-          <span className={cn(
-            "grid place-items-center size-10 rounded-[13px] shrink-0",
-            REC_TONE[group.type] || "bg-blue-soft text-blue",
-          )}>
-            <Icon size={19} strokeWidth={2} aria-hidden />
-          </span>
-          <span className="font-semibold text-sm text-ink truncate">
-            {REC_GROUP_LABEL[group.type] || group.recs[0].label}
-          </span>
-          <span className="grid place-items-center font-display tabular-nums text-[11px] font-bold rounded-full bg-bg-sunken px-1.5 min-w-5 h-5 text-ink-secondary">
-            {group.recs.length}
-          </span>
-          <motion.span
-            animate={{ rotate: open ? 180 : 0 }}
-            transition={{ duration: 0.18 }}
-            className="ml-auto text-ink-faint shrink-0"
+        {/* A group whose button is the whole point renders its header as
+            plain text: there is no list to open, so a toggle (and a chevron
+            promising one) would be a control that does nothing. */}
+        {solo ? (
+          <div className="flex-1 min-w-0 flex items-center gap-3.5 p-4">
+            <GroupHead group={group} Icon={Icon} />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            className="flex-1 min-w-0 flex items-center gap-3.5 p-4 text-left cursor-pointer"
           >
-            <ChevronDown size={17} aria-hidden />
-          </motion.span>
-        </button>
+            <GroupHead group={group} Icon={Icon} />
+            <motion.span
+              animate={{ rotate: open ? 180 : 0 }}
+              transition={{ duration: 0.18 }}
+              className="ml-auto text-ink-faint shrink-0"
+            >
+              <ChevronDown size={17} aria-hidden />
+            </motion.span>
+          </button>
+        )}
         {/* Sibling of the toggle, never nested inside it (invalid HTML). */}
         {action && (
           <Button variant="soft" size="sm" className="shrink-0"
@@ -319,7 +348,7 @@ function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
         )}
       </AnimatePresence>
       <AnimatePresence initial={false}>
-        {open && (
+        {open && !solo && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
