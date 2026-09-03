@@ -162,8 +162,54 @@ def test_busy_is_retryable_not_a_crash():
 
 def test_the_engine_state_a_probe_reads_is_cheap_and_complete():
     state = images.engine_state()
-    assert set(state) == {"model", "loaded", "busy", "last_inference_seconds"}
+    assert set(state) == {"model", "loaded", "busy", "last_inference_seconds",
+                          "model_load_seconds"}
     assert state["busy"] is False
+
+
+def test_a_slow_model_load_is_not_reported_as_a_slow_inference(monkeypatch,
+                                                                caplog):
+    """The first call pays for importing onnxruntime and building the session
+    around a 176MB file; that is a load, and it happened once per boot. It
+    was timed under the same clock as the inference behind it, so every
+    deploy's warm-up reported itself as a ~107s inference on /api/ready,
+    fired the slow-inference warning into the error feed, and stayed as the
+    "last inference" until a real photo came through -- which on a quiet day
+    is never. Nothing could then say what an inference actually costs."""
+    import sys
+    import time
+    import types
+
+    from PIL import Image
+
+    fake = types.ModuleType("rembg")
+
+    def new_session(model):
+        time.sleep(0.25)          # the load, deliberately over the slow bar
+        return object()
+
+    def remove(img, session=None, only_mask=False):
+        return Image.new("L", img.size, 255)
+
+    fake.new_session = new_session
+    fake.remove = remove
+    monkeypatch.setitem(sys.modules, "rembg", fake)
+    monkeypatch.setattr(images, "_rembg_session", None)
+    monkeypatch.setattr(images, "_model_ready", False)
+    monkeypatch.setattr(images, "_last_infer_seconds", 0.0)
+    monkeypatch.setattr(images, "_model_load_seconds", 0.0)
+    monkeypatch.setattr(images, "INFER_SLOW_SECONDS", 0.1)
+
+    with caplog.at_level("WARNING", logger="thryft"):
+        images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)))
+
+    state = images.engine_state()
+    assert state["loaded"] is True
+    assert state["model_load_seconds"] >= 0.25
+    assert state["last_inference_seconds"] < 0.1, (
+        "the load was counted as the inference")
+    assert not [r for r in caplog.records if "inference took" in r.getMessage()], (
+        "a one-time load was reported as a pathological inference")
 
 
 # --- the housekeeping daemon's decision ------------------------------------
@@ -181,7 +227,7 @@ def test_a_full_or_unreadable_volume_counts_as_low():
     know the free space". Its actual effect was to read 0 as "no reason to
     hurry" and switch aggressive reclaim off at the one moment it exists for.
     """
-    aggressive, delay = main._reclaim_plan(0)
+    aggressive, _trim, delay = main._reclaim_plan(0)
     assert aggressive is True
     assert delay == main._RECLAIM_INTERVAL_LOW
 
@@ -190,7 +236,7 @@ def test_a_low_volume_is_revisited_sooner():
     """The docstring has always promised "sooner when the volume is running
     low"; the loop slept three hours either way, so a volume that filled
     mid-batch stayed broken until the next pass came round on its own."""
-    aggressive, delay = main._reclaim_plan(main._LOW_DISK_BYTES - 1)
+    aggressive, _trim, delay = main._reclaim_plan(main._LOW_DISK_BYTES - 1)
     assert aggressive is True
     assert delay == main._RECLAIM_INTERVAL_LOW
     assert delay < main._RECLAIM_INTERVAL
@@ -200,9 +246,55 @@ def test_a_healthy_volume_keeps_the_slow_pass():
     """The other half of the trade: room to spare must NOT shorten the TTLs.
     Aggressive mode drops originals after 15 minutes, so leaving it on costs
     every subsequent edit a round trip to R2 for bytes that were local."""
-    aggressive, delay = main._reclaim_plan(main._LOW_DISK_BYTES + 1)
+    aggressive, trim, delay = main._reclaim_plan(main._TRIM_DISK_BYTES + 1)
     assert aggressive is False
+    assert trim is False
     assert delay == main._RECLAIM_INTERVAL
+
+
+def test_the_band_where_the_alarm_pages_is_trimmed_not_ignored():
+    """Between the app's own emergency line and the health-watch alarm's
+    there was nothing: the alarm paged every two hours for three days from
+    2026-08-31 (281-393 MB free on the 1 GB volume) while the daemon kept
+    week-long TTLs and a three-hour nap, because 250 MB had not been
+    reached. In that band it now trims, on the short interval, and still
+    stops short of the desperate TTLs that make every fresh edit go to R2."""
+    assert main._TRIM_DISK_BYTES > main._LOW_DISK_BYTES
+    aggressive, trim, delay = main._reclaim_plan(main._LOW_DISK_BYTES + 1)
+    assert aggressive is False
+    assert trim is True
+    assert delay == main._RECLAIM_INTERVAL_LOW
+    # Below the emergency line it is aggressive, never both.
+    aggressive, trim, _delay = main._reclaim_plan(main._LOW_DISK_BYTES - 1)
+    assert (aggressive, trim) == (True, False)
+
+
+def test_trim_reclaims_sooner_than_the_slow_pass_and_later_than_desperate(
+        monkeypatch):
+    """The TTLs each mode hands the pruners, pinned in order: trim must be
+    strictly between the slow pass and the emergency on every axis, or the
+    band it exists for either changes nothing or costs what aggressive costs."""
+    seen: dict[str, list[int]] = {}
+
+    def _spy(name):
+        def _f(ttl, *a, **k):
+            seen.setdefault(name, []).append(int(ttl))
+            return 0
+        return _f
+
+    monkeypatch.setattr(main, "_sweep_orphans", lambda: None)
+    monkeypatch.setattr(main, "_offload_to_r2", _spy("offload"))
+    for fn in ("prune_originals", "prune_history", "prune_exports"):
+        monkeypatch.setattr(main.storage, fn, _spy(fn))
+
+    main.reclaim_space()
+    main.reclaim_space(trim=True)
+    main.reclaim_space(aggressive=True)
+    for name, (normal, trim, aggressive) in seen.items():
+        assert aggressive < trim < normal, (name, normal, trim, aggressive)
+    # Originals are what a resumed batch and a fresh edit still need: trim
+    # keeps them for hours, not the emergency's fifteen minutes.
+    assert seen["prune_originals"][1] >= 3600
 
 
 def test_api_answers_are_never_cached(client):

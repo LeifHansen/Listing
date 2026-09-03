@@ -10,8 +10,7 @@ import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Textarea, Toggle } from "@/components/ui/fields";
 import { Card } from "@/components/ui/Card";
-import { AIStatusCard } from "@/components/ui/AIStatus";
-import { WorkflowSkeleton } from "@/components/ui/Skeleton";
+import { BrandPulse } from "@/components/ui/AIStatus";
 import { PhotoUploadIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -192,16 +191,22 @@ export function UploadPhase() {
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
               : stage.phase === "maker" ? "Double-checking the brand…"
+                : stage.phase === "artwork" ? "Naming the artist and the work…"
                 // The web lookup. It is the slowest stage and the one worth
                 // waiting for, so it says what it is doing rather than
                 // hiding behind "Finishing up".
                 : stage.phase === "research"
                   ? "Looking it up online — what it is and what it's worth…"
                   : "Finishing up…";
+    // The pulsing mark and the stage in words, and nothing else: the grey
+    // skeleton bars that used to sit under a small status card read as a
+    // page that had failed to load, not one that was working.
     return (
       <div className="flex flex-col gap-5">
-        <AIStatusCard messages={[stageLine]} />
-        <WorkflowSkeleton />
+        <BrandPulse
+          message={stageLine}
+          detail="Your photos are safe here — this can take a minute or two."
+        />
       </div>
     );
   }

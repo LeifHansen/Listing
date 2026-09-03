@@ -188,6 +188,15 @@ class CutoutBusy(RuntimeError):
 # evidence anyone ever has.
 INFER_SLOW_SECONDS = float(os.getenv("REMBG_SLOW_SECONDS", "20") or 20)
 _last_infer_seconds: float = 0.0
+# The one-time cost, kept apart from the inference number on purpose:
+# importing onnxruntime and building the session around a 176MB model file.
+# The first call used to time both under one clock, so every boot's warm-up
+# reported itself as a ~107s "inference" on /api/ready, fired the
+# slow-inference warning below into the error feed (six deploys in a day
+# counted six), and then sat there as the last reading until a real photo
+# came through -- which on a quiet day is never. Nothing anywhere could then
+# say what an inference actually costs on the box.
+_model_load_seconds: float = 0.0
 _model_ready = False
 
 
@@ -195,7 +204,8 @@ def engine_state() -> dict:
     """What the readiness probe needs to know about the local model."""
     return {"model": _REMBG_MODEL, "loaded": _model_ready,
             "busy": _INFER_LOCK.locked(),
-            "last_inference_seconds": round(_last_infer_seconds, 2)}
+            "last_inference_seconds": round(_last_infer_seconds, 2),
+            "model_load_seconds": round(_model_load_seconds, 2)}
 # Draw a soft contact shadow under the cut-out subject so the white-background
 # result still reads like a studio product shot. Pure Pillow, no external API.
 # Disable with BG_SHADOW=off.
@@ -210,6 +220,19 @@ _FILL_HOLES = os.getenv("BG_FILL_HOLES", "on").strip().lower() not in (
 # see-through gap. ~26 per channel: comfortably above JPEG noise and backdrop
 # vignetting, well below a printed graphic or a glossy panel.
 _HOLE_BG_TOL = float(os.getenv("BG_HOLE_TOLERANCE", "45") or "45")
+# A sealed hole the size of a picture, full of detail, IS a picture. The
+# colour test above cannot see that: a dark painting in its frame, on a dark
+# table, matches the table -- the model called the picture background, the
+# frame survived on its own, and a seller's abstract painting was drafted as
+# an empty frame (2026-09-02). A see-through gap shows the flat wall behind
+# the item; a picture, a print, a printed panel show edges. So an enclosed
+# hole at least this fraction of the item's footprint is put back whatever
+# its colour when it carries clearly more detail (mean luma gradient) than
+# the backdrop around the item: the larger of a floor above JPEG noise and a
+# multiple of the backdrop's own.
+_HOLE_PICTURE_FRACTION = float(os.getenv("BG_HOLE_PICTURE_FRACTION", "0.12") or "0.12")
+_HOLE_DETAIL_RATIO = float(os.getenv("BG_HOLE_DETAIL_RATIO", "2.0") or "2.0")
+_HOLE_DETAIL_FLOOR = float(os.getenv("BG_HOLE_DETAIL_FLOOR", "4.0") or "4.0")
 # Hole analysis runs on a downscaled copy: the regions we're looking for are
 # blobs, not hairlines, and 512px keeps a 1600px photo at a few milliseconds.
 # Scaling down can only bridge a thin subject wall (which makes a hole read as
@@ -674,16 +697,16 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
     # One inference at a time — concurrent runs would stack peak memory and OOM
     # — but with a deadline on the wait, so a caller who cannot afford to queue
     # is told "busy" instead of hanging.
-    global _last_infer_seconds, _model_ready
+    global _last_infer_seconds, _model_load_seconds, _model_ready
     if not _INFER_LOCK.acquire(
             timeout=BATCH_INFER_WAIT_SECONDS if wait is None else wait):
         raise CutoutBusy(
             "The background remover is working through another batch. "
             "Give it a moment and try again.")
-    started = time.monotonic()
     try:
         # Imported inside the lock, after the wait: a machine that is already
         # full answers "busy" without paying to pull in onnxruntime first.
+        loading = time.monotonic()
         from rembg import new_session, remove
         if _rembg_session is None:
             # Set before the session is built, not after — rembg reads this
@@ -691,13 +714,21 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
             os.environ.setdefault("OMP_NUM_THREADS", str(_infer_threads()))
             _rembg_session = new_session(_REMBG_MODEL)
             _model_ready = True
-            log.info("bg-removal: model %s ready (%s inference thread(s), "
-                     "%dpx, %d photo workers)", _REMBG_MODEL,
+            _model_load_seconds = time.monotonic() - loading
+            log.info("bg-removal: model %s ready in %.1fs (%s inference "
+                     "thread(s), %dpx, %d photo workers)", _REMBG_MODEL,
+                     _model_load_seconds,
                      os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE,
                      _LOCAL_BATCH_WORKERS)
-        alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+        # The clock starts here, not when the lock was taken: the load above
+        # is paid once per process and is not what "inference" means to the
+        # probe or to the slow-inference warning below.
+        started = time.monotonic()
+        try:
+            alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
+        finally:
+            _last_infer_seconds = time.monotonic() - started
     finally:
-        _last_infer_seconds = time.monotonic() - started
         _INFER_LOCK.release()
     if _last_infer_seconds > INFER_SLOW_SECONDS:
         log.warning("bg-removal: inference took %.1fs at %dpx (model=%s, "
@@ -917,6 +948,7 @@ def _interior_fill_mask(alpha: Image.Image,
                 else np.array([255, 255, 255], dtype=np.int16))
     off_backdrop = np.sqrt(((rgb - backdrop) ** 2).sum(axis=2))
     keep = holes & (off_backdrop > _HOLE_BG_TOL)
+    keep |= _detailed_holes(rgb, holes, reached, kept=~bg)
     if not keep.any():
         return None
 
@@ -932,6 +964,45 @@ def _interior_fill_mask(alpha: Image.Image,
              "of the item's interior", 100.0 * grown.sum() / grown.size)
     out = Image.fromarray(np.where(grown, 255, 0).astype(np.uint8), "L")
     return out if out.size == alpha.size else out.resize(alpha.size, Image.BILINEAR)
+
+
+def _detailed_holes(rgb, holes, reached, kept):
+    """The sealed holes that are pictures: each connected hole at least
+    _HOLE_PICTURE_FRACTION of the item's footprint (kept plus holes) whose
+    mean luma gradient beats the backdrop's by _HOLE_DETAIL_RATIO and the
+    floor. Colour plays no part -- that is the point. Without SciPy the holes
+    are judged as one region, which only matters when a picture and a handle
+    are both sealed inside one item."""
+    import numpy as np
+
+    if not holes.any():
+        return np.zeros_like(holes)
+    luma = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1]
+            + 0.114 * rgb[..., 2]).astype(np.float32)
+    detail = np.zeros_like(luma)
+    detail[:, 1:] += np.abs(np.diff(luma, axis=1))
+    detail[1:, :] += np.abs(np.diff(luma, axis=0))
+    backdrop_detail = float(detail[reached].mean()) if reached.any() else 0.0
+    bar = max(_HOLE_DETAIL_FLOOR, _HOLE_DETAIL_RATIO * backdrop_detail)
+    footprint = max(1, int(kept.sum()) + int(holes.sum()))
+    ndimage = matte._ndimage()
+    if ndimage is None:
+        regions = [holes]
+    else:
+        labels, count = ndimage.label(holes)
+        regions = [labels == i for i in range(1, count + 1)]
+    out = np.zeros_like(holes)
+    for region in regions:
+        area = int(region.sum())
+        if area / footprint < _HOLE_PICTURE_FRACTION:
+            continue
+        seen = float(detail[region].mean())
+        if seen > bar:
+            log.info("bg-removal: a %.0f%%-of-item hole carries detail (%.1f vs "
+                     "backdrop %.1f) — a picture, not a gap; putting it back",
+                     100.0 * area / footprint, seen, backdrop_detail)
+            out |= region
+    return out
 
 
 def _fill_interior_holes(alpha: Image.Image,
@@ -1510,10 +1581,11 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
 def warm() -> None:
     """Pre-load the rembg model + trigger numba's JIT on a tiny image.
 
-    The very first background removal otherwise pays a ~60-70s one-time cost
-    (importing scipy/numba/onnxruntime + JIT). Called in a background thread at
-    startup so the machine is reachable immediately while this warms up, and
-    real uploads hit a warm (~1s) path."""
+    The very first background removal otherwise pays a one-time cost of a
+    minute or two (importing scipy/numba/onnxruntime + JIT; /api/ready
+    reports what it came to as model_load_seconds). Called in a background
+    thread at startup so the machine is reachable immediately while this
+    warms up, and real uploads hit a warm path."""
     try:
         # Warm the LOCAL model directly (the default engine, and it powers the
         # subject masks either way) — never via _studio_and_cutout,

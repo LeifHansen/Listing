@@ -516,7 +516,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         } else {
           stopped.current = true;  // nothing left to watch — don't re-poll on focus
           loadListings({ quiet: true });
-          onSettled?.();  // stop persisting; a reload shouldn't restore a done batch
+          // Stop persisting (a reload shouldn't restore a done batch), and say
+          // which sessions it drafted so the shell's banner can retire itself
+          // once they are all listed.
+          onSettled?.((j.items || []).map((it) => it.session_id));
         }
       } catch (e) {
         if (stopped.current) return;
@@ -900,7 +903,9 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // cards stream in below it as each item is drafted.
   const pct = Math.round((() => {
     const frac = (cur, tot) => (tot ? Math.min(1, (cur || 0) / tot) : 0);
-    if (!job) return 3;
+    // Nothing has happened before the server has the pile. A bar that opens
+    // on 3% claims progress that was never made, and the seller noticed.
+    if (!job) return 0;
     if (job.done) return 100;
     if (phase === "uploading") return 5;
     if (phase === "optimizing") return 10 + 35 * frac(job.current, job.total_photos);

@@ -47,7 +47,7 @@ from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
                      RefineRequest, SessionOnlyRequest)
 from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
-                       ebay_trading, image_import, images, jobstore,
+                       ebay_trading, image_import, images, imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
                        orient, owed_refunds, preflight, pricing, promotions,
@@ -498,6 +498,19 @@ _HISTORY_TTL = int(os.getenv("HISTORY_TTL_DAYS", "14") or "14") * 86400
 # 250 MB is roughly one full bulk batch of headroom, which is the amount that
 # actually predicts an ENOSPC.
 _LOW_DISK_BYTES = int(os.getenv("LOW_DISK_MB", "250") or "250") * 1024 * 1024
+# Above that but below this, the volume is not yet one batch from breaking,
+# and the slow pass used to be all it got -- while the health-watch alarm
+# (.github/workflows/health-watch.yml, whose MIN_FREE_MB this mirrors) paged
+# the operator every two hours. From 2026-08-31 it did so for three days
+# straight, at 281-393 MB free on the 1 GB volume, with the app idling on
+# week-long TTLs because 250 MB had not been reached. In this band the daemon
+# TRIMS instead: photos the bucket already holds go after a day rather than
+# a week, originals after two hours rather than twelve, and it comes back
+# every fifteen minutes. That costs a seller at most a round trip to R2 for
+# an edit on a day-old listing; what it buys is a volume that keeps itself
+# above the line the alarm draws. Keep the two numbers in step: an alarm
+# that fires above the level the app acts at is one the app can never answer.
+_TRIM_DISK_BYTES = int(os.getenv("TRIM_DISK_MB", "400") or "400") * 1024 * 1024
 # How long the housekeeping daemon waits between passes. A volume with room to
 # spare only needs the slow pass; one that is low - or that will not answer how
 # much is left - has to be revisited soon, because the next bulk batch is what
@@ -567,27 +580,37 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
     return freed
 
 
-def reclaim_space(aggressive: bool = False) -> int:
+def reclaim_space(aggressive: bool = False, trim: bool = False) -> int:
     """Free volume space and return the bytes reclaimed. Runs the orphan sweep,
     prunes source uploads and old edit snapshots, and (when R2 is configured)
     drops local photo copies that the bucket already holds. `aggressive` (used
     when the disk is nearly full, or right after an ENOSPC) shortens the TTLs
-    so a wedged volume can recover without a human."""
+    so a wedged volume can recover without a human. `trim` (the band between
+    _LOW_DISK_BYTES and _TRIM_DISK_BYTES) sits between the two: sooner than
+    the slow pass, without the fifteen-minute originals that make every edit
+    on a fresh upload go back to R2. Aggressive wins when both are set."""
     _sweep_orphans()
-    orig_ttl = 900 if aggressive else _ORIGINALS_TTL      # 15 min when desperate
-    hist_ttl = 86400 if aggressive else _HISTORY_TTL      # 1 day when desperate
+    if aggressive:            # 15-minute originals, 1-day history, 1-hour rest
+        orig_ttl, hist_ttl, export_ttl, offload_ttl = 900, 86400, 3600, 3600
+    elif trim:                # 2-hour originals, 3-day history, 1-day rest
+        orig_ttl, hist_ttl = 2 * 3600, 3 * 86400
+        export_ttl = offload_ttl = 86400
+    else:
+        orig_ttl, hist_ttl = _ORIGINALS_TTL, _HISTORY_TTL
+        export_ttl, offload_ttl = 2 * 86400, 7 * 86400
     freed = storage.prune_originals(orig_ttl) + storage.prune_history(hist_ttl)
     # Dry-run export payloads: debug artifacts, never read back.
-    freed += storage.prune_exports(3600 if aggressive else 2 * 86400)
-    freed += _offload_to_r2(3600 if aggressive else 7 * 86400)
+    freed += storage.prune_exports(export_ttl)
+    freed += _offload_to_r2(offload_ttl)
     if freed:
-        log.info("reclaim: freed %.1f MB from the volume (aggressive=%s)",
-                 freed / 1e6, aggressive)
+        log.info("reclaim: freed %.1f MB from the volume (aggressive=%s, "
+                 "trim=%s)", freed / 1e6, aggressive, trim)
     return freed
 
 
-def _reclaim_plan(free: int) -> tuple[bool, int]:
-    """Decide (aggressive, seconds until the next pass) from a free-space reading.
+def _reclaim_plan(free: int) -> tuple[bool, bool, int]:
+    """Decide (aggressive, trim, seconds until the next pass) from a free-space
+    reading.
 
     `free` is storage.disk_free_bytes(), which reports 0 both for a genuinely
     full volume and for a stat it could not take (it swallows the error and
@@ -600,9 +623,15 @@ def _reclaim_plan(free: int) -> tuple[bool, int]:
     A stat that fails on a healthy volume therefore reclaims early rather than
     late. That trade is deliberate: short TTLs cost a round trip to R2 for an
     edit, while being wrong the other way is ENOSPC, which fails every upload.
+
+    `trim` is the band above that and below _TRIM_DISK_BYTES, where the
+    health-watch alarm is already paging: revisited on the short interval,
+    reclaimed on the middle TTLs, never the desperate ones.
     """
     low = free < _LOW_DISK_BYTES
-    return low, (_RECLAIM_INTERVAL_LOW if low else _RECLAIM_INTERVAL)
+    trim = not low and free < _TRIM_DISK_BYTES
+    soon = low or trim
+    return low, trim, (_RECLAIM_INTERVAL_LOW if soon else _RECLAIM_INTERVAL)
 
 
 def _reclaim_loop() -> None:
@@ -613,8 +642,8 @@ def _reclaim_loop() -> None:
         delay = _RECLAIM_INTERVAL_LOW
         try:
             free = storage.disk_free_bytes()
-            aggressive, delay = _reclaim_plan(free)
-            freed = reclaim_space(aggressive=aggressive)
+            aggressive, trim, delay = _reclaim_plan(free)
+            freed = reclaim_space(aggressive=aggressive, trim=trim)
             # The one state this daemon cannot fix by itself: the volume is
             # low and there is nothing left to free. Nothing else reports it
             # - reclaim_space only logs when it actually frees something - and
@@ -3342,6 +3371,216 @@ _RESEARCH_CATEGORIES = (
 )
 
 
+# --- the art lookup: name the artist and the work ---------------------------
+#
+# A print by a known artist is worth what its NAME is worth, and the identify
+# pass can only read a name that is printed on it. Prints by well-known
+# artists were drafted as "vintage art print" -- a title no collector
+# searches for -- because nothing on the print said who made it. So a draft
+# that is artwork and does not yet name its artist is looked up: a reverse
+# image search (Google Lens through SerpApi, when SERPAPI_KEY is set) says
+# what the web already calls this picture, and a vision call with web search
+# reads the print first, recognises the image second, takes those matches as
+# leads, and confirms against a catalogue, a museum page or an auction record
+# before naming anyone. Off with ART_LOOKUP=off.
+#
+# Gated on the draft being art, not on RESEARCH_PASS: that gate is wide (most
+# of a thrift store trips it) and costs a minute per item, which is why it is
+# off. This one is narrow, and it is the lookup the seller asked for.
+ART_LOOKUP = os.getenv("ART_LOOKUP", "auto").strip().lower() or "auto"
+_ART_CATEGORY_WORDS = ("art prints", "paintings", "posters & prints",
+                       "art posters", "prints & posters", "mixed media art",
+                       "drawings", "art photographs")
+_ART_WORDS = (
+    "art print", "giclee", "giclée", "lithograph", "serigraph", "screenprint",
+    "screen print", "silkscreen", "etching", "engraving", "woodblock",
+    "woodcut", "linocut", "poster", "painting", "watercolor", "watercolour",
+    "gouache", "canvas print", "framed print", "artwork", "fine art",
+    "exhibition print", "museum print",
+)
+
+
+def _artwork_category(listing: Listing) -> bool:
+    category = (listing.category_suggestion or "").lower()
+    return (category.split(">")[0].strip() == "art"
+            or any(w in category for w in _ART_CATEGORY_WORDS))
+
+
+def _is_artwork(listing: Listing, observations: str = "") -> bool:
+    """Whether a draft is a picture with an artist behind it."""
+    if _artwork_category(listing):
+        return True
+    haystack = " ".join([
+        listing.title or "", observations or "",
+        " ".join(f"{s.name} {s.value}" for s in (listing.item_specifics or [])),
+    ]).lower()
+    return any(w in haystack for w in _ART_WORDS)
+
+
+def _artist_on(listing: Listing) -> str:
+    """The artist the draft already names: the Artist specific, else the
+    brand (the identify pass writes a maker there). "" for a placeholder."""
+    for s in listing.item_specifics or []:
+        if s.name.strip().lower() == "artist" and (s.value or "").strip():
+            return s.value.strip()
+    brand = (listing.brand or "").strip()
+    return "" if brand.lower() in _GENERIC_MAKERS else brand
+
+
+def _artwork_named(listing: Listing) -> bool:
+    """Whether the draft already leads with its artist, unhedged. One that
+    does read the name off the print and earned its title; the lookup is for
+    the one that could not."""
+    artist = _artist_on(listing)
+    if not artist:
+        return False
+    title = (listing.title or "").lower()
+    if any(h in title for h in _RESEARCH_HEDGES):
+        return False
+    return artist.split()[-1].lower() in title
+
+
+def _reverse_image_leads(session_id: str, path) -> list[dict]:
+    """What a reverse image search says about one photo, as leads for the
+    lookup. The engine fetches the image itself, so it needs a URL it can
+    reach: the copy in the bucket. The upload path mirrors every optimized
+    photo there; one the mirror has not reached yet is uploaded here, the
+    way the reclaim pass backfills. [] without SERPAPI_KEY or the bucket."""
+    if not imagesearch.enabled() or not objstore.enabled():
+        return []
+    try:
+        key = objstore.key_for(session_id, path.name)
+        if not objstore.exists(key) and objstore.upload(path, key) is None:
+            return []
+        url = objstore.url_for(key)
+    except Exception as exc:  # noqa: BLE001 - a lead is optional
+        log.info("art lookup: no fetchable URL for %s: %s", path.name, exc)
+        return []
+    return imagesearch.reverse_image(url) if url else []
+
+
+def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
+                    observations: str = "") -> Optional[dict]:
+    """Name the artist and the work behind a drafted print, in place.
+
+    Runs when the draft is artwork and does not yet lead with its artist.
+    What it may do, at medium or high confidence: fill an empty brand and a
+    blank Artist specific with the artist; at high confidence, replace a
+    title that names neither the artist nor the work with one that leads
+    with both (at medium, suggest that title in a note); and add what the
+    seller must check -- an edition number, a pencil signature, a blind
+    stamp. What it may never do: demote a print, touch a price, or overwrite
+    a title that already names the artist. Never raises.
+    """
+    if ART_LOOKUP == "off" or not config.anthropic_ready():
+        return None
+    if not _is_artwork(listing, observations) or _artwork_named(listing):
+        return None
+    paths = [p for p in image_paths if p.is_file()]
+    if not paths:
+        return None
+    leads = _reverse_image_leads(session_id, paths[0]) if session_id else []
+    log.info("art lookup: %r with %d reverse-image lead(s)",
+             (listing.title or "")[:60], len(leads))
+    try:
+        found = claude_ai.identify_artwork(paths, listing, leads=leads,
+                                          observations=observations)
+    except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
+        log.info("art lookup failed: %s", exc)
+        return None
+    if not found:
+        return None
+    return _apply_artwork(listing, found)
+
+
+def _same_artist(a: str, b: str) -> bool:
+    """Whether two spellings name one artist: "Hokusai" and "Katsushika
+    Hokusai" do; "Hokusai" and "Hiroshige" do not."""
+    a, b = a.strip().lower(), b.strip().lower()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a or a.split()[-1] == b.split()[-1]
+
+
+def _set_artist_specific(listing: Listing, artist: str, conf: str) -> bool:
+    """Write the artist to the Artist specific when it is blank. eBay's art
+    categories carry that aspect and buyers filter on it. Returns whether
+    anything was written."""
+    for s in listing.item_specifics:
+        if s.name.strip().lower() == "artist":
+            if (s.value or "").strip():
+                return False
+            s.value = artist
+            s.confidence = conf
+            return True
+    listing.item_specifics.append(
+        ItemSpecific(name="Artist", value=artist, confidence=conf))
+    return True
+
+
+def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
+    """Fold a lookup's answer into the draft under _lookup_artwork's rules.
+    Returns `found` when anything was applied or noted, else None."""
+    conf = str(found.get("confidence") or "low").strip().lower()
+    artist = str(found.get("artist") or "").strip()[:65]
+    work = str(found.get("work") or "").strip()[:80]
+    notes: list[str] = []
+    applied = False
+    known = _artist_on(listing)
+    if artist and conf in ("medium", "high") and known and \
+            not _same_artist(known, artist):
+        # The draft names someone else. Two attributions on one listing is a
+        # question for the seller, not a coin for this pass to flip.
+        notes.append(f"The lookup reads the artist as {artist}"
+                     + (f" ({work})" if work else "")
+                     + f"; the draft says {known} -- check which is right.")
+    elif artist and conf in ("medium", "high"):
+        if not known:
+            listing.brand = artist
+            applied = True
+        has_row = any(s.name.strip().lower() == "artist"
+                      for s in listing.item_specifics)
+        if (has_row or _artwork_category(listing)) and \
+                _set_artist_specific(listing, artist, conf):
+            applied = True
+        current = listing.title or ""
+        lower = current.lower()
+        names_it = (artist.split()[-1].lower() in lower
+                    and (not work or work.lower() in lower))
+        hedged = any(h in lower for h in _RESEARCH_HEDGES)
+        proposed = str(found.get("title") or "").strip()[:TITLE_MAX_CHARS]
+        if not proposed and work:
+            proposed = f"{artist} {work}"[:TITLE_MAX_CHARS]
+        if proposed and (hedged or not names_it) and proposed.lower() != lower:
+            if conf == "high":
+                log.info("art lookup: title %r -> %r", current, proposed)
+                listing.title = proposed
+                applied = True
+            else:
+                notes.append(f"The lookup suggests this title: \u201c{proposed}\u201d.")
+        if applied:
+            # The artist is settled; the nag to find one is answered.
+            listing.missing_info = [m for m in listing.missing_info
+                                    if "artist" not in m.lower()]
+    elif artist or work:
+        reading = ", ".join(x for x in (artist, work) if x)
+        notes.append(f"The lookup wasn't sure -- its best reading: {reading}")
+    for item in (found.get("verify") or [])[:3]:
+        text = str(item or "").strip()
+        if text:
+            notes.append(f"Verify: {text}")
+    sources = [str(u).strip() for u in (found.get("sources") or [])[:3] if u]
+    if sources and (applied or notes):
+        notes.append("Looked up from: " + ", ".join(sources))
+    if notes:
+        listing.missing_info = [*(listing.missing_info or []), *notes]
+    if not (applied or notes):
+        return None
+    log.info("art lookup: %r by %r (%s confidence, applied=%s)",
+             work or "?", artist or "?", conf, applied)
+    return found
+
+
 def _research_reason(listing: Listing, observations: str = "") -> str:
     """Why this draft needs looking up, or "" when it doesn't.
 
@@ -4049,9 +4288,20 @@ async def upload_more(
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
 ) -> dict:
-    """Add more photos to an existing listing. Optimizes each new file into the
-    session with non-colliding names and returns the new filenames, so the
-    client can append them to the listing's image order."""
+    """Add more photos to an existing listing. Saves the files, then optimizes
+    each into the session under non-colliding names as a JOB the client polls;
+    the job's result carries the new filenames, so the client can append them
+    to the listing's image order.
+
+    A job, like every other upload path, and later than the rest of them: this
+    one kept running the orientation pass (a vision call) and the cutouts
+    (single-flight inference, queued behind whatever bulk batch holds the
+    lock, on a model that takes a minute to warm) inside the request. A
+    seller adding four photos to a listing waited on a spinner for the length
+    of all of that, and past the client's deadline the request was abandoned
+    with the work still running -- "adding photos is taking forever / not
+    working". The request now returns the moment the originals are on disk.
+    """
     await run_in_threadpool(_assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
@@ -4066,7 +4316,6 @@ async def upload_more(
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
     orig = storage.original_dir(session_id)
-    opt_dir = storage.optimized_dir(session_id)
     # Save every new file first, so the orientation pass can judge them all in
     # one batched call rather than one call per photo.
     staged: list[tuple[int, Path]] = []
@@ -4086,15 +4335,62 @@ async def upload_more(
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
-    rotations = await run_in_threadpool(
-        orient.detect_rotations, [src for _idx, src in staged])
-    # One batched call so added photos share the same worker pool as the main
-    # upload path, instead of one serial threadpool round-trip per photo.
-    results = await run_in_threadpool(
-        images.optimize_batch,
-        [(src, opt_dir / f"img_{idx:03d}.jpg", rotations.get(src.name, 0))
-         for idx, src in staged],
-        strip_bg)
+    uid = _uid(request)
+    job_id = storage.new_session_id()
+    # The background-removal charge is deliberately NOT written to the job
+    # mirror: it can be refunded in PART (one photo's worth per failed
+    # cutout), and a partial refund is keyed in the ledger by its amount, so
+    # settling it from a mirror after the process died could pay twice. Same
+    # reasoning as the upload pipeline's job.
+    await run_in_threadpool(_register_bulk_job, job_id, {
+        "id": job_id, "kind": "upload_more", "phase": "orienting", "done": False,
+        "error": None, "result": None, "session_id": session_id,
+        "total_photos": len(staged), "current": 0,
+    }, uid=uid)
+    threading.Thread(
+        target=_run_upload_more_job,
+        args=(job_id, session_id, staged, strip_bg, spent),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id, "running": True, "total": len(staged)}
+
+
+def _run_upload_more_job(job_id: str, session_id: str,
+                         staged: list[tuple[int, Path]], strip_bg: bool,
+                         spent: Optional[dict]) -> None:
+    """Background worker for "Add photos": the orientation pass, then the
+    optimize/cutout pass with live per-photo progress, then the R2 push. The
+    result is what the synchronous route used to answer with."""
+    opt_dir = storage.optimized_dir(session_id)
+    try:
+        _bulk_set(job_id, phase="orienting", beat=time.time())
+        rotations = orient.detect_rotations([src for _idx, src in staged])
+        _bulk_set(job_id, phase="optimizing", current=0,
+                  total_photos=len(staged), beat=time.time())
+        # One batched call so added photos share the same worker pool as the
+        # main upload path, instead of one serial round-trip per photo.
+        results = images.optimize_batch(
+            [(src, opt_dir / f"img_{idx:03d}.jpg", rotations.get(src.name, 0))
+             for idx, src in staged],
+            strip_bg,
+            progress=lambda done, total: _bulk_set(
+                job_id, current=done, total_photos=total, beat=time.time()))
+    except OSError as exc:
+        tokens.refund(spent)
+        if getattr(exc, "errno", None) == errno.ENOSPC:
+            freed = reclaim_space(aggressive=True)
+            log.warning("upload-more %s hit a full volume; reclaimed %.1f MB",
+                        job_id, freed / 1e6)
+        log.warning("upload-more %s: optimize failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, phase="failed", error=(
+            "The server ran out of photo storage — try again shortly."))
+        return
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        tokens.refund(spent)
+        log.warning("upload-more %s: optimize failed: %s", job_id, exc)
+        _bulk_set(job_id, done=True, phase="failed",
+                  error=f"Photo processing failed: {exc}")
+        return
     new_names: list[str] = []
     # Photos whose cutout failed (engine down / out of credits) kept their
     # background, so they owe nothing — counted the same way /api/upload does.
@@ -4109,23 +4405,24 @@ async def upload_more(
         if res.get("bg_error"):
             bg_failed += 1
     if not new_names:
-        await run_in_threadpool(tokens.refund, spent)
-        raise HTTPException(400, "Could not process the uploaded image(s).")
+        tokens.refund(spent)
+        _bulk_set(job_id, done=True, phase="failed",
+                  error="Could not process the uploaded image(s).")
+        return
     if spent and bg_failed:
-        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
     _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                    what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
     # optimize_results carries each photo's bg_error, exactly as /api/upload
-    # returns it. It was computed here already -- the token refund above counts
-    # it -- and then dropped on the floor, so a photo that kept its background
-    # reached the seller with nothing said about it. The refund is not the
-    # message; it is invisible.
-    return {"added": new_names, "optimized": storage.list_optimized(session_id),
-            "optimize_results": [
-                {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
-                for (idx, _src), res in zip(staged, results)
-                if not res.get("error") and res.get("bg_error")]}
+    # returns it: a photo that kept its background has to be SAID, or the
+    # seller is left wondering why two photos look nothing like the others.
+    _bulk_set(job_id, done=True, phase="done", result={
+        "added": new_names, "optimized": storage.list_optimized(session_id),
+        "optimize_results": [
+            {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
+            for (idx, _src), res in zip(staged, results)
+            if not res.get("error") and res.get("bg_error")]})
 
 
 @app.post("/api/edit-image")
@@ -4308,7 +4605,14 @@ async def rotate_image(payload: dict, request: Request) -> dict:
                      "didn't update. Try the rotation again in a moment."
             ) from exc
     _in_background(db.touch_listing, session_id, what="rotate touch")
-    return {"ok": True}
+    # The rotated file's own timestamp, for the client's cache-buster. Its
+    # per-open counter restarted at 0 on every open of the editor, and a
+    # browser reuses an image it has already loaded in the same page for an
+    # identical URL without asking the server -- so "?v=1" could hand back
+    # the bytes of an earlier edit, and the tile's turn came off over the
+    # wrong picture. A version no other load of this photo has ever used
+    # cannot be answered from anything but the file.
+    return {"ok": True, "version": int(path.stat().st_mtime * 1000)}
 
 
 @app.post("/api/image/auto-clean")
@@ -4538,7 +4842,18 @@ def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> di
 
     Takes the listing in the request body rather than reading the saved copy,
     so edits still open in the editor are enriched (and are not overwritten
-    by an older save). Returns the whole listing back for the form to adopt.
+    by an older save).
+
+    Runs as a JOB, like identify and the dashboard's bulk fill, and for the
+    same reason: one vision call over up to eight photos plus a maker check
+    is routinely longer than the 90 seconds the client waits on a request,
+    and longer than the proxy in front of this server holds one open. Run in
+    the request, the fill kept finishing and saving on the server after the
+    editor had already reported "Couldn't fill in the details" -- which is
+    how a working feature came to be reported as one that does not work.
+    Everything that can refuse does so here, before the charge; the answer
+    -- the whole listing for the form to adopt, plus what was filled -- is
+    the job's result, polled at /api/bulk/status/{job_id}.
     """
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
@@ -4561,39 +4876,97 @@ def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> di
     if not paths:
         raise HTTPException(400, "This listing's photos aren't on the server anymore.")
     spent = _charge_ai(request, "specifics")
+    uid = _uid(request)
+    job_id = storage.new_session_id()
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "enrich_one", "phase": "specifics", "done": False,
+        "error": None, "session_id": session_id,
+        # The charge, while it is outstanding: a restart mid-fill pays it
+        # back the way it does for every other job (see _settle_interrupted_jobs).
+        "_refunds": tokens.receipts(spent) if spent else None,
+    }, uid=uid)
+    threading.Thread(target=_run_single_enrich_job,
+                     args=(job_id, session_id, listing, paths, uid, spent),
+                     daemon=True).start()
+    return {"job_id": job_id, "running": True}
+
+
+def _specifics_filled(before: list[tuple[str, str]], before_brand: str,
+                      listing: Listing) -> list[dict]:
+    """What a fill actually wrote: the name/value pairs on the listing now
+    that were not on it before, the brand included. "Filled 3 details" is a
+    number; "Color: Blue, Size: M" is evidence, and evidence is what a seller
+    who cannot tell whether the button did anything was asking for."""
+    had = {(n.strip().lower(), (v or "").strip().lower())
+           for n, v in before if (v or "").strip()}
+    out: list[dict] = []
+    for s in listing.item_specifics:
+        value = (s.value or "").strip()
+        if value and (s.name.strip().lower(), value.lower()) not in had:
+            out.append({"name": s.name.strip(), "value": value})
+    brand = (listing.brand or "").strip()
+    if brand and brand.lower() != (before_brand or "").strip().lower():
+        out.insert(0, {"name": "Brand", "value": brand})
+    return out[:40]
+
+
+def _run_single_enrich_job(job_id: str, session_id: str, listing: Listing,
+                           paths: list, uid: Optional[str], spent) -> None:
+    """Background worker for the editor's "Fill in details" -- the body the
+    route above used to run in the request. Saves the way every other save
+    saves and reports the whole listing back, plus what it filled."""
     try:
-        added = _enrich_listing(listing, paths)
-    except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
+        before = [(s.name, s.value) for s in listing.item_specifics]
+        before_brand = listing.brand or ""
+        try:
+            added = _enrich_listing(listing, paths)
+        except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
+            tokens.refund(spent)
+            _code, message = claude_ai.ai_error_message(exc)
+            log.warning("enrich failed (session=%s): %s", session_id, exc)
+            _bulk_set(job_id, _refunds=None, done=True, phase="failed",
+                      error=message)
+            return
+        if added is None:
+            # Never ran -- no taxonomy, no model, or no aspects published for
+            # this category. `_enrich_listing` swallows its own failures, so
+            # this is the return value rather than an exception, and nothing
+            # was earned.
+            tokens.refund(spent)
+            _bulk_set(job_id, _refunds=None, done=True, phase="failed", error=(
+                "The AI couldn't read eBay's details for that category -- "
+                "nothing was filled in, and nothing was charged."))
+            return
+        # Blanks the fill has now answered stop asking. Same rule the bulk
+        # enrich applies, so a draft filled here and one filled from the
+        # dashboard end up in the same state.
+        settled = _drop_answered_missing_info(listing)
+        filled = _specifics_filled(before, before_brand, listing)
+        # Saved the way every other save saves. _restore_server_state is not
+        # optional bookkeeping here: it keeps the client's copy of the
+        # server-owned publish state from erasing the real one, and it marks
+        # what changed. A listing that is ALREADY live is revised with only
+        # its dirty fields, so specifics filled in here and left unmarked
+        # would be saved locally and never reach eBay when the seller presses
+        # Update -- the exact silence _enrich_one had to mark_dirty around,
+        # avoided by going through the same path a save does.
+        prev = _restore_server_state(session_id, listing)
+        storage.save_listing(session_id, listing)
+        db.upsert_listing(session_id, listing.model_dump(),
+                          status=_sticky_status(prev), user_id=uid)
+        log.info("enrich: session=%s added=%d settled=%d filled=%s", session_id,
+                 added, settled, ", ".join(f["name"] for f in filled) or "-")
+        _bulk_set(job_id, _refunds=None, done=True, phase="done", result={
+            "listing": listing.model_dump(), "added": added,
+            "settled": settled, "filled": filled})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
         tokens.refund(spent)
-        code, message = claude_ai.ai_error_message(exc)
-        log.warning("enrich failed (session=%s): %s", session_id, exc)
-        raise HTTPException(code, message) from exc
-    if added is None:
-        # Never ran — no taxonomy, no model, or no aspects published for this
-        # category. `_enrich_listing` swallows its own failures, so this is
-        # the return value rather than an exception, and nothing was earned.
-        tokens.refund(spent)
-        raise HTTPException(
-            400, "The AI couldn't read eBay's details for that category — "
-                 "nothing was filled in, and nothing was charged.")
-    # Blanks the fill has now answered stop asking. Same rule the bulk enrich
-    # applies, so a draft filled here and one filled from the dashboard end
-    # up in the same state.
-    settled = _drop_answered_missing_info(listing)
-    # Saved the way every other save saves. _restore_server_state is not
-    # optional bookkeeping here: it keeps the client's copy of the
-    # server-owned publish state from erasing the real one, and it marks what
-    # changed. A listing that is ALREADY live is revised with only its dirty
-    # fields, so specifics filled in here and left unmarked would be saved
-    # locally and never reach eBay when the seller presses Update — the exact
-    # silence _enrich_one had to mark_dirty around, avoided by going through
-    # the same path a save does.
-    prev = _restore_server_state(session_id, listing)
-    storage.save_listing(session_id, listing)
-    db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(prev), user_id=_uid(request))
-    log.info("enrich: session=%s added=%d settled=%d", session_id, added, settled)
-    return {"listing": listing.model_dump(), "added": added, "settled": settled}
+        reference = _support_reference()
+        log.warning("enrich job %s failed for session=%s [%s]: %s",
+                    job_id, session_id, reference, exc)
+        _bulk_set(job_id, _refunds=None, done=True, phase="failed", error=(
+            "We couldn't finish filling this in. Try again in a moment -- if "
+            f"it keeps happening, quote {reference} to support."))
 
 
 def _taxonomy_guard(request: Request) -> None:
@@ -5535,6 +5908,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # first pass — one consolidated call on chain v2.
                 _enrich_listing(listing, [item_dir / n for n in item_names],
                                 tags=result.tags)
+                # A note the fill just answered must not outlive it: it is
+                # what the dashboard's "Fill in details" reads, and a fresh
+                # draft carrying "size" beside a filled Size was suggested
+                # for a fill that then found nothing to do.
+                _drop_answered_missing_info(listing)
+                _lookup_artwork(listing, [item_dir / n for n in item_names],
+                                sid, result.raw_observations)
                 _research_draft(listing, [item_dir / n for n in item_names],
                                 result.raw_observations, result.confidence)
                 _price_against_comps(listing, uid, prefs)
@@ -5546,7 +5926,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 tokens.refund(spent)
                 log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
                 item["status"] = "error"
-                item["error"] = str(exc)
+                # The card shows this. A decoder's complaint about the
+                # model's JSON is not something a seller can act on; the
+                # sentence ai_error_message gives it is.
+                item["error"] = (claude_ai.ai_error_message(exc)[1]
+                                 if isinstance(exc, json.JSONDecodeError)
+                                 else str(exc))
                 item["listing"] = None
                 item["title"] = group["name"]
             items.append(item)
@@ -5791,6 +6176,12 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # filled and stood the fallback down over a draft with every required
         # specific still blank.
         result.specifics_autofilled = _specifics_were_filled(added)
+        # See the bulk path: a note the fill answered stops being asked here,
+        # not on the next "Fill in details" press.
+        _drop_answered_missing_info(result.listing)
+        _beat("artwork")
+        _lookup_artwork(result.listing, [opt_dir / n for n in names],
+                        session_id, result.raw_observations)
         _beat("research")
         _research_draft(result.listing, [opt_dir / n for n in names],
                         result.raw_observations, result.confidence)
@@ -6480,11 +6871,16 @@ def _drop_answered_missing_info(listing: Listing) -> int:
               if (s.value or "").strip() and s.name.strip()}
     if (listing.brand or "").strip():
         filled.add("brand")
-    if not filled:
-        return 0
-    kept = [note for note in listing.missing_info
-            if not any(re.search(rf"\b{re.escape(name)}\b", note.lower())
-                       for name in filled)]
+    kept = list(listing.missing_info)
+    # _needs_a_category's own note, answered by the category it asked for:
+    # the fill resolves one before it runs, and a draft that now has a
+    # category must stop saying it has none.
+    if str(listing.category_id or "").strip():
+        kept = [note for note in kept if "ebay category" not in note.lower()]
+    if filled:
+        kept = [note for note in kept
+                if not any(re.search(rf"\b{re.escape(name)}\b", note.lower())
+                           for name in filled)]
     settled = len(listing.missing_info) - len(kept)
     listing.missing_info = kept
     return settled
@@ -6539,6 +6935,7 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
         return {"skip": "This listing's photos aren't on the server anymore."}
 
     before_brand = (listing.brand or "").strip()
+    before = [(s.name, s.value) for s in listing.item_specifics]
     spent = _charge_uid(uid, "specifics")
     if note_charge:
         note_charge(tokens.receipts(spent))
@@ -6556,6 +6953,7 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
             tokens.refund(spent)
             return {"skip": "The AI couldn't read eBay's details for that category."}
         settled = _drop_answered_missing_info(listing)
+        filled = _specifics_filled(before, before_brand, listing)
         if not added and not settled:
             # The AI did run and found nothing the photos could answer, which
             # is a real (billable) answer — the same one the single-listing
@@ -6578,13 +6976,15 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
                 creds)
             if not outcome.ok:
                 return {"message": outcome.message or "eBay rejected the new details."}
-            return {"ok": True, "added": added, "settled": settled, "pushed": True}
+            return {"ok": True, "added": added, "settled": settled, "pushed": True,
+                    "filled": filled}
         # A draft (or a seller with no eBay connection): the fill is still
         # worth keeping, it just has nowhere to go yet.
         storage.save_listing(rid, listing)
         db.upsert_listing(rid, listing.model_dump(), status=_sticky_status(rec),
                           user_id=uid)
-        return {"ok": True, "added": added, "settled": settled, "pushed": False}
+        return {"ok": True, "added": added, "settled": settled, "pushed": False,
+                "filled": filled}
     finally:
         # Settled either way by the time we get here: earned by a fill that
         # landed, or handed back above. Anything still recorded as outstanding

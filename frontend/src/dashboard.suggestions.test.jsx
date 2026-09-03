@@ -171,6 +171,49 @@ describe("filling in a whole group at once", () => {
   });
 });
 
+describe("what the AI left for a person", () => {
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("is a nudge to look, with no button that would fill nothing", async () => {
+    // A price the lookup raised, an edition to check, where it looked: none
+    // of it is a blank an item specific answers, so "Enrich all" over it
+    // came back "nothing the photos could answer" every time it was pressed.
+    const recs = [{ listing_id: "c", listing_title: "Hokusai print", type: "verify",
+      label: "Check details", reason: "2 things the AI left for you to check.",
+      action: "open", priority: 40, rate: null }];
+    const { root, text } = await mount([], { recs });
+    expect(text()).toContain("Check details");
+    expect(byText("Enrich all")).toBeFalsy();
+    await expand("Check details");
+    expect(text()).toContain("Hokusai print");
+    expect(text()).toContain("2 things the AI left for you to check.");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("says why each listing the fill could not finish needs a person", async () => {
+    // "1 need you" is a count; the seller's question afterwards is "did it
+    // do anything?", and the reason the job gave per listing is the answer.
+    const { root, text } = await mount([], {
+      jobResult: {
+        changed: 1, skipped: 1, failed: 0, total: 2, filled: 3, deferred: 0,
+        stopped: "",
+        results: {
+          changed: [{ listing_id: "a", title: "Nike hoodie", added: 3 }],
+          skipped: [{ listing_id: "b", title: "Canon AE-1",
+                      message: "No eBay category yet — open it and pick one." }],
+          failed: [],
+        },
+      },
+    });
+    await click(byText("Enrich all"));
+    await click(byText("Fill them in"));
+    expect(text()).toContain("Filled in 1 listing · 3 details added · 1 need you");
+    expect(text()).toContain("Canon AE-1: No eBay category yet");
+    await act(async () => { root.unmount(); });
+  });
+});
+
 /* A group can be bigger than one run. The server fills a capped number of
  * listings per pass and hands the rest back as `deferred` — so a 3-listing
  * group under a cap of 2 asked the seller to confirm 3, quoted the AI cost of

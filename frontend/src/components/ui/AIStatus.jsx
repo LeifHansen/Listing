@@ -87,6 +87,44 @@ export function LoadingOverlay({ messages }) {
   );
 }
 
+// BrandPulse — the wait state for a screen that is nothing BUT waiting: the
+// upload pipeline, where the seller has handed over their photos and there is
+// no form under it yet. The Thryft Shop mark, large and breathing, with the
+// current stage in words beneath it. The seller asked for this in place of
+// the small status card over a stack of grey skeleton bars, which read as a
+// page that had failed to load rather than one that was working.
+export function BrandPulse({ message, detail, className }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className={cn("flex flex-col items-center gap-6 py-12 text-center", className)}
+    >
+      <span className="relative grid place-items-center" aria-hidden>
+        <span className="brand-pulse-halo absolute inset-[-40%] rounded-full" />
+        <BrandMark className="brand-pulse relative size-28 rounded-[32px] shadow-float" />
+      </span>
+      <div className="flex flex-col items-center gap-1.5 min-w-0 max-w-md">
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={message}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.25 }}
+            className="ai-shimmer-text font-bold text-lg"
+          >
+            {message}
+          </motion.p>
+        </AnimatePresence>
+        {detail && (
+          <p className="text-sm text-ink-secondary">{detail}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Small inline variant for tight spots (buttons rows, card headers).
 export function AIStatusInline({ message, className }) {
   return (

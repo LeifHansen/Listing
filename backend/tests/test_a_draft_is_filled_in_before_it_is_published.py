@@ -26,9 +26,18 @@ What has to hold for a one-tap fill that spends AI credits:
     for "didn't run", which is a different answer from "ran and found
     nothing"; and
 
-  * another seller's session id is not a key to their listing.
+  * another seller's session id is not a key to their listing;
+
+  * and it runs as a JOB. One vision call over every photo plus a maker check
+    routinely outlives the 90 seconds the client waits on a request, so the
+    fill kept finishing and saving on the server after the editor had
+    reported "Couldn't fill in the details" -- a working feature, reported
+    broken. Everything that can refuse still refuses in the request, before
+    the charge; the answer is the job's result.
 """
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -84,6 +93,26 @@ def _body(rid: str, **over) -> dict:
     return {"session_id": rid, "listing": listing, "mode": "draft"}
 
 
+def _finish(client, res, timeout: float = 10.0) -> dict:
+    """The job the route started, once its worker is done: the status body
+    (result or error), so a test can assert on either."""
+    assert res.status_code == 200, res.text
+    job_id = res.json()["job_id"]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = client.get(f"/api/bulk/status/{job_id}").json()
+        if body.get("done"):
+            return body
+        time.sleep(0.02)
+    raise AssertionError(f"enrich job {job_id} never finished")
+
+
+def _result(client, res) -> dict:
+    body = _finish(client, res)
+    assert not body.get("error"), body["error"]
+    return body["result"]
+
+
 def test_it_fills_the_blanks_and_hands_the_listing_back(seller, monkeypatch):
     client, dbmod, uid = seller
     assert dbmod.upsert_listing("draft-1", _body("draft-1")["listing"],
@@ -93,11 +122,13 @@ def test_it_fills_the_blanks_and_hands_the_listing_back(seller, monkeypatch):
 
     res = client.post("/api/enrich/draft-1", json=_body("draft-1"))
 
-    assert res.status_code == 200, res.text
-    body = res.json()
+    body = _result(client, res)
     assert body["added"] == 1
     names = [s["name"] for s in body["listing"]["item_specifics"]]
     assert "Size" in names
+    # And WHAT it filled, by name and value: the evidence a seller who could
+    # not tell whether the button did anything was asking for.
+    assert body["filled"] == [{"name": "Size", "value": "M"}]
     # The note the fill answered stops being asked, so the dashboard's own
     # "Fill in details" suggestion doesn't sit there reading like a no-op.
     assert body["settled"] == 1
@@ -118,9 +149,9 @@ def test_it_enriches_the_listing_in_front_of_the_seller(seller, monkeypatch):
     res = client.post("/api/enrich/draft-2",
                       json=_body("draft-2", title="Nike hoodie, navy, large"))
 
-    assert res.status_code == 200, res.text
+    body = _result(client, res)
     assert seen == ["Nike hoodie, navy, large"]
-    assert res.json()["listing"]["title"] == "Nike hoodie, navy, large"
+    assert body["listing"]["title"] == "Nike hoodie, navy, large"
     stored = dbmod.get_listing("draft-2")["listing"]
     assert stored["title"] == "Nike hoodie, navy, large"
 
@@ -137,7 +168,7 @@ def test_what_it_filled_is_marked_as_changed(seller, monkeypatch):
 
     res = client.post("/api/enrich/live-1", json=_body("live-1"))
 
-    assert res.status_code == 200, res.text
+    _result(client, res)
     assert "item_specifics" in dbmod.get_listing("live-1")["listing"]["dirty_fields"]
 
 
@@ -148,8 +179,7 @@ def test_filling_a_live_listing_does_not_demote_it(seller, monkeypatch):
     _with_photo("live-2")
     monkeypatch.setattr(main, "_enrich_listing", _fills_size([]))
 
-    assert client.post("/api/enrich/live-2",
-                       json=_body("live-2")).status_code == 200
+    _result(client, client.post("/api/enrich/live-2", json=_body("live-2")))
     assert dbmod.get_listing("live-2")["status"] == "published"
 
 
@@ -164,8 +194,9 @@ def test_a_pass_that_never_ran_is_not_reported_as_a_fill(seller, monkeypatch):
 
     res = client.post("/api/enrich/draft-3", json=_body("draft-3"))
 
-    assert res.status_code == 400
-    assert "category" in res.json()["detail"].lower()
+    body = _finish(client, res)
+    assert "category" in (body.get("error") or "").lower()
+    assert not body.get("result")
 
 
 def test_a_listing_with_no_photos_left_says_so(seller, monkeypatch):

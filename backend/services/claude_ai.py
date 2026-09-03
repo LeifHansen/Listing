@@ -24,6 +24,7 @@ from .listing_prompt import (
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
+    expected_item_count,
     group_notes_block,
     identify_notes_block,
 )
@@ -82,6 +83,11 @@ def ai_error_message(exc: Exception) -> tuple[int, str]:
     if "connection" in body or "timed out" in body or "timeout" in body:
         return 503, ("Couldn't reach the AI service — check the connection and "
                      "try again in a moment.")
+    if isinstance(exc, json.JSONDecodeError):
+        # Its own message ("Expecting ',' delimiter: line 1 column 3644") is
+        # about a document the seller never sees. What they can do is retry.
+        return 502, ("The AI's answer couldn't be read this time — try it "
+                     "again.")
     return 502, f"AI request failed: {str(exc)[:200]}"
 
 
@@ -123,7 +129,86 @@ def _extract_json(text: str) -> dict:
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end != -1:
         text = text[start : end + 1]
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        # The model's answer, not ours, and it reads a listing: a description
+        # that says the jeans are 34" x 28" has put two unescaped quotes in
+        # the middle of a JSON string, and a batch item died on 'Expecting
+        # ',' delimiter: line 1 column 3644'. Repair what a person would
+        # repair before giving up.
+        repaired = _repair_json(text)
+        if repaired == text:
+            raise
+        try:
+            data = json.loads(repaired)
+        except json.JSONDecodeError:
+            raise exc from None
+        log.info("ai: repaired the model's JSON (%s)", exc.msg)
+        return data
+
+
+_CLOSERS = frozenset(",}]:")
+
+
+def _repair_json(text: str) -> str:
+    """The most common ways a model breaks its own JSON, undone.
+
+    A quote INSIDE a string that was never escaped -- the inch mark in
+    34" x 28", a quoted name in a description -- is told apart from the
+    string's closing quote by what follows it: a real closing quote is
+    followed (after whitespace) by a comma, a colon, a closing bracket or the
+    end; an inner one by prose. A raw newline or tab inside a string is
+    escaped. A trailing comma before a closing bracket is dropped. Everything
+    else is left exactly as it was, and the caller decides.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+            elif ch == "\\":
+                out.append(ch)
+                escaped = True
+            elif ch == '"':
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] in _CLOSERS:
+                    out.append(ch)
+                    in_string = False
+                else:
+                    out.append('\\"')
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\t":
+                out.append("\\t")
+            elif ch == "\r":
+                pass
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+                out.append(ch)
+            elif ch == ",":
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j < n and text[j] in "}]":
+                    pass                     # trailing comma
+                else:
+                    out.append(ch)
+            else:
+                out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 # Public aliases for other services (orient.py) — cross-module callers
@@ -345,10 +430,20 @@ Rules:
   ORDER is strong evidence: consecutive photos usually belong to the same item.
   A close-up (tag, label, texture, flaw) almost always belongs to the item in
   the surrounding overview shots — never make a close-up its own item.
-- Split ONLY when two photos clearly show different physical items (different
-  garment/object, clearly different color or print). When unsure, KEEP THEM
-  TOGETHER: a duplicate listing of the same item is a much worse mistake than
-  one extra photo on a listing, and the seller can drag a photo out later.
+- IDENTITY EVIDENCE OUTRANKS LOOKS. A size tag, a care label, a brand patch
+  (a Levi's leather patch with its lot number and W/L size), a model or serial
+  number, a distinctive flaw: two photos showing DIFFERENT such marks are two
+  items, even when the garments look identical. Two pairs of jeans in the
+  same wash are two listings. Count the tags and patches you can see and
+  expect at least that many items. A seller who shoots look-alikes shoots
+  each one's tag right after its overview: the tag belongs to the overview
+  before it, and the next overview starts the next item.
+- Split when two photos show different physical items (a different
+  garment/object, a clearly different color or print, or different identity
+  marks as above). When nothing tells two look-alikes apart -- no tag, patch
+  or label reads differently -- KEEP THEM TOGETHER: a duplicate listing of
+  one item is a worse mistake than one extra photo on a listing, and the
+  seller can drag a photo out later.
 - Order each group's indices with the best overview shot first.
 """
 
@@ -362,9 +457,147 @@ Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
   single print from a print set, one shoe of a pair) belongs with its set's
   overview group — those are the classic accidental splits.
 - Keep genuinely different physical products separate, even from the same
-  brand or artist.
+  brand or artist. Two groups whose tags or patches read differently (a
+  different size, lot or model number) are two items however alike they
+  look; never merge look-alikes on looks alone.
 - Nothing to merge? Return {"merge": []}.
 """
+
+
+# --- the split check: one item, or two of the same? -------------------------
+#
+# The first pass is told to keep look-alikes together when unsure, and the
+# verify pass above only ever merges. Nothing corrected the opposite mistake,
+# and it happened: two pairs of Levi's, each with its own patch and tag,
+# drafted as one listing. So a group big enough to be two items -- or, when
+# the seller's notes promised more items than the grouping found, the biggest
+# groups -- gets a second look with all of its photos, and is split only on
+# identity evidence the model can point at. Angles are never evidence.
+#
+# One garment gets three to five photos: front, back, tag, a detail. Two of
+# the same garment merged into one group is the six-to-ten-photo group.
+GROUP_SPLIT_MIN_PHOTOS = int(os.getenv("BULK_SPLIT_CHECK_MIN_PHOTOS", "6") or "6")
+# Below this a group cannot be two items with a tag each; not worth a call.
+_GROUP_SPLIT_FLOOR = 3
+
+_GROUP_SPLIT_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{"items": [{"name": "short name telling this one apart", "indices": [3, 4, 5], "evidence": "what makes this a separate physical item"}]}
+- These numbered photos were grouped as ONE item for sale. Decide whether
+  they show one physical item, or MORE THAN ONE of the same kind (two pairs
+  of the same jeans, two of the same shirt in different sizes).
+- Split ONLY on identity evidence you can point at: a different size on the
+  tag or patch, a different lot, model or serial number, a different care
+  label, a different flaw or wear pattern, a clearly different wash or color.
+  Quote the tag or patch text where you can read it.
+- Angles, lighting, a hanger vs laid flat, a close-up vs an overview, front
+  vs back are NOT evidence of a second item. A close-up of a tag belongs
+  with the overview shots taken around it.
+- Every photo index appears in exactly one item. One item: return a single
+  entry with every index and evidence "".
+"""
+
+
+def _split_candidates(groups: list[dict], expected: int = 0) -> list[int]:
+    """Which groups get the second look: every group at or above
+    GROUP_SPLIT_MIN_PHOTOS, and -- when the seller's notes named more items
+    than the grouping found -- the biggest groups down to the floor, until
+    the count could come out right. Largest first: the merged pair is the
+    biggest group in the pile."""
+    order = sorted(range(len(groups)),
+                   key=lambda gi: -len(groups[gi].get("indices") or []))
+    picked = [gi for gi in order
+              if len(groups[gi].get("indices") or []) >= GROUP_SPLIT_MIN_PHOTOS]
+    short = max(0, expected - len(groups))
+    for gi in order:
+        if short <= 0:
+            break
+        if gi in picked:
+            continue
+        if len(groups[gi].get("indices") or []) < _GROUP_SPLIT_FLOOR:
+            break
+        picked.append(gi)
+        short -= 1
+    return picked
+
+
+def _apply_split(group: dict, items) -> list[dict]:
+    """The verifier's answer for one group, applied deterministically: the
+    group is split only into items that partition its photos exactly and
+    each carry evidence. Anything else -- one item, a photo dropped or used
+    twice, a split with nothing to point at -- keeps the group as it was."""
+    want = list(group.get("indices") or [])
+    if not isinstance(items, list) or len(items) < 2:
+        return [group]
+    parts: list[dict] = []
+    seen: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            return [group]
+        idxs: list[int] = []
+        for i in item.get("indices") or []:
+            try:
+                i = int(i)
+            except (TypeError, ValueError):
+                return [group]
+            if i in seen or i not in want:
+                return [group]
+            seen.add(i)
+            idxs.append(i)
+        if not idxs or not str(item.get("evidence") or "").strip():
+            return [group]
+        parts.append({"indices": idxs,
+                      "name": str(item.get("name") or "").strip()})
+    if seen != set(want):
+        return [group]
+    base = group.get("name") or "Item"
+    out = []
+    for k, part in enumerate(parts, start=1):
+        name = part["name"] or (base if k == 1 else f"{base} ({k})")
+        out.append({"name": name, "indices": part["indices"]})
+    return out
+
+
+def _check_splits(client, images: list[bytes], groups: list[dict],
+                  expected: int = 0) -> list[dict]:
+    """Second look at the groups that could be two items. Best-effort per
+    group: a failed call keeps that group as it was."""
+    candidates = _split_candidates(groups, expected)
+    if not candidates:
+        return groups
+    result: dict[int, list[dict]] = {}
+    for gi in candidates:
+        group = groups[gi]
+        content: list[dict] = []
+        for i in group["indices"]:
+            content.append({"type": "text", "text": f"Photo {i}:"})
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(images[i]).decode("ascii")}})
+        content.append({"type": "text", "text": (
+            f'These photos were grouped as one item, "{group.get("name", "")}", '
+            "from a reseller's bulk photo dump. Is it one item?\n\n"
+            + _GROUP_SPLIT_SCHEMA)})
+        try:
+            resp = client.messages.create(
+                model=config.VISION_MODEL, max_tokens=800,
+                messages=[{"role": "user", "content": content}])
+            text = "".join(b.text for b in resp.content if b.type == "text")
+            parts = _apply_split(group, _extract_json(text).get("items"))
+        except Exception as exc:  # noqa: BLE001 - an assist, never a gate
+            log.info("bulk split check skipped for %r: %s",
+                     group.get("name", ""), exc)
+            continue
+        if len(parts) > 1:
+            log.info("bulk split check: %r -> %d items", group.get("name", ""),
+                     len(parts))
+            result[gi] = parts
+    if not result:
+        return groups
+    out: list[dict] = []
+    for gi, group in enumerate(groups):
+        out.extend(result.get(gi, [group]))
+    return out
 
 
 def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
@@ -498,6 +731,15 @@ def group_photos(images: list[bytes], notes: str = "") -> dict:
     try:
         groups = _verify_groups(client, images, groups)
     except Exception:  # noqa: BLE001 - verification is an assist, never a gate
+        pass
+    # The opposite mistake, checked AFTER the merges so nothing it separates
+    # is put back together: a group big enough to be two of the same thing,
+    # or the biggest groups when the seller's notes promised more items than
+    # were found, is looked at photo by photo and split on identity evidence.
+    try:
+        groups = _check_splits(client, images, groups,
+                               expected=expected_item_count(notes))
+    except Exception:  # noqa: BLE001 - an assist, never a gate
         pass
     return {"groups": groups}
 
@@ -1197,6 +1439,116 @@ def research_item(image_paths: list[Path], listing: Listing,
     log.info("research: %d searches -> %r (confidence=%s, %s-%s)", searches,
              str(data.get("identified", ""))[:80], data.get("confidence"),
              data.get("value_low"), data.get("value_high"))
+    return data
+
+
+# --- the art lookup: name the artist and the work ---------------------------
+#
+# A print is worth what its NAME is worth, and the identify pass can only
+# read a name that is printed on it. This pass is for the print that carries
+# none: read whatever text there is, recognise the image, take a reverse
+# image search's matches as leads, and confirm against a catalogue, a museum
+# page or an auction record before naming anyone. Same web-search tool and
+# the same never-downward rule as the research pass; main.py folds the answer
+# in under rules that can name an artist and a work and can never demote a
+# print to a poster.
+_ART_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{
+  "artist": "the artist's name as catalogued, or \"\" if not established",
+  "work": "the title of this specific work, or \"\" if not established",
+  "kind": "original | hand-signed limited edition print | open edition print | poster or reproduction -- or \"\" if the photos cannot say",
+  "year": "the year or period of the work or of this edition, or \"\"",
+  "publisher": "the publisher, printer or gallery named on the print, or \"\"",
+  "read_from_print": "the text you could actually read ON the print -- signature, printed title, edition number, publisher or copyright line -- or \"\"",
+  "evidence": "one or two sentences: what settled the artist and the work (text on the print, a reverse-image match, a composition you recognised) and which source confirmed it",
+  "title": "an eBay title <= 80 chars that LEADS with the artist's name, then the work's title, then what kind of print it is -- or \"\" if unresolved",
+  "verify": ["what the SELLER must physically check: an edition number, a pencil signature, a blind stamp, a plate mark, a watermark, the paper"],
+  "sources": ["urls you actually used"],
+  "confidence": "low|medium|high"
+}
+Rules:
+- READ THE PRINT FIRST. A signature, a printed title or caption, a publisher
+  or gallery line, an edition number, a copyright notice: transcribe what is
+  there before anything else. When the print names its artist and its work,
+  that is the answer -- confirm it with one search and stop.
+- When the print carries no name, IDENTIFY THE IMAGE. A well-known work is
+  recognisable by its composition, palette and subject; name the work you
+  recognise, then SEARCH to confirm it against the artist's catalogue, a
+  museum page, or a gallery or auction record. If a reverse image search
+  found matches they are listed below: read them as LEADS, not as the
+  answer. A match titled for the work is strong evidence; a match to a poster
+  shop says something about the edition, not about the artist.
+- Tell an ORIGINAL from a hand-signed LIMITED EDITION from an OPEN EDITION
+  print from a POSTER. Their prices differ by orders of magnitude. Say which
+  the photos support and put what would settle it in verify. NEVER resolve a
+  doubt downward: an unsigned print is not proof of a poster and a familiar
+  image is not proof of a reproduction -- the seller is holding it and you
+  are not.
+- If nothing settled the artist, leave artist and work "" and say so with
+  confidence "low". A guessed attribution is worse than a blank.
+- Cite what you used in sources. A name with no source is a guess.
+"""
+
+
+def identify_artwork(image_paths: list[Path], listing: Listing,
+                     leads: Optional[list[dict]] = None,
+                     observations: str = "") -> Optional[dict]:
+    """Name the artist and the work behind a print, with web search and any
+    reverse-image leads the caller found. Returns the parsed dict, or None
+    when the pass did not run or produced nothing usable.
+
+    Best-effort by contract, like research_item: every caller treats a
+    failure as "no answer". Raises nothing.
+    """
+    if not image_paths:
+        return None
+    try:
+        client = _client()
+        imgs = [_image_block(p) for p in image_paths[:4]]
+        lead_lines = "\n".join(
+            f"  - {lead.get('title')}"
+            + (f" ({lead.get('source')})" if lead.get("source") else "")
+            + (f" {lead.get('link')}" if lead.get("link") else "")
+            for lead in (leads or [])[:12] if lead.get("title"))
+        context = (
+            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE and "
+            "could not name the artist or the work. Establish both.\n\n"
+            f"Drafted title: {listing.title}\n"
+            f"Drafted artist/brand: {listing.brand or '(none)'}\n"
+            f"Category: {listing.category_suggestion or '(unknown)'}\n"
+            f"What the first pass saw: {(observations or '')[:600]}\n"
+            + (f"\nReverse image search matches for the first photo:\n"
+               f"{lead_lines}\n" if lead_lines
+               else "\nNo reverse image search was available for this photo.\n")
+            + _ART_SCHEMA)
+        messages = [{"role": "user", "content": imgs + [{"type": "text",
+                                                         "text": context}]}]
+        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+                  "max_uses": RESEARCH_MAX_SEARCHES}]
+        resp = client.messages.create(
+            model=config.VISION_MODEL, max_tokens=4096,
+            tools=tools, messages=messages)
+        resumes = 0
+        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
+            resumes += 1
+            messages = messages + [{"role": "assistant", "content": resp.content}]
+            resp = client.messages.create(
+                model=config.VISION_MODEL, max_tokens=4096,
+                tools=tools, messages=messages)
+        _log_usage("artwork", resp)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        data = _extract_json(text)
+    except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
+        log.info("art lookup skipped: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    searches = sum(1 for b in resp.content
+                   if getattr(b, "type", "") == "server_tool_use")
+    log.info("art lookup: %d searches -> %r by %r (confidence=%s)", searches,
+             str(data.get("work", ""))[:80], str(data.get("artist", ""))[:60],
+             data.get("confidence"))
     return data
 
 
