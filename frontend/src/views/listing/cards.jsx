@@ -526,6 +526,21 @@ export function SpecificsCard({ w }) {
     .map((s, i) => ({ ...s, i }))
     .filter((s) => !aspectNames.has(s.name.trim().toLowerCase()));
 
+  // An aspect eBay refused over that this category's list does not contain and
+  // the listing does not already carry. eBay adds required specifics to a
+  // category from time to time, and our aspect list is cached — so a listing
+  // that published fine can come back refused over a field with NO input
+  // anywhere on the page. The seller could reach it only by knowing to press
+  // "Add specific" and typing eBay's exact wording. Give it a box instead.
+  const haveNames = new Set([
+    ...aspectNames,
+    ...w.form.item_specifics.map((s) => s.name.trim().toLowerCase()),
+  ].filter(Boolean));
+  const unlisted = [...refusedNames]
+    .filter((n) => n && !haveNames.has(n))
+    .map((n) => (refused.flatMap((i) => i.fields || [])
+      .find((f) => (f || "").trim().toLowerCase() === n) || n));
+
   const catAspects = [...required, ...dimensions, ...recommendedAll];
   const filledCount = catAspects.filter((a) => w.getSpecific(a.name)).length;
   // Brand mirrors the listing's own brand field (see renderAspect), so a
@@ -797,6 +812,28 @@ export function SpecificsCard({ w }) {
           <SpecGroup title="Item size" note="the item itself, not the shipping box (e.g. “7 in”)">
             <div className="grid sm:grid-cols-3 gap-x-4 gap-y-3.5">
               {dimensions.map(renderAspect)}
+            </div>
+          </SpecGroup>
+        )}
+
+        {unlisted.length > 0 && (
+          <SpecGroup title="eBay asked for these" count={unlisted.length}>
+            <div className="flex flex-col gap-2.5">
+              <p className="text-[13px] text-ink-secondary">
+                {saidByEbay
+                  ? "eBay refused the listing over these and this category's field list doesn't carry them — eBay adds required specifics from time to time. Fill them in here."
+                  : "These were named for this listing but aren't in the category's field list. Fill them in here."}
+              </p>
+              {unlisted.map((name) => (
+                <Field key={name} label={name}>
+                  <Input
+                    value={w.getSpecific(name)}
+                    placeholder={name}
+                    className="ring-2 ring-error/70"
+                    onChange={(e) => w.upsertSpecific(name, e.target.value)}
+                  />
+                </Field>
+              ))}
             </div>
           </SpecGroup>
         )}

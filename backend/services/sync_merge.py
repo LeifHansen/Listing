@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ..config import log
 from ..models import Listing
 from .dirty_fields import TRACKED, _comparable
 
@@ -90,6 +91,45 @@ class Merged:
     kept_local: list[str] = field(default_factory=list)
 
 
+# Fields eBay never reports as empty for a listing that is LIVE. A title, a
+# category, a price, a currency, a format, a condition and at least one photo
+# are what "live" means — eBay will not let a seller remove any of them and
+# keep the listing up.
+#
+# So an empty value for one of these is a PARSE that found nothing: a response
+# shape we did not expect, a namespace, a GetSellerList row that carries less
+# than GetItem does. The remote dict always holds every key (`_text` returns
+# "" for a node it cannot find), so "eBay did not report this" and "eBay
+# cleared this" arrived here as the same value — and the merge read it as the
+# second.
+#
+# What that did: a seller's listing, published successfully, came back from a
+# routine sync with its category id wiped. Nothing said so. The next publish
+# then failed, the editor could not show which field was wrong because the
+# category is what the required-aspect list is READ from, and the listing was
+# stuck. Reported as "this listing was already published live, successfully,
+# and now I can't get it to publish".
+#
+# Fields that a seller CAN legitimately empty on eBay — a subtitle, condition
+# notes, a shipping policy, the item specifics — are deliberately not here and
+# still reconcile normally.
+NEVER_EMPTY = ("title", "category_id", "price", "currency", "listing_format",
+               "condition", "images", "image_urls")
+
+
+def _is_blank(value: Any) -> bool:
+    """Empty in the way a failed parse is empty, not the way 0 is a number."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, dict)):
+        return not value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value <= 0
+    return False
+
+
 def three_way(local: Listing, shadow: Optional[dict], remote: dict,
               dirty: Optional[set[str]] = None) -> Merged:
     """Reconcile `local` against `remote`, using `shadow` as the base.
@@ -125,6 +165,14 @@ def three_way(local: Listing, shadow: Optional[dict], remote: dict,
     for name in TRACKED:
         if name not in remote:
             # eBay did not report this field, so it says nothing about it.
+            continue
+        # ...and neither does an empty value for a field that cannot be empty
+        # on a live listing (see NEVER_EMPTY). Taking it as eBay's answer
+        # deletes the local value.
+        if (name in NEVER_EMPTY and _is_blank(remote[name])
+                and not _is_blank(getattr(local, name, None))):
+            log.warning("sync: eBay reported no %s for a live listing — keeping "
+                        "the local value rather than clearing it", name)
             continue
         base_v = _versions(name, shadow.get(name))
         local_v = _versions(name, getattr(local, name, None))
