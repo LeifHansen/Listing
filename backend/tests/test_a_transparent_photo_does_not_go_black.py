@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("PIL")
-pytest.importorskip("numpy")
 
 from pathlib import Path  # noqa: E402
 
