@@ -571,95 +571,39 @@ Frontend dev with hot reload: `cd frontend && npm run dev` (proxies `/api` and
 `/media` to the backend on :8000). `./run.sh` and the Dockerfile build the
 production bundle automatically.
 
-## Photo pipeline (engine picked by `BG_ENGINE`)
+## Photo pipeline
 
-Background removal + studio treatment run on the engine `BG_ENGINE` selects.
-Unset (auto) means: **Pixian when its keys are present, otherwise the local
-model** — the paid Photoroom/Adobe engines never run in auto mode, so a
-configured key can't quietly spend money per photo.
+Per photo, the pass does three things and nothing else: it honours the
+camera's EXIF orientation, it takes the background off when the seller asked
+(one run of the local rembg model, the matte hardened a little, the item
+composited on white), and it sizes the result for eBay -- the longest side to
+1600px, never upscaled -- saved as a JPEG with no metadata, so the GPS of the
+seller's home never rides along to a listing. The frame the seller composed is
+the frame that ships; cropping, straightening an item that lay sideways, and
+fixing a cutout the model got wrong are the seller's, in the photo studio.
 
-- **`local` (the free default)** — the in-process Pillow + rembg pipeline; no
-  key, no per-image cost. Production runs the `isnet-general-use` model
-  (`REMBG_MODEL` in fly.toml — needs the 4GB VM; smaller boxes fall back to
-  the light `u2netp`).
-- **`pixian` (the budget API)** — [Pixian.ai](https://pixian.ai) with
-  `PIXIAN_API_ID`/`PIXIAN_API_SECRET` set: roughly a tenth of Photoroom's
-  per-image price, with the local model as its in-chain fallback. Batches run
-  several photos at a time (`PHOTO_BATCH_WORKERS`, default 8).
-- **`photoroom`** — the Photoroom API (`PHOTOROOM_API_KEY`); best quality,
-  priciest. When Adobe is also configured it backs Photoroom up.
-- **`adobe`** — `ADOBE_CLIENT_ID`/`ADOBE_CLIENT_SECRET` (a server-to-server
-  OAuth credential from
-  [developer.adobe.com/console](https://developer.adobe.com/console) with the
-  Lightroom + Photoshop APIs enabled): the **Lightroom API** applies the
-  "studio" develop preset (bundled at `backend/assets/studio-preset.xmp`;
-  `ADOBE_STUDIO_PRESET_URL` overrides it), then the **Photoshop Remove
-  Background** service does the cutout. R2 is required for this path: Adobe's
-  async APIs move files exclusively via presigned URLs.
+Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,
+baked into the image; needs the 4GB VM). `u2netp` is the 4MB fallback for a
+smaller box. Both are free per photo; there is no remote engine.
 
-Either way the finished images continue through the usual flow: square crop,
-resize to 1600px, identify, draft, publish. A failed pro-engine call never
-loses a photo: the original is kept and the reason is surfaced in the API
-response (`optimize_results`) and the photo studio.
-
-**Interior-hole repair.** Every engine's matte goes through the same fix-up
-before it's composited: matting models regularly call a printed graphic, a
-bright panel or a glossy face *inside* the item "background", which is what
-punches white holes through the middle of a product. A removed region that is
-completely sealed in by subject is either a genuine see-through gap (a mug
-handle) — which shows the very backdrop we just removed — or item the model
-ate, which doesn't. So the backdrop is flooded inward from the frame border and
-every stranded region that doesn't match it is put back, with the pixels taken
-from the original photo. The same repaired mask drives the photo studio's
-auto-clean, residue highlight, and smart crop. Tunable with
-`BG_HOLE_TOLERANCE` (default 45) and `BG_FILL_HOLES=off`.
-
-**One inference at a time, but two different deadlines.** The local model is
+**One inference at a time, but two different deadlines.** The model is
 serialized (two runs at once double peak memory and OOM the box), so callers
-queue for a slot — and how long they should queue depends entirely on who is
-waiting. Someone watching the photo studio's spinner wants a fast "busy, try
-again" (`REMBG_WAIT_SECONDS`, default 25). A photo in a background batch has
-nobody to tell and gets no retry, so giving up just saves it with its
-background still on — it queues instead (`REMBG_BATCH_WAIT_SECONDS`, default
-300). A single deadline served both at 25s, which is shorter than one
-inference on a loaded box, so every photo queued behind another was guaranteed
-to time out and keep its background.
-
-**`REMBG_MAX_SIDE` is not a speed dial.** It caps the copy handed to the
-model, and both bundled models normalize their input to a fixed tensor first
-(isnet 1024x1024, u2netp 320x320) — so a smaller copy is upscaled straight
-back before any convolution runs. Measured on two pinned cores, 640 and 1024
-finish within 2% of each other; going below the model's own input size costs
-quality and buys nothing. Production matches isnet at 1024. What the setting
-genuinely controls is memory and the resolution the refinement passes run at.
-
-What *does* cost time is contention. On the same two pinned cores one
-inference takes 0.32s with nothing else running, 0.72s against one competing
-worker and 0.83s against two — so `PHOTO_LOCAL_WORKERS` is sized to cores, not
-to RAM, and `REMBG_THREADS` caps onnxruntime at one fewer than the visible
-CPUs (uvicorn still has to answer its health check while a batch runs, and a
-machine that misses those gets replaced by the platform, killing the batch).
-
-Those are worth perhaps 1.5x. The 41s and 105s inferences in the incident that
-prompted this were an order of magnitude beyond what contention explains, and
-the remaining factor is the `shared-cpu` allocation itself: sustained batches
-exhaust the burst allowance and get throttled to baseline. If batches need to
-be genuinely fast rather than merely reliable, the lever is `performance-2x`
-(dedicated cores) or a remote engine — not these settings.
+queue for a slot -- and how long they should queue depends on who is waiting.
+Someone watching the photo studio's spinner wants a fast "busy, try again"
+(`REMBG_WAIT_SECONDS`, default 25). A photo in a batch has nobody to tell and
+gets no retry, so it queues (`REMBG_BATCH_WAIT_SECONDS`, default 300) and, if
+even that runs out, is saved as shot with the reason rather than lost.
 
 **A batch survives the machine it started on.** Bulk does every photo's
 background removal up front and only then starts drafting, so until the last
-cutout lands nothing durable exists. A machine that goes away during that pass
-(a deploy, an OOM, a platform replacement) used to take the whole batch with
-it, even though the finished photos were on the volume the entire time.
-Optimized outputs are now renamed into place — so a file existing means it is
-complete — and the photo pass skips any it already has. On boot, a batch that
-was interrupted *before it drafted anything* is re-registered under its own
-job id and run again, so a browser still polling simply carries on. Batches
-interrupted during `identifying` are left alone: each finished item is already
-saved and already billed per item, so resuming would duplicate both.
-`BULK_MAX_RESUMES` (default 2) stops a batch that keeps dying from taking the
-machine with it.
+cutout lands nothing durable exists. Optimized outputs are renamed into place
+-- so a file existing means it is complete -- and the photo pass skips any it
+already has. On boot, a batch that was interrupted *before it drafted
+anything* is re-registered under its own job id and run again, so a browser
+still polling simply carries on. Batches interrupted during `identifying` are
+left alone: each finished item is already saved and already billed per item,
+so resuming would duplicate both. `BULK_MAX_RESUMES` (default 2) stops a batch
+that keeps dying from taking the machine with it.
 
 ## Bi-directional eBay sync
 

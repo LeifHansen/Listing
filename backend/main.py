@@ -50,7 +50,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        ebay_trading, image_import, images, imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
-                       orient, owed_refunds, preflight, pricing, promotions,
+                       owed_refunds, preflight, pricing, promotions,
                        recommender, sync_guard, sync_merge,
                        taxonomy, tokens)
 from .services import etsy as etsy_service
@@ -796,11 +796,6 @@ def _diagnostics() -> dict:
         "etsy_seats": config.etsy_seat_ceiling(),
         "etsy_roster": len(config.ETSY_OWNER_EMAILS),
         "etsy_gate_active": config.etsy_gate_active(),
-        # adobe_configured = credentials present; adobe_ready = pipeline can
-        # actually run (Adobe's APIs need R2 as presigned-URL hand-off storage).
-        "adobe_configured": config.adobe_configured(),
-        "adobe_ready": config.adobe_ready(),
-        "photoroom_configured": config.photoroom_ready(),
         # Photo storage: is the R2 bucket wired up — and if not, exactly which
         # pieces are missing (four credentials sat deployed for a week while a
         # bare `false` here hid that two more vars were expected) — plus how
@@ -812,9 +807,6 @@ def _diagnostics() -> dict:
                               if objstore.enabled() else None),
         "objstore_error": objstore.last_error(),
         "disk_free_mb": round(storage.disk_free_bytes() / 1e6),
-        "pixian_configured": config.pixian_ready(),
-        # The background-removal engines that will actually run, in order.
-        "bg_engines": config.bg_engine_chain(),
         "storage": "r2" if objstore.enabled() else "local",
         # Monetization, reported like every other integration: whether metering
         # is actually on, what's still missing before money can move, and which
@@ -4260,7 +4252,7 @@ async def upload(
             "Could not process the uploaded image(s)"
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
-    # Photos whose cutout failed (engine down / out of credits) kept their
+    # Photos whose cutout failed (the model found no item, or fell over) kept their
     # background — give those tokens back.
     bg_failed = sum(1 for r in opt_results if r.get("bg_error") or r.get("error"))
     if spent and bg_failed:
@@ -4316,8 +4308,7 @@ async def upload_more(
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
     orig = storage.original_dir(session_id)
-    # Save every new file first, so the orientation pass can judge them all in
-    # one batched call rather than one call per photo.
+    # Save every new file first, then hand the whole pile to one job.
     staged: list[tuple[int, Path]] = []
     for j, f in enumerate(files):
         data = await f.read()
@@ -4343,7 +4334,7 @@ async def upload_more(
     # settling it from a mirror after the process died could pay twice. Same
     # reasoning as the upload pipeline's job.
     await run_in_threadpool(_register_bulk_job, job_id, {
-        "id": job_id, "kind": "upload_more", "phase": "orienting", "done": False,
+        "id": job_id, "kind": "upload_more", "phase": "optimizing", "done": False,
         "error": None, "result": None, "session_id": session_id,
         "total_photos": len(staged), "current": 0,
     }, uid=uid)
@@ -4358,20 +4349,15 @@ async def upload_more(
 def _run_upload_more_job(job_id: str, session_id: str,
                          staged: list[tuple[int, Path]], strip_bg: bool,
                          spent: Optional[dict]) -> None:
-    """Background worker for "Add photos": the orientation pass, then the
-    optimize/cutout pass with live per-photo progress, then the R2 push. The
-    result is what the synchronous route used to answer with."""
+    """Background worker for "Add photos": the optimize/cutout pass with
+    live per-photo progress, then the R2 push. The result is what the
+    synchronous route used to answer with."""
     opt_dir = storage.optimized_dir(session_id)
     try:
-        _bulk_set(job_id, phase="orienting", beat=time.time())
-        rotations = orient.detect_rotations([src for _idx, src in staged])
         _bulk_set(job_id, phase="optimizing", current=0,
                   total_photos=len(staged), beat=time.time())
-        # One batched call so added photos share the same worker pool as the
-        # main upload path, instead of one serial round-trip per photo.
         results = images.optimize_batch(
-            [(src, opt_dir / f"img_{idx:03d}.jpg", rotations.get(src.name, 0))
-             for idx, src in staged],
+            [(src, opt_dir / f"img_{idx:03d}.jpg") for idx, src in staged],
             strip_bg,
             progress=lambda done, total: _bulk_set(
                 job_id, current=done, total_photos=total, beat=time.time()))
@@ -4392,7 +4378,7 @@ def _run_upload_more_job(job_id: str, session_id: str,
                   error=f"Photo processing failed: {exc}")
         return
     new_names: list[str] = []
-    # Photos whose cutout failed (engine down / out of credits) kept their
+    # Photos whose cutout failed (the model found no item, or fell over) kept their
     # background, so they owe nothing — counted the same way /api/upload does.
     bg_failed = 0
     for (idx, src), res in zip(staged, results):
@@ -4648,10 +4634,9 @@ async def image_remove_bg(
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
-    """Full background removal composited onto pure white — Photoroom by
-    default, Adobe Photoshop's Remove Background as the backup, the in-house
-    model when neither is configured. Returns the processed image for the
-    editor to preview (not saved)."""
+    """Full background removal composited onto pure white, on the in-house
+    model. Returns the processed image for the editor to preview (not
+    saved)."""
     _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
@@ -4675,8 +4660,7 @@ async def image_remove_bg(
         raise HTTPException(503, str(exc),
                             headers={"Retry-After": "20"}) from exc
     except ValueError as exc:
-        # Cutout failure OR an Adobe/Photoroom problem (bad credentials / out
-        # of credits / rate limit) — the message tells the user exactly which.
+        # The model found nothing to keep — the message says what to try.
         await run_in_threadpool(tokens.refund, spent)
         raise HTTPException(422, str(exc)) from exc
     except Exception:
@@ -5757,8 +5741,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # The photo pass is where a long batch spends its time, so the stop
                 # has to reach inside it rather than waiting for the whole pile.
                 should_stop=lambda: jobstore.cancel_requested(job_id))
-            # Surface a background-removal failure (out of credits, bad key, rate
-            # limit) on the job so the UI can say WHY the photos came back with
+            # Surface a background-removal failure on the job so the UI can say WHY the photos came back with
             # their backgrounds intact — silence here reads as "the feature is
             # broken" when the photo was deliberately kept unchanged.
             # A photo that failed to process AT ALL (corrupt/truncated file, a
@@ -6246,7 +6229,7 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
                 "Could not process the uploaded image(s)"
                 + (f": {errs}" if errs else ". Unsupported or corrupt file format.")))
             return
-        # Photos whose cutout failed (engine down / out of credits) kept their
+        # Photos whose cutout failed (the model found no item, or fell over) kept their
         # background — give those tokens back, exactly as /api/upload does.
         bg_failed = sum(1 for r in opt_results
                         if r.get("bg_error") or r.get("error"))

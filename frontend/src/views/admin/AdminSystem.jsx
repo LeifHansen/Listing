@@ -103,13 +103,7 @@ export function AdminSystem() {
           <Ready label="Taxonomy lookups" ok={d.taxonomy_configured} />
           <Ready label="Object storage (R2)" ok={d.objstore_configured} missing={d.objstore_missing} />
           <Ready label="Billing (Stripe)" ok={d.tokens_enabled} missing={d.tokens_missing} />
-          <Ready label="Adobe photo cleanup" ok={d.adobe_ready} />
-          <Ready label="Photoroom" ok={d.photoroom_configured} />
-          <Ready label="Pixian" ok={d.pixian_configured} />
         </ul>
-        <p className="mt-3 text-xs text-ink-faint">
-          Background removal chain: {(d.bg_engines || []).join(" → ") || "none"}
-        </p>
       </Card>
     </div>
   );

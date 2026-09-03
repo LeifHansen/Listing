@@ -24,13 +24,8 @@ PyJWT==2.10.1
 # every right not to have it.
 cryptography>=42.0
 boto3==1.35.99
-# Declared explicitly, not left to rembg to drag in: services/matte.py imports
-# numpy at module scope and services/images.py imports matte, so the app cannot
-# START without it. Relying on a transitive dependency for that meant the boot
-# requirements were a fiction -- strip rembg (as the CI smoke job does, and as
-# any slimmer deployment would) and the app stops importing. Deliberately a
-# floor rather than a pin, so pip is free to resolve whatever onnxruntime and
-# rembg want and this can never wedge the image build.
+# rembg's own dependency, declared as a floor rather than a pin so pip is free
+# to resolve whatever onnxruntime and rembg want.
 numpy>=1.26
 
 # In-house background removal: rembg pulls in onnxruntime + a ~176MB

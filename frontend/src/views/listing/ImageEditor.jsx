@@ -288,7 +288,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
       toast(
-        `Background removed${res.engine === "adobe" ? " with Adobe Photoshop" : res.engine === "photoroom" ? " with Photoroom" : res.engine === "pixian" ? " with Pixian" : " (on-server model)"} — review and Save to keep it.`,
+        `Background removed — review and Save to keep it.`,
         { kind: "success" },
       );
     } catch (e) {

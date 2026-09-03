@@ -150,13 +150,6 @@ export function UploadPhase() {
         const warning = bgFailureMessage(optResults, prepped.length);
         if (warning) toast(warning, { kind: "warning", ttl: 10000 });
       }
-      // Photos shot with the item lying sideways get straightened server-side
-      // (EXIF can't catch that) — say so, since it's a visible change.
-      const turned = optResults.filter((r) => r && r.rotated).length;
-      if (turned) {
-        toast(`Straightened ${turned} sideways photo${turned === 1 ? "" : "s"} — rotate any of them in the editor if we got one wrong.`,
-          { kind: "success" });
-      }
       files.forEach((f) => URL.revokeObjectURL(f.url));
       setSession({
         sessionId: up.session_id,

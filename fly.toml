@@ -41,28 +41,16 @@ primary_region = 'sjc'
   # secret, since it is people's email addresses). Set ETSY_ACCESS_TIER =
   # 'commercial' the day Etsy grants it and the gate retires itself.
   ETSY_ACCESS_TIER = 'personal'
-  # Background removal defaults to the FREE on-server model (BG_ENGINE unset =
-  # auto: Pixian if its keys are ever added as secrets, else local). The paid
-  # Photoroom/Adobe engines only run if a BG_ENGINE secret explicitly selects
-  # them. isnet-general-use is the best-quality local model — it needs the 4GB
-  # VM below — and is baked into the image (see Dockerfile), so no runtime
-  # download and no volume dependency.
+  # Background removal runs on the FREE on-server model, one pass per photo,
+  # the item composited on white. isnet-general-use is the better-edged of
+  # the two bundled models -- it needs the 4GB VM below -- and is baked into
+  # the image (see Dockerfile), so no runtime download and no volume
+  # dependency. u2netp (4MB) is the fallback for a smaller machine.
   REMBG_MODEL = 'isnet-general-use'
-  # Size of the copy we hand the model. Match it to the model's own input
-  # (isnet normalizes to 1024x1024 internally, whatever it is given) — feeding
-  # it less just means it upscales our downscale, which costs the same and
-  # produces a worse matte. This knob is NOT an inference-cost dial; measured
-  # on 2 pinned cores, 640 and 1024 run within 2% of each other. What it does
-  # buy is a cheaper refinement pass and a smaller working copy, which is why
-  # a memory-constrained box may still want it lower.
+  # The copy handed to the model. isnet normalizes its input to 1024x1024
+  # whatever it is given, so feeding it less means it upscales our downscale
+  # for the same cost and a worse matte.
   REMBG_MAX_SIDE = '1024'
-  # Photos in flight per batch with the local engine. Inference stays
-  # single-flight (in-process lock); this overlaps the mask/crop/encode work
-  # around it. 2, not 3: contention is what actually costs time here. Measured
-  # on 2 pinned cores, one inference takes 0.32s with nothing else running,
-  # 0.72s against one competing worker and 0.83s against two — so a third
-  # worker had no core to run on and just slowed the two doing the work.
-  PHOTO_LOCAL_WORKERS = '2'
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...

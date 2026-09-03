@@ -378,82 +378,6 @@ if TOKENS_ENABLED and DATABASE_URL and not STRIPE_SECRET_KEY:
     log.warning("Token billing is on without STRIPE_SECRET_KEY — users get the "
                 "monthly free allowance but cannot buy more tokens.")
 
-# --- Adobe Lightroom / Photoshop (Firefly Services) --------------------------
-# A paid photo engine, used only when BG_ENGINE (below) selects it — either
-# directly ("adobe") or as Photoroom's backup ("photoroom"). The Lightroom API
-# applies our "studio" develop preset, then the Photoshop Remove Background
-# service does the cutout, and the result comes back into the listing flow.
-# Credentials are a server-to-server OAuth client (id + secret) from a
-# developer.adobe.com/console project with the Lightroom + Photoshop APIs
-# enabled; both APIs draw on the same Adobe credit pool. NOTE: a single
-# "API key" string is not enough — IMS server-to-server auth needs the pair.
-#
-# Adobe's APIs are async and pull/push files via presigned URLs, so R2 must
-# also be configured — it is the hand-off storage.
-ADOBE_CLIENT_ID = _env("ADOBE_CLIENT_ID")
-ADOBE_CLIENT_SECRET = _env("ADOBE_CLIENT_SECRET")
-ADOBE_SCOPES = os.getenv("ADOBE_SCOPES",
-                         "openid,AdobeID,firefly_api,ff_apis").strip()
-ADOBE_IMS_TOKEN_URL = os.getenv(
-    "ADOBE_IMS_TOKEN_URL", "https://ims-na1.adobelogin.com/ims/token/v3").strip()
-ADOBE_IMAGE_API_BASE = os.getenv(
-    "ADOBE_IMAGE_API_BASE", "https://image.adobe.io").strip().rstrip("/")
-# Optional: use your own Lightroom preset (a URL to an exported .xmp) instead
-# of the bundled studio look (backend/assets/studio-preset.xmp).
-ADOBE_STUDIO_PRESET_URL = os.getenv("ADOBE_STUDIO_PRESET_URL", "").strip()
-
-
-def adobe_configured() -> bool:
-    """Adobe credentials are present (says nothing about the R2 hand-off)."""
-    return bool(ADOBE_CLIENT_ID and ADOBE_CLIENT_SECRET)
-
-
-def adobe_ready() -> bool:
-    """The Adobe pipeline can actually run: credentials AND R2 hand-off."""
-    return adobe_configured() and r2_configured()
-
-
-if adobe_configured() and not r2_configured():
-    log.warning(
-        "Adobe credentials are set but R2 is not configured — the Lightroom/"
-        "Photoshop pipeline needs R2 as hand-off storage (Adobe's APIs only "
-        "accept presigned URLs). Falling back to the non-Adobe photo pipeline.")
-
-# --- Background removal engines ----------------------------------------------
-# BG_ENGINE picks which engine strips photo backgrounds:
-#   "pixian"    — Pixian.ai API: the budget engine, roughly a tenth of
-#                 Photoroom's per-image price (PIXIAN_API_ID + PIXIAN_API_SECRET)
-#   "photoroom" — Photoroom API (PHOTOROOM_API_KEY); Adobe backs it up when
-#                 configured. Good quality, but expensive per image.
-#   "adobe"     — Adobe Firefly: Lightroom studio preset + Photoshop cutout
-#   "local"     — the in-house rembg model on this server (free per photo;
-#                 tunables REMBG_MODEL / REMBG_MAX_SIDE / BG_SHADOW are read
-#                 in services/images.py)
-# Unset (or "auto") means: Pixian when its keys are present, otherwise local.
-# The pricey engines NEVER run in auto mode — a configured Photoroom/Adobe key
-# alone must not quietly spend money on every photo; set BG_ENGINE to opt in.
-#
-# Whatever the chain, a failed engine never loses a photo: the original is
-# kept and the exact reason (bad key / out of credits / rate limit) is
-# surfaced — never a silent mangled cutout.
-BG_ENGINE = os.getenv("BG_ENGINE", "auto").strip().lower() or "auto"
-
-PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
-
-PIXIAN_API_ID = _env("PIXIAN_API_ID")
-PIXIAN_API_SECRET = _env("PIXIAN_API_SECRET")
-# Pixian's free integration-test mode (results are for testing, not listings).
-PIXIAN_TEST = os.getenv("PIXIAN_TEST", "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def photoroom_ready() -> bool:
-    return bool(PHOTOROOM_API_KEY)
-
-
-def pixian_ready() -> bool:
-    return bool(PIXIAN_API_ID and PIXIAN_API_SECRET)
-
-
 # Reverse image search for the art lookup: SerpApi's Google Lens engine. Off
 # without the key -- the lookup then runs on the model's own recognition plus
 # web search. See services/imagesearch.py.
@@ -463,26 +387,6 @@ SERPAPI_KEY = _env("SERPAPI_KEY")
 def serpapi_ready() -> bool:
     return bool(SERPAPI_KEY)
 
-
-def bg_engine_chain() -> list[str]:
-    """Background-removal engines to try, in order. Always non-empty: the
-    local model needs no credentials, so it's the floor. An explicit BG_ENGINE
-    whose credentials are missing falls back to the auto chain (with a warning
-    at import time, below)."""
-    if BG_ENGINE == "photoroom" and photoroom_ready():
-        return ["photoroom", "adobe"] if adobe_ready() else ["photoroom"]
-    if BG_ENGINE == "adobe" and adobe_ready():
-        return ["adobe"]
-    if BG_ENGINE == "pixian" and pixian_ready():
-        return ["pixian"]
-    if BG_ENGINE == "local":
-        return ["local"]
-    return ["pixian", "local"] if pixian_ready() else ["local"]
-
-
-if BG_ENGINE not in ("auto", "local") and BG_ENGINE not in bg_engine_chain():
-    log.warning("BG_ENGINE=%r isn't fully configured (missing credentials?) — "
-                "using %s instead.", BG_ENGINE, "/".join(bg_engine_chain()))
 
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
@@ -794,7 +698,6 @@ def _watched_names() -> list[tuple[str, str]]:
         ("SECRET_KEY", SECRET_KEY),
         ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
         ("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET),
-        ("PHOTOROOM_API_KEY", PHOTOROOM_API_KEY),
         ("SERPAPI_KEY", SERPAPI_KEY),
         ("EBAY_VERIFICATION_TOKEN", EBAY_VERIFICATION_TOKEN),
         ("R2_ACCOUNT_ID", R2_ACCOUNT_ID),

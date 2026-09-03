@@ -69,7 +69,6 @@ SAFE_TO_REPEAT = {
     "backend.services.ebay_notify._app_token":
         "application token fetch — no seller state.",
     "backend.services.taxonomy._app_token": "same as ebay_notify._app_token.",
-    "backend.services.adobe._access_token": "same as ebay_notify._app_token.",
     "backend.ebay_auth._create_policy":
         "creates a business policy, but every caller looks the account up "
         "FIRST and adopts an existing one (ensure_payment_policy and friends), "
@@ -89,17 +88,6 @@ SAFE_TO_REPEAT = {
     "backend.services.tokens._stripe_post":
         "creates a Checkout Session, which moves no money — the webhook "
         "credits the purchase, idempotently, and is the thing that charges.",
-    "backend.services.images._pixian_cutout":
-        "a paid cutout API, so a lost answer may still be billed for one "
-        "image. Repeating costs one more cutout and nothing of the seller's "
-        "changes — no listing, no order, no marketplace state. Worth knowing, "
-        "not worth a dialog.",
-    "backend.services.images._photoroom_cutout": "same as _pixian_cutout.",
-    "backend.services.adobe._submit":
-        "submits an async image job and returns a poll URL. The job operates "
-        "on an image WE uploaded, not on anything of the seller's on another "
-        "service; a lost answer loses the poll URL, so the work is redone and "
-        "nothing is left behind that anyone can see.",
 }
 
 _VERBS = {"post", "put", "patch", "delete", "request"}
