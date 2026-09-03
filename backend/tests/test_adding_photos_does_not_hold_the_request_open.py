@@ -48,14 +48,13 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(main.storage, "optimized_dir", lambda sid: opt)
     monkeypatch.setattr(main.storage, "list_optimized",
                         lambda sid: sorted(p.name for p in opt.iterdir()))
-    monkeypatch.setattr(main.orient, "detect_rotations", lambda paths: {})
     monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
     seen: dict = {}
 
     def optimize_batch(jobs, remove_bg=False, progress=None, **kw):
         seen["remove_bg"] = remove_bg
         out = []
-        for i, (src, dst, _rot) in enumerate(jobs):
+        for i, (src, dst) in enumerate(jobs):
             dst.write_bytes(src.read_bytes())
             if progress:
                 progress(i + 1, len(jobs))
@@ -108,7 +107,7 @@ def test_the_background_choice_reaches_the_job(client):
 def test_a_pile_nothing_could_be_made_of_fails_the_job_not_the_request(client, monkeypatch):
     monkeypatch.setattr(main.images, "optimize_batch",
                         lambda jobs, remove_bg=False, progress=None, **kw:
-                        [{"file": dst.name, "error": "corrupt"} for _s, dst, _r in jobs])
+                        [{"file": dst.name, "error": "corrupt"} for _s, dst in jobs])
     start = _add(client, n=1)
     body = _finish(client, start["job_id"])
     assert "Could not process" in body["error"]

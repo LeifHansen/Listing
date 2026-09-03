@@ -55,7 +55,7 @@ def api():
 OPERATOR_KEYS = (
     "ebay_missing", "objstore_missing", "objstore_bucket",
     "objstore_url_mode", "objstore_error", "disk_free_mb", "tokens_missing",
-    "stripe_live_mode", "config_warnings", "db", "bg_engines", "ebay_env",
+    "stripe_live_mode", "config_warnings", "db", "ebay_env",
 )
 
 
