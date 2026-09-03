@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Sparkles, FolderOpen, Trash2, Camera, MessageSquareText } from "lucide-react";
+import {
+  Sparkles, FolderOpen, Trash2, Camera, MessageSquareText, Check, CheckCheck, X,
+} from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import { lastRemoveBg, rememberRemoveBg } from "@/lib/photoPrefs";
 import {
@@ -77,6 +79,14 @@ export function UploadPhase() {
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Select mode: pick several photos out of the pile and drop them in one go.
+  // A per-tile trash is one tap for one wrong photo, and forty taps for the
+  // half of a shoot that came out dark -- which is what a seller sorting a
+  // 250-photo batch actually has. Selection is keyed by the object URL, not
+  // the index: an index shifts under every removal, so deleting a set by
+  // index deletes the wrong photos as soon as the first one goes.
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState(() => new Set());
   // Live status of the background pipeline job (phase/current/total_photos),
   // so the wait card reports what's actually happening instead of guessing.
   const [stage, setStage] = useState(null);
@@ -112,6 +122,38 @@ export function UploadPhase() {
       return cur.filter((_, j) => j !== i);
     });
   };
+
+  const togglePick = (url) => {
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(url)) next.add(url);
+      return next;
+    });
+  };
+
+  // Leave select mode with nothing held, so the next time it is entered it
+  // does not open on a selection the seller made minutes ago.
+  const endSelecting = () => {
+    setSelecting(false);
+    setPicked(new Set());
+  };
+
+  const removePicked = () => {
+    setFiles((cur) => {
+      const kept = cur.filter((f) => !picked.has(f.url));
+      // Revoke only what actually left: a URL still on screen must keep
+      // working, and a revoked one renders as a broken tile.
+      cur.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
+      return kept;
+    });
+    endSelecting();
+  };
+
+  // A pile emptied by other means (every photo removed one at a time) must
+  // not leave the toolbar behind on a grid that is gone.
+  useEffect(() => {
+    if (!files.length && selecting) endSelecting();
+  }, [files.length, selecting]);
 
   // The batch screen takes over on the click — no waiting on the upload with
   // the Sell tab still on screen — which unmounts this component, so the
@@ -257,32 +299,109 @@ export function UploadPhase() {
             transition={{ duration: 0.2 }}
           >
             <Card className="flex flex-col gap-5">
+              {/* The pile's own toolbar. Out of select mode it is a count and
+                  one way in; in select mode it is what the seller is doing:
+                  how many are held, select-all/none, and the delete. */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-sm font-semibold text-ink">
+                  {selecting
+                    ? `${picked.size} of ${files.length} selected`
+                    : `${files.length} photo${files.length === 1 ? "" : "s"}`}
+                </p>
+                <div className="ml-auto flex items-center gap-2">
+                  {selecting ? (
+                    <>
+                      <Button
+                        variant="ghost" size="sm"
+                        onClick={() => setPicked(picked.size === files.length
+                          ? new Set()
+                          : new Set(files.map((f) => f.url)))}
+                      >
+                        <CheckCheck aria-hidden />
+                        {picked.size === files.length ? "Select none" : "Select all"}
+                      </Button>
+                      <Button
+                        variant="danger" size="sm"
+                        disabled={!picked.size}
+                        onClick={removePicked}
+                      >
+                        <Trash2 aria-hidden />
+                        Delete{picked.size ? ` ${picked.size}` : ""}
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={endSelecting}>
+                        <X aria-hidden /> Done
+                      </Button>
+                    </>
+                  ) : (
+                    <Button variant="secondary" size="sm"
+                      onClick={() => setSelecting(true)}>
+                      <Check aria-hidden /> Select
+                    </Button>
+                  )}
+                </div>
+              </div>
+
               <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3">
                 <AnimatePresence>
-                  {files.map((f, i) => (
-                    <motion.div
-                      key={f.url}
-                      layout
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.85 }}
-                      transition={{ duration: 0.18 }}
-                      className="relative rounded-tile overflow-hidden border border-line aspect-square group"
-                    >
-                      <img src={f.url} alt="" className="size-full object-cover" />
-                      <button
-                        type="button"
-                        aria-label="Remove photo"
-                        title="Remove photo"
-                        onClick={() => removeFile(i)}
-                        className="absolute top-1.5 left-1.5 z-10 grid place-items-center size-7 rounded-full
-                          bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card cursor-pointer
-                          hover:text-error hover:border-error/40 transition-colors duration-150"
+                  {files.map((f, i) => {
+                    const on = picked.has(f.url);
+                    return (
+                      <motion.div
+                        key={f.url}
+                        layout
+                        initial={{ opacity: 0, scale: 0.9 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.85 }}
+                        transition={{ duration: 0.18 }}
+                        className={cn(
+                          "relative rounded-tile overflow-hidden border aspect-square group",
+                          on ? "border-blue ring-2 ring-blue" : "border-line",
+                        )}
                       >
-                        <Trash2 size={13} aria-hidden />
-                      </button>
-                    </motion.div>
-                  ))}
+                        {/* In select mode the whole tile is the target — a
+                            7px corner control is not something to hit forty
+                            times on a phone. The button IS the tile, so it
+                            carries the label and the pressed state. */}
+                        {selecting ? (
+                          <button
+                            type="button"
+                            aria-pressed={on}
+                            aria-label={`${on ? "Deselect" : "Select"} photo ${i + 1}`}
+                            onClick={() => togglePick(f.url)}
+                            className="absolute inset-0 z-10 cursor-pointer"
+                          >
+                            <img src={f.url} alt="" className="size-full object-cover" />
+                            <span className={cn(
+                              "absolute inset-0 transition-colors duration-150",
+                              on ? "bg-blue/25" : "bg-transparent hover:bg-ink/10",
+                            )} />
+                            <span className={cn(
+                              "absolute top-1.5 left-1.5 grid place-items-center size-7 rounded-full border shadow-card transition-colors duration-150",
+                              on ? "bg-blue border-blue text-on-accent"
+                                : "bg-card/85 backdrop-blur border-line text-transparent",
+                            )}>
+                              <Check size={15} strokeWidth={3} aria-hidden />
+                            </span>
+                          </button>
+                        ) : (
+                          <>
+                            <img src={f.url} alt="" className="size-full object-cover" />
+                            <button
+                              type="button"
+                              aria-label="Remove photo"
+                              title="Remove photo"
+                              onClick={() => removeFile(i)}
+                              className="absolute top-1.5 left-1.5 z-10 grid place-items-center size-7 rounded-full
+                                bg-card/85 backdrop-blur border border-line text-ink-faint shadow-card cursor-pointer
+                                hover:text-error hover:border-error/40 transition-colors duration-150"
+                            >
+                              <Trash2 size={13} aria-hidden />
+                            </button>
+                          </>
+                        )}
+                      </motion.div>
+                    );
+                  })}
                 </AnimatePresence>
               </div>
 
