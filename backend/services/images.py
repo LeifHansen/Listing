@@ -1,29 +1,27 @@
-"""Image optimization tuned for eBay listing photos.
+"""Listing photos: as shot, or with the background taken off — and upright.
 
-eBay recommends square-ish images with the longest side >= 1600px for zoom,
-clean framing, and good lighting.
+Per photo the pass does exactly three things. It honours the camera's EXIF
+orientation. It takes the background off when the seller asked for that:
+one run of the local model, the matte hardened a little, the item composited
+on white. And it sizes the result for eBay — the longest side to 1600px,
+never upscaled — saved as a JPEG that carries no metadata, so the GPS of the
+seller's home never rides along to a public listing.
 
-The pipeline (per photo): auto-orient -> background removal (the cutout
-composited on white with our soft contact shadow) -> subject-aware square
-crop -> resize to target -> a finishing sharpen -> save.
+Deliberately nothing else. The pass used to be a pipeline: a two-round vision
+call to guess whether the ITEM lay sideways, a matte refined by a border
+solidifier, an interior-hole repair, a contact shadow, a square crop with
+subject detection, a finishing sharpen, three paid cutout APIs as alternate
+engines, and a guard for every way those could go wrong. Each was reasonable
+on its own; together they made every photo cost a minute and every result a
+surprise, and the seller asked for the photos as shot or cut out, and to do
+the rest themselves in the editor. So: the model's own matte ships, the
+frame the seller composed is the frame that ships, and a wrong cutout is one
+tap of Revert.
 
-Deliberately nothing else. The photo's own tone is left alone (see _finish):
-what a listing shot has to get right is a clean white background and an item
-that is all there, and no amount of re-levelling the finished canvas moves
-either of those.
-
-Whatever engine produces the matte, the local one's silhouette is solidified
-before anything is composited (_solidify_border): the border is closed into one
-continuous outline, floating crumbs are dropped, and the outline is then snapped
-onto the item's real edge using the photo itself. A cutout is only ever as good
-as that boundary — every visible failure (bites out of a hem, a fringe of the
-old backdrop, an item shedding fragments) lives there.
-
-Which remover runs is config.bg_engine_chain() (BG_ENGINE): by default the
-budget Pixian.ai API when its keys are present, otherwise the in-house rembg
-model — so the module works with no external service at all. The pricey
-engines (Photoroom, and Adobe's Lightroom-preset + Photoshop-cutout combo)
-run only when BG_ENGINE explicitly selects them.
+One model inference runs at a time (_INFER_LOCK): two at once double peak
+memory and kill a small machine. Callers queue for the slot with a deadline —
+short for a person watching the studio's spinner, long for a photo in a batch
+that has nobody to tell and no retry (see INFER_WAIT_SECONDS).
 """
 from __future__ import annotations
 
@@ -35,9 +33,7 @@ from typing import Optional
 
 from PIL import Image, ImageFile, ImageFilter, ImageOps
 
-from .. import config
 from ..config import log
-from . import matte
 from ..storage import natural_key
 
 # Phone uploads over flaky connections arrive missing their last few bytes
@@ -55,126 +51,51 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-TARGET_SIZE = 1600  # px, longest side per eBay zoom recommendation
+TARGET_SIZE = 1600  # px, longest side per eBay's zoom recommendation
 # 90 is the knee: below it JPEG starts showing ringing on the hard
-# subject/white-canvas edge a cutout creates, above it the file grows for
-# detail eBay's own re-encode discards anyway.
+# subject/white edge a cutout creates, above it the file grows for detail
+# eBay's own re-encode discards anyway.
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90") or 90)
-CANVAS_COLOR = (248, 248, 248)  # near-white, looks clean on eBay
-WHITE = (255, 255, 255)  # pure white when the user asks to strip the background
-# Downscale anything larger than this (longest side) up front: a 150MP phone
-# panorama is under the 20MB byte cap but makes several full-res RGB copies
-# (~1GB+) during autocrop/pad and can OOM a small machine. We only ever output
-# TARGET_SIZE, so working above ~2x that buys nothing.
-MAX_WORK_SIDE = 3200
+WHITE = (255, 255, 255)
 
-
-def _flatten(img: Image.Image) -> Image.Image:
-    """Return an RGB image, compositing any alpha onto the near-white canvas
-    instead of dropping it. A plain `.convert("RGB")` discards transparency and
-    leaves formerly-transparent pixels black; product cutout PNGs need the
-    alpha composited so the background reads as the clean canvas, not black."""
-    if img.mode == "RGB":
-        # Already flat. `convert` would hand back a full-size COPY, and this
-        # now runs once per photo on the pipeline's main path — on a 250-photo
-        # batch that is 250 pointless 30MB allocations on a machine that is
-        # already the reason MAX_WORK_SIDE exists.
-        return img
-    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-        rgba = img.convert("RGBA")
-        canvas = Image.new("RGBA", rgba.size, CANVAS_COLOR + (255,))
-        canvas.alpha_composite(rgba)
-        return canvas.convert("RGB")
-    return img.convert("RGB")
-
-# In-house background removal — rembg (ONNX U^2-Net family) running in-process,
-# no external service. rembg loads its model on first use; keep the session
-# process-global so we pay that cost once, and only when background removal is
-# actually used.
-#
-# Model choice is a hard memory ceiling. Empirically:
-#   - "u2netp" (~4MB) is light and stable even on a 2GB machine, but weak on
-#     dark/black or low-contrast items (can mangle them). It's the code
-#     default so dev machines and small boxes always work.
-#   - "u2net" (full, ~176MB) and "isnet-general-use" (1024x1024) need a 4GB+
-#     machine — on 2GB they OOM-kill the box. isnet has the best edges and is
-#     what production runs (fly.toml sets REMBG_MODEL=isnet-general-use with a
-#     4GB VM) now that the local model is the default no-per-image-cost engine.
+# --- the local model --------------------------------------------------------
+# u2netp (~4MB) runs on a 2GB machine; isnet-general-use (~176MB) has the
+# better edges and is what production selects in fly.toml (it needs the 4GB
+# VM). Both are baked into the image (see Dockerfile).
 _REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
-_rembg_session = None
+# The copy handed to the model. Not a speed dial: both models normalize their
+# input to a fixed tensor first (isnet 1024x1024, u2netp 320x320), so a smaller
+# copy is upscaled straight back before any convolution runs. 1024 matches
+# isnet, so its matte is not a downscale that got upscaled.
+_REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "1024") or "1024")
+# Harden the soft matte so the background is gone rather than faintly there.
+# Alpha below LOW is dropped, above HIGH is kept solid, and the band between is
+# ramped into a soft edge. Erring toward keeping the item: with no border pass
+# to rebuild an edge the thresholds shaved, a wide band costs a faint fringe
+# where a narrow one costs a bite out of a hem.
+_ALPHA_LOW = int(os.getenv("REMBG_ALPHA_LOW", "64") or 64)
+_ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "192") or 192)
+# A matte that keeps less than this share of the frame found no item — a
+# close-up texture, a dark item on a dark table — and shipping it would ship
+# a white square. The photo is kept as shot instead, and says so.
+_MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
 
-# Harden the soft matte into a near-binary mask so the background is fully
-# gone, not faintly visible. Alpha below _ALPHA_LOW is forced to background,
-# above _ALPHA_HIGH to solid subject; the thin band between keeps a 1-2px
-# anti-aliased edge. A soft matte (mid-alpha everywhere) is what leaves a
-# "ghost" of the old background compositing through as gray fuzz.
-# Env-tunable (REMBG_ALPHA_LOW / REMBG_ALPHA_HIGH) so cutout sensitivity can
-# be re-dialed on a deployment without a code change: RAISE LOW toward ~120 if
-# leftover background ghosting shows up, LOWER it toward ~60 if the cutout eats
-# parts of the item. The defaults stay where the border-solidify pass
-# (_solidify_border) was tuned against them — that pass now rebuilds edges the
-# old thresholds used to shave, so loosening them by default is no longer the
-# fix it once was.
-_ALPHA_LOW = int(os.getenv("REMBG_ALPHA_LOW", "90") or 90)
-_ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "170") or 170)
-# If the cutout keeps less than this fraction of the frame as opaque subject,
-# the model ate the item (dark denim, close-up textures, low contrast) — keep
-# the original photo rather than saving a destroyed one.
-_MIN_FG_COVERAGE = 0.045
-# When the removed (background) region is both large (>50% of the frame) and
-# darker than this mean luminance, it's almost certainly a dark ITEM the model
-# mistook for background (not a real backdrop, which is white/neutral) — keep
-# the original. Tunable via DARK_BG_LUMA.
-_DARK_BG_LUMA = int(os.getenv("DARK_BG_LUMA", "70") or "70")
-# ...and when a dark surround leaves less than this much of the frame, the
-# survivor is about the size of a chest print, so the cutout goes out flagged
-# for review rather than unremarked. Above it, a dark surface is just a dark
-# surface and the cutout is reported clean.
-_DARK_REVIEW_COVERAGE = float(os.getenv("DARK_REVIEW_COVERAGE", "0.20") or 0.20)
-# Size of the copy handed to the background model. Read the name carefully:
-# this caps OUR image, not the model's work.
-#
-# It is tempting to treat this as an inference-cost dial — halve the side,
-# quarter the pixels, quarter the time — and that is simply not how these
-# models run. Both of the ones shipped here normalize their input to a fixed
-# tensor first (isnet to 1024x1024, u2netp to 320x320), so a smaller copy is
-# upscaled straight back before a single convolution happens. Measured on two
-# pinned cores, 640 and 1024 finish within 2% of each other. Going smaller
-# than the model's own input therefore buys nothing and costs real quality:
-# the matte is then a downscale that got upscaled, and it still has to be
-# resized once more to the photo.
-#
-# What it does control is memory (the working copy, which is why a 2GB box may
-# want it lower) and the resolution the refinement passes run at, since
-# _cutout_on_white refines the matte at its native size.
-_REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "640") or "640")
-# The photo studio can run the matte at a different size from a batch — it
-# does one photo at a time with a seller watching. Defaults to the batch size;
-# per the above, raising it past the model's own input size does nothing.
-_STUDIO_MAX_SIDE = int(os.getenv("REMBG_STUDIO_MAX_SIDE", str(_REMBG_MAX_SIDE))
-                       or str(_REMBG_MAX_SIDE))
-# Serialize model inference: two isnet runs at once (e.g. a studio cutout during
-# a bulk background-removal batch) would double peak memory and OOM the machine.
 _INFER_LOCK = threading.Lock()
-# ...and never wait on that lock forever. A serialized queue plus an unbounded
-# wait is precisely how "remove background" comes to APPEAR HUNG: the request
-# is alive and doing nothing, behind a bulk job that has forty photos to get
-# through. A bounded wait turns that into an answer — "busy, try again" — which
-# the seller can act on, instead of a spinner that never resolves.
-#
-# That reasoning holds for a person watching a spinner and NOT for a photo in a
-# background batch, which is the distinction this pair of deadlines draws.
-# Giving up is only better than queueing when someone is waiting on the answer:
-# a batch photo that abandons its turn doesn't get a retry, it gets SILENTLY
-# SAVED WITH ITS BACKGROUND STILL ON, which is the one outcome the whole
-# feature exists to avoid. One deadline served both, at 25s — shorter than a
-# single inference on a loaded box — so every photo queued behind another one
-# was guaranteed to time out and keep its background. The batch deadline is
-# therefore long enough to outlast a real queue; the interactive one stays
-# short, because there the fast answer IS the useful one.
+# How long a caller queues for the one inference slot. A person watching the
+# photo studio's spinner wants a prompt "busy, try again"; a photo in a batch
+# has nobody to tell and gets no retry — giving up would silently save it with
+# its background still on — so it queues for as long as a real batch takes.
 INFER_WAIT_SECONDS = float(os.getenv("REMBG_WAIT_SECONDS", "25") or 25)
 BATCH_INFER_WAIT_SECONDS = float(
     os.getenv("REMBG_BATCH_WAIT_SECONDS", "300") or 300)
+# One inference past this is reported as pathological. ONNX cannot be
+# interrupted mid-run, so this aborts nothing; it makes a slow model visible.
+INFER_SLOW_SECONDS = float(os.getenv("REMBG_SLOW_SECONDS", "20") or 20)
+
+_rembg_session = None
+_model_ready = False
+_model_load_seconds: float = 0.0
+_last_infer_seconds: float = 0.0
 
 
 class CutoutBusy(RuntimeError):
@@ -182,22 +103,10 @@ class CutoutBusy(RuntimeError):
     nothing is broken, the machine is just full."""
 
 
-# How long one inference may take before it is reported as pathological. ONNX
-# cannot be interrupted mid-run, so this does not abort anything; it makes a
-# slow model visible in the logs instead of leaving "it felt slow" as the only
-# evidence anyone ever has.
-INFER_SLOW_SECONDS = float(os.getenv("REMBG_SLOW_SECONDS", "20") or 20)
-_last_infer_seconds: float = 0.0
-# The one-time cost, kept apart from the inference number on purpose:
-# importing onnxruntime and building the session around a 176MB model file.
-# The first call used to time both under one clock, so every boot's warm-up
-# reported itself as a ~107s "inference" on /api/ready, fired the
-# slow-inference warning below into the error feed (six deploys in a day
-# counted six), and then sat there as the last reading until a real photo
-# came through -- which on a quiet day is never. Nothing anywhere could then
-# say what an inference actually costs on the box.
-_model_load_seconds: float = 0.0
-_model_ready = False
+class Stopped(Exception):
+    """Raised inside a photo batch that its caller called off mid-run. Nothing
+    is left half-written: optimize() renames its result into place, so the
+    photos already finished stay valid and a stopped run is still resumable."""
 
 
 def engine_state() -> dict:
@@ -206,463 +115,13 @@ def engine_state() -> dict:
             "busy": _INFER_LOCK.locked(),
             "last_inference_seconds": round(_last_infer_seconds, 2),
             "model_load_seconds": round(_model_load_seconds, 2)}
-# Draw a soft contact shadow under the cut-out subject so the white-background
-# result still reads like a studio product shot. Pure Pillow, no external API.
-# Disable with BG_SHADOW=off.
-_BG_SHADOW = os.getenv("BG_SHADOW", "on").strip().lower() not in (
-    "off", "0", "false", "no", "none", "")
-# Re-attach interior holes the matte punches through the middle of the item
-# (see _fill_interior_holes). Off switch: BG_FILL_HOLES=off.
-_FILL_HOLES = os.getenv("BG_FILL_HOLES", "on").strip().lower() not in (
-    "off", "0", "false", "no", "none", "")
-# How far (RGB euclidean distance) an enclosed removed region has to sit from
-# the backdrop we actually removed before we call it item rather than a real
-# see-through gap. ~26 per channel: comfortably above JPEG noise and backdrop
-# vignetting, well below a printed graphic or a glossy panel.
-_HOLE_BG_TOL = float(os.getenv("BG_HOLE_TOLERANCE", "45") or "45")
-# A sealed hole the size of a picture, full of detail, IS a picture. The
-# colour test above cannot see that: a dark painting in its frame, on a dark
-# table, matches the table -- the model called the picture background, the
-# frame survived on its own, and a seller's abstract painting was drafted as
-# an empty frame (2026-09-02). A see-through gap shows the flat wall behind
-# the item; a picture, a print, a printed panel show edges. So an enclosed
-# hole at least this fraction of the item's footprint is put back whatever
-# its colour when it carries clearly more detail (mean luma gradient) than
-# the backdrop around the item: the larger of a floor above JPEG noise and a
-# multiple of the backdrop's own.
-_HOLE_PICTURE_FRACTION = float(os.getenv("BG_HOLE_PICTURE_FRACTION", "0.12") or "0.12")
-_HOLE_DETAIL_RATIO = float(os.getenv("BG_HOLE_DETAIL_RATIO", "2.0") or "2.0")
-_HOLE_DETAIL_FLOOR = float(os.getenv("BG_HOLE_DETAIL_FLOOR", "4.0") or "4.0")
-# Hole analysis runs on a downscaled copy: the regions we're looking for are
-# blobs, not hairlines, and 512px keeps a 1600px photo at a few milliseconds.
-# Scaling down can only bridge a thin subject wall (which makes a hole read as
-# ordinary background and simply not get filled), so it never invents a fill.
-_HOLE_SCAN_SIDE = 512
-# Safety valve on the flood: each sweep propagates in straight lines, so a
-# region needing more than this many direction changes to reach the frame is
-# treated as enclosed. Real photos converge in a handful.
-_FLOOD_SWEEPS = 24
-
-# --- border solidification --------------------------------------------------
-# Before anything gets composited, the raw matte's boundary is consolidated
-# into one solid, continuous silhouette that follows the item's real edge (see
-# _solidify_border). This is what stops the "chewed" cutouts: denim hems, thin
-# straps and low-contrast edges come back from the model as a ragged, pitted
-# outline, and compositing that straight onto white saws visible bites out of
-# the product. Off switch: BG_SOLIDIFY=off (falls back to the old plain erode).
-_SOLIDIFY = os.getenv("BG_SOLIDIFY", "on").strip().lower() not in (
-    "off", "0", "false", "no", "none", "")
-# Border work runs on a downscaled copy — the decisions are shape-scale, not
-# pixel-scale, and 768px keeps a 1600px photo at a few milliseconds. The mask
-# comes back up bilinearly, which also gives the edge its anti-aliasing.
-_SOLIDIFY_SCAN_SIDE = int(os.getenv("BG_SOLIDIFY_SCAN_SIDE", "768") or "768")
-# Gap-bridging radius as a fraction of the short side: a morphological close
-# with this sigma seals notches and pinholes up to ~2x its width and smooths
-# the staircase left by upscaling a small matte. 0.6% of 1600px ~ 10px, which
-# is a frayed hem — well under any real gap between, say, two shoes.
-_EDGE_CLOSE_FRAC = float(os.getenv("BG_EDGE_CLOSE", "0.006") or "0.006")
-# How far the border may travel, in or out, as a fraction of the short side
-# (4% of 1600px = 64px). Every step is gated on the photo's own colours, so
-# this is a ceiling on how much of a mangled edge can be rebuilt, not a
-# distance the border will actually move.
-_EDGE_SNAP_FRAC = float(os.getenv("BG_EDGE_SNAP", "0.04") or "0.04")
-# Colour distance from the measured backdrop at which a pixel stops being
-# backdrop and starts being item, in the luma-damped space below.
-_EDGE_SNAP_TOL = float(os.getenv("BG_EDGE_TOLERANCE", "24") or "24")
-# Brightness counts less than colour when deciding backdrop vs item: a contact
-# shadow is the backdrop's own colour turned down, so weighting luma equally
-# would read it as "not the backdrop" and grow the item into its own shadow.
-_LUMA_WEIGHT = float(os.getenv("BG_LUMA_WEIGHT", "0.35") or "0.35")
-# Refuse a snap that inflates the silhouette by more than this share of itself
-# — that is the item leaking into scenery, not a border being recovered.
-_MAX_GROWTH = float(os.getenv("BG_MAX_GROWTH", "0.35") or "0.35")
-# Growth stops at any edge in the photo stronger than this share of the
-# backdrop-to-item contrast. The item's own outline is the strongest edge
-# around it, so the border lands on it instead of wandering past — and the
-# soft edge where a cast shadow meets the item stops the border there too,
-# which is what keeps the item from dragging its shadow onto the white canvas.
-_EDGE_BLOCK_FRAC = float(os.getenv("BG_EDGE_BLOCK", "0.4") or "0.4")
-# How many pixels the border may reclaim through backdrop-coloured shade.
-_SHADE_REACH = int(os.getenv("BG_SHADE_REACH", "2") or "2")
-# ...and how dim a pixel can get before it's too dark to be the backdrop in
-# shadow at all, as a fraction of the backdrop's brightness. Below this it's
-# treated as item, so black jeans on a white sweep still get their border back.
-_SHADE_FLOOR = float(os.getenv("BG_SHADE_FLOOR", "0.5") or "0.5")
-# A backdrop this varied (mean per-channel std) is a cluttered scene, not a
-# sweep — there the "off-backdrop means item" inference doesn't hold, so the
-# border is only trimmed inward, never grown.
-_BUSY_BACKDROP_STD = float(os.getenv("BG_BUSY_BACKDROP", "34") or "34")
-def _blur_threshold(mask: Image.Image, sigma: float, cut: int) -> Image.Image:
-    """Binary morphology via blur + threshold: cut < 128 dilates the mask by
-    about `sigma`, cut > 128 erodes it by about the same, and both smooth the
-    contour on the way. Far cheaper than a rank filter at these radii, and the
-    radius is a float so it can scale with the photo."""
-    if sigma <= 0:
-        return mask
-    return mask.filter(ImageFilter.GaussianBlur(sigma)).point(
-        lambda a: 255 if a >= cut else 0)
-
-
-def _close_mask(mask: Image.Image, sigma: float) -> Image.Image:
-    """Morphological close: grow then shrink, which fills gaps, notches and
-    pinholes up to ~2*sigma across while leaving the silhouette's size and its
-    convex corners essentially where they were."""
-    return _blur_threshold(_blur_threshold(mask, sigma, 40), sigma, 215)
-
-
-def _colour_gap(luma, chroma, reference, luma_weight: Optional[float] = None):
-    """Distance from every pixel to one reference colour, given the pixels
-    already split into brightness and colour (see _colour_split), with
-    brightness damped by `luma_weight` (_LUMA_WEIGHT by default; 0 compares
-    colour alone, ignoring how light or dark the pixel is).
-
-    Plain RGB distance can't tell a shadow from a different material: a contact
-    shadow is the backdrop's own colour with the light taken out, and at full
-    luma weight it reads as far from the backdrop as the item does. Comparing
-    mostly on colour and only a little on brightness keeps shadows, vignetting
-    and uneven lighting on the backdrop's side of the line."""
-    import numpy as np
-
-    weight = _LUMA_WEIGHT if luma_weight is None else luma_weight
-    ref_luma = float(np.mean(reference))
-    ref_chroma = np.asarray(reference, dtype=np.float32) - ref_luma
-    return np.sqrt(weight * (luma - ref_luma) ** 2
-                   + ((chroma - ref_chroma) ** 2).sum(axis=-1))
-
-
-def _colour_split(rgb):
-    """Split pixels into (brightness, colour-without-brightness) once, so the
-    several comparisons a border decision needs don't each redo it."""
-    luma = rgb.mean(axis=-1)
-    return luma, rgb - luma[..., None]
-
-
-def _edge_strength(src: Image.Image):
-    """Per-pixel edge magnitude of a photo, mildly blurred first so fabric
-    weave and sensor noise don't register as boundaries."""
-    import numpy as np
-
-    sm = np.asarray(src.filter(ImageFilter.GaussianBlur(1.2)), dtype=np.float32)
-    gy, gx = np.zeros_like(sm), np.zeros_like(sm)
-    gy[1:-1] = (sm[2:] - sm[:-2]) * 0.5
-    gx[:, 1:-1] = (sm[:, 2:] - sm[:, :-2]) * 0.5
-    return np.sqrt((gx ** 2 + gy ** 2).sum(axis=-1))
-
-
-def _grow_within(seed, allowed, reach: int):
-    """Flood `seed` outward through `allowed` for at most `reach` pixels — a
-    constrained dilation, so the silhouette can only expand across pixels the
-    photo agrees are item, and only near where it already was.
-
-    scipy does this in C; the numpy fallback is the same 4-connected expansion
-    written out, which at scan resolution is a few milliseconds."""
-    import numpy as np
-
-    try:
-        from scipy import ndimage
-        return ndimage.binary_dilation(seed, np.ones((3, 3), bool),
-                                       iterations=reach, mask=allowed)
-    except Exception:  # noqa: BLE001 - fall back to plain numpy
-        cur = seed.copy()
-        for _ in range(reach):
-            nxt = cur.copy()
-            nxt[1:, :] |= cur[:-1, :]
-            nxt[:-1, :] |= cur[1:, :]
-            nxt[:, 1:] |= cur[:, :-1]
-            nxt[:, :-1] |= cur[:, 1:]
-            nxt &= allowed
-            nxt |= seed
-            if nxt.sum() == cur.sum():
-                break
-            cur = nxt
-        return cur
-
-
-def _solidify_border(alpha: Image.Image, source: Image.Image,
-                     out_size: Optional[tuple[int, int]] = None,
-                     raw: Optional[Image.Image] = None,
-                     result: Optional[matte.CutoutResult] = None,
-                     ) -> Optional[Image.Image]:
-    """Consolidate a raw matte into one solid silhouette whose border sits on
-    the item's actual edge. Returns None when it can't run (disabled, no numpy,
-    degenerate mask) so the caller falls back to the plain erode.
-
-    Three passes, in order:
-
-    1. **Close** the mask: bridge the notches, pinholes and hairline splits the
-       model leaves along fabric edges, and smooth the staircase that upscaling
-       a 640-1024px matte to 1600px bakes into the contour. This alone is most
-       of the "solid border" — a cutout can only look clean if its outline is
-       continuous.
-    2. **Drop detached crumbs** so the result is the item, not the item plus a
-       confetti of speckles floating on the white canvas.
-    3. **Snap the border to the photo.** The matte's edge is only approximate,
-       so measure the two colours that actually meet there — the backdrop (well
-       outside the mask) and the item (well inside it) — and let the border
-       travel, in both directions, through whichever pixels resemble which.
-       Item the matte shaved off comes back; backdrop fringe it left behind is
-       eaten away. This is what fixes a light-wash garment on a white sweep,
-       where the model's edge wanders around inside the item and the old
-       blanket 1px erode only ever pushed it further in.
-
-    Growing is skipped on a cluttered backdrop, where "not the backdrop colour"
-    stops meaning "item"; trimming still runs. Growth also stops at real edges
-    in the photo and is capped in total, and if any of it somehow eats the
-    subject we return the merely-closed mask rather than a mangled one.
-
-    `raw` is the model's own matte, before hardening. It is the reference every
-    pass here is measured against (see services/matte.py): the parts the model
-    was confident about are not this function's to delete, whatever the colour
-    maths concludes. `result` collects the warnings and metrics."""
-    if not _SOLIDIFY:
-        return None
-    try:
-        import numpy as np
-    except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime
-        return None
-
-    out_size = out_size or alpha.size
-    w, h = alpha.size
-    if min(w, h) < 32:
-        return None
-    scale = min(1.0, _SOLIDIFY_SCAN_SIDE / max(w, h))
-    sw, sh = max(16, round(w * scale)), max(16, round(h * scale))
-    small = alpha if (sw, sh) == (w, h) else alpha.resize((sw, sh), Image.BILINEAR)
-    side = min(sw, sh)
-
-    closed = _close_mask(small.point(lambda a: 255 if a >= 128 else 0),
-                         max(1.0, side * _EDGE_CLOSE_FRAC))
-    arr = np.asarray(closed, dtype=np.uint8) >= 128
-    if not arr.any() or arr.all():
-        return None  # nothing kept, or nothing removed — no border to solidify
-    # The model's own matte at scan scale: the reference for every decision
-    # below, and the thing that tells a shoelace apart from a JPEG crumb.
-    raw_small = None
-    if raw is not None:
-        raw_small = np.asarray(
-            raw if raw.size == (sw, sh) else raw.resize((sw, sh), Image.BILINEAR),
-            dtype=np.uint8)
-    # Detached blobs: drop crumbs, keep parts. Area alone can't tell a strap
-    # from a speck, so confidence and shape get a vote (see matte.py).
-    arr = matte.keep_components(arr, confidence=raw_small)
-    if not arr.any():
-        return None
-    # What this function is forbidden to delete. Empty when there is no raw
-    # matte to consult, which simply disables the rollbacks.
-    core = (matte.confident_core(raw_small) & arr if raw_small is not None
-            else np.zeros_like(arr))
-
-    def _out(mask) -> Image.Image:
-        img = Image.fromarray(np.where(mask, 255, 0).astype(np.uint8), "L")
-        # BILINEAR back up: the ramp it leaves across the edge IS the cutout's
-        # anti-aliasing, and unlike LANCZOS it can't overshoot a halo back in.
-        return img if img.size == out_size else img.resize(out_size, Image.BILINEAR)
-
-    reach = max(2, round(side * _EDGE_SNAP_FRAC))
-    solid = Image.fromarray(np.where(arr, 255, 0).astype(np.uint8), "L")
-    outer = (np.asarray(_blur_threshold(solid, reach, 40), dtype=np.uint8) >= 128) & ~arr
-    far_bg = ~arr & ~outer  # backdrop well clear of the edge, so it is backdrop
-    if arr.sum() < 64 or far_bg.sum() < 64:
-        return _out(arr)  # subject fills the frame — no backdrop to compare to
-
-    src = source.convert("RGB")
-    if src.size != (sw, sh):
-        src = src.resize((sw, sh), Image.BILINEAR)
-    rgb = np.asarray(src, dtype=np.float32)
-    luma, chroma = _colour_split(rgb)
-    backdrop = np.median(rgb[far_bg], axis=0)
-    # Sample the item well inside its own edge. Reading it at the rim looks
-    # tempting (it is the most local sample) but a matte that overshoots puts
-    # leftover backdrop there, and the item would end up "measured" as the very
-    # colour we're removing — after which nothing gets trimmed. Step in far
-    # enough to clear that overshoot, and back off on a thin item that erodes
-    # away at that depth.
-    inner = arr
-    for inset in (reach, reach * 0.5):
-        eroded = (np.asarray(_blur_threshold(solid, max(2.0, inset), 215),
-                             dtype=np.uint8) >= 128)
-        if eroded.sum() > max(64, 0.02 * arr.sum()):
-            inner = eroded
-            break
-    # The item's colours — plural. Describing a product with one median is the
-    # assumption that breaks every printed tee, two-tone sneaker and patterned
-    # dress: the median lands between the garment and its print, so both
-    # measure as "not the item", and whichever also sits near the backdrop's
-    # colour gets trimmed away. A small palette costs one histogram.
-    item_colours = matte.palette(rgb, inner)
-    d_bg = _colour_gap(luma, chroma, backdrop)
-    d_item = matte.nearest_gap(
-        lambda colour: _colour_gap(luma, chroma, colour), item_colours)
-    busy = float(rgb[far_bg].std(axis=0).mean())
-
-    # How far apart those two colours actually are decides how picky we can
-    # be: on a strong separation, demand a clear difference from the backdrop;
-    # on a pale item against a white sweep there is no clear difference to be
-    # had, so scale the bar down rather than give up on the border entirely.
-    # Contrast against the item's DOMINANT colour (palette entries come back
-    # busiest-first) — the one the backdrop actually abuts most of the time.
-    item_luma, item_chroma = _colour_split(item_colours[0].reshape(1, 1, 3))
-    contrast = float(_colour_gap(item_luma, item_chroma, backdrop)[0, 0])
-    tol = max(10.0, min(_EDGE_SNAP_TOL, 0.35 * contrast))
-    if busy > _BUSY_BACKDROP_STD:
-        # A cluttered scene: "not the backdrop colour" no longer means "item",
-        # so don't grow at all. Trimming below still runs.
-        log.info("bg-removal: backdrop too varied (std=%.0f) to grow the border "
-                 "into — trimming only", busy)
-        grown = arr
-    else:
-        # Item, per the photo: clearly off the backdrop's colour, at least as
-        # close to the item's, and not on the far side of a real edge. The
-        # border only ever advances through these, which is what keeps
-        # recovering a hem from turning into a land-grab across the whole
-        # photo. (Built only on this branch — the busy-backdrop path never
-        # grows, so it never needs the edge field.)
-        itemish = ((d_bg > tol) & (d_bg * 1.15 > d_item)
-                   & (_edge_strength(src) < max(12.0, _EDGE_BLOCK_FRAC * contrast)))
-        # Shade: the backdrop's own colour with some light taken out — same
-        # hue, dimmer, but not dramatically dimmer (a cast shadow keeps most of
-        # the backdrop's brightness; a genuinely dark item does not). The
-        # border may creep a couple of pixels into shade, since a grey item
-        # reads the same way and still needs its edge back, but never far
-        # enough to drag a whole cast shadow onto the white canvas.
-        bg_luma = float(np.mean(backdrop))
-        shade = ((_colour_gap(luma, chroma, backdrop, luma_weight=0.0)
-                  < 0.3 * contrast)
-                 & (luma < bg_luma) & (luma > _SHADE_FLOOR * bg_luma))
-        room = outer | arr
-        grown = _grow_within(arr, itemish & ~shade & room, reach)
-        grown = _grow_within(grown, (itemish & room) | grown, _SHADE_REACH)
-        if grown.sum() > arr.sum() * (1.0 + _MAX_GROWTH):
-            log.warning("bg-removal: border snap tried to grow the subject by "
-                        "%.0f%% — leaking into the scene, keeping the plain mask",
-                        100.0 * (grown.sum() / max(1, arr.sum()) - 1))
-            grown = arr
-            if result is not None:
-                result.metrics["grow_rolled_back"] = True
-    # Trim the other way, symmetrically: let the backdrop eat back into the
-    # silhouette wherever the mask is still covering backdrop-coloured pixels
-    # that connect to the outside. That clears the halo of old background a
-    # generous matte leaves around the item — the job the old unconditional 1px
-    # erode was doing, except it shaved the item everywhere, fringe or not.
-    # The item's whole palette judges the trim too, not a filtered subset.
-    # Excluding item colours that happen to match the backdrop (a patent bag's
-    # specular band, a white logo on a white sweep) does clean up a faint halo
-    # on those photos — and costs a pale garment a 13px rim of itself all the
-    # way round, because "pale" and "matches the backdrop" are the same
-    # measurement. A 1% halo is a cosmetic flaw the seller can see and fix;
-    # a shaved hem is a ruined photo. So: full palette, keep the item.
-    backdropish = (d_bg <= tol) & (d_bg < d_item)
-    outside = ~grown
-    eaten = _grow_within(outside, backdropish | outside, reach) & grown
-    # Four brakes on the trim, in the order they should apply.
-    # 0. Depth. The trim exists to remove a rim of leftover backdrop, so it
-    #    only gets to reach a rim's distance inside the silhouette. Without
-    #    this the flood can run the full snap radius and hollow out a sleeve
-    #    on one bad colour reading — and a depth cap, unlike an area cap,
-    #    doesn't punish a strap for being mostly edge.
-    eaten &= matte.rim(grown, matte.trim_depth_for(side))
-    # 1. Never eat a thin part of the CONFIDENT matte. A halo of leftover
-    #    backdrop is thin too, which is exactly why this looks at what the
-    #    model was sure of and not at the grown silhouette: a halo is never
-    #    confident, a shoelace always is.
-    if core.any():
-        protected = matte.thin_structures(core)
-        if protected.any():
-            eaten &= ~protected
-            if result is not None:
-                result.metrics["thin_protected_px"] = int(protected.sum())
-    snapped = grown & ~eaten
-    # 2. A hard ceiling on how much of the silhouette the trim may remove, no
-    #    matter what the colour maths concluded. Past that it misread the
-    #    photo, and the first 6% of a misreading is no more trustworthy than
-    #    the rest — so the trim is dropped whole.
-    snapped, capped = matte.cap_trim(grown, snapped)
-    if capped:
-        log.warning("bg-removal: inward trim wanted to remove %.0f%% of the "
-                    "subject — over the cap, keeping the untrimmed border",
-                    100.0 * (grown & eaten).sum() / max(1, grown.sum()))
-        if result is not None:
-            result.metrics["trim_capped"] = True
-            result.warn("Some background may still show around the edges — "
-                        "the cleanup stopped rather than risk cutting into "
-                        "the item.")
-    # 2b. Per-part: an absolute depth is a rim on a coat and most of a size
-    #     tag, so also ask whether each confident piece kept enough of itself.
-    if core.any():
-        starved = matte.undersized_parts(core, snapped)
-        if starved.any():
-            log.warning("bg-removal: inward trim was removing %d px of a part "
-                        "rather than trimming it — putting the part back",
-                        int(starved.sum()))
-            snapped = snapped | starved
-            if result is not None:
-                result.metrics["parts_restored_px"] = int(starved.sum())
-    # 2c. Scraps: a lump of background the matte swallowed whole — a cast
-    #     shadow, a wedge of table, a hand. The depth cap above can never
-    #     reach one, by design, so this uses confidence instead of distance
-    #     and is safe by construction (see matte.uncertain_scraps).
-    if raw_small is not None:
-        # Restricted to `arr`, the mask the MODEL produced. The grow pass adds
-        # pixels the raw matte never had — recovering a hem the model shaved —
-        # and those read as "the model was unsure" for the trivial reason that
-        # the model never saw them as subject at all. Judging them here would
-        # undo the grow pass's work on exactly the photos that needed it.
-        scrap = matte.uncertain_scraps(raw_small, snapped & arr, core)
-        if scrap.any():
-            snapped = snapped & ~scrap
-            if result is not None:
-                result.metrics["scrap_removed_px"] = int(scrap.sum())
-    # 3. And the backstop: whatever survived, it still has to contain what the
-    #    model was confident about — in substance, not in total. A few px
-    #    shaved evenly off the rim is this pass working; a chunk out of a hem
-    #    is not, and only structural_loss can tell those apart (a trimmed halo
-    #    is one big connected ring, so counting area or blobs cannot).
-    if core.any():
-        bite = matte.structural_loss_mask(core, snapped)
-        lost = float(bite.sum()) / float(max(1, int(core.sum())))
-        if result is not None:
-            result.metrics["border_core_loss"] = round(lost, 4)
-        if lost > matte.MAX_CORE_LOSS:
-            log.warning("bg-removal: border snap bit %.1f%% out of the confident "
-                        "subject — putting it back", 100 * lost)
-            snapped = snapped | bite
-            if result is not None:
-                result.metrics["border_rolled_back"] = True
-    if snapped.sum() < 0.5 * arr.sum():
-        log.warning("bg-removal: border snap would have cut the subject in half "
-                    "— keeping the plain solid mask")
-        if result is not None:
-            result.metrics["border_rolled_back"] = True
-        return _out(arr)
-    # A last hairline close so the snap's per-pixel decisions read as one edge
-    # rather than a dotted one.
-    return _out(np.asarray(
-        _close_mask(Image.fromarray(np.where(snapped, 255, 0).astype(np.uint8), "L"),
-                    max(1.0, side * _EDGE_CLOSE_FRAC * 0.5)), dtype=np.uint8) >= 128)
 
 
 def _infer_threads() -> int:
-    """How many threads onnxruntime may use for one inference.
-
-    rembg builds its InferenceSession from OMP_NUM_THREADS when that variable
-    is set, and otherwise lets onnxruntime pick — which means "one thread per
-    core the C++ runtime thinks it can see", i.e. every core on the box. That
-    is the wrong default to leave in place here, for two reasons.
-
-    The photos queued behind the current inference are not idle: inference is
-    serialized (_INFER_LOCK) but the rest of each photo's pipeline is numpy and
-    Pillow, which release the GIL and run concurrently by design. A session
-    sized to the whole box stacks N inference threads on top of that pool and
-    everything context-switches instead of finishing.
-
-    And the box still has an app on it. uvicorn has to keep answering
-    /api/health inside its 5s timeout while a batch runs — a machine that
-    misses those checks gets REPLACED by the platform, which kills the batch
-    outright. Leaving a core for everything that is not inference is what keeps
-    a long batch from ending in a restart.
-
-    REMBG_THREADS overrides. sched_getaffinity (not cpu_count) so a cpuset that
-    pins us to a slice of a bigger host is respected."""
+    """Threads onnxruntime may use for one inference: one fewer than the CPUs
+    we can see (REMBG_THREADS overrides). uvicorn still has to answer its
+    health check while a batch runs, and a machine that misses those checks
+    is replaced by the platform, which kills the batch."""
     forced = int(os.getenv("REMBG_THREADS", "0") or 0)
     if forced > 0:
         return forced
@@ -673,31 +132,16 @@ def _infer_threads() -> int:
     return max(1, cpus - 1)
 
 
-def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
-                upscale: bool = True,
-                wait: Optional[float] = None) -> Image.Image:
-    """rembg subject alpha (mode L), computed on a copy capped to `max_side`
-    (defaults to the fast bulk size) then upscaled back to img_rgb's size.
-    A larger max_side feeds the model more detail = crisper edges.
-
-    `upscale=False` returns the matte at the resolution the model actually
-    produced. The refinement passes make their decisions at or below that
-    scale anyway, so working on the pre-upscale matte does the same work on
-    ~10x fewer pixels; _refine_alpha upscales once at the end instead.
+def _mask(rgb: Image.Image, wait: Optional[float] = None) -> Image.Image:
+    """The model's subject matte (mode L) at rgb's size.
 
     `wait` is how long to queue for the inference slot before giving up with
-    CutoutBusy; it defaults to the batch deadline. See BATCH_INFER_WAIT_SECONDS
-    for why the two callers want very different answers."""
-    global _rembg_session
-    cap = max_side or _REMBG_MAX_SIDE
-    scale = min(1.0, cap / max(img_rgb.size))
-    small = (img_rgb.resize((max(1, round(img_rgb.width * scale)),
-                             max(1, round(img_rgb.height * scale))), Image.LANCZOS)
-             if scale < 1 else img_rgb)
-    # One inference at a time — concurrent runs would stack peak memory and OOM
-    # — but with a deadline on the wait, so a caller who cannot afford to queue
-    # is told "busy" instead of hanging.
-    global _last_infer_seconds, _model_load_seconds, _model_ready
+    CutoutBusy; it defaults to the batch deadline."""
+    global _rembg_session, _model_ready, _model_load_seconds, _last_infer_seconds
+    scale = min(1.0, _REMBG_MAX_SIDE / max(rgb.size))
+    small = (rgb.resize((max(1, round(rgb.width * scale)),
+                         max(1, round(rgb.height * scale))), Image.LANCZOS)
+             if scale < 1 else rgb)
     if not _INFER_LOCK.acquire(
             timeout=BATCH_INFER_WAIT_SECONDS if wait is None else wait):
         raise CutoutBusy(
@@ -709,17 +153,15 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
         loading = time.monotonic()
         from rembg import new_session, remove
         if _rembg_session is None:
-            # Set before the session is built, not after — rembg reads this
-            # when it constructs the SessionOptions and never looks again.
+            # Set before the session is built: rembg reads this when it
+            # constructs the SessionOptions and never looks again.
             os.environ.setdefault("OMP_NUM_THREADS", str(_infer_threads()))
             _rembg_session = new_session(_REMBG_MODEL)
             _model_ready = True
             _model_load_seconds = time.monotonic() - loading
             log.info("bg-removal: model %s ready in %.1fs (%s inference "
-                     "thread(s), %dpx, %d photo workers)", _REMBG_MODEL,
-                     _model_load_seconds,
-                     os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE,
-                     _LOCAL_BATCH_WORKERS)
+                     "thread(s), %dpx)", _REMBG_MODEL, _model_load_seconds,
+                     os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE)
         # The clock starts here, not when the lock was taken: the load above
         # is paid once per process and is not what "inference" means to the
         # probe or to the slow-inference warning below.
@@ -731,1169 +173,255 @@ def _alpha_mask(img_rgb: Image.Image, max_side: Optional[int] = None,
     finally:
         _INFER_LOCK.release()
     if _last_infer_seconds > INFER_SLOW_SECONDS:
-        log.warning("bg-removal: inference took %.1fs at %dpx (model=%s, "
-                    "%s threads) — a batch will still finish, but anyone "
-                    "watching a spinner has given up",
-                    _last_infer_seconds, cap, _REMBG_MODEL,
+        log.warning("bg-removal: inference took %.1fs (model=%s, %s threads)",
+                    _last_infer_seconds, _REMBG_MODEL,
                     os.environ.get("OMP_NUM_THREADS", "auto"))
-    if upscale and alpha.size != img_rgb.size:
-        # BILINEAR (not LANCZOS) to upscale the mask: LANCZOS overshoots at
-        # high-contrast edges, ringing a faint halo of the old background back
-        # in — exactly the "ghost background" the cutout is meant to remove.
-        alpha = alpha.resize(img_rgb.size, Image.BILINEAR)
+    if alpha.size != rgb.size:
+        # BILINEAR, not LANCZOS: LANCZOS overshoots at a hard edge and rings a
+        # faint halo of the old background back in.
+        alpha = alpha.resize(rgb.size, Image.BILINEAR)
     return alpha
 
 
-def _refine_alpha(alpha: Image.Image,
-                  source: Optional[Image.Image] = None,
-                  out_size: Optional[tuple[int, int]] = None,
-                  result: Optional[matte.CutoutResult] = None) -> Image.Image:
-    """Clean the matte into a natural cutout: despeckle, kill the faint
-    background ghost, solidify the item's border against the photo, then
-    lightly feather the edge so it blends instead of looking stickered-on.
-
-    `source` is the photo the matte came from. With it, the border is
-    consolidated and snapped onto the item's real edge (_solidify_border) —
-    which is what a background remover has to get right, since every visible
-    failure (bites out of a hem, a fringe of old backdrop, floating crumbs)
-    lives on that boundary. Without it we fall back to the old blanket 1px
-    erode, which trims background fringe at the cost of shaving the item.
-
-    Border-aware: where the subject runs off the frame it has no background
-    fringe to trim, so eroding + feathering there just eats a white gutter into
-    the item (the 'bleeds off frame' artifact). We restore the hardened,
-    un-feathered alpha in a thin band along the frame so an edge-touching
-    subject stays solid to the border. Where the subject doesn't reach an edge
-    the hardened alpha is 0 there, so those borders are unchanged.
-
-    `out_size` is the size the refined matte must come back at (defaults to
-    alpha's own size). Passing the matte at the model's native resolution with
-    out_size set to the photo's size runs the despeckle/harden work on ~10x
-    fewer pixels; the final edge is the same BILINEAR ramp the full-size path
-    produced, since that upscale always happened somewhere in the chain."""
-    out_size = out_size or alpha.size
-    w, h = out_size
-    alpha = alpha.filter(ImageFilter.MedianFilter(3))
-    # The model's matte, kept as-is. Everything below is measured against it —
-    # a refinement is only an improvement if it did not delete product.
-    raw = alpha
-    span = max(1, _ALPHA_HIGH - _ALPHA_LOW)
-    hardened = alpha.point(lambda a: 0 if a < _ALPHA_LOW
-                           else 255 if a > _ALPHA_HIGH
-                           else round((a - _ALPHA_LOW) * 255 / span))
-    solid = (_solidify_border(hardened, source, out_size=out_size, raw=raw,
-                              result=result)
-             if source is not None else None)
-    if solid is not None:
-        # The solidified border already decided, per pixel, where the item
-        # stops — eroding on top of that would only walk it back inside again.
-        hardened = solid
-        refined = hardened.filter(ImageFilter.GaussianBlur(0.6))
-    else:
-        if hardened.size != out_size:
-            # Upscale BEFORE the erode so the fallback trims the same ~1px at
-            # output scale it always has, not 1px at matte scale (~3px here).
-            hardened = hardened.resize(out_size, Image.BILINEAR)
-        # Erode 1px to cut the residual background fringe, then a sub-pixel
-        # feather so the composited edge is smooth rather than jagged.
-        refined = hardened.filter(ImageFilter.MinFilter(3)).filter(
-            ImageFilter.GaussianBlur(0.6))
-    band = 3
-    if w > 2 * band and h > 2 * band:
-        refined.paste(hardened.crop((0, 0, w, band)), (0, 0))               # top
-        refined.paste(hardened.crop((0, h - band, w, h)), (0, h - band))    # bottom
-        refined.paste(hardened.crop((0, 0, band, h)), (0, 0))               # left
-        refined.paste(hardened.crop((w - band, 0, w, h)), (w - band, 0))    # right
-    return _guard_refinement(raw, refined, result)
+def _harden(alpha: Image.Image) -> Image.Image:
+    """Drop the faint background, keep the item solid, ramp the band between."""
+    low, high = _ALPHA_LOW, max(_ALPHA_HIGH, _ALPHA_LOW + 1)
+    span = high - low
+    return alpha.point([0 if a <= low else 255 if a >= high
+                        else (a - low) * 255 // span for a in range(256)])
 
 
-def _guard_refinement(raw: Image.Image, refined: Image.Image,
-                      result: Optional[matte.CutoutResult] = None) -> Image.Image:
-    """Last line of defence: the finished matte still has to contain what the
-    model was confident about.
+def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
+    """The item on white, or None when the model found no item to keep.
 
-    Every individual pass already checks itself, but they compose — a legal
-    trim after a legal close after a legal despeckle can still add up to a
-    missing strap. So the whole chain gets measured once against the raw matte
-    it started from, and anything the model was sure of is painted back in
-    rather than shipped missing. Roughness here is cosmetic; absence is not.
-    """
+    Raises CutoutBusy when the inference slot is taken for longer than
+    `wait`; any other failure raises as itself so a caller can say why."""
+    alpha = _harden(_mask(rgb, wait=wait))
+    kept = alpha.point(lambda a: 255 if a >= 128 else 0)
+    coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
+    if coverage < _MIN_FG_COVERAGE:
+        return None
+    return Image.composite(rgb, Image.new("RGB", rgb.size, WHITE), alpha)
+
+
+def _flatten(img: Image.Image) -> Image.Image:
+    """Any transparency composited onto WHITE, as opaque RGB.
+
+    A bare `.convert("RGB")` paints transparent pixels BLACK, so a PNG that
+    arrived already cut out (an iPhone "lift subject" shot, another tool's
+    export) would reach the model, and the listing, as an item on a black
+    field."""
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        canvas = Image.new("RGB", rgba.size, WHITE)
+        canvas.paste(rgba, mask=rgba.getchannel("A"))
+        return canvas
+    return img.convert("RGB") if img.mode != "RGB" else img
+
+
+def _load(src: Path) -> tuple[Image.Image, tuple[int, int]]:
+    """The photo as the camera meant it — upright per its EXIF, opaque, and no
+    larger than TARGET_SIZE on its longest side — plus the size it was shot
+    at. Nothing downstream needs more pixels than the output has, so a JPEG
+    is asked to decode at a reduced scale up front (`draft`): a 12MP phone
+    photo then never exists at full size in memory at all."""
+    with Image.open(src) as raw:
+        shot = raw.size
+        # Orientation 5-8 mean the sensor was sideways, so the photo the
+        # seller took is the stored one turned — report that size.
+        if raw.getexif().get(274, 1) in (5, 6, 7, 8):
+            shot = (shot[1], shot[0])
+        w, h = raw.size
+        scale = TARGET_SIZE / max(w, h)
+        if scale < 1:
+            raw.draft(None, (max(1, round(w * scale)), max(1, round(h * scale))))
+        img = ImageOps.exif_transpose(raw)
+        img.load()
+    img = _flatten(img)
+    if max(img.size) > TARGET_SIZE:
+        img.thumbnail((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
+    return img, shot
+
+
+def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
+    """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
+    Returns what was done. A cutout that finds nothing keeps the photo as shot
+    and says so in `bg_error`, so the caller can give the charge back."""
+    img, shot = _load(src)
+    bg_removed, bg_error = False, None
+    if remove_bg:
+        try:
+            out = cutout(img)
+        except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
+            log.warning("bg-removal: keeping %s as shot (%s)", src.name, exc)
+            out, bg_error = None, f"Background removal failed: {exc}"
+        if out is not None:
+            img, bg_removed = out, True
+        elif not bg_error:
+            bg_error = ("The background remover found no item in this photo "
+                        "— it was kept as shot.")
+    dst = dst.with_suffix(".jpg")
+    # No exif= argument, on purpose: the saved file carries no metadata, so the
+    # GPS coordinates of the seller's home never reach a public listing
+    # (test_export_pipeline.py holds that line). Written via a temp file and
+    # renamed: a photo that exists is a photo that is FINISHED. optimize_all
+    # treats an existing output as done — that is what makes an interrupted
+    # batch resumable — so a torn JPEG left by a machine that died mid-save
+    # must never be where a resume would adopt it.
+    tmp = dst.with_name(f".{dst.name}.{os.getpid():x}.tmp")
     try:
-        import numpy as np
-    except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime
-        return refined
-    ref = raw if raw.size == refined.size else raw.resize(refined.size,
-                                                          Image.BILINEAR)
-    core = matte.confident_core(np.asarray(ref, dtype=np.uint8))
-    if not core.any():
-        return refined
-    final = np.asarray(refined, dtype=np.uint8) >= 128
-    bite = matte.structural_loss_mask(core, final)
-    lost = float(bite.sum()) / float(max(1, int(core.sum())))
-    if result is not None:
-        result.metrics["core_retention"] = round(1.0 - matte.core_loss(core, final), 4)
-        result.metrics["structural_loss"] = round(lost, 4)
-    if lost <= matte.MAX_CORE_LOSS:
-        return refined
-    log.warning("bg-removal: refinement bit %.1f%% out of the confident subject "
-                "— restoring it", 100 * lost)
-    # Restore the BITE, not the whole core: putting the core back wholesale
-    # would also undo the legitimate rim trim and hand back the halo.
-    restored = np.maximum(np.asarray(refined, dtype=np.uint8),
-                          np.where(bite, 255, 0).astype(np.uint8))
-    if result is not None:
-        result.metrics["refinement_rolled_back"] = True
-        result.warn("Part of the item was about to be cut away, so the "
-                    "cleanup was pulled back — check the edges before "
-                    "publishing.")
-    return Image.fromarray(restored, "L")
-
-
-def _flood_sweep(bg, reached, axis: int):
-    """One straight-line propagation pass of `reached` through `bg` along
-    `axis` (1 = across rows, 0 = down columns).
-
-    Every uninterrupted run of background pixels is one segment; a segment that
-    already contains a reached pixel becomes reached end to end. Done as two
-    whole-image numpy passes rather than a per-pixel flood, which is what keeps
-    this affordable on every photo."""
-    import numpy as np
-
-    b = bg if axis == 1 else bg.T
-    r = reached if axis == 1 else reached.T
-    rows, cols = b.shape
-    # A sentinel non-background column so runs can't wrap from one row's end
-    # into the next row's start once flattened.
-    stop = np.zeros((rows, 1), dtype=bool)
-    flat_bg = np.concatenate([b, stop], axis=1).ravel()
-    flat_reached = np.concatenate([r, stop], axis=1).ravel()
-    seg = np.cumsum(~flat_bg)  # constant within a run of background
-    hit = np.zeros(int(seg[-1]) + 2, dtype=bool)
-    hit[seg[flat_reached]] = True
-    out = (flat_bg & hit[seg]).reshape(rows, cols + 1)[:, :cols]
-    return out if axis == 1 else out.T
-
-
-def _border_connected(bg):
-    """Background pixels reachable from the frame border (4-connected) — i.e.
-    the real backdrop, as opposed to background-labelled regions sealed inside
-    the subject."""
-    import numpy as np
-
-    reached = np.zeros_like(bg)
-    reached[0, :] = bg[0, :]
-    reached[-1, :] = bg[-1, :]
-    reached[:, 0] = bg[:, 0]
-    reached[:, -1] = bg[:, -1]
-    for _ in range(_FLOOD_SWEEPS):
-        before = int(reached.sum())
-        reached = _flood_sweep(bg, reached, axis=1)
-        reached = _flood_sweep(bg, reached, axis=0)
-        if int(reached.sum()) == before:
-            break
-    return reached
-
-
-def _interior_fill_mask(alpha: Image.Image,
-                        source: Image.Image) -> Optional[Image.Image]:
-    """Mask (mode L) of the pixels an alpha matte punched out of the middle of
-    the subject and that should be put back — None when there's nothing to fix.
-
-    This is the failure sellers describe as "it removed the inside of my item":
-    the model calls a printed graphic, a bright panel, a glossy patch or a
-    reflective face INSIDE the product 'background', so the composite shows
-    white holes straight through the item.
-
-    A removed region completely sealed in by subject is one of exactly two
-    things:
-      * a genuine see-through gap (a mug handle, the space between shoe
-        straps, the hole in a doughnut) — which shows the SAME backdrop we just
-        removed, or
-      * item the matte ate — which does not.
-    So: flood the background inward from the frame border, and put back every
-    stranded leftover whose pixels don't look like the backdrop. Keeping the
-    backdrop-coloured ones removed is what stops mug handles filling in — and
-    when the call is wrong there, the region matched white-ish backdrop anyway,
-    so on the white canvas it's invisible either way."""
-    if not _FILL_HOLES:
-        return None
-    try:
-        import numpy as np
-    except Exception:  # noqa: BLE001 - numpy rides in with onnxruntime; if it's
-        # somehow absent, skip the repair rather than fail a photo.
-        return None
-
-    w, h = alpha.size
-    if w < 8 or h < 8:
-        return None
-    scale = min(1.0, _HOLE_SCAN_SIDE / max(w, h))
-    sw, sh = max(4, round(w * scale)), max(4, round(h * scale))
-    small = alpha if (sw, sh) == (w, h) else alpha.resize((sw, sh), Image.BILINEAR)
-    bg = np.asarray(small, dtype=np.uint8) < 128
-    if not bg.any() or bg.all():
-        return None  # nothing removed, or nothing kept — no interior to repair
-    reached = _border_connected(bg)
-    holes = bg & ~reached
-    if not holes.any():
-        return None
-
-    src = source.convert("RGB")
-    if src.size != (sw, sh):
-        src = src.resize((sw, sh), Image.BILINEAR)
-    rgb = np.asarray(src, dtype=np.int16)
-    # The backdrop we actually removed, not a guess: the median colour of the
-    # border-connected background (median, so a dark table edge or a shadow in
-    # the corner doesn't drag the reference).
-    backdrop = (np.median(rgb[reached], axis=0) if reached.any()
-                else np.array([255, 255, 255], dtype=np.int16))
-    off_backdrop = np.sqrt(((rgb - backdrop) ** 2).sum(axis=2))
-    keep = holes & (off_backdrop > _HOLE_BG_TOL)
-    keep |= _detailed_holes(rgb, holes, reached, kept=~bg)
-    if not keep.any():
-        return None
-
-    fill = Image.fromarray(np.where(keep, 255, 0).astype(np.uint8), "L")
-    # Median: drop isolated speckle so we restore regions, not confetti.
-    # MaxFilter: grow a pixel outward so the restored region meets the
-    # surrounding subject instead of leaving a hairline seam at the hole's rim.
-    fill = fill.filter(ImageFilter.MedianFilter(5)).filter(ImageFilter.MaxFilter(3))
-    grown = (np.asarray(fill, dtype=np.uint8) >= 128) & ~reached  # never spill
-    if not grown.any():                                          # into the backdrop
-        return None
-    log.info("bg-removal: restored %.1f%% of the frame the matte had punched out "
-             "of the item's interior", 100.0 * grown.sum() / grown.size)
-    out = Image.fromarray(np.where(grown, 255, 0).astype(np.uint8), "L")
-    return out if out.size == alpha.size else out.resize(alpha.size, Image.BILINEAR)
-
-
-def _detailed_holes(rgb, holes, reached, kept):
-    """The sealed holes that are pictures: each connected hole at least
-    _HOLE_PICTURE_FRACTION of the item's footprint (kept plus holes) whose
-    mean luma gradient beats the backdrop's by _HOLE_DETAIL_RATIO and the
-    floor. Colour plays no part -- that is the point. Without SciPy the holes
-    are judged as one region, which only matters when a picture and a handle
-    are both sealed inside one item."""
-    import numpy as np
-
-    if not holes.any():
-        return np.zeros_like(holes)
-    luma = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1]
-            + 0.114 * rgb[..., 2]).astype(np.float32)
-    detail = np.zeros_like(luma)
-    detail[:, 1:] += np.abs(np.diff(luma, axis=1))
-    detail[1:, :] += np.abs(np.diff(luma, axis=0))
-    backdrop_detail = float(detail[reached].mean()) if reached.any() else 0.0
-    bar = max(_HOLE_DETAIL_FLOOR, _HOLE_DETAIL_RATIO * backdrop_detail)
-    footprint = max(1, int(kept.sum()) + int(holes.sum()))
-    ndimage = matte._ndimage()
-    if ndimage is None:
-        regions = [holes]
-    else:
-        labels, count = ndimage.label(holes)
-        regions = [labels == i for i in range(1, count + 1)]
-    out = np.zeros_like(holes)
-    for region in regions:
-        area = int(region.sum())
-        if area / footprint < _HOLE_PICTURE_FRACTION:
-            continue
-        seen = float(detail[region].mean())
-        if seen > bar:
-            log.info("bg-removal: a %.0f%%-of-item hole carries detail (%.1f vs "
-                     "backdrop %.1f) — a picture, not a gap; putting it back",
-                     100.0 * area / footprint, seen, backdrop_detail)
-            out |= region
+        img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
+        os.replace(tmp, dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    out = {"file": dst.name, "original_size": shot, "output_size": img.size,
+           "background_removed": bg_removed}
+    if bg_removed:
+        out["bg_engine"] = "local"
+    if bg_error:
+        out["bg_error"] = bg_error
     return out
 
 
-def _fill_interior_holes(alpha: Image.Image,
-                         source: Image.Image) -> tuple[Image.Image, Optional[Image.Image]]:
-    """Alpha with interior holes re-attached, plus the mask of what was put
-    back (None when the matte had no interior holes worth fixing) so callers
-    can source those pixels from the original photo."""
-    added = _interior_fill_mask(alpha, source)
-    if added is None:
-        return alpha, None
-    from PIL import ImageChops
-    return ImageChops.lighter(alpha, added), added
+_EXTS = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
+         ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
 
 
-def _compose_on_white(rgb: Image.Image, alpha: Image.Image,
-                      shadow: bool = True, source: Optional[Image.Image] = None,
-                      fill_holes: bool = True) -> Image.Image:
-    """Composite the subject (given by `alpha`) onto pure white, optionally
-    with a soft drop shadow drawn from the subject silhouette.
+def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
+                 progress=None, should_stop=None) -> list[dict]:
+    """Every image in src_dir, in shooting order, as img_NNN.jpg in dst_dir.
 
-    Interior holes in `alpha` are repaired first (see _fill_interior_holes)
-    unless the caller already did it. `source` is the original photo, used both
-    to judge those holes and to supply their pixels — a remote engine's cutout
-    can carry anything under its transparent areas, so restored regions come
-    from the photo itself. Pass fill_holes=False when the alpha is already
-    repaired."""
-    if fill_holes:
-        src = source if source is not None else rgb
-        alpha, added = _fill_interior_holes(alpha, src)
-        if added is not None and source is not None and source is not rgb:
-            patch = source.convert("RGB")
-            if patch.size != rgb.size:
-                patch = patch.resize(rgb.size, Image.LANCZOS)
-            rgb = rgb.copy()
-            rgb.paste(patch, (0, 0), added)
-    w, h = rgb.size
-    canvas = Image.new("RGB", (w, h), WHITE)
-    if shadow:
-        # Shadow = the silhouette, blurred, nudged down/right, at low opacity —
-        # a subtle contact shadow that grounds the item on the white backdrop.
-        # It's low-frequency by construction (a ~1.5%-of-frame blur), so render
-        # it on a small copy and upscale — visually identical at ~1/10 the cost
-        # of blurring the full-size mask.
-        blur = max(4, round(min(w, h) * 0.015))
-        off = max(2, round(min(w, h) * 0.010))
-        scale = min(1.0, 800 / max(w, h))
-        if scale < 1.0:
-            sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
-            shadow_a = alpha.resize((sw, sh), Image.BILINEAR).filter(
-                ImageFilter.GaussianBlur(max(1.0, blur * scale))).point(
-                lambda a: int(a * 0.40)).resize((w, h), Image.BILINEAR)
-        else:
-            shadow_a = alpha.filter(ImageFilter.GaussianBlur(blur)).point(
-                lambda a: int(a * 0.40))
-        shifted = Image.new("L", (w, h), 0)
-        shifted.paste(shadow_a, (off, off))
-        canvas.paste(Image.new("RGB", (w, h), (55, 55, 55)), (0, 0), shifted)
-    canvas.paste(rgb, (0, 0), alpha)
-    return canvas
+    `progress(done, total)` is called after each photo. `should_stop()` is
+    asked before each photo starts; True raises Stopped rather than working
+    through the rest of the pile.
 
-
-def _cutout_on_white(img: Image.Image, max_side: Optional[int] = None,
-                     dark_guard: bool = True,
-                     result: Optional[matte.CutoutResult] = None,
-                     wait: Optional[float] = None) -> Optional[Image.Image]:
-    """In-house rembg cutout composited on pure white (with a soft drop shadow
-    unless BG_SHADOW=off) — or None when the result is clearly a failure
-    (subject erased), so callers keep the original photo instead of saving a
-    destroyed one. `max_side` caps the matte resolution (higher = crisper).
-
-    `dark_guard` catches the classic 'item bleeds off frame' failure (see below)
-    by bailing to None — right for the automatic path, which would otherwise
-    silently save a mangled cutout. The photo studio passes dark_guard=False:
-    the seller is reviewing the result and can Revert, so it's better to SHOW
-    the cutout than to hard-fail with an error.
-
-    `wait` is the inference-queue deadline (see BATCH_INFER_WAIT_SECONDS); the
-    default queues like a batch, and the studio passes the interactive one."""
-    result = result if result is not None else matte.CutoutResult()
-    result.engine = result.engine or f"rembg:{_REMBG_MODEL}"
-    rgb = img.convert("RGB")
-    # Refine the matte at the resolution the model produced it (upscale=False):
-    # every decision in _refine_alpha/_solidify_border happens at or below that
-    # scale anyway, so the old full-size median/harden was ~10x the pixels for
-    # the same answer. out_size brings the finished matte back to photo size.
-    alpha = _refine_alpha(
-        _alpha_mask(rgb, max_side=max_side, upscale=False, wait=wait),
-        source=rgb, out_size=rgb.size, result=result)
-    # Put back anything the matte punched out of the item's middle BEFORE the
-    # guards below: a matte that ate the interior and left a rim reads as
-    # "subject nearly erased" (or as a big dark removed area), and bailing out
-    # there would throw away a cutout that's fine once repaired.
-    alpha, _ = _fill_interior_holes(alpha, rgb)
-    if not _subject_survived(alpha, rgb, result, dark_guard=dark_guard):
-        return None
-    # Warnings raised along the way mean the cutout is usable but wants a look
-    # before it goes on a listing.
-    result.status = matte.NEEDS_REVIEW if result.warnings else matte.APPLIED
-    return _compose_on_white(rgb, alpha, shadow=_BG_SHADOW, fill_holes=False)
-
-
-# Scale the boundary test runs at. It is a question about shapes, not about
-# pixels, and 512px answers it in a few ms on a mask that may be 1600px+.
-_BOUNDARY_SCAN_SIDE = int(os.getenv("BG_BOUNDARY_SCAN", "512") or 512)
-
-
-def _boundary_support(alpha: Image.Image, rgb: Image.Image) -> dict:
-    """matte.boundary_support for a PIL matte + photo: does the silhouette sit
-    on something that is actually in the picture?
-
-    Any failure returns "supported" — this test exists to stop a guard from
-    deleting good cutouts, so it must never become a new way to delete one.
-    """
-    import numpy as np
-
-    try:
-        side = max(1, _BOUNDARY_SCAN_SIDE)
-        scale = min(1.0, side / max(1, max(rgb.size)))
-        size = (max(2, int(rgb.width * scale)), max(2, int(rgb.height * scale)))
-        small = rgb.resize(size, Image.BILINEAR)
-        kept = np.asarray(alpha.resize(size, Image.BILINEAR), dtype=np.uint8) >= 128
-        return matte.boundary_support(np.asarray(small, dtype=np.float32),
-                                      _edge_strength(small), kept)
-    except Exception as exc:  # noqa: BLE001 - inconclusive must mean "keep"
-        log.warning("bg-removal: boundary test failed (%s) — keeping the cutout", exc)
-        return {"edge_ratio": None, "colour_gap": None, "supported": True}
-
-
-def _subject_survived(alpha: Image.Image, rgb: Image.Image,
-                      result: matte.CutoutResult,
-                      dark_guard: bool = True) -> bool:
-    """Did the product survive this cutout? Records the verdict on `result`.
-
-    Runs for EVERY engine, local or remote. A paid API is better at edges, not
-    immune to deciding a black hoodie on a dark floor is background — and a
-    remote cutout that erases the item is worse than a local one, because it
-    also cost money and arrived with an air of authority.
-    """
-    from PIL import ImageStat
-
-    total = max(1, alpha.width * alpha.height)
-    opaque = sum(alpha.histogram()[128:])
-    result.metrics["kept_fraction"] = round(opaque / total, 4)
-    if opaque / total < _MIN_FG_COVERAGE:
-        log.warning("bg-removal: subject nearly erased (%.1f%% kept) — keeping original",
-                    100 * opaque / total)
-        result.status = matte.KEPT_ORIGINAL
-        result.error_code = matte.ERR_SUBJECT_ERASED
-        result.warn("The cutout removed almost the whole photo, so the "
-                    "original was kept.")
-        return False
-    # Dark-background guard: a dark garment that fills the frame gets called
-    # 'background', leaving only its bright printed graphic. A large, dark
-    # removed region is the SYMPTOM of that, so it still opens the question —
-    # but it is not the answer, and treating it as one is why removal appeared
-    # dead for anyone shooting on a dark floor, slate, black card or asphalt:
-    # a flawless cutout was thrown away for the colour of the surface behind
-    # the item. Brightness cannot tell "cut through a black hoodie" from "cut
-    # around a bowl on a dark worktop"; the presence of a real boundary can,
-    # so the photo itself casts the deciding vote (see matte.boundary_support).
-    if dark_guard and (total - opaque) / total > 0.5:
-        bg_mask = alpha.point(lambda a: 255 if a < 128 else 0)
-        stat = ImageStat.Stat(rgb.convert("L"), mask=bg_mask)
-        result.metrics["removed_luma"] = round(stat.mean[0], 1) if stat.count[0] else None
-        if stat.count[0] and stat.mean[0] < _DARK_BG_LUMA:
-            support = _boundary_support(alpha, rgb)
-            result.metrics.update(support)
-            if not support["supported"]:
-                log.warning("bg-removal: removed area large & dark (mean L=%.0f) with no "
-                            "edge under the cut (edge_ratio=%s colour_gap=%s) — likely ate "
-                            "a dark item, keeping original", stat.mean[0],
-                            support["edge_ratio"], support["colour_gap"])
-                result.status = matte.KEPT_ORIGINAL
-                result.error_code = matte.ERR_DARK_SUBJECT
-                result.warn("The item looked like the background (dark item, dark "
-                            "photo), so the original was kept.")
-                return False
-            # The cut follows a real edge — but "a real edge" is also what the
-            # outline of a printed graphic is, so evidence alone cannot tell a
-            # bowl on a slate worktop from a black hoodie reduced to its chest
-            # print. Nothing local can: the two are the same picture, and only
-            # the difference between a surface and an object separates them.
-            # So stop guessing. When the survivor is ALSO small enough to be
-            # just such a graphic, keep the cutout and say so — the seller is
-            # looking at the grid and can revert in one tap, which beats both
-            # silently shipping it and silently throwing it away.
-            if opaque / total < _DARK_REVIEW_COVERAGE:
-                log.info("bg-removal: dark surround (mean L=%.0f) kept only %.1f%% — "
-                         "flagging for review", stat.mean[0], 100 * opaque / total)
-                result.warn("This photo was taken on a dark surface and only a small "
-                            "part of it was kept — check the whole item is still there.")
-            else:
-                log.info("bg-removal: removed area is dark (mean L=%.0f) but the cut "
-                         "follows a real edge (edge_ratio=%s colour_gap=%s) — keeping "
-                         "the cutout", stat.mean[0], support["edge_ratio"],
-                         support["colour_gap"])
-    return True
-
-
-def _apply_studio(img: Image.Image) -> tuple[Image.Image, bool, Optional[str]]:
-    """Lightroom "studio" develop preset via the Adobe API.
-
-    Returns (image, applied, error). Keep-the-photo guarantee: any failure
-    returns the ORIGINAL image plus the reason, so a batch never loses a shot
-    to a network blip or an out-of-credits account.
-    """
-    try:
-        from . import adobe
-        return adobe.apply_studio(img), True, None
-    except ValueError as exc:  # AdobeError — carries the user-facing reason
-        log.warning("lightroom studio: %s — continuing with the unedited photo", exc)
-        return img, False, str(exc)
-    except Exception as exc:  # noqa: BLE001 - a photo must never fail optimize()
-        log.warning("lightroom studio: unexpected error (%s) — continuing with "
-                    "the unedited photo", exc)
-        return img, False, f"Studio preset failed: {exc}"
-
-
-def _adobe_cutout(img: Image.Image) -> Optional[Image.Image]:
-    """Photoshop Remove Background cutout composited on white (with our soft
-    shadow). Returns None only when Adobe isn't ready; when it is, a failure
-    raises AdobeError with the actual reason — same loud-failure contract as
-    Photoroom below."""
-    if not config.adobe_ready():
-        return None
-    from . import adobe
-    cut = adobe.remove_background(img)
-    alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — no subject found
-        raise adobe.AdobeError("Adobe couldn't find a subject in this photo.")
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
-
-
-class PhotoroomError(ValueError):
-    """Photoroom is configured but the call failed — carries a user-facing
-    reason. Subclasses ValueError so the studio route's error mapping (422 +
-    message in a toast) surfaces the real cause instead of a silent fallback."""
-
-
-class PixianError(ValueError):
-    """Pixian is configured but the call failed — carries a user-facing
-    reason. A ValueError for the same reason PhotoroomError is."""
-
-
-# Cap what we send a remote engine: the final output is always TARGET_SIZE, so
-# a full 3200px working copy just wastes upload time and RAM — and on a
-# 250-photo batch those add up to minutes and hundreds of MB. 2048px keeps a
-# comfortable margin above the 1600px output.
-_REMOTE_MAX_SIDE = int(os.getenv("BG_API_MAX_SIDE",
-                                 os.getenv("PHOTOROOM_MAX_SIDE", "2048"))
-                       or "2048")
-# Total attempts per photo. Big batches WILL trip an API's per-minute rate
-# limit and the odd network blip; those retry with backoff instead of failing
-# the photo. Hard failures (bad key, out of credits) never retry — they'd fail
-# identically every time.
-_REMOTE_TRIES = int(os.getenv("BG_API_TRIES",
-                              os.getenv("PHOTOROOM_TRIES", "4")) or "4")
-
-
-def _api_backoff(resp, attempt: int) -> float:
-    """Seconds to wait before retrying: the service's own Retry-After when it
-    sends one, else 2s/4s/8s..., capped so a stuck batch photo can't stall a
-    worker slot for long."""
-    retry_after = (resp.headers.get("retry-after") or "").strip() if resp is not None else ""
-    if retry_after.isdigit():
-        return min(30.0, max(1.0, float(retry_after)))
-    return min(15.0, float(2 ** attempt))
-
-
-def _post_with_retries(name: str, send, exc_cls: type):
-    """Run `send()` (an httpx POST) with retries on 429/5xx/network errors.
-    Returns the final response; raises `exc_cls` when the service stayed
-    unreachable through every attempt."""
-    resp = None
-    for attempt in range(1, _REMOTE_TRIES + 1):
+    Photos whose output already exists are left alone and reported as
+    {"file", "reused"}: a batch that died halfway — a deploy, an OOM, a
+    machine the platform replaced — starts again without redoing the cutouts
+    it finished. Trusting an existing output is safe because optimize()
+    renames its result into place. Positions come from the naturally sorted
+    source list, so the same photo maps to the same output name every run."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    jobs = [(i, src) for i, src
+            in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
+            if src.suffix.lower() in _EXTS]
+    todo = [(i, src, dst) for i, src in jobs
+            if not (dst := dst_dir / f"img_{i:03d}.jpg").exists()]
+    if len(todo) < len(jobs):
+        log.info("images: %d of %d photo(s) already optimized — resuming",
+                 len(jobs) - len(todo), len(jobs))
+    pending = [i for i, _src, _dst in todo]
+    pending_set = set(pending)
+    results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
+               for i, _src in jobs if i not in pending_set}
+    if progress and not todo and jobs:
+        # Nothing left to do, so nothing below will tick. Report the real
+        # count once rather than leaving a resumed batch's bar reading zero.
         try:
-            resp = send()
-        except Exception as exc:  # noqa: BLE001 - network/timeout
-            if attempt == _REMOTE_TRIES:
-                raise exc_cls(f"Couldn't reach {name}: {exc}") from exc
-            wait = _api_backoff(None, attempt)
-            log.info("%s: network error (%s) — retry %d/%d in %.0fs",
-                     name, exc, attempt, _REMOTE_TRIES - 1, wait)
-            time.sleep(wait)
-            continue
-        if (resp.status_code == 429 or resp.status_code >= 500) \
-                and attempt < _REMOTE_TRIES:
-            wait = _api_backoff(resp, attempt)
-            log.info("%s: HTTP %d — retry %d/%d in %.0fs",
-                     name, resp.status_code, attempt, _REMOTE_TRIES - 1, wait)
-            time.sleep(wait)
-            continue
-        break
-    return resp
+            progress(len(jobs), len(jobs))
+        except Exception:  # noqa: BLE001 - progress is display-only
+            pass
+    results.update(zip(pending, optimize_batch(
+        [(src, dst) for _i, src, dst in todo], remove_bg=remove_bg,
+        progress=progress, should_stop=should_stop,
+        done_already=len(results), grand_total=len(jobs))))
+    return [results[i] for i, _src in jobs]
 
 
-def _jpeg_payload(img: Image.Image) -> bytes:
-    """The JPEG bytes a remote engine gets, capped to _REMOTE_MAX_SIDE."""
-    from io import BytesIO
-    rgb = img.convert("RGB")
-    if max(rgb.size) > _REMOTE_MAX_SIDE:
-        rgb.thumbnail((_REMOTE_MAX_SIDE, _REMOTE_MAX_SIDE), Image.LANCZOS)
-    buf = BytesIO()
-    rgb.save(buf, "JPEG", quality=92)
-    return buf.getvalue()
+def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
+                   progress=None, done_already: int = 0,
+                   grand_total: int = 0, should_stop=None) -> list[dict]:
+    """(src, dst) jobs in order; a failed photo yields {"file", "error"}
+    instead of raising. Serial on purpose: inference is single-flight, and
+    what is left around it — a decode, a composite, an encode — is not worth
+    a thread pool's memory.
 
-
-def _pixian_cutout(img: Image.Image,
-                   result: Optional[matte.CutoutResult] = None,
-                   ) -> Optional[Image.Image]:
-    """Cut out the subject via Pixian.ai — the budget engine, around a tenth
-    of Photoroom's per-image price — and composite it on white with our soft
-    shadow. Returns None only when no credentials are configured; a real
-    failure raises PixianError with the actual reason."""
-    if not config.pixian_ready():
-        return None
-    from io import BytesIO
-    import httpx
-    payload = _jpeg_payload(img)
-    resp = _post_with_retries("pixian", lambda: httpx.post(
-        "https://api.pixian.ai/api/v2/remove-background",
-        auth=(config.PIXIAN_API_ID, config.PIXIAN_API_SECRET),
-        files={"image": ("image.jpg", payload, "image/jpeg")},
-        data={"test": "true"} if config.PIXIAN_TEST else {},
-        timeout=60,
-    ), PixianError)
-    if resp.status_code in (401, 403):
-        raise PixianError(
-            "Pixian rejected the API credentials — check the PIXIAN_API_ID and "
-            "PIXIAN_API_SECRET secrets on the server.")
-    if resp.status_code == 402:
-        raise PixianError(
-            "The Pixian account is out of credits — top it up at pixian.ai.")
-    if resp.status_code == 429:
-        raise PixianError(
-            "Pixian kept rate-limiting us even after several retries — "
-            "try again in a minute.")
-    if resp.status_code != 200:
-        raise PixianError(f"Pixian error {resp.status_code}: {resp.text[:160]}")
-    try:
-        cut = Image.open(BytesIO(resp.content)).convert("RGBA")
-    except Exception as exc:  # noqa: BLE001
-        raise PixianError("Pixian returned an unreadable image.") from exc
-    alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — no subject found
-        raise PixianError("Pixian couldn't find a subject in this photo.")
-    # Paid engines get the same survival check as the local one. Better edges
-    # is not the same as never mistaking a black hoodie on a dark floor for
-    # background, and a remote cutout that erases the item is worse — it also
-    # cost money and arrived looking authoritative.
-    result = result if result is not None else matte.CutoutResult()
-    result.engine = "pixian"
-    if not _subject_survived(alpha, img.convert("RGB"), result):
-        raise PixianError(result.warnings[-1] if result.warnings
-                    else "Pixian removed the item instead of the background.")
-    result.status = matte.NEEDS_REVIEW if result.warnings else matte.APPLIED
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
-
-
-def _photoroom_cutout(img: Image.Image,
-                   result: Optional[matte.CutoutResult] = None,
-                   ) -> Optional[Image.Image]:
-    """Cut out the subject via Photoroom's API and composite it on white (with
-    our soft shadow). Returns None only when no key is configured; when a key
-    IS set, a failure raises PhotoroomError with the actual reason — silent
-    fallbacks to the weak local model are exactly how mangled photos kept
-    getting saved without anyone knowing why."""
-    if not config.photoroom_ready():
-        return None
-    from io import BytesIO
-    import httpx
-    payload = _jpeg_payload(img)
-    resp = _post_with_retries("photoroom", lambda: httpx.post(
-        "https://sdk.photoroom.com/v1/segment",
-        headers={"x-api-key": config.PHOTOROOM_API_KEY},
-        files={"image_file": ("image.jpg", payload, "image/jpeg")},
-        data={"format": "png"},
-        timeout=60,
-    ), PhotoroomError)
-    if resp.status_code in (401, 403):
-        raise PhotoroomError(
-            "Photoroom rejected the API key — check the PHOTOROOM_API_KEY "
-            "secret on the server (it may be missing, mistyped, or a sandbox key).")
-    if resp.status_code == 402:
-        raise PhotoroomError(
-            "The Photoroom account is out of credits — top it up at photoroom.com.")
-    if resp.status_code == 429:
-        raise PhotoroomError(
-            "Photoroom kept rate-limiting us even after several retries — "
-            "try again in a minute.")
-    if resp.status_code != 200:
-        raise PhotoroomError(
-            f"Photoroom error {resp.status_code}: {resp.text[:160]}")
-    try:
-        cut = Image.open(BytesIO(resp.content)).convert("RGBA")
-    except Exception as exc:  # noqa: BLE001
-        raise PhotoroomError("Photoroom returned an unreadable image.") from exc
-    alpha = cut.split()[3]
-    if alpha.getbbox() is None:  # nothing kept — no subject found
-        raise PhotoroomError("Photoroom couldn't find a subject in this photo.")
-    # Paid engines get the same survival check as the local one. Better edges
-    # is not the same as never mistaking a black hoodie on a dark floor for
-    # background, and a remote cutout that erases the item is worse — it also
-    # cost money and arrived looking authoritative.
-    result = result if result is not None else matte.CutoutResult()
-    result.engine = "photoroom"
-    if not _subject_survived(alpha, img.convert("RGB"), result):
-        raise PhotoroomError(result.warnings[-1] if result.warnings
-                    else "Photoroom removed the item instead of the background.")
-    result.status = matte.NEEDS_REVIEW if result.warnings else matte.APPLIED
-    return _compose_on_white(cut.convert("RGB"), alpha, shadow=_BG_SHADOW, source=img)
-
-
-# The remote engines a chain entry can name (adobe and local are special-cased
-# where the chain is walked: adobe needs its studio-preset pass, local runs
-# in-process).
-_REMOTE_CUTOUTS = {"pixian": _pixian_cutout, "photoroom": _photoroom_cutout}
-
-
-def _studio_and_cutout(
-        img: Image.Image) -> tuple[Image.Image, str, Optional[str], bool,
-                                   Optional[str], Optional[str]]:
-    """Background removal + studio treatment for the automatic upload path.
-    Returns (image, engine, error, studio_applied, studio_error, review) where
-    engine is the chain member that produced the cutout ('pixian', 'photoroom',
-    'adobe', 'local') or 'none' (kept the original), and `review` is set when a
-    cutout was USED but wants a look — a different thing from `error`, which
-    means no cutout was used at all, and worth keeping separate: reporting a
-    usable photo through the failure channel is how a warning becomes noise.
-
-    The engines and their order come from config.bg_engine_chain() (BG_ENGINE):
-    by default the budget Pixian API when configured (with the local model
-    behind it), otherwise local alone — the pricey Photoroom/Adobe engines run
-    only when BG_ENGINE explicitly picks them. Each engine's cutout goes on
-    white with our soft shadow (Adobe additionally runs its Lightroom preset
-    first, which is the one path that retones the photo at all).
-
-    When every engine in the chain fails, keep the ORIGINAL photo and surface
-    the last reason — a busy background is always better than a shredded item."""
-    last_err: Optional[str] = None
-    studio_applied, studio_error = False, None
-    for engine in config.bg_engine_chain():
-        if engine == "local":
-            # Carry a result in: _cutout_on_white writes the REASON it gave up
-            # on it (subject erased, item read as the backdrop, ...). Letting
-            # it default meant that reason was built, logged and dropped, and
-            # the seller got a bare "cutout failed" for every distinct cause —
-            # nothing to act on, and nothing to tell the difference between a
-            # busy machine and a photo the model could not read.
-            verdict = matte.CutoutResult()
-            try:
-                out = _cutout_on_white(img, result=verdict)
-            except CutoutBusy as exc:
-                # The automatic path never fails a photo — it keeps the
-                # original and says why, which is the right trade in a batch.
-                log.warning("bg-removal: %s", exc)
-                last_err = str(exc)
-                out = None
-            except Exception as exc:  # noqa: BLE001 - bulk keeps going without the cutout
-                log.warning("bg-removal: local cutout failed (%s)", exc)
-                out = None
-            if out is not None:
-                # A cutout that wants a look carries its note out; an
-                # unremarkable one carries nothing. Guarded on `warnings`
-                # too — optimize() must not raise, least of all over a
-                # status set without one.
-                review = (verdict.warnings[-1]
-                          if verdict.status == matte.NEEDS_REVIEW and verdict.warnings
-                          else None)
-                return out, "local", None, studio_applied, studio_error, review
-            last_err = last_err or verdict.reason or "cutout failed"
-        elif engine == "adobe":
-            if not config.adobe_ready():
-                continue
-            # Lightroom studio preset first so the cutout works on a
-            # well-exposed image (keep-the-photo guarantee inside _apply_studio).
-            img, studio_applied, studio_error = _apply_studio(img)
-            try:
-                out = _adobe_cutout(img)
-                if out is not None:
-                    return out, "adobe", None, studio_applied, studio_error, None
-            except ValueError as exc:  # AdobeError
-                log.warning("adobe bg-removal: %s", exc)
-                last_err = str(exc)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("adobe bg-removal: unexpected error (%s)", exc)
-                last_err = f"Background removal failed: {exc}"
-        else:
-            try:
-                out = _REMOTE_CUTOUTS[engine](img)
-                if out is not None:
-                    return out, engine, None, False, None, None
-            except ValueError as exc:  # PixianError/PhotoroomError — mapped reason
-                log.warning("%s: %s", engine, exc)
-                last_err = str(exc)
-            except Exception as exc:  # noqa: BLE001 - keep-original must hold for
-                # ANY failure, not just mapped API errors — a photo must never
-                # fail optimize().
-                log.warning("%s: unexpected error (%s)", engine, exc)
-                last_err = f"Background removal failed: {exc}"
-    log.warning("bg-removal: keeping the original photo (%s)",
-                last_err or "no engine produced a cutout")
-    return (_flatten(img), "none", last_err or "background removal failed",
-            studio_applied, studio_error, None)
-
-
-def _matte_ladder() -> tuple[int, ...]:
-    """Matte resolutions to try, largest first, each one only once.
-
-    A retry only earns its wait if it does something different: a smaller
-    inference is the recovery from an out-of-memory kill, and re-running the
-    identical size is pure delay on the path where someone is watching a
-    spinner."""
-    ladder: list[int] = []
-    for side in (_STUDIO_MAX_SIDE, _REMBG_MAX_SIDE):
-        if side > 0 and side not in ladder:
-            ladder.append(side)
-    return tuple(ladder or (_REMBG_MAX_SIDE,))
-
-
-def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
-    """Photo-studio 'Remove background'. Returns (image, engine) so the editor
-    can name the remover that actually ran. Raises when the cutout genuinely
-    fails so the editor can tell the user instead of silently doing nothing.
-
-    Walks the same config.bg_engine_chain() as the automatic path. A failure
-    on the chain's LAST engine RAISES (PixianError/PhotoroomError/AdobeError
-    are ValueErrors → the editor shows the real reason as a toast) instead of
-    silently degrading — a silent fallback is how mangled cutouts kept
-    appearing with no clue why. The local model runs at the higher studio
-    matte resolution, falling back to the fast size if a big inference runs
-    out of memory."""
-    chain = config.bg_engine_chain()
-    for i, engine in enumerate(chain):
-        final = i == len(chain) - 1
-        if engine == "local":
-            # Distinct sizes only, largest first. _STUDIO_MAX_SIDE defaults to
-            # _REMBG_MAX_SIDE, so the naive tuple ran the SAME inference twice
-            # on the default config — doubling the wait on the one path where
-            # a seller is sitting there watching it, for an identical result.
-            for side in _matte_ladder():
-                try:
-                    # dark_guard off: the seller reviews the result and can
-                    # Revert, so show the cutout rather than hard-failing on a
-                    # borderline shot.
-                    out = _cutout_on_white(img, max_side=side, dark_guard=False,
-                                           wait=INFER_WAIT_SECONDS)
-                except CutoutBusy:
-                    # Not a model problem and not fixable by trying smaller —
-                    # the queue was full. Retrying here would just spend
-                    # another wait to learn the same thing.
-                    raise
-                except Exception as exc:  # noqa: BLE001 - retry smaller on OOM/model error
-                    log.warning("bg-removal: matte at %dpx failed (%s) — retrying smaller",
-                                side, exc)
-                    continue
-                if out is not None:
-                    return out, "local"
-                break  # a clean run that erased the subject won't improve when smaller
-            break  # nothing worked — fall through to the raise below
+    `done_already`/`grand_total` describe work this call is NOT doing — the
+    photos a resumed batch found already finished — so `progress` keeps
+    saying "38 of 40" across a restart instead of dropping to "0 of 2"."""
+    total = grand_total or len(jobs)
+    done = done_already
+    results = []
+    for src, dst in jobs:
+        if should_stop is not None and should_stop():
+            raise Stopped()
         try:
-            out = (_adobe_cutout(img) if engine == "adobe"
-                   else _REMOTE_CUTOUTS[engine](img))
-            if out is not None:
-                return out, engine
-        except ValueError as exc:  # engine's own user-facing reason
-            if final:
-                raise
-            log.warning("%s: %s — trying the next engine", engine, exc)
-    raise ValueError(
-        "Couldn't cleanly separate this photo from its background — it's "
-        "likely a close-up, dark, or low-contrast shot. Try cropping in "
-        "tighter, or paint the background out with the white brush.")
+            result = optimize(src, dst, remove_bg)
+        except Exception as exc:  # noqa: BLE001 - keep going on a bad image
+            result = {"file": src.name, "error": str(exc)}
+        results.append(result)
+        done += 1
+        if progress:
+            try:
+                progress(done, total)
+            except Exception:  # noqa: BLE001 - progress is display-only
+                pass
+    return results
 
 
 def warm() -> None:
-    """Pre-load the rembg model + trigger numba's JIT on a tiny image.
-
-    The very first background removal otherwise pays a one-time cost of a
-    minute or two (importing scipy/numba/onnxruntime + JIT; /api/ready
-    reports what it came to as model_load_seconds). Called in a background
-    thread at startup so the machine is reachable immediately while this
-    warms up, and real uploads hit a warm path."""
+    """Pre-load the model on a tiny image, from a startup thread, so the first
+    real photo does not pay for importing onnxruntime and reading a 176MB
+    file (/api/ready reports that cost as model_load_seconds)."""
     try:
-        # Warm the LOCAL model directly (the default engine, and it powers the
-        # subject masks either way) — never via _studio_and_cutout,
-        # which would burn a paid API credit on every boot when a remote
-        # engine is configured. Warm the mask pipeline only, not the full
-        # cutout: a synthetic solid-color square has no subject to keep, and
-        # the cutout's failure guard rightly cried "subject nearly erased
-        # (0.0% kept)" on it every single boot.
-        # A small subject on a backdrop, not a flat tile: the border pass only
-        # engages when there's an edge to work on, and warming it here is what
-        # keeps scipy's import off the first real photo.
         tile = Image.new("RGB", (64, 64), (235, 235, 235))
         tile.paste(Image.new("RGB", (30, 30), (200, 100, 50)), (17, 17))
-        _refine_alpha(_alpha_mask(tile), source=tile)
+        _mask(tile)
         log.info("images: background-removal model warmed")
     except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-        log.warning(f"images: warmup failed (will lazy-load on first use): {exc}")
+        log.warning("images: warmup failed (will lazy-load on first use): %s", exc)
 
 
-def _subject_box(img_rgb: Image.Image) -> Optional[tuple[int, int, int, int]]:
-    """Best-effort subject bounding box via a cheap corner-color difference.
+# --- the photo studio --------------------------------------------------------
 
-    Works well on plain backgrounds and on cutouts-on-white (the corner is the
-    background color). Returns None when the box is basically the whole frame
-    (busy/textured background) or a tiny speck, so callers fall back to a plain
-    center crop instead of a bad guess. No model — fast enough for every photo.
-    """
-    from PIL import ImageChops
+def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
+    """The studio's "Remove background": the item on white, and the name of
+    the engine that did it. Raises ValueError when the model found nothing to
+    keep, so the editor can tell the seller instead of silently doing
+    nothing, and CutoutBusy when the slot is taken (the editor's wait is the
+    short one: a person is watching)."""
+    out = cutout(_flatten(img), wait=INFER_WAIT_SECONDS)
+    if out is None:
+        raise ValueError(
+            "Couldn't separate this photo from its background — it's likely "
+            "a close-up, dark, or low-contrast shot. Try cropping in tighter, "
+            "or paint the background out with the white brush.")
+    return out, "local"
 
-    bg = Image.new("RGB", img_rgb.size, img_rgb.getpixel((0, 0)))
-    diff = ImageChops.difference(img_rgb, bg).convert("L")
-    mask = diff.point(lambda v: 255 if v > 32 else 0)
-    box = mask.getbbox()
-    if not box:
+
+def _subject(img: Image.Image) -> tuple[Image.Image, Image.Image]:
+    rgb = _flatten(img)
+    return rgb, _harden(_mask(rgb, wait=INFER_WAIT_SECONDS))
+
+
+def auto_clean(img: Image.Image) -> Image.Image:
+    """Whiten everything outside the item. The mask is grown a little and
+    feathered so the edge stays soft and nothing of the item is eaten."""
+    rgb, mask = _subject(img)
+    mask = mask.point(lambda a: 255 if a >= 96 else 0)
+    mask = mask.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.GaussianBlur(2))
+    return Image.composite(rgb, Image.new("RGB", rgb.size, WHITE), mask)
+
+
+def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
+    """Crop to the item plus a margin. None when there is no confident item
+    or the frame is already tight, so the caller can say "nothing to crop"
+    instead of degrading the photo."""
+    rgb, mask = _subject(img)
+    bbox = mask.point(lambda a: 255 if a >= 128 else 0).getbbox()
+    if not bbox:
         return None
-    w, h = img_rgb.size
-    bw, bh = box[2] - box[0], box[3] - box[1]
-    if (bw > w * 0.92 and bh > h * 0.92) or bw < w * 0.05 or bh < h * 0.05:
-        return None  # whole frame (textured bg) or a speck — not a clean subject
-    return box
+    left, top, right, bottom = bbox
+    mx, my = int((right - left) * margin), int((bottom - top) * margin)
+    box = (max(0, left - mx), max(0, top - my),
+           min(rgb.width, right + mx), min(rgb.height, bottom + my))
+    if (box[2] - box[0]) * (box[3] - box[1]) > 0.92 * rgb.width * rgb.height:
+        return None  # already tight — don't churn the photo for a <8% trim
+    return rgb.crop(box)
 
 
-def _border_color(rgb: Image.Image) -> tuple:
-    """The image's own backdrop color, averaged from its four corners — pure
-    white on a cleaned photo, approximately the table/backdrop otherwise."""
-    corners = [rgb.getpixel((x, y)) for x, y in
-               ((0, 0), (rgb.width - 1, 0), (0, rgb.height - 1),
-                (rgb.width - 1, rgb.height - 1))]
-    return tuple(sum(c[i] for c in corners) // 4 for i in range(3))
-
-
-def _pad_square(crop: Image.Image, pad_color: tuple) -> Image.Image:
-    """Center `crop` on a square canvas of its longest side."""
-    side = max(crop.size)
-    canvas = Image.new("RGB", (side, side), pad_color)
-    canvas.paste(crop, ((side - crop.width) // 2, (side - crop.height) // 2))
-    return canvas
-
-
-# Breathing room around a cut-out subject on its white canvas, as a fraction of
-# the canvas per side. eBay's own gallery shots sit at roughly this; tighter
-# and the item collides with the thumbnail's edge, looser and it shrinks in
-# search results where every listing is competing at 220px.
-PAD_FRACTION = float(os.getenv("CUTOUT_PAD_FRACTION", "0.09") or 0.09)
-
-
-def _frame_cutout(img: Image.Image, pad: float = PAD_FRACTION) -> Image.Image:
-    """Centre a cut-out subject on a square white canvas with even padding.
-
-    The difference from _fill_square, the path a photo that kept its
-    background takes: that one holds the photo at its own scale, because there
-    the frame is a picture the seller composed and everything in it is real.
-    On a cutout the background IS the canvas — blank white this pass painted
-    on — so there is nothing to preserve outside the item, and sizing the
-    canvas to it is what makes a row of listing photos look like a set.
-
-    Falls back to _fill_square when the subject can't be located (which for a
-    cutout on white would mean it filled the frame or vanished).
-    """
-    rgb = _flatten(img)
-    box = _subject_box(rgb)
-    if not box:
-        return _fill_square(rgb)
-    w, h = rgb.size
-    left, top, right, bottom = box
-    longest = max(right - left, bottom - top)
-    # The window: subject plus `pad` on each side, floored at half the photo's
-    # short side so a ring shot from across the room is not blown up to 1600px
-    # of blur.
-    side = max(int(round(longest / max(0.1, 1 - 2 * pad))), min(w, h) // 2)
-    cx, cy = (left + right) // 2, (top + bottom) // 2
-    sx, sy = cx - side // 2, cy - side // 2
-    canvas = Image.new("RGB", (side, side), WHITE)
-    # Intersect with the photo and paste at the offset, rather than cropping
-    # past the edge (PIL would fill that with black) — and this keeps whatever
-    # sits just outside the subject box, notably the contact shadow, instead
-    # of slicing it off at the box's hard edge.
-    x0, y0 = max(0, sx), max(0, sy)
-    x1, y1 = min(w, sx + side), min(h, sy + side)
-    if x1 > x0 and y1 > y0:
-        canvas.paste(rgb.crop((x0, y0, x1, y1)), (x0 - sx, y0 - sy))
-    return canvas
-
-
-def _plain_backdrop(rgb: Image.Image, tol: int = 28) -> bool:
-    """True when the photo's border is a near-uniform backdrop (white sweep,
-    a cleaned cutout, a plain table) rather than a busy scene.
-
-    _subject_box gives up when the difference box spans the frame, which means
-    one of two very different things: the item fills the photo edge to edge, or
-    the background is textured and every pixel differs from the corner. On a
-    plain backdrop it's the former, and cropping such a photo would slice the
-    item — so _fill_square needs to tell the two apart.
-    """
-    ref = _border_color(rgb)
-    w, h = rgb.size
-    step = max(1, min(w, h) // 32)
-    samples, plain = 0, 0
-    for x in range(0, w, step):
-        for y in (0, h - 1):
-            px = rgb.getpixel((x, y))
-            samples += 1
-            plain += all(abs(px[i] - ref[i]) <= tol for i in range(3))
-    for y in range(0, h, step):
-        for x in (0, w - 1):
-            px = rgb.getpixel((x, y))
-            samples += 1
-            plain += all(abs(px[i] - ref[i]) <= tol for i in range(3))
-    return samples > 0 and plain / samples >= 0.85
-
-
-def _fill_square(img: Image.Image) -> Image.Image:
-    """Square-frame the photo around its subject, at the photo's own scale.
-
-    The window is always the largest square the frame can hold, slid over the
-    subject: the crop re-CENTRES, it never tightens. Framing used to pick a
-    window as small as the subject plus ~30% and let the resize to TARGET_SIZE
-    blow it back up, which cost three things at once — the item was magnified
-    (and softened) beyond the photo the seller took, most of the background
-    they deliberately shot was thrown away, and wherever the cheap corner-diff
-    subject box came in short of the real item, the gallery thumbnail arrived
-    with its edges sliced off. A seller who does want a tighter frame has Crop
-    and Smart crop in the photo studio; the pipeline no longer decides it for
-    them.
-
-    A subject too big for that window — one filling a portrait frame, or an
-    elongated one like skis or a curtain rod — keeps the whole photo, padded
-    out to square with the photo's own backdrop color. Whole item beats full
-    frame."""
-    rgb = _flatten(img)
-    w, h = rgb.size
-    side = min(w, h)  # the largest square the frame holds — never smaller
-    box = _subject_box(rgb)
-    if box:
-        left, top, right, bottom = box
-        bw, bh = right - left, bottom - top
-        mx, my = max(6, int(bw * 0.05)), max(6, int(bh * 0.05))
-        # What a square crop would have to contain to keep the whole subject.
-        if max(bw + 2 * mx, bh + 2 * my) > side:
-            # Bigger than any square this frame holds: a crop would cut the
-            # item, so keep every pixel and pad out to square instead.
-            return _pad_square(rgb, _border_color(rgb))
-        cx, cy = (left + right) // 2, (top + bottom) // 2
-    elif _plain_backdrop(rgb):
-        # No clean box on a plain backdrop: the item runs edge to edge (or is
-        # a speck on an empty sweep). Either way there's nothing safe to crop,
-        # so pad the frame out to square and keep every pixel of it.
-        return _pad_square(rgb, _border_color(rgb))
-    else:
-        # Busy, textured scene — no idea where the item is. Leave the window
-        # on the middle of the frame.
-        cx, cy = w // 2, h // 2
-    # Clamp the window so it stays fully inside the image (still no padding).
-    left = min(max(0, cx - side // 2), w - side)
-    top = min(max(0, cy - side // 2), h - side)
-    return rgb.crop((left, top, left + side, top + side))
-
-
-def _finish(img: Image.Image) -> Image.Image:
-    """The only tone work the pipeline does: a light sharpen, to put back the
-    micro-contrast that the downscale to TARGET_SIZE costs.
-
-    There used to be an "auto tone" pass here — a border-referenced white
-    balance, an adaptive levels stretch, and brightness/contrast/colour
-    nudges — added on the theory that a better-exposed photo would give the
-    background remover a cleaner edge to find. It cannot: the matte comes from
-    isnet, which sees its own downscaled copy of the SOURCE photo (see
-    _alpha_mask), while this runs after the cutout, on the finished canvas.
-    Every photo paid for a full-frame histogram, a 64x64 border sample and
-    four LUT/enhance passes that changed nothing about where the cut landed.
-
-    What it did change was the picture, usually for the worse. On a cutout the
-    frame is white by construction, so the levels stretch read a histogram
-    that was mostly backdrop, and the contrast nudge pushed the item darker
-    against a canvas already clipped at 255 — the item came back muddier than
-    the photo the seller actually took.
-    """
-    return img.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=3))
-
-
-# Clockwise degrees -> the exact (lossless) Pillow transpose for it.
-_CW_TRANSPOSE = {
-    90: Image.Transpose.ROTATE_270,   # Pillow names rotations counter-clockwise
-    180: Image.Transpose.ROTATE_180,
-    270: Image.Transpose.ROTATE_90,
-}
-CW_TRANSPOSE = _CW_TRANSPOSE  # public alias (used by orient.py's verify pass)
-
-
-def optimize(src: Path, dst: Path, remove_bg: bool = False,
-             rotate: int = 0) -> dict:
-    """Optimize a single image. Returns metadata about what was done.
-
-    `rotate` is clockwise degrees (0/90/180/270) applied right after the EXIF
-    fix — see services/orient. It has to happen BEFORE the cutout and square
-    crop so the subject detection and framing work on an upright photo.
-    """
-    # Ignore anything that isn't a clean quarter turn, so a bad value can't
-    # resample (and blur) the photo — or get reported as a rotation that
-    # didn't happen.
-    turn = rotate % 360 if rotate % 360 in _CW_TRANSPOSE else 0
-    with Image.open(src) as raw:
-        img = ImageOps.exif_transpose(raw)  # honor camera rotation
-        # ...then straighten the ITEM, which EXIF knows nothing about.
-        if turn:
-            img = img.transpose(_CW_TRANSPOSE[turn])
-        original_size = img.size
-
-        # Downscale oversized inputs before the memory-heavy passes below.
-        if max(img.size) > MAX_WORK_SIDE:
-            img.thumbnail((MAX_WORK_SIDE, MAX_WORK_SIDE), Image.LANCZOS)
-
-        # Alpha is composited HERE, once, before anything looks at the photo.
-        # The framing passes each did their own _flatten, so a photo that kept
-        # its background was safe — but the cutout path in between reached the
-        # source with a bare `.convert("RGB")`, which turns every transparent
-        # pixel BLACK. So a photo that arrived already cut out (a PNG, an
-        # iPhone "lift subject" shot, another tool's export) was handed to the
-        # matte — and to the paid engines, which are billed per image — as an
-        # item on a black field, and any of it the cutout kept came out black.
-        # One flatten up front means every path below works on the same
-        # opaque photo, and the framing ones no-op on it.
-        img = _flatten(img)
-
-        studio_applied, studio_error = False, None
-        bg_removed = False
-        bg_engine, bg_error, bg_review = None, None, None
-        if remove_bg:
-            # Engine order comes from BG_ENGINE — see _studio_and_cutout.
-            img, bg_engine, bg_error, studio_applied, studio_error, bg_review = \
-                _studio_and_cutout(img)
-            bg_removed = bg_engine not in (None, "none")
-        # Square frame. A cutout gets centred with padding on its white canvas
-        # (the canvas is the point — cropping it only risks the item); a photo
-        # that kept its background gets the largest square the frame holds,
-        # slid over the item — its own scale, scenery and all. Neither path
-        # zooms: tighter framing is the seller's call, in the photo studio.
-        img = _frame_cutout(img) if bg_removed else _fill_square(img)
-
-        if img.size[0] != TARGET_SIZE:
-            img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
-
-        # One finishing sharpen for every path. Adobe's Lightroom preset (when
-        # the adobe engine ran) has already set tone and colour; nothing else
-        # sets it at all, by design — see _finish.
-        img = _finish(img)
-
-        dst = dst.with_suffix(".jpg")
-        # No exif= argument, deliberately and on the record: the saved file
-        # carries no EXIF at all, so the GPS coordinates of the seller's home
-        # never ride along to a public marketplace listing. Pillow's default
-        # is to drop it, which makes this a guarantee that could be lost by
-        # someone helpfully "preserving metadata" — hence the note and
-        # test_export_pipeline.py's assertion.
-        #
-        # Written via a temp file and renamed: a photo that exists is a photo
-        # that is FINISHED. optimize_all treats an existing output as done and
-        # skips it (that is what makes an interrupted batch resumable), so a
-        # torn JPEG left behind by a machine that died mid-save would be
-        # adopted as a good one and shipped to a listing.
-        tmp = dst.with_name(f".{dst.name}.{os.getpid():x}.tmp")
-        try:
-            img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
-            os.replace(tmp, dst)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-
-    out = {
-        "file": dst.name,
-        "original_size": original_size,
-        "output_size": (TARGET_SIZE, TARGET_SIZE),
-        "background_removed": bg_removed,
-    }
-    if turn:
-        out["rotated"] = turn  # auto-straightened; the UI reports the count
-    if studio_applied:
-        out["studio"] = "lightroom"
-    if studio_error:
-        out["studio_error"] = studio_error  # why the preset didn't run
-    if bg_engine:
-        out["bg_engine"] = bg_engine
-    if bg_error:
-        out["bg_error"] = bg_error  # why the original was kept instead
-    if bg_review:
-        out["bg_review"] = bg_review  # cutout was used, but worth a look
-    return out
-
+# --- copies for the AI ---------------------------------------------------------
 
 def thumb_jpeg(path: Path, side: int = 512) -> bytes:
     """Small JPEG bytes for AI grouping calls — keeps a 40-photo request light."""
@@ -1941,233 +469,3 @@ def vision_copy(path: Path, side: int = 0) -> Path:
     except Exception as exc:  # noqa: BLE001 - a copy is an optimization only
         log.info("vision copy skipped for %s: %s", path.name, exc)
         return path
-
-
-# How many photos to run through a remote engine (Pixian/Photoroom/Adobe) at
-# once. The per-photo work there is mostly waiting on the API, so the pool
-# turns a 250-photo bulk batch from ~15 minutes of serial waiting into
-# overlapping waves — while keeping peak memory (a few 3200px working copies
-# plus the capped upload payloads) tolerable. Rate limits are handled
-# per-call with retry/backoff, so a bigger pool degrades to pacing, not
-# failures.
-_PHOTO_BATCH_WORKERS = int(os.getenv("PHOTO_BATCH_WORKERS", "8") or "8")
-# Concurrency when the LOCAL engine (or no cutout at all) does the work.
-# Model inference stays single-flight behind _INFER_LOCK regardless, but
-# everything around it — mask refinement, hole fill, compose, crop, tone,
-# encode, roughly half of each photo's wall clock — is ordinary Pillow/numpy
-# work that releases the GIL. A couple of photos in flight let one photo's
-# post-processing overlap the next photo's inference. Kept small because each
-# in-flight photo holds a few full-size working buffers; PHOTO_LOCAL_WORKERS=1
-# restores the old strictly-serial behavior.
-_LOCAL_BATCH_WORKERS = int(os.getenv("PHOTO_LOCAL_WORKERS", "2") or "2")
-
-
-class Stopped(Exception):
-    """Raised inside a photo batch that its caller called off mid-run.
-
-    Cutouts are the longest thing this app does — one local inference is ~100s
-    on the production box, so a 40-photo batch is an hour — which is why "stop
-    this batch" has to reach INSIDE the photo pass instead of waiting politely
-    for it. Nothing is left half-written: optimize() renames its result into
-    place, so the photos already finished stay valid and a stopped run is
-    still a resumable one.
-    """
-
-
-def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
-                 progress=None, should_stop=None) -> list[dict]:
-    """Optimize every image in src_dir. `progress(done, total)` (optional) is
-    called after each photo so long bulk jobs can show a live count.
-
-    `should_stop()` (optional) is asked before each photo starts; when it
-    answers True the run raises `Stopped` rather than working through the rest
-    of the pile. Unlike `progress`, it is NOT display-only — a caller passing
-    it is asking to be able to abandon the batch.
-
-    Photos whose output already exists are left alone and reported as
-    {"file", "reused"}. That is what lets a batch that died halfway — a deploy,
-    an OOM, a machine the platform decided to replace — be started again
-    without paying for the cutouts it already finished. It is safe to trust an
-    existing output because optimize() renames its result into place, so a
-    file being there means it was written completely (see the save in
-    optimize()). Positions come from the sorted source list, so the same photo
-    maps to the same output name on every run."""
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    exts = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
-            ".tif", ".tiff", ".heic", ".heif", ".hif", ".avif"}
-    # Natural sort: past 99 files a lexicographic sort puts src_100 before
-    # src_20, scrambling the shooting order that bulk grouping relies on.
-    jobs = [(i, src) for i, src
-            in enumerate(sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)))
-            if src.suffix.lower() in exts]
-    todo = [(i, src, dst) for i, src in jobs
-            if not (dst := dst_dir / f"img_{i:03d}.jpg").exists()]
-    if len(todo) < len(jobs):
-        log.info("images: %d of %d photo(s) already optimized — resuming",
-                 len(jobs) - len(todo), len(jobs))
-    # One batched vision pass over the photos still to do decides which were
-    # shot with the ITEM lying sideways or upside-down — something EXIF can't
-    # tell us. Done up front so each photo is straightened before its cutout
-    # and square crop, not after.
-    # Imported here, not at module scope: orient reaches the Anthropic SDK,
-    # and everything else in this file is pure Pillow/NumPy. Keeping the AI
-    # dependency inside the one function that needs it is what lets the cutout
-    # safety suite run in CI without installing an LLM client to check that a
-    # mask kept a shoelace.
-    from . import orient
-    rotations = orient.detect_rotations([src for _i, src, _dst in todo])
-    # A list, not a set: these line up positionally with optimize_batch's
-    # results below, and a set's iteration order is not the job order. The
-    # membership test gets its own set, built once — inside the comprehension
-    # it was rebuilt per job, which on a 250-photo batch resumed after a
-    # restart is a quarter of a million comparisons to answer "which of these
-    # are already done".
-    pending = [i for i, _src, _dst in todo]
-    pending_set = set(pending)
-    results = {i: {"file": f"img_{i:03d}.jpg", "reused": True}
-               for i, _src in jobs if i not in pending_set}
-    if progress and not todo and jobs:
-        # Nothing left to do, so nothing below will ever tick. Report the real
-        # count once rather than leaving a resumed batch's bar reading zero.
-        try:
-            progress(len(jobs), len(jobs))
-        except Exception:  # noqa: BLE001 - progress is display-only
-            pass
-    results.update(zip(pending, optimize_batch(
-        [(src, dst, rotations.get(src.name, 0)) for _i, src, dst in todo],
-        remove_bg=remove_bg, progress=progress, should_stop=should_stop,
-        done_already=len(results), grand_total=len(jobs))))
-    # Back into source order, so results still line up with the filenames.
-    return [results[i] for i, _src in jobs]
-
-
-def optimize_batch(jobs: list[tuple[Path, Path, int]], remove_bg: bool = False,
-                   progress=None, done_already: int = 0,
-                   grand_total: int = 0, should_stop=None) -> list[dict]:
-    """Optimize (src, dst, clockwise-rotation) jobs, pooled to fit the engine.
-
-    A chain led by a remote API (Pixian/Photoroom/Adobe) gets a wide pool —
-    each photo is mostly a network call we wait on. The local engine (and the
-    no-cutout path) gets a small pool: inference is serialized by _INFER_LOCK
-    either way, but the pipeline around it overlaps. Results come back in job
-    order; a failed photo yields {"file", "error"} instead of raising.
-
-    `done_already`/`grand_total` describe work this call is NOT doing — the
-    photos a resumed batch found already finished. They only shift what
-    `progress` reports, so the seller's count stays "38 of 40" across a
-    restart instead of dropping back to "0 of 2"."""
-    total = grand_total or len(jobs)
-    done = done_already
-    done_lock = threading.Lock()
-
-    def _tick() -> None:
-        nonlocal done
-        with done_lock:
-            done += 1
-            count = done
-        if progress:
-            try:
-                progress(count, total)
-            except Exception:  # noqa: BLE001 - progress is display-only
-                pass
-
-    def _one(job: tuple[Path, Path, int]) -> dict:
-        src, dst, rotate = job
-        # Asked before the photo starts, so a stop costs at most the one
-        # cutout already running rather than the whole rest of the pile.
-        if should_stop is not None and should_stop():
-            raise Stopped()
-        try:
-            result = optimize(src, dst, remove_bg, rotate=rotate)
-        except Exception as exc:  # noqa: BLE001 - keep going on a bad image
-            result = {"file": src.name, "error": str(exc)}
-        _tick()
-        return result
-
-    chain = config.bg_engine_chain() if remove_bg else []
-    remote_first = bool(chain) and chain[0] != "local"
-    # Sized to the photos THIS call has to run, not to `total` — which on a
-    # resumed batch also counts the ones already on disk.
-    if remote_first:
-        workers = min(_PHOTO_BATCH_WORKERS, len(jobs))
-    elif remove_bg:
-        # Local cutouts: model inference releases the GIL (and is serialized
-        # by _INFER_LOCK anyway), so a second photo's mask/crop/encode work
-        # genuinely overlaps it.
-        workers = min(_LOCAL_BATCH_WORKERS, len(jobs))
-    else:
-        # No cutout = pure Pillow CPU with no waits to overlap; measured with
-        # the perf harness, a 2-thread pool is ~15% SLOWER than serial here
-        # (GIL + memory-bandwidth contention), so plain optimizes stay serial.
-        workers = 1
-    if workers > 1:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            # map() preserves job order, so results line up with filenames.
-            return list(pool.map(_one, jobs))
-    return [_one(job) for job in jobs]
-
-
-# ---------------------------------------------------------------------------
-# Photo studio: AI subject detection powering smart crop and one-tap auto
-# clean-up in the in-browser editor.
-# ---------------------------------------------------------------------------
-
-def _subject_mask(img: Image.Image) -> Image.Image:
-    """Soft alpha mask (mode L, same size as img) of the detected subject,
-    with interior holes re-attached — otherwise a graphic or a bright panel the
-    model mistakes for background makes auto-clean whiten a chunk out of the
-    middle of the item."""
-    rgb = img.convert("RGB")
-    # Interactive deadline: these back the editor's Smart crop / Auto clean
-    # buttons, where a prompt "busy, try again" beats a long spinner.
-    mask, _ = _fill_interior_holes(_alpha_mask(rgb, wait=INFER_WAIT_SECONDS), rgb)
-    return mask
-
-
-def auto_clean(img: Image.Image) -> Image.Image:
-    """Re-detect the item's borders and whiten everything outside them.
-
-    The mask edge is grown slightly then feathered so we never eat into the
-    subject and the transition stays soft.
-    """
-    rgb = _flatten(img)
-    mask = _subject_mask(rgb)
-    mask = mask.point(lambda a: 255 if a >= 96 else 0)
-    mask = mask.filter(ImageFilter.MaxFilter(7))
-    mask = mask.filter(ImageFilter.GaussianBlur(2))
-    white = Image.new("RGB", rgb.size, WHITE)
-    return Image.composite(rgb, white, mask)
-
-
-def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
-    """Crop to the detected subject (plus a margin), re-padded to a square.
-
-    Returns None when there's no confident subject or the frame is already
-    tight, so the caller can say "nothing to crop" instead of degrading the
-    photo.
-    """
-    rgb = _flatten(img)
-    mask = _subject_mask(rgb)
-    bbox = mask.point(lambda a: 255 if a >= 96 else 0).getbbox()
-    if not bbox:
-        return None
-    left, top, right, bottom = bbox
-    mx = int((right - left) * margin)
-    my = int((bottom - top) * margin)
-    left = max(0, left - mx)
-    top = max(0, top - my)
-    right = min(rgb.width, right + mx)
-    bottom = min(rgb.height, bottom + my)
-    # Already tight? Don't churn the image for a <8% trim.
-    if (right - left) * (bottom - top) > 0.92 * rgb.width * rgb.height:
-        return None
-
-    crop = rgb.crop((left, top, right, bottom))
-    # Pad back to a square using the image's own border color (pure white on a
-    # cleaned photo; approximates the backdrop otherwise).
-    canvas = _pad_square(crop, _border_color(rgb))
-    if canvas.width != TARGET_SIZE:
-        canvas = canvas.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
-    return canvas

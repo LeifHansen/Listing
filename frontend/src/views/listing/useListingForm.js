@@ -539,7 +539,7 @@ export function useListingForm() {
             onUpdate: (j) => setAddingStatus(
               j.phase === "optimizing" && j.total_photos
                 ? `Photo ${Math.min((j.current || 0) + 1, j.total_photos)} of ${j.total_photos}…`
-                : j.phase === "orienting" ? "Checking which way is up…" : "Adding…"),
+                : "Adding…"),
           })
         : start;
       const added = res.added || [];

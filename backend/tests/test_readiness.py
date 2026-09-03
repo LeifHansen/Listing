@@ -78,7 +78,7 @@ def test_a_full_inference_queue_gives_up_instead_of_hanging(monkeypatch):
     images._INFER_LOCK.acquire()
     try:
         with pytest.raises(images.CutoutBusy):
-            images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)),
+            images._mask(Image.new("RGB", (64, 64), (200, 200, 200)),
                                wait=0.05)
     finally:
         images._INFER_LOCK.release()
@@ -109,7 +109,7 @@ def test_a_batch_photo_queues_for_the_model_instead_of_giving_up(monkeypatch):
 
     def _queued_photo() -> None:
         try:
-            images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)))
+            images._mask(Image.new("RGB", (64, 64), (200, 200, 200)))
             outcome.append("got-the-slot")
         except images.CutoutBusy:
             outcome.append("gave-up")
@@ -201,7 +201,7 @@ def test_a_slow_model_load_is_not_reported_as_a_slow_inference(monkeypatch,
     monkeypatch.setattr(images, "INFER_SLOW_SECONDS", 0.1)
 
     with caplog.at_level("WARNING", logger="thryft"):
-        images._alpha_mask(Image.new("RGB", (64, 64), (200, 200, 200)))
+        images._mask(Image.new("RGB", (64, 64), (200, 200, 200)))
 
     state = images.engine_state()
     assert state["loaded"] is True
