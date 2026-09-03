@@ -85,8 +85,16 @@ export function UploadPhase() {
   // 250-photo batch actually has. Selection is keyed by the object URL, not
   // the index: an index shifts under every removal, so deleting a set by
   // index deletes the wrong photos as soon as the first one goes.
-  const [selecting, setSelecting] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
   const [picked, setPicked] = useState(() => new Set());
+  // Derived, not synced: an empty pile has no grid and so no toolbar, and
+  // deriving that is what keeps it true no matter which path emptied it. The
+  // effect that used to reset the flag was both a lint error (setState inside
+  // an effect, cascading renders) and a race waiting to happen.
+  const selecting = selectMode && files.length > 0;
+  // Counted against the pile rather than read off the set, so a URL left in
+  // `picked` for a photo that has since gone cannot inflate "N of M".
+  const pickedCount = files.reduce((n, f) => n + (picked.has(f.url) ? 1 : 0), 0);
   // Live status of the background pipeline job (phase/current/total_photos),
   // so the wait card reports what's actually happening instead of guessing.
   const [stage, setStage] = useState(null);
@@ -134,7 +142,7 @@ export function UploadPhase() {
   // Leave select mode with nothing held, so the next time it is entered it
   // does not open on a selection the seller made minutes ago.
   const endSelecting = () => {
-    setSelecting(false);
+    setSelectMode(false);
     setPicked(new Set());
   };
 
@@ -148,12 +156,6 @@ export function UploadPhase() {
     });
     endSelecting();
   };
-
-  // A pile emptied by other means (every photo removed one at a time) must
-  // not leave the toolbar behind on a grid that is gone.
-  useEffect(() => {
-    if (!files.length && selecting) endSelecting();
-  }, [files.length, selecting]);
 
   // The batch screen takes over on the click — no waiting on the upload with
   // the Sell tab still on screen — which unmounts this component, so the
@@ -305,7 +307,7 @@ export function UploadPhase() {
               <div className="flex items-center gap-2 flex-wrap">
                 <p className="text-sm font-semibold text-ink">
                   {selecting
-                    ? `${picked.size} of ${files.length} selected`
+                    ? `${pickedCount} of ${files.length} selected`
                     : `${files.length} photo${files.length === 1 ? "" : "s"}`}
                 </p>
                 <div className="ml-auto flex items-center gap-2">
@@ -313,20 +315,20 @@ export function UploadPhase() {
                     <>
                       <Button
                         variant="ghost" size="sm"
-                        onClick={() => setPicked(picked.size === files.length
+                        onClick={() => setPicked(pickedCount === files.length
                           ? new Set()
                           : new Set(files.map((f) => f.url)))}
                       >
                         <CheckCheck aria-hidden />
-                        {picked.size === files.length ? "Select none" : "Select all"}
+                        {pickedCount === files.length ? "Select none" : "Select all"}
                       </Button>
                       <Button
                         variant="danger" size="sm"
-                        disabled={!picked.size}
+                        disabled={!pickedCount}
                         onClick={removePicked}
                       >
                         <Trash2 aria-hidden />
-                        Delete{picked.size ? ` ${picked.size}` : ""}
+                        Delete{pickedCount ? ` ${pickedCount}` : ""}
                       </Button>
                       <Button variant="ghost" size="sm" onClick={endSelecting}>
                         <X aria-hidden /> Done
@@ -334,7 +336,7 @@ export function UploadPhase() {
                     </>
                   ) : (
                     <Button variant="secondary" size="sm"
-                      onClick={() => setSelecting(true)}>
+                      onClick={() => setSelectMode(true)}>
                       <Check aria-hidden /> Select
                     </Button>
                   )}
