@@ -227,7 +227,7 @@ export function TitleCard({ w }) {
           <Input
             maxLength={TITLE_MAX}
             value={w.form.title}
-            needsFix={w.fixTarget === "title"}
+            needsFix={w.fixLevel("title")}
             onChange={(e) => w.set("title", e.target.value)}
             placeholder="e.g. Nike Air Max 90 Men's 10.5 White Leather Sneakers"
           />
@@ -300,7 +300,7 @@ export function CategoryCard({ w }) {
           <Field label="Category" help="A human-readable label — the numeric ID is what eBay uses.">
             <Input
               value={w.form.category_suggestion}
-              needsFix={w.fixTarget === "category"}
+              needsFix={w.fixLevel("category")}
               onChange={(e) => w.set("category_suggestion", e.target.value)}
             />
           </Field>
@@ -308,7 +308,7 @@ export function CategoryCard({ w }) {
             <Input
               className="sm:w-40"
               value={w.form.category_id}
-              needsFix={w.fixTarget === "category"}
+              needsFix={w.fixLevel("category")}
               onChange={(e) => w.set("category_id", e.target.value)}
               onBlur={() => w.loadCategoryMeta()}
             />
@@ -923,7 +923,7 @@ export function PricingCard({ w }) {
               <Input
                 type="number" step="0.01" min="0" inputMode="decimal"
                 value={w.form.auction_start_price}
-                needsFix={w.fixTarget === "price"}
+                needsFix={w.fixLevel("price")}
                 onChange={(e) => w.set("auction_start_price", e.target.value)}
               />
             </Field>
@@ -933,7 +933,7 @@ export function PricingCard({ w }) {
               <Input
                 type="number" step="0.01" min="0" inputMode="decimal"
                 value={w.form.price}
-                needsFix={w.fixTarget === "price"}
+                needsFix={w.fixLevel("price")}
                 onChange={(e) => w.set("price", e.target.value)}
               />
             </Field>
@@ -1003,7 +1003,8 @@ export function PricingCard({ w }) {
                 + "category, so these are the general ones."
               : undefined}
           >
-            <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
+            <Select value={w.form.condition} needsFix={w.fixLevel("condition")}
+              onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </Select>
           </Field>
@@ -1186,7 +1187,7 @@ export function ShippingCard({ w }) {
             <Input
               type="number" min="0" step="1" inputMode="numeric"
               value={w.form.package_weight_lb}
-              needsFix={w.fixTarget === "weight"}
+              needsFix={w.fixLevel("weight")}
               onChange={(e) => w.set("package_weight_lb", e.target.value)}
             />
           </Field>
@@ -1194,7 +1195,7 @@ export function ShippingCard({ w }) {
             <Input
               type="number" min="0" max="15" step="0.1" inputMode="decimal"
               value={w.form.package_weight_oz}
-              needsFix={w.fixTarget === "weight"}
+              needsFix={w.fixLevel("weight")}
               onChange={(e) => w.set("package_weight_oz", e.target.value)}
             />
           </Field>

@@ -938,6 +938,26 @@ export function useListingForm() {
     }),
     [collect, categoryMeta.aspects, categoryMeta.conditions, chipTargets, isLive]);
 
+  // Which fields are keeping this listing off eBay right now, and how sure we
+  // are. Two levels, the same pair the item-specifics grid has always drawn:
+  // "warn" (amber) is our own reading of eBay's rules — required and still
+  // empty — and "true" (red) is the marketplace or the server naming the
+  // field in an actual refusal, which outranks a prediction.
+  //
+  // Read from the LIVE blocker list, not from fixTarget alone. fixTarget is
+  // set by a publish attempt inside this editor and dies with the component,
+  // so a seller whose publish failed in the bulk queue, or who simply came
+  // back to the draft later, opened a form with nothing marked at all and no
+  // way to tell which field was missing. That was the whole complaint, and
+  // the information was already here — `blockers` knows on every render.
+  const blockedTargets = useMemo(
+    () => new Set(blockers.map((b) => b.target).filter(Boolean)),
+    [blockers]);
+  const fixLevel = useCallback(
+    (target) => (fixTarget && fixTarget === target ? "true"
+      : blockedTargets.has(target) ? "warn" : undefined),
+    [fixTarget, blockedTargets]);
+
   // ---------- completion per workflow card ----------
   // Three states, and the distinction between the last two is the whole
   // point: "attention" means eBay refuses the listing until this card is
@@ -979,7 +999,7 @@ export function useListingForm() {
     aiBusy, setAiBusy,
     marketTargets, toggleMarketTarget, chipTargets,
     publish, publishResult, setPublishResult, runPreflight,
-    fixTarget, setFixTarget,
+    fixTarget, setFixTarget, fixLevel,
     refine,
     autofillSpecifics, fillInDetails,
     suggestCategories, catSuggestions, chooseCategory,
