@@ -78,6 +78,7 @@ describe("addImages", () => {
       const path = String(url);
       calls.push({ path, method: opts.method || "GET" });
       if (path.startsWith("/api/upload-more/s1")) {
+        calls[calls.length - 1].form = opts.body;
         return ok({ job_id: "job-9", running: true, total: 2 });
       }
       if (path.startsWith("/api/bulk/status/job-9")) {
@@ -126,5 +127,54 @@ describe("addImages", () => {
     });
     expect(get().form.form.images).toEqual(["img_000.jpg"]);
     expect(document.body.textContent).toContain("Could not process the uploaded image(s).");
+  });
+});
+
+
+/* Photos added to a listing go in AS SHOT.
+ *
+ * "Add photos" used to reuse the uploader's remembered "Remove background"
+ * checkbox, so adding a photo to a listing whose first ones were cut out
+ * silently replaced the new photo's background too — from a control on
+ * another screen, last touched on a different pile, with no toggle on this
+ * one and no word about it afterwards. Reported as: "when uploading
+ * additional photos to a listing, it auto removes background. Don't do that."
+ *
+ * Cutting a photo out afterwards is one tap per photo in the image editor,
+ * where it is reversible and the seller is looking at the photo when they
+ * decide. So the request says false, and says it explicitly rather than
+ * leaning on the server's default — a default is not a decision, and this
+ * one has been read the other way once already.
+ */
+describe("added photos keep their background", () => {
+  it("asks for no cutout, whatever the uploader's checkbox remembers", async () => {
+    // The remembered YES is exactly the state that used to turn this on.
+    localStorage.setItem("remove-bg", "yes");
+    const calls = [];
+    vi.stubGlobal("fetch", vi.fn((url, opts = {}) => {
+      const path = String(url);
+      calls.push({ path, form: null, method: opts.method || "GET" });
+      if (path.startsWith("/api/upload-more/s1")) {
+        calls[calls.length - 1].form = opts.body;
+        return ok({ job_id: "job-9", running: true, total: 1 });
+      }
+      if (path.startsWith("/api/bulk/status/job-9")) {
+        return ok({ id: "job-9", done: true, phase: "done",
+                    result: { added: ["img_001.jpg"],
+                              optimized: ["img_000.jpg", "img_001.jpg"],
+                              optimize_results: [] } });
+      }
+      if (path.startsWith("/api/save/s1")) return ok({ ok: true });
+      return ok({});
+    }));
+    const get = await mountEditor();
+
+    await act(async () => {
+      await get().form.addImages([new File(["a"], "a.jpg", { type: "image/jpeg" })]);
+    });
+
+    const sent = calls.find((c) => c.path.startsWith("/api/upload-more/"))?.form;
+    expect(sent).toBeTruthy();
+    expect(sent.get("remove_bg")).toBe("false");
   });
 });

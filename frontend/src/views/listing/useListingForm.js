@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, pollJob, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
-import { lastRemoveBg } from "@/lib/photoPrefs";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
@@ -521,12 +520,23 @@ export function useListingForm() {
       // that already has the least time to spare.
       const prepped = await downscaleAllForUpload(files);
       prepped.forEach((f) => fd.append("files", f));
-      // Photos joining a listing get the same treatment its existing photos
-      // got. Sending nothing here left the server on its `false` default, so
-      // "Add photos" quietly produced originals-with-backgrounds alongside
-      // cut-outs, with no toggle on the card and no word about it afterwards.
-      const removeBg = lastRemoveBg();
-      fd.append("remove_bg", removeBg ? "true" : "false");
+      // Photos added to an existing listing go in AS SHOT.
+      //
+      // This used to reuse the uploader's remembered checkbox, so that a
+      // listing whose first photos were cut out got cut-out additions too.
+      // The reasoning was consistency; what it actually produced was a
+      // destructive edit nobody asked for. The remembered value is a choice
+      // the seller made about a DIFFERENT pile, possibly weeks ago, on a
+      // screen that is not on the page — "Add photos" has no toggle, and the
+      // result was that adding a photo silently replaced its background.
+      // Reported as: "when uploading additional photos to a listing, it auto
+      // removes background. Don't do that."
+      //
+      // Nothing is lost by asking. Cutting a photo out afterwards is one tap
+      // per photo in the image editor (POST /api/image/remove-bg), it is
+      // reversible there, and the seller is looking at the photo when they
+      // decide. Doing it on the way in is neither.
+      fd.append("remove_bg", "false");
       // The request only carries the files; the orientation pass and the
       // cutouts run as a job the way every other upload path's do. They used
       // to run INLINE here, and a deadline stretched to fit N inferences was
@@ -553,15 +563,6 @@ export function useListingForm() {
         // The outer catch turns it into "Couldn't add photos: ...".
         await postJson(`/api/save/${sessionId}`, { ...collect(), images: next });
         toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`, { kind: "success" });
-        // A cutout that failed keeps the original photo, background and all.
-        // That is the right fallback -- a photo is better than no photo -- but
-        // it has to be SAID, or the seller is left wondering why two of their
-        // photos look nothing like the others.
-        const kept = (res.optimize_results || []).filter((r) => r.bg_error);
-        if (kept.length) {
-          toast(`${kept.length} photo${kept.length === 1 ? " kept its" : "s kept their"} `
-                + `background: ${kept[0].bg_error}`, { kind: "warning" });
-        }
         // New photos were saved onto the listing — and if it had none, the
         // card was rendering the no-photo placeholder.
         invalidateListings();
