@@ -758,16 +758,21 @@ export function SpecificsCard({ w }) {
               {" to check — nothing blocking, but a wrong specific is worse than a missing one"}
             </span>
             {reviewCount > 1 && (
-              // Offered last and worded plainly, never as the primary action:
-              // one tap that accepts everything is exactly how a wrong value
-              // reaches a live listing.
-              <button
-                type="button"
+              // Still offered LAST, and still worded as a claim the seller is
+              // making rather than an instruction — one tap that accepts
+              // everything is how a wrong value reaches a live listing. What
+              // it is no longer is hard to find: it was a grey underlined
+              // link at the end of a sentence, which read as a footnote on
+              // the banner it sits in, and a seller who has genuinely read
+              // twelve guesses should not have to hunt for the way to say so.
+              // Solid against the banner's soft blue, so it is unmistakably
+              // the control here without becoming the page's primary action.
+              <Button
+                variant="primary" size="sm" className="shrink-0"
                 onClick={w.confirmAllSpecifics}
-                className="shrink-0 text-[12px] font-semibold text-ink-secondary underline underline-offset-2 cursor-pointer hover:text-ink"
               >
-                I've read them all
-              </button>
+                <Check aria-hidden /> I've read them all
+              </Button>
             )}
           </div>
         )}
