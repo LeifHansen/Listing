@@ -1640,6 +1640,65 @@ def _merge_filled_specifics(listing: Listing, filled: list,
     return added
 
 
+# The coverage pass is on by default and switchable off (SPECIFICS_COVERAGE=0)
+# the same way the identify chain is, because it costs a second vision call
+# per listing and a seller's AI budget is real money.
+#
+# It runs when at least this many of eBay's aspects are still blank after the
+# first fill. Going back for one leftover is a round trip for a single box;
+# going back for eleven is the difference between a listing buyers can filter
+# to and one they cannot.
+_COVERAGE_MIN_BLANKS = 2
+# How many blanks one coverage call is asked about. item_aspects sorts
+# required first, so a category with a very long tail asks about the ones that
+# matter and leaves the rest — a prompt with 200 aspects in it fills none of
+# them well.
+_COVERAGE_MAX_BLANKS = 40
+
+
+def _coverage_on() -> bool:
+    return (os.getenv("SPECIFICS_COVERAGE", "1").strip().lower()
+            not in ("0", "false", "no", "off"))
+
+
+def _cover_remaining_specifics(listing: Listing, image_paths: list,
+                               aspects: list[dict]) -> int:
+    """Go back for the item specifics the first fill left blank.
+
+    The first pass is handed thirty-odd aspects and asked to fill what it can;
+    what it does with the ones it is unsure of is silently nothing. That is
+    how a listing reaches eBay with Subject, Era, Occasion, Packaging and
+    Character empty while eBay's own suggester offers all five on the very
+    next screen, from the same photos — and every one of them is a filter a
+    buyer can use that the listing does not appear in.
+
+    So the blanks are asked about again, on their own, by a pass whose whole
+    job is "you have already read this item; what is it obviously about".
+    Identifiers are not in the list it is shown (taxonomy.fillable_blanks),
+    because an instruction to prefer an inference must never reach a UPC box.
+
+    Returns how many values were added. NEVER raises: this is the last thing
+    between a draft and the seller, and a draft is worth more than a
+    complete specifics grid.
+    """
+    if not _coverage_on():
+        return 0
+    try:
+        blanks = taxonomy.fillable_blanks(listing, aspects)
+        if len(blanks) < _COVERAGE_MIN_BLANKS:
+            return 0
+        filled = claude_ai.fill_missing_aspects(
+            image_paths, listing, blanks[:_COVERAGE_MAX_BLANKS])
+    except Exception as exc:  # noqa: BLE001 - the second look is optional
+        log.info("specifics coverage skipped (cat=%s): %s",
+                 listing.category_id, exc)
+        return 0
+    added = _merge_filled_specifics(listing, filled, aspects)
+    log.info("specifics coverage: cat=%s blanks=%d added=%d",
+             listing.category_id, len(blanks), added)
+    return added
+
+
 def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[int]:
     """Best-effort: fill eBay's category item specifics (required + recommended)
     from the photos and merge them in without overwriting anything already set.
@@ -1669,6 +1728,7 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[in
     added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    added += _cover_remaining_specifics(listing, paths, aspects)
     _pair_aspects(listing, aspects)
     return added
 
@@ -1788,6 +1848,10 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
     added = _merge_filled_specifics(listing, filled, aspects)
     if added:
         log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
+    # The blanks the pass above left behind get their own, narrower ask —
+    # without it a listing goes live missing the specifics eBay's own
+    # suggester offers the seller on the very next screen.
+    added += _cover_remaining_specifics(listing, paths, aspects)
     # eBay pairs some aspects with others — a Size Type has to be one it
     # publishes beside the Size on the tag. Done here, on the draft, so the
     # seller reads the answer in the editor and can still change it; the
@@ -1832,7 +1896,16 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
                     progress=None) -> Optional[int]:
     """Post-identify enrichment (item specifics + maker), routed by
     IDENTIFY_CHAIN. `progress(phase)` (optional) reports stage names for job
-    heartbeats. Returns specifics added, or None when enrichment didn't run."""
+    heartbeats. Returns specifics added, or None when enrichment didn't run.
+
+    Stamps `listing.enriched_at` whenever the chain actually RAN — including
+    the run that added nothing, which is the one that matters. "The AI has
+    read this listing's photos against eBay's aspect list for its category"
+    is a fact about the listing, and the dashboard needs it to stop offering
+    a fill that has already happened. A run that never happened (no category,
+    no photos, no taxonomy — `added is None`) leaves it alone, because that
+    listing still has the fill ahead of it.
+    """
     if _identify_chain() == "v1":
         if progress:
             progress("specifics")
@@ -1840,8 +1913,13 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
         if progress:
             progress("maker")
         _fill_maker(listing, image_paths)
-        return added
-    return _enrich_listing_v2(listing, image_paths, tags or [], progress=progress)
+    else:
+        added = _enrich_listing_v2(listing, image_paths, tags or [],
+                                   progress=progress)
+    if added is not None:
+        listing.enriched_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds")
+    return added
 
 
 def _uid(request: Request):
@@ -4785,6 +4863,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # Merge: keep the seller's existing non-empty values; add the rest
     # (aspect-aware — MULTI aspects may take several values).
     added = _merge_filled_specifics(listing, filled, aspects)
+    added += _cover_remaining_specifics(listing, paths, aspects)
     storage.save_listing(session_id, listing)
     # _sticky_status, not a second hand-written copy of the rule. This was the
     # one status write that re-implemented it, and it listed only
@@ -6612,6 +6691,76 @@ def duplicate_listings(request: Request) -> dict:
             "listings": sum(len(g["listings"]) for g in groups)}
 
 
+# How many DISTINCT categories one /api/insights may look up live. The
+# Taxonomy API runs on a single application-wide allowance shared by every
+# seller, so a dashboard that fetched aspects for a whole store's worth of
+# categories would spend everyone's quota on a screen nobody asked a question
+# on. Anything already cached is free and always read; past this budget the
+# rest of the store simply reports "nobody counted" this time and the
+# recommendation falls back to the notes. The cache is six hours deep, so a
+# store's categories fill in over the first few dashboard loads and stay
+# filled.
+_INSIGHTS_ASPECT_LOOKUPS = 12
+
+
+def _blank_specifics_by_id(items: list[dict]) -> dict:
+    """{listing id: how many of eBay's item specifics it still has blank}.
+
+    This is what "Fill in details" is for, and what the group had no way of
+    knowing: `missing_info` notes are what the AI said about an item, and a
+    listing imported from eBay has none of them however empty its specifics
+    grid is. Only listings a recommendation could actually be made for are
+    counted, and the categories they sit in are looked up most-common first,
+    so the budget above buys the most listings it can.
+
+    Best-effort by construction: a listing whose category is not counted is
+    simply absent from the map, which recommender.recommend_for reads as
+    "nobody counted" rather than as "nothing is blank". Never raises —
+    insights must not break over a suggestion.
+    """
+    by_category: dict[str, list[tuple[str, dict]]] = {}
+    for it in items:
+        # The same statuses recommend_for will actually emit a rec for; every
+        # other record returns early there, so looking its category up would
+        # spend the budget on an answer nobody reads.
+        if it.get("status") not in ("published", "live"):
+            continue
+        listing = it.get("listing") or {}
+        if str(listing.get("enriched_at") or "").strip():
+            continue  # the fill has run; the count cannot change the answer
+        cid = str(listing.get("category_id") or "").strip()
+        lid = it.get("id")
+        if cid and lid:
+            by_category.setdefault(cid, []).append((lid, listing))
+    if not by_category:
+        return {}
+    out: dict[str, int] = {}
+    spent = 0
+    # Biggest categories first: one lookup that answers for forty listings is
+    # worth more than one that answers for a single listing.
+    for cid, rows in sorted(by_category.items(), key=lambda kv: -len(kv[1])):
+        aspects = taxonomy.cached_item_aspects(cid)
+        if aspects is None:
+            if spent >= _INSIGHTS_ASPECT_LOOKUPS or not config.taxonomy_ready():
+                continue
+            try:
+                aspects = taxonomy.item_aspects(cid)
+            except Exception as exc:  # noqa: BLE001 - a count, never a blocker
+                log.info("insights: no aspects for category %s: %s", cid, exc)
+                continue
+            spent += 1
+        names = aspects.get("aspects") or []
+        if not names:
+            continue
+        for lid, listing in rows:
+            try:
+                out[lid] = len(taxonomy.fillable_blanks(
+                    Listing(**listing), names))
+            except Exception:  # noqa: BLE001 - one bad record, not the screen
+                continue
+    return out
+
+
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
@@ -6632,7 +6781,7 @@ def insights(request: Request) -> dict:
         return {"recommendations": recommender.recommendations(
             items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
             promoted_ids=promoted_ids, promotion_known=promotion_known,
-            limit=50),
+            limit=50, blanks_by_id=_blank_specifics_by_id(items)),
             # What one tap on a group can actually reach in a single run — the
             # group renders its button, so it has to know. See _bulk_caps.
             "bulk_caps": _bulk_caps()}
@@ -6941,6 +7090,16 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
             # The AI did run and found nothing the photos could answer, which
             # is a real (billable) answer — the same one the single-listing
             # autofill gives. What it is not is done.
+            #
+            # It IS, however, an answer worth keeping. `_enrich_listing`
+            # stamped enriched_at, and saving that is what stops this listing
+            # coming back in "Fill in details" tomorrow to be asked the same
+            # question and give the same answer — the loop a seller reads,
+            # correctly, as the button not working. Nothing else on the
+            # listing changed, so there is nothing to push to eBay.
+            storage.save_listing(rid, listing)
+            db.upsert_listing(rid, listing.model_dump(),
+                              status=_sticky_status(rec), user_id=uid)
             return {"skip": "Nothing the photos could answer — this one needs you."}
 
         if status in ("published", "live") and creds:

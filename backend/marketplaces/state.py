@@ -146,6 +146,13 @@ SERVER_OWNED_FIELDS = (
     # a brand-new draft still carries whatever the client sent. Depth, not the
     # guard.
     "image_urls",
+    # When the AI specifics fill last ran. Written by the server, on the
+    # server's own clock, and read by the dashboard to decide whether to go on
+    # offering "Fill in details" for this listing. A tab that loaded before the
+    # fill ran carries a blank one, and honouring that blank puts the listing
+    # back in the group the fill just finished with — the same staleness every
+    # other field here is protected from.
+    "enriched_at",
 )
 
 

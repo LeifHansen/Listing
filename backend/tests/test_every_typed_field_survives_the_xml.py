@@ -135,6 +135,9 @@ def test_the_scan_covers_every_free_text_field_on_the_model():
         # Server-owned: set by the sync, never sent back into the XML.
         "source", "status", "ebay_listing_id", "view_url", "sku",
         "ebay_account", "ebay_account_id", "ebay_start_time", "sold_at",
+        # Written on the server's own clock when the AI specifics fill runs,
+        # read only by the dashboard's suggestions. Never sent to eBay.
+        "enriched_at",
     }
     covered = {"title", "subtitle", "description", "condition_description",
                "brand"}

@@ -46,13 +46,27 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
 # WHICH notes counted (2026-09-02) made the group smaller without breaking
 # the loop; the count is what breaks it.
 #
-# Below this many filled specifics, the fill has real room to work. The exact
-# truth -- how many of THIS category's recommended aspects are unanswered --
-# needs a taxonomy call per listing, which this pass runs across the seller's
-# whole store and cannot afford. The count of what is filled is the cheap
-# proxy, and it is never wrong in the direction that matters: a listing with
-# nothing filled is always one the fill can help.
+# Below this many filled specifics, the fill has real room to work. This is
+# the CHEAP proxy for the exact truth -- how many of THIS category's aspects
+# are unanswered -- which needs eBay's aspect list for the category and so
+# cannot simply be asked for a whole store at a time. It is never wrong in the
+# direction that matters: a listing with nothing filled is always one the fill
+# can help.
+#
+# It is a proxy, though, and it is blind in one direction: a listing with
+# Material, Type and Brand filled has three specifics and passes this, while
+# Subject, Era, Occasion, Packaging and Character sit blank and eBay's own
+# suggester offers all five to the seller on the next screen. So the caller
+# now counts the real thing where it can afford to (main._blank_specifics_by_id
+# spends a small budget of cached Taxonomy lookups per dashboard load) and
+# passes it as `blank_specifics`; this stands wherever it could not.
 MIN_SPECIFICS = 3
+
+# ...and how many have to be BLANK, when the caller could afford to ask eBay
+# which aspects this listing's category actually publishes. One empty box is
+# not an errand; three is the difference between a listing buyers can filter
+# to and one they cannot.
+MIN_BLANK_SPECIFICS = 3
 
 
 def filled_specifics(listing: dict) -> int:
@@ -63,7 +77,8 @@ def filled_specifics(listing: dict) -> int:
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
                   rate: Optional[float] = None, promoted: bool = False,
-                  promotion_known: bool = True) -> list[dict]:
+                  promotion_known: bool = True,
+                  blank_specifics: Optional[int] = None) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
     {listing_id, listing_title, type, label, reason, action, priority, rate}.
     `rate` is eBay's recommended Promoted Listings ad rate (%) for this listing,
@@ -76,6 +91,12 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     `promoted=False` from an unanswered lookup is not evidence that a listing
     is unpromoted — it is the absence of evidence either way. Defaults True so
     a caller that does not pass it keeps its recommendations.
+
+    `blank_specifics` is how many of eBay's item specifics for this listing's
+    category it currently holds no value for, counted against eBay's own
+    aspect list — see the "Fill in details" rule below. None means nobody
+    counted (no category, the Taxonomy API down, or past the lookup budget one
+    dashboard load may spend), and the rule falls back to `filled_specifics`.
     """
     listing = item.get("listing") or {}
     status = item.get("status")
@@ -136,13 +157,47 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             f"Only {n} photo{'' if n == 1 else 's'} — more angles mean more sales.", 50)
     notes = [n for n in (listing.get("missing_info") or [])
              if str(n or "").strip()]
+    # Two signals decide this, and they answer the same question at different
+    # prices.
+    #
+    # `blank_specifics` is the TRUTH: how many of the aspects eBay publishes
+    # for this listing's category it holds no value for, counted by the caller
+    # (main._blank_specifics_by_id) against eBay's own aspect list. It is what
+    # the group is actually about, and it is the only one of the two that can
+    # see the case this app was shipping: a listing with Material, Type and
+    # Brand filled and Subject, Era, Occasion, Packaging and Character blank
+    # has plenty of specifics and is still missing the ones eBay's own
+    # suggester offers the seller on the next screen.
+    #
+    # `filled_specifics` is the PROXY, and it is what stands when nobody
+    # counted — no category on the listing, the Taxonomy API down, or the
+    # store's categories past the lookup budget one dashboard load may spend
+    # on a shared eBay allowance. It is never wrong in the direction that
+    # matters: a listing with nothing filled is always one the fill can help.
+    #
+    # `enriched_at` is what ENDS it, and neither count can. Set whenever the
+    # fill actually ran — including the run that added nothing, which is the
+    # one that matters — it is the difference between "these specifics are
+    # blank" and "these specifics are blank and the AI has already looked".
+    # Without it a listing whose photos genuinely cannot answer its category
+    # sits in the group forever, is charged for on every press, and moves the
+    # count not at all: the loop a seller reads, correctly, as the button not
+    # working. What is left for them then is to LOOK, which is the other rec.
+    enriched = str(listing.get("enriched_at") or "").strip()
     have = filled_specifics(listing)
-    if have < MIN_SPECIFICS:
-        add("specifics", "Fill in details",
-            ("None of eBay's item specifics are filled in — buyers filter by "
-             "these." if not have else
-             f"Only {have} of eBay's item specifics {'is' if have == 1 else 'are'} "
-             "filled in — buyers filter by these."), 45)
+    if blank_specifics is None:
+        worth_filling = have < MIN_SPECIFICS
+        reason = ("None of eBay's item specifics are filled in — buyers filter "
+                  "by these." if not have else
+                  f"Only {have} of eBay's item specifics "
+                  f"{'is' if have == 1 else 'are'} filled in — buyers filter "
+                  "by these.")
+    else:
+        worth_filling = blank_specifics >= MIN_BLANK_SPECIFICS
+        reason = (f"{blank_specifics} of eBay's item specifics are still blank "
+                  "— buyers filter by these.")
+    if not enriched and worth_filling:
+        add("specifics", "Fill in details", reason, 45)
     elif notes:
         # Notes on a listing whose specifics are filled are what the fill
         # could NOT answer: a measurement, an authentication, a flaw only the
@@ -157,13 +212,15 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
 def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
                     rates_by_id: Optional[dict] = None,
                     promoted_ids: Optional[set] = None,
-                    promotion_known: bool = True, limit: int = 8) -> list[dict]:
+                    promotion_known: bool = True, limit: int = 8,
+                    blanks_by_id: Optional[dict] = None) -> list[dict]:
     """Ranked recommendations across many listing records (best first). Keeps
     the single strongest action per listing so the list spans the whole
     portfolio instead of piling onto one item."""
     metrics_by_id = metrics_by_id or {}
     rates_by_id = rates_by_id or {}
     promoted_ids = promoted_ids or set()
+    blanks_by_id = blanks_by_id or {}
     # Keep the strongest action per listing as they are generated, rather than
     # collecting every rec across the whole store and sorting the lot to throw
     # most of it away. A mirrored store is thousands of listings and each one
@@ -178,7 +235,8 @@ def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
                 it, metrics=metrics_by_id.get(it.get("id")),
                 rate=rates_by_id.get(it.get("id")),
                 promoted=it.get("id") in promoted_ids,
-                promotion_known=promotion_known):
+                promotion_known=promotion_known,
+                blank_specifics=blanks_by_id.get(it.get("id"))):
             held = best.get(r["listing_id"])
             if held is None or r["priority"] > held["priority"]:
                 best[r["listing_id"]] = r

@@ -363,6 +363,36 @@ Without them, you can still type a category ID manually in the preview.
 > publishing, deploy the app on a public host (or swap in an image CDN) so eBay
 > can fetch the optimized photos.
 
+### Filling eBay's item specifics — and going back for the blanks
+
+Item specifics are the fields buyers filter by, so an empty one is a search
+the listing never appears in. The fill (`claude_ai.fill_aspects_combined`) is
+handed the whole aspect list eBay publishes for the listing's category and
+asked to fill what it honestly can, matching fixed-choice values verbatim
+against eBay's own allowed list and ticking every box that applies on the
+multi-select ones.
+
+What it does with an aspect it is unsure of is **silently nothing**, and for a
+long time nothing downstream asked how many were left. That is how a listing
+written here reached eBay with *Subject*, *Era*, *Occasion*, *Packaging* and
+*Character* blank while eBay's own suggester — same photos, same title —
+offered all five on the listing form the seller opened next.
+
+So the blanks now get a second, narrower ask (`claude_ai.fill_missing_aspects`,
+one vision call over four photos, `SPECIFICS_COVERAGE=0` to turn off). It is a
+different question from the first pass — not *read this item* but *you have
+already read it; what is it obviously about* — over a short list instead of
+thirty, carrying the finished title, description and filled specifics as
+context so its answers agree with them. Answers merge through the same path as
+the first pass's, so nothing overwrites what the seller wrote and a value that
+is illegal for its aspect is still dropped.
+
+**Identifiers are not on the list it is shown.** A UPC, EAN, ISBN, MPN, serial
+or anything else shaped like a code (`taxonomy.is_identifier_aspect`) is read
+off the item or it is wrong, and *"prefer a defensible inference to a blank"*
+in the same prompt as an empty UPC box is how a model talks itself into twelve
+digits that belong to somebody else's product.
+
 ## API endpoints
 
 | Method | Path | Purpose |
@@ -432,10 +462,11 @@ free — the right default for local dev and self-hosters.
 Plus 120/$11.99 · Pro 300/$24.99 · Power 1000/$69.99 — $0.12 down to
 $0.07/token as packs grow.
 
-**Why these numbers are profitable.** A full draft runs 2–3 vision calls over
+**Why these numbers are profitable.** A full draft runs 3–4 vision calls over
 up to 8 photos (the consolidated `IDENTIFY_CHAIN=v2` chain — it was 4–6 before
 the tag-read, specifics and maker passes were folded together, and the photos
-now ride as ~1092px copies at roughly half the image tokens); on the default
+now ride as ~1092px copies at roughly half the image tokens; the specifics
+**coverage pass** below adds one more, over four photos rather than eight); on the default
 Opus-tier vision model ($5/M input, $25/M output) that's ~$0.10 of API spend
 for a typical 3-photo listing and ~$0.30 worst-case at 8 photos. At 5 tokens,
 a draft brings in $0.35–$0.60 → a wider margin than the 40–60% these prices
@@ -724,8 +755,7 @@ problem:
   category, read off its own photos (the same enrichment a fresh AI draft
   gets, `_enrich_listing`), merged in **without** overwriting anything the
   seller wrote, then pushed to the live listing. Notes in `missing_info` that
-  the fill actually answered are dropped, so the suggestion goes away instead
-  of sitting there after the work is done; a note nothing filled is kept, and
+  the fill actually answered are dropped; a note nothing filled is kept, and
   that listing is reported as one that still needs a human. Because a vision
   pass per listing takes minutes, this one runs as a **background job**
   (`POST /api/listings/enrich` → `job_id`, polled on `/api/bulk/status/{id}`),
@@ -733,6 +763,31 @@ problem:
   It spends AI tokens per listing, so the button confirms the count and the
   cost first, and a listing it can't reach (no category, photos gone, eBay not
   connected) is skipped **before** it is charged for.
+
+  **What decides the group** is item specifics, never the free-text
+  `missing_info` notes beside them — a note is evidence the fill has *already*
+  failed to answer something, so building the group from notes made the button
+  a permanent no-op. Two counts answer that question at different prices, and
+  a third fact ends it:
+
+  - `recommender.filled_specifics` — the cheap proxy: how many specifics the
+    listing carries a value for. Never wrong in the direction that matters (a
+    listing with nothing filled is always one the fill can help), and blind in
+    one: Material, Type and Brand filled clears it while *Subject*, *Era*,
+    *Occasion*, *Packaging* and *Character* sit blank.
+  - `taxonomy.fillable_blanks` — the truth: how many of the aspects eBay
+    publishes for **this listing's category** it holds no value for, counted
+    per listing in `/api/insights` (`_blank_specifics_by_id`). It needs eBay's
+    aspect list, so it is budgeted: cached six hours and read for free, with at
+    most a dozen live Taxonomy lookups per dashboard load (that API runs on one
+    allowance shared by every seller of the app), biggest categories first. Past
+    the budget the proxy above stands.
+  - `Listing.enriched_at` — set whenever the fill actually **ran**, including
+    the run that added nothing. Neither count can end the group on its own: a
+    listing whose photos genuinely cannot answer its category has blank
+    specifics before the fill and blank specifics after it, so it sat there
+    forever and was charged for on every press. What is left for the seller
+    afterwards is to *look*, which is the **Check details** suggestion instead.
 
 Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind

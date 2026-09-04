@@ -223,8 +223,14 @@ Rules:
   * Shoes: Department, Type, Style, US Shoe Size, Color, Upper Material.
   * Trading cards: Game, Set, Card Name, Card Number, Language, Rarity, Finish,
     Features, Grade.
-  * Collectibles/other: Type, Character, Material, Color, Theme, Year
-    Manufactured, Country/Region of Manufacture.
+  * Collectibles/other: Type, Subject, Character, Material, Color, Theme,
+    Era, Occasion, Packaging, Year Manufactured, Country/Region of
+    Manufacture.
+  The descriptive ones above — Subject (what the item depicts), Character,
+  Era, Occasion, Packaging, Theme, Style — are the specifics that reach live
+  listings blank most often, and eBay's own suggester offers them from these
+  same photos. Answer them: a defensible reading of what the item plainly is
+  beats a blank, and a blank is a filter this listing never appears in.
   Use the canonical value eBay expects (e.g. Color "Red", Department "Men",
   Size "L"). For a field with two values, return it twice as separate entries
   (e.g. {"name":"Season","value":"Spring"} and {"name":"Season","value":"Summer"})
