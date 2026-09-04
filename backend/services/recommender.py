@@ -32,26 +32,33 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
     return max(0, (datetime.now(timezone.utc) - dt).days)
 
 
-# The app appends its own notes to missing_info beside the AI's: a price it
-# raised, a title it suggests, what to check before listing, where it looked,
-# a category or condition it could not settle. Those are advice to a person.
-# "Fill in details" runs the AI fill, which answers item specifics and nothing
-# else -- so it is offered only for notes a specific could answer. On
-# 2026-09-02 a seller pressed it on a group whose every note was one of these,
-# watched it come back "nothing the photos could answer", and could not tell
-# whether anything had worked, because the suggestion it was supposed to
-# answer never went away. The rest earn a nudge to LOOK, not a button.
-_ADVISORY_PREFIXES = (
-    "verify:", "looked up from:", "the lookup", "check before listing",
-    "for reference,", "price raised", "confirm the price", "item condition",
-    "ebay category",
-)
+# "Fill in details" fills ONE thing: eBay's item specifics for the listing's
+# category, read off its own photos. So the question that decides whether to
+# offer it is "are those specifics still blank", and nothing else.
+#
+# It used to be decided by missing_info instead -- any note the AI or the app
+# had left on the listing -- and that could not work, because a note is
+# evidence of the opposite. Every draft runs the same fill at draft time and
+# then drops the notes it answered, so a note still on a listing is one the
+# fill has ALREADY failed to answer once. Pressing the button re-ran that
+# same pass, was charged for it, added nothing, and left the note in place --
+# so the suggestion never went away and the count never moved. Narrowing
+# WHICH notes counted (2026-09-02) made the group smaller without breaking
+# the loop; the count is what breaks it.
+#
+# Below this many filled specifics, the fill has real room to work. The exact
+# truth -- how many of THIS category's recommended aspects are unanswered --
+# needs a taxonomy call per listing, which this pass runs across the seller's
+# whole store and cannot afford. The count of what is filled is the cheap
+# proxy, and it is never wrong in the direction that matters: a listing with
+# nothing filled is always one the fill can help.
+MIN_SPECIFICS = 3
 
 
-def is_fillable(note: str) -> bool:
-    """Whether a missing_info note is one the AI fill could answer."""
-    text = str(note or "").strip().lower()
-    return bool(text) and not text.startswith(_ADVISORY_PREFIXES)
+def filled_specifics(listing: dict) -> int:
+    """How many of a listing's item specifics actually carry a value."""
+    return sum(1 for s in (listing.get("item_specifics") or [])
+               if isinstance(s, dict) and str(s.get("value") or "").strip())
 
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
@@ -129,10 +136,18 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             f"Only {n} photo{'' if n == 1 else 's'} — more angles mean more sales.", 50)
     notes = [n for n in (listing.get("missing_info") or [])
              if str(n or "").strip()]
-    if any(is_fillable(n) for n in notes):
+    have = filled_specifics(listing)
+    if have < MIN_SPECIFICS:
         add("specifics", "Fill in details",
-            "Some fields buyers filter by are still blank.", 45)
+            ("None of eBay's item specifics are filled in — buyers filter by "
+             "these." if not have else
+             f"Only {have} of eBay's item specifics {'is' if have == 1 else 'are'} "
+             "filled in — buyers filter by these."), 45)
     elif notes:
+        # Notes on a listing whose specifics are filled are what the fill
+        # could NOT answer: a measurement, an authentication, a flaw only the
+        # person holding it can see. They earn a nudge to LOOK, never a button
+        # that would charge for the same empty pass again.
         n = len(notes)
         add("verify", "Check details",
             f"{n} thing{'' if n == 1 else 's'} the AI left for you to check.", 40)

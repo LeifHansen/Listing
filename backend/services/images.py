@@ -3,15 +3,15 @@
 Per photo the pass does exactly three things. It honours the camera's EXIF
 orientation. It takes the background off when the seller asked for that:
 one run of the local model, the matte hardened a little, the item composited
-on white. And it sizes the result for eBay — the longest side to 1600px,
+on white under a soft contact shadow. And it sizes the result for eBay — the longest side to 1600px,
 never upscaled — saved as a JPEG that carries no metadata, so the GPS of the
 seller's home never rides along to a public listing.
 
 Deliberately nothing else. The pass used to be a pipeline: a two-round vision
 call to guess whether the ITEM lay sideways, a matte refined by a border
-solidifier, an interior-hole repair, a contact shadow, a square crop with
-subject detection, a finishing sharpen, three paid cutout APIs as alternate
-engines, and a guard for every way those could go wrong. Each was reasonable
+solidifier, an interior-hole repair, a square crop with subject detection, a
+finishing sharpen, three paid cutout APIs as alternate engines, and a guard
+for every way those could go wrong. Each was reasonable
 on its own; together they made every photo cost a minute and every result a
 surprise, and the seller asked for the photos as shot or cut out, and to do
 the rest themselves in the editor. So: the model's own matte ships, the
@@ -191,8 +191,48 @@ def _harden(alpha: Image.Image) -> Image.Image:
                         else (a - low) * 255 // span for a in range(256)])
 
 
+# The contact shadow. An item composited on pure white with a hard edge reads
+# as a sticker cut out and pasted down; the same item over a soft shadow reads
+# as an object sitting on a surface, which is what a catalogue photo looks
+# like. It was dropped with the rest of the old pipeline and asked for back --
+# on its own, because unlike the passes around it, it is neither slow nor a
+# surprise: it is drawn from the silhouette the model already produced, so it
+# costs no inference and cannot change what the item looks like.
+#
+# It is cheap by construction. The shadow is low-frequency -- a blur of ~1.5%
+# of the frame -- so it is rendered on a copy no bigger than _SHADOW_SIDE and
+# scaled back up: visually identical to blurring the full-size mask, at about
+# a tenth of the cost. On a 4032x3024 photo that is a ~800px blur instead of a
+# 4032px one.
+_SHADOW_ALPHA = 0.40          # how dark, against white
+_SHADOW_INK = (55, 55, 55)    # near-black, never pure: pure reads as a hole
+_SHADOW_BLUR = 0.015          # softness, as a fraction of the short side
+_SHADOW_OFFSET = 0.010        # down and right, ditto -- the light is above left
+_SHADOW_SIDE = 800            # render the blur no larger than this
+
+
+def _contact_shadow(alpha: Image.Image) -> Image.Image:
+    """The subject's silhouette as a soft shadow mask, offset down and right."""
+    w, h = alpha.size
+    blur = max(4, round(min(w, h) * _SHADOW_BLUR))
+    off = max(2, round(min(w, h) * _SHADOW_OFFSET))
+    scale = min(1.0, _SHADOW_SIDE / max(w, h))
+    if scale < 1.0:
+        small = (max(1, round(w * scale)), max(1, round(h * scale)))
+        soft = alpha.resize(small, Image.BILINEAR).filter(
+            ImageFilter.GaussianBlur(max(1.0, blur * scale))).point(
+            lambda a: int(a * _SHADOW_ALPHA)).resize((w, h), Image.BILINEAR)
+    else:
+        soft = alpha.filter(ImageFilter.GaussianBlur(blur)).point(
+            lambda a: int(a * _SHADOW_ALPHA))
+    shifted = Image.new("L", (w, h), 0)
+    shifted.paste(soft, (off, off))
+    return shifted
+
+
 def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
-    """The item on white, or None when the model found no item to keep.
+    """The item on white under a soft contact shadow, or None when the model
+    found no item to keep.
 
     Raises CutoutBusy when the inference slot is taken for longer than
     `wait`; any other failure raises as itself so a caller can say why."""
@@ -201,7 +241,11 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
     if coverage < _MIN_FG_COVERAGE:
         return None
-    return Image.composite(rgb, Image.new("RGB", rgb.size, WHITE), alpha)
+    canvas = Image.new("RGB", rgb.size, WHITE)
+    canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
+                 _contact_shadow(alpha))
+    canvas.paste(rgb, (0, 0), alpha)
+    return canvas
 
 
 def _flatten(img: Image.Image) -> Image.Image:

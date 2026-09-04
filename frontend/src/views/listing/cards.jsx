@@ -227,7 +227,7 @@ export function TitleCard({ w }) {
           <Input
             maxLength={TITLE_MAX}
             value={w.form.title}
-            needsFix={w.fixTarget === "title"}
+            needsFix={w.fixLevel("title")}
             onChange={(e) => w.set("title", e.target.value)}
             placeholder="e.g. Nike Air Max 90 Men's 10.5 White Leather Sneakers"
           />
@@ -300,7 +300,7 @@ export function CategoryCard({ w }) {
           <Field label="Category" help="A human-readable label — the numeric ID is what eBay uses.">
             <Input
               value={w.form.category_suggestion}
-              needsFix={w.fixTarget === "category"}
+              needsFix={w.fixLevel("category")}
               onChange={(e) => w.set("category_suggestion", e.target.value)}
             />
           </Field>
@@ -308,7 +308,7 @@ export function CategoryCard({ w }) {
             <Input
               className="sm:w-40"
               value={w.form.category_id}
-              needsFix={w.fixTarget === "category"}
+              needsFix={w.fixLevel("category")}
               onChange={(e) => w.set("category_id", e.target.value)}
               onBlur={() => w.loadCategoryMeta()}
             />
@@ -525,6 +525,21 @@ export function SpecificsCard({ w }) {
   const freeRows = w.form.item_specifics
     .map((s, i) => ({ ...s, i }))
     .filter((s) => !aspectNames.has(s.name.trim().toLowerCase()));
+
+  // An aspect eBay refused over that this category's list does not contain and
+  // the listing does not already carry. eBay adds required specifics to a
+  // category from time to time, and our aspect list is cached — so a listing
+  // that published fine can come back refused over a field with NO input
+  // anywhere on the page. The seller could reach it only by knowing to press
+  // "Add specific" and typing eBay's exact wording. Give it a box instead.
+  const haveNames = new Set([
+    ...aspectNames,
+    ...w.form.item_specifics.map((s) => s.name.trim().toLowerCase()),
+  ].filter(Boolean));
+  const unlisted = [...refusedNames]
+    .filter((n) => n && !haveNames.has(n))
+    .map((n) => (refused.flatMap((i) => i.fields || [])
+      .find((f) => (f || "").trim().toLowerCase() === n) || n));
 
   const catAspects = [...required, ...dimensions, ...recommendedAll];
   const filledCount = catAspects.filter((a) => w.getSpecific(a.name)).length;
@@ -743,16 +758,21 @@ export function SpecificsCard({ w }) {
               {" to check — nothing blocking, but a wrong specific is worse than a missing one"}
             </span>
             {reviewCount > 1 && (
-              // Offered last and worded plainly, never as the primary action:
-              // one tap that accepts everything is exactly how a wrong value
-              // reaches a live listing.
-              <button
-                type="button"
+              // Still offered LAST, and still worded as a claim the seller is
+              // making rather than an instruction — one tap that accepts
+              // everything is how a wrong value reaches a live listing. What
+              // it is no longer is hard to find: it was a grey underlined
+              // link at the end of a sentence, which read as a footnote on
+              // the banner it sits in, and a seller who has genuinely read
+              // twelve guesses should not have to hunt for the way to say so.
+              // Solid against the banner's soft blue, so it is unmistakably
+              // the control here without becoming the page's primary action.
+              <Button
+                variant="primary" size="sm" className="shrink-0"
                 onClick={w.confirmAllSpecifics}
-                className="shrink-0 text-[12px] font-semibold text-ink-secondary underline underline-offset-2 cursor-pointer hover:text-ink"
               >
-                I've read them all
-              </button>
+                <Check aria-hidden /> I've read them all
+              </Button>
             )}
           </div>
         )}
@@ -797,6 +817,28 @@ export function SpecificsCard({ w }) {
           <SpecGroup title="Item size" note="the item itself, not the shipping box (e.g. “7 in”)">
             <div className="grid sm:grid-cols-3 gap-x-4 gap-y-3.5">
               {dimensions.map(renderAspect)}
+            </div>
+          </SpecGroup>
+        )}
+
+        {unlisted.length > 0 && (
+          <SpecGroup title="eBay asked for these" count={unlisted.length}>
+            <div className="flex flex-col gap-2.5">
+              <p className="text-[13px] text-ink-secondary">
+                {saidByEbay
+                  ? "eBay refused the listing over these and this category's field list doesn't carry them — eBay adds required specifics from time to time. Fill them in here."
+                  : "These were named for this listing but aren't in the category's field list. Fill them in here."}
+              </p>
+              {unlisted.map((name) => (
+                <Field key={name} label={name}>
+                  <Input
+                    value={w.getSpecific(name)}
+                    placeholder={name}
+                    className="ring-2 ring-error/70"
+                    onChange={(e) => w.upsertSpecific(name, e.target.value)}
+                  />
+                </Field>
+              ))}
             </div>
           </SpecGroup>
         )}
@@ -923,7 +965,7 @@ export function PricingCard({ w }) {
               <Input
                 type="number" step="0.01" min="0" inputMode="decimal"
                 value={w.form.auction_start_price}
-                needsFix={w.fixTarget === "price"}
+                needsFix={w.fixLevel("price")}
                 onChange={(e) => w.set("auction_start_price", e.target.value)}
               />
             </Field>
@@ -933,7 +975,7 @@ export function PricingCard({ w }) {
               <Input
                 type="number" step="0.01" min="0" inputMode="decimal"
                 value={w.form.price}
-                needsFix={w.fixTarget === "price"}
+                needsFix={w.fixLevel("price")}
                 onChange={(e) => w.set("price", e.target.value)}
               />
             </Field>
@@ -1003,7 +1045,8 @@ export function PricingCard({ w }) {
                 + "category, so these are the general ones."
               : undefined}
           >
-            <Select value={w.form.condition} onChange={(e) => w.set("condition", e.target.value)}>
+            <Select value={w.form.condition} needsFix={w.fixLevel("condition")}
+              onChange={(e) => w.set("condition", e.target.value)}>
               {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
             </Select>
           </Field>
@@ -1186,7 +1229,7 @@ export function ShippingCard({ w }) {
             <Input
               type="number" min="0" step="1" inputMode="numeric"
               value={w.form.package_weight_lb}
-              needsFix={w.fixTarget === "weight"}
+              needsFix={w.fixLevel("weight")}
               onChange={(e) => w.set("package_weight_lb", e.target.value)}
             />
           </Field>
@@ -1194,7 +1237,7 @@ export function ShippingCard({ w }) {
             <Input
               type="number" min="0" max="15" step="0.1" inputMode="decimal"
               value={w.form.package_weight_oz}
-              needsFix={w.fixTarget === "weight"}
+              needsFix={w.fixLevel("weight")}
               onChange={(e) => w.set("package_weight_oz", e.target.value)}
             />
           </Field>

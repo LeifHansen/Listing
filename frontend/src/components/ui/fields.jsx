@@ -28,7 +28,11 @@ const controlClasses = cn(
   "placeholder:text-ink-faint transition-colors duration-150",
   "hover:border-line-strong focus:border-blue focus:outline-none",
   "focus:ring-2 focus:ring-blue/25",
+  // Two levels, so a field can say which kind of wrong it is. Red: eBay or
+  // the server named this field in a refusal. Amber: our own rules say it is
+  // required and still empty, which is a prediction and reads as one.
   "data-[fix=true]:border-error data-[fix=true]:ring-2 data-[fix=true]:ring-error/25",
+  "data-[fix=warn]:border-warning data-[fix=warn]:ring-2 data-[fix=warn]:ring-warning/25",
 );
 
 // Field — label above control. Helper prose (`help`) hides behind a hover ⓘ
@@ -74,10 +78,13 @@ export const Textarea = forwardRef(function Textarea({ className, needsFix, ...p
   );
 });
 
-export const Select = forwardRef(function Select({ className, children, ...props }, ref) {
+export const Select = forwardRef(function Select({
+  className, children, needsFix, ...props
+}, ref) {
   return (
     <select
       ref={ref}
+      data-fix={needsFix || undefined}
       className={cn(controlClasses, "h-11 text-[15px] appearance-none pr-9 bg-no-repeat",
         "bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%236b7280%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')]",
         "bg-[position:right_14px_center]",
