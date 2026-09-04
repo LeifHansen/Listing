@@ -39,6 +39,7 @@ from fastapi.testclient import TestClient
 
 from backend import main, ratelimit
 from backend.models import ItemSpecific, Listing
+from backend.services import recommender
 
 
 # ------------------------------------------------------------ the notes rule
@@ -451,6 +452,66 @@ def test_a_logged_out_caller_gets_nothing(dbmod, monkeypatch):
     client = TestClient(main.app)
     assert client.post("/api/listings/enrich",
                        json={"listing_ids": ["x"]}).status_code == 401
+
+
+# ------------------------------------- the run that found nothing, and stopped
+
+def test_a_run_that_filled_nothing_still_stops_the_group_asking(seller,
+                                                                monkeypatch):
+    """The seller's report: 46 listings, "Enrich all", nothing changed, badge
+    still 46 the next time they looked.
+
+    Both halves were real. "Nothing the photos could answer" is an honest
+    answer to a listing whose only note is "exact measurements" — but it was
+    an answer the app then threw away, so the group asked the same question
+    on the next refresh, and the one after that. What the run learned is that
+    the AI has now read this listing against eBay's aspect list for its
+    category, and that is worth writing down even when it filled nothing.
+    """
+    client, dbmod, uid = seller
+    assert dbmod.upsert_listing("quiet", _listing("quiet"),
+                                status="published", user_id=uid)
+    _with_photo("quiet")
+    # The real _enrich_listing, with the chain under it standing in for the
+    # vision calls: it RAN (0, not None) and found nothing to add.
+    monkeypatch.setattr(main, "_enrich_listing_v2",
+                        lambda listing, paths, tags, progress=None: 0)
+    monkeypatch.setattr(main.marketplaces, "get", lambda name: _AcceptingEbay())
+
+    started = client.post("/api/listings/enrich",
+                          json={"listing_ids": ["quiet"]})
+    result = _finish(client, started.json()["job_id"])
+
+    assert result["changed"] == 0
+    assert result["skipped"] == 1
+    stored = dbmod.get_listing("quiet")["listing"]
+    assert stored["enriched_at"], \
+        "the run's own answer was thrown away, so the group will ask again"
+    # And that is what the dashboard reads to stop offering the fill.
+    assert "specifics" not in [
+        r["type"] for r in recommender.recommend_for(
+            {"id": "quiet", "status": "published",
+             "created_at": "2020-01-01T00:00:00+00:00", "listing": stored},
+            blank_specifics=14)]
+
+
+def test_a_fill_that_never_ran_leaves_the_group_asking(seller, monkeypatch):
+    """`enriched_at` means the pass RAN. A listing whose category or photos
+    were missing at the time still has the fill ahead of it, and marking it
+    done would hide a listing that genuinely needs the button."""
+    client, dbmod, uid = seller
+    assert dbmod.upsert_listing("nocat", _listing("nocat", category_id=""),
+                                status="published", user_id=uid)
+    _with_photo("nocat")
+    monkeypatch.setattr(main, "_enrich_listing_v2",
+                        lambda listing, paths, tags, progress=None: None)
+    monkeypatch.setattr(main.marketplaces, "get", lambda name: _AcceptingEbay())
+
+    started = client.post("/api/listings/enrich",
+                          json={"listing_ids": ["nocat"]})
+    _finish(client, started.json()["job_id"])
+
+    assert not (dbmod.get_listing("nocat")["listing"].get("enriched_at") or "")
 
 
 # ----------------------------------------------------------------- stand-ins

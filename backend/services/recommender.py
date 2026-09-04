@@ -18,6 +18,11 @@ from typing import Optional
 
 STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
 FEW_PHOTOS = 3    # fewer than this → suggest adding photos
+# How many of eBay's item specifics have to be blank before filling them in is
+# worth a seller's attention (and their AI credits). One empty box is not an
+# errand; a dozen is the difference between a listing buyers can filter to and
+# one they cannot.
+FEW_BLANK_SPECIFICS = 3
 
 
 def _age_days(iso: Optional[str]) -> Optional[int]:
@@ -56,7 +61,8 @@ def is_fillable(note: str) -> bool:
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
                   rate: Optional[float] = None, promoted: bool = False,
-                  promotion_known: bool = True) -> list[dict]:
+                  promotion_known: bool = True,
+                  blank_specifics: Optional[int] = None) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
     {listing_id, listing_title, type, label, reason, action, priority, rate}.
     `rate` is eBay's recommended Promoted Listings ad rate (%) for this listing,
@@ -69,6 +75,12 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     `promoted=False` from an unanswered lookup is not evidence that a listing
     is unpromoted — it is the absence of evidence either way. Defaults True so
     a caller that does not pass it keeps its recommendations.
+
+    `blank_specifics` is how many of eBay's item specifics for this listing's
+    category it currently holds no value for — see the "Fill in details" rule
+    below for why the group cannot be built honestly without it. None means
+    nobody counted (no category, or the Taxonomy API was down), and the rule
+    falls back to the notes alone.
     """
     listing = item.get("listing") or {}
     status = item.get("status")
@@ -129,9 +141,35 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             f"Only {n} photo{'' if n == 1 else 's'} — more angles mean more sales.", 50)
     notes = [n for n in (listing.get("missing_info") or [])
              if str(n or "").strip()]
-    if any(is_fillable(n) for n in notes):
-        add("specifics", "Fill in details",
-            "Some fields buyers filter by are still blank.", 45)
+    # "Fill in details" runs the AI item-specifics fill. What it should be
+    # offered for is therefore item specifics that are BLANK — which, until
+    # `blank_specifics` existed, is not what this rule asked. It asked whether
+    # the listing carried a free-text `missing_info` note, and that is a
+    # different question with a different answer at both ends:
+    #
+    #   * a listing IMPORTED from eBay carries no notes at all, so a store
+    #     mirrored out of Seller Hub — every specific blank, which is exactly
+    #     what the fill exists for — was never once offered it;
+    #   * an app-made draft carries the notes the identify pass wrote, and
+    #     some of them ("exact measurements", "confirm the signature") are
+    #     things no item specific answers. That listing was offered the fill
+    #     forever: it ran, changed nothing, came back "nothing the photos
+    #     could answer", and was suggested again on the next refresh.
+    #
+    # So the blanks decide whether to offer it, and `enriched_at` decides when
+    # to stop. A listing the fill has already run on has been asked this
+    # question and has given its answer; asking again spends the seller's AI
+    # credits to be told the same thing. What is left for them then is to
+    # LOOK, which is the other rec.
+    enriched = str(listing.get("enriched_at") or "").strip()
+    fillable_notes = any(is_fillable(n) for n in notes)
+    worth_filling = (blank_specifics >= FEW_BLANK_SPECIFICS
+                     if blank_specifics is not None else fillable_notes)
+    if not enriched and (worth_filling or fillable_notes):
+        reason = (f"{blank_specifics} fields buyers filter by are still blank."
+                  if blank_specifics else
+                  "Some fields buyers filter by are still blank.")
+        add("specifics", "Fill in details", reason, 45)
     elif notes:
         n = len(notes)
         add("verify", "Check details",
@@ -142,13 +180,15 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
 def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
                     rates_by_id: Optional[dict] = None,
                     promoted_ids: Optional[set] = None,
-                    promotion_known: bool = True, limit: int = 8) -> list[dict]:
+                    promotion_known: bool = True, limit: int = 8,
+                    blanks_by_id: Optional[dict] = None) -> list[dict]:
     """Ranked recommendations across many listing records (best first). Keeps
     the single strongest action per listing so the list spans the whole
     portfolio instead of piling onto one item."""
     metrics_by_id = metrics_by_id or {}
     rates_by_id = rates_by_id or {}
     promoted_ids = promoted_ids or set()
+    blanks_by_id = blanks_by_id or {}
     # Keep the strongest action per listing as they are generated, rather than
     # collecting every rec across the whole store and sorting the lot to throw
     # most of it away. A mirrored store is thousands of listings and each one
@@ -163,7 +203,8 @@ def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
                 it, metrics=metrics_by_id.get(it.get("id")),
                 rate=rates_by_id.get(it.get("id")),
                 promoted=it.get("id") in promoted_ids,
-                promotion_known=promotion_known):
+                promotion_known=promotion_known,
+                blank_specifics=blanks_by_id.get(it.get("id"))):
             held = best.get(r["listing_id"])
             if held is None or r["priority"] > held["priority"]:
                 best[r["listing_id"]] = r

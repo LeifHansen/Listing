@@ -426,6 +426,23 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     return result
 
 
+def cached_item_aspects(category_id: str,
+                        marketplace_id: Optional[str] = None) -> Optional[dict]:
+    """`item_aspects` for a category ALREADY in the cache, else None — never a
+    live call.
+
+    The Taxonomy API runs on one application-wide allowance shared by every
+    seller (see test_taxonomy_quota_guard), so a screen that wants aspects for
+    a whole store's worth of categories cannot simply ask for them. This lets
+    such a caller take what is already paid for and spend its own small budget
+    of live lookups deliberately on the rest.
+    """
+    if not category_id:
+        return None
+    return _cache_get(_ASPECTS_CACHE, f"{category_id}|{marketplace_id or ''}",
+                      _ASPECTS_TTL)
+
+
 def _value_constraints(aspect_values: list[dict]) -> dict:
     """eBay's valueConstraints, as {value: {controlling aspect: [values]}}.
 
@@ -1132,3 +1149,77 @@ def sanitize_specifics(listing) -> None:
     # Size Type "Big & Tall". eBay rejects the whole listing when that one says
     # "Regular", and this is the last place before it is sent.
     apply_big_and_tall(listing, aspects)
+
+
+# --- what the AI fill can still be asked for --------------------------------
+
+# Aspects whose value is an IDENTIFIER: a code printed on the item, its box or
+# its plate. There is no such thing as inferring one — a UPC is read off the
+# barcode or it is wrong, and a wrong one puts someone else's product on the
+# listing. Every pass that fills specifics is told never to invent these; the
+# COVERAGE pass (claude_ai.fill_missing_aspects), whose whole licence is "a
+# defensible inference beats a blank", must not even be shown them, because
+# that instruction and an empty UPC box in the same prompt is how a model
+# talks itself into twelve digits.
+#
+# Matched as whole words against the aspect name, plus anything ending in
+# "Number" — which catches Model Number, Style Number, Card Number and the
+# rest of the family without listing them, and leaves the plain names beside
+# them (Model, Style, Card Name) alone.
+_IDENTIFIER_WORDS = {
+    "upc", "ean", "isbn", "gtin", "mpn", "sku", "asin", "issn",
+    "serial", "barcode", "vin",
+}
+
+
+def is_identifier_aspect(name: str) -> bool:
+    """Whether `name` is an aspect nothing may fill by inference."""
+    text = (name or "").strip().lower()
+    if not text:
+        return False
+    words = re.findall(r"[a-z0-9]+", text)
+    if not words:
+        return False
+    return bool(_IDENTIFIER_WORDS & set(words)) or words[-1] == "number"
+
+
+def _aspect_keys(name: str) -> set[str]:
+    """The names a listing might legitimately be holding this aspect under.
+
+    eBay publishes "Item Height" and sellers (and the identify pass) write
+    "Height"; sanitize_specifics already treats the two as one aspect, and a
+    coverage check that did not would keep asking for a specific the listing
+    plainly holds.
+    """
+    key = (name or "").strip().lower()
+    if not key:
+        return set()
+    return {key, key[5:] if key.startswith("item ") else f"item {key}"}
+
+
+def fillable_blanks(listing, aspects: list[dict]) -> list[dict]:
+    """The category's aspects this listing holds no value for and the AI could
+    still be asked to answer — every blank except the identifiers above.
+
+    This is what "Fill in details" is actually about, and until it existed the
+    app had no way to say it: the dashboard's group was built from the
+    free-text `missing_info` notes instead, which is a different question with
+    a different answer. A listing can carry no notes at all and still reach
+    eBay with Subject, Era, Occasion, Packaging and Character blank — eBay's
+    own suggester offers exactly those, from the same photos, and a buyer
+    filtering on any of them never sees the listing.
+    """
+    held = {(s.name or "").strip().lower()
+            for s in (getattr(listing, "item_specifics", None) or [])
+            if (s.value or "").strip()}
+    if (getattr(listing, "brand", "") or "").strip():
+        held.add("brand")
+    out = []
+    for a in aspects:
+        name = (a.get("name") or "").strip()
+        if not name or is_identifier_aspect(name):
+            continue
+        if _aspect_keys(name) & held:
+            continue
+        out.append(a)
+    return out

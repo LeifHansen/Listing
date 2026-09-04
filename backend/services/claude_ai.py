@@ -1021,11 +1021,20 @@ Rules:
 - For "(free text)" aspects, give the single best concise value eBay expects.
 - DESCRIPTIVE aspects are inference-friendly — fill them, at "medium", from
   what the item clearly shows. These are the ones eBay's own suggester fills
-  and buyers filter by: Accents (e.g. Logo), Character (a named character on
-  the item), Theme (e.g. 90s, Sports), Occasion, Season (from the garment's
-  weight/type), Style, Features, Performance/Activity, Garment Care (from
-  the care tag), Product Line (the brand's line, e.g. "Tommy Jeans"),
-  Pattern, Fit, Neckline, Closure. An honest inference here beats a blank.
+  and buyers filter by, and the ones that reach live listings blank most
+  often: Subject (what the item DEPICTS or is about — Bowling, Floral,
+  Nautical), Character (a named character on or as the item, a generic figure
+  included: "Bowler", "Santa Claus"), Era / Time Period Manufactured (from
+  style, construction and marks, in the allowed list's own wording:
+  "Mid 20th Century (1941-1969)"), Occasion (what it is bought or given for —
+  "All Occasions" is a real answer for an item that suits any of them),
+  Packaging (whether the item is boxed IN THESE PHOTOS — "Unboxed" for a loose
+  item), Accents (e.g. Logo), Theme (e.g. 90s, Sports), Season (from the
+  garment's weight/type), Style, Features, Performance/Activity, Garment Care
+  (from the care tag), Product Line (the brand's line, e.g. "Tommy Jeans"),
+  Pattern, Fit, Neckline, Closure. An honest inference here beats a blank:
+  almost every one of these has a true answer for almost every item, and a
+  blank one is a filter this listing never appears in.
 - A free-text aspect shown as "(may repeat: several values allowed)" works the
   same way — e.g. Season as both "Winter" and "Spring". Repeat the name in a
   new entry per value; never comma-join values.
@@ -1300,6 +1309,146 @@ def fill_aspects_combined(
                      "confidence": str(m.get("confidence", "low")).strip().lower()}
     return specifics, maker
 
+
+# ---------------------------------------------------------------------------
+# The coverage pass — going back for the specifics the first fill skipped.
+#
+# fill_aspects/fill_aspects_combined hand the model thirty-odd aspects at once
+# and ask it to fill what it can. What it does with the ones it is unsure of
+# is silently nothing, and nothing downstream ever noticed: a listing reached
+# eBay with Subject, Era, Occasion, Packaging and Character blank while eBay's
+# own suggester offered all five, from the same photos and the same title, on
+# the listing form the seller opened next. Every blank is a filter a buyer can
+# use that this listing does not appear in.
+#
+# So the blanks get a second, narrower ask. It is a different question from
+# the first pass — not "read this item" but "you have already read it; what is
+# it obviously ABOUT" — and it is asked of a short list instead of thirty, so
+# there is nowhere for an aspect to quietly go missing. The identifiers are
+# not on that list at all: see taxonomy.is_identifier_aspect for why an
+# instruction to prefer an inference must never be able to reach a UPC box.
+# ---------------------------------------------------------------------------
+
+_COVERAGE_SCHEMA = """
+Return ONLY a JSON object (no markdown fences):
+{ "specifics": [ {"name": "<exact aspect name>", "value": "<value>",
+                  "confidence": "high|medium"} ] }
+These are the item specifics eBay lists for this category that the listing
+STILL HAS BLANK. You have already read this item once; this pass is not about
+reading it again. It is about what the item plainly IS and what it is
+obviously ABOUT — the things a person holding it could answer in a second and
+eBay's own suggester answers from these same photos.
+Rules:
+- ANSWER EVERY ASPECT YOU HONESTLY CAN. A blank helps nobody: buyers filter on
+  these, and an aspect left empty is a search this listing never appears in.
+  "medium" confidence is the expected answer here — the seller is shown a
+  review flag on it and can change it in one click. Omit an aspect only when
+  you genuinely cannot tell, not merely because you are not certain.
+- Every value must still be TRUE of THIS item. An inference is a reading of
+  what you can see; it is not a guess, and it is never a placeholder.
+- Most of these have an answer for almost any item, and they are the ones that
+  ship blank most often. What they mean:
+  * Subject / Theme / Franchise — what the item DEPICTS or is about (Bowling,
+    Floral, Nautical, Christmas, a sport, a place, a named property).
+  * Character — a named character shown on or as the item (including a generic
+    figure the piece is of, e.g. "Bowler", "Santa Claus").
+  * Era / Time Period Manufactured / Age / Vintage — when it was made, in the
+    wording the allowed list uses ("Mid 20th Century (1941-1969)", "1970s").
+    Judge it from style, construction, materials, marks and wear.
+  * Occasion — what it is bought or given for. "All Occasions" is a real and
+    usually correct answer for an item that suits any of them.
+  * Packaging — whether the item is in its box/packaging IN THESE PHOTOS
+    ("Unboxed" for a loose item, "Boxed"/"Original Box" when the box is shown).
+  * Style / Type / Product Line / Features / Accents / Pattern / Finish —
+    what the design plainly is.
+  * Material / Color / Shape / Size — what the item is made of and looks like.
+  * Country/Region of Manufacture — only from a mark, label or stamp that
+    says so; never from where a brand is headquartered.
+  * Year Manufactured — only a year the item, its mark or its packaging
+    actually supports; leave blank rather than round an era to a year.
+  * Original/Reproduction, Signed, Handmade, Antique — answer these from the
+    evidence you can see, and never downgrade the item to be safe: an unmarked
+    piece is not a "Reproduction", it is an item whose aspect stays blank.
+- FIXED-CHOICE aspects: the value MUST be copied VERBATIM from that aspect's
+  allowed list, exactly as spelled there — a near miss is dropped and the box
+  stays empty. When the list holds nothing that is true of this item, leave the
+  aspect out.
+  * "(choose exactly one of: ...)" — one value.
+  * "(CHECKBOXES - ...)" — tick EVERY listed value that applies, as a separate
+    entry with the same name. Two to four is normal.
+- "(plain number)" takes a bare number, "(4-digit year)" a year like "1985".
+  Text in either gets the listing rejected — omit instead.
+- Physical size aspects (Item Height, Item Length, Item Width, Item Depth,
+  Item Diameter, Item Weight) take a best-effort ESTIMATE of the ITEM (not its
+  shipping box) judged from the photos, as a number with unit ("7 in").
+- NEVER fill an aspect with "Not Specified", "Does Not Apply", "Unknown",
+  "N/A", "Various" or "Other" — an empty box says the same thing honestly and
+  those answers show up on the live listing.
+- One entry per VALUE, not per aspect.
+"""
+
+_COVERAGE_SYSTEM = (
+    "You are finishing an eBay listing that has already been drafted. The "
+    "item has been identified and described; what is left is the item "
+    "specifics nobody filled in.\n\n" + _COVERAGE_SCHEMA)
+
+# The first pass gets eight photos because it is reading the item. This one
+# already knows what the item is — it is carrying the finished title,
+# description and specifics as context — so it needs enough frames to judge
+# style, material and whether a box is in shot, and no more. Four keeps the
+# marginal cost of going back for the blanks well under the first pass.
+_COVERAGE_PHOTOS = 4
+
+
+def _coverage_context(listing: Listing) -> str:
+    """What the first pass already settled, so this one argues from it rather
+    than starting over — and so a value it proposes has to agree with the
+    listing the seller is going to publish."""
+    held = [f"{s.name}: {s.value}" for s in (listing.item_specifics or [])
+            if (s.name or "").strip() and (s.value or "").strip()]
+    context = _listing_context(listing)
+    if held:
+        context += ("\nItem specifics ALREADY FILLED (do not repeat these; "
+                    "your answers must agree with them):\n- "
+                    + "\n- ".join(held[:60]))
+    return context
+
+
+def fill_missing_aspects(image_paths: list[Path], listing: Listing,
+                         blanks: list[dict]) -> list[ItemSpecific]:
+    """Second look at the item specifics `blanks` left empty. `blanks` is the
+    taxonomy aspect list narrowed by taxonomy.fillable_blanks — identifiers
+    are already gone from it, and this function does not put them back.
+
+    Returns validated ItemSpecifics, the same shape fill_aspects returns, so
+    the caller merges both through one path."""
+    named = [a for a in blanks if a.get("name")]
+    if not named or not image_paths:
+        return []
+    client = _client()
+    content: list[dict] = [_image_block(p)
+                           for p in image_paths[:_COVERAGE_PHOTOS]]
+    content.append({"type": "text", "text": "CONTEXT:\n"
+                    + _coverage_context(listing)})
+    resp = client.messages.create(
+        model=config.VISION_MODEL,
+        max_tokens=3000,
+        system=[
+            {"type": "text", "text": _COVERAGE_SYSTEM,
+             "cache_control": {"type": "ephemeral"}},
+            # Not cached: the blanks are what THIS listing is missing, so the
+            # block changes listing to listing and a breakpoint here would
+            # write a cache entry nothing ever reads.
+            {"type": "text",
+             "text": "ITEM SPECIFICS STILL BLANK:\n" + _aspect_lines(named)},
+        ],
+        messages=[{"role": "user", "content": content}],
+    )
+    _log_usage("fill_missing_aspects", resp)
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the item-specifics response was cut off; try again")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    return _validate_specifics(_extract_json(text), named)
 
 # ---------------------------------------------------------------------------
 # Maker / manufacturer identification — a double-layer check.

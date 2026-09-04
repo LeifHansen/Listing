@@ -147,6 +147,21 @@ class Listing(BaseModel):
     image_urls: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
     missing_info: list[str] = Field(default_factory=list)
+    # When the AI item-specifics fill last actually RAN on this listing
+    # (ISO-8601 UTC), set by main._enrich_listing whichever path called it.
+    # "" means it has never run — an imported listing, or one whose category
+    # or photos were not there at the time.
+    #
+    # The dashboard's "Fill in details" group is what this exists for. That
+    # group used to be built from `missing_info`, which is a different
+    # question with a different answer: an imported listing carries no notes
+    # at all and so was never offered the fill however blank its specifics
+    # were, while an app-made draft carried notes the fill cannot answer
+    # ("exact measurements") and was offered it forever, coming back "nothing
+    # the photos could answer" every time. A listing the fill has already run
+    # on has nothing more to gain from running it again, and this is how the
+    # suggestion knows to stop asking.
+    enriched_at: str = ""
     # Set once the listing goes live: eBay's item id (the /itm/ number).
     # Powers "View on eBay" links and survives every save/publish round-trip.
     ebay_listing_id: str = ""
