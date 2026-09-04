@@ -1,26 +1,26 @@
-"""The dashboard's "Fill in details" group, and why it did nothing.
+"""The dashboard's "Fill in details" group: the count that decides it, and
+the fact that ends it.
 
-A seller reported the group as broken: 46 listings, "Enrich all", and nothing
-changed — the run came back "nothing the photos could answer" and the badge
-still read 46 the next time they looked.
+test_a_note_for_a_person_is_not_a_fill covers the first half of this — the
+group is decided by item specifics, never by the free-text notes beside them.
+This file covers the two things added on top.
 
-Both halves of that were true, and both came from the same place. The group
-was built from `missing_info`, the free-text notes the AI writes about an
-item, and asked to fill ITEM SPECIFICS. Those are different questions:
+THE COUNT. `filled_specifics` is a proxy, and it is blind in one direction:
+a listing with Material, Type and Brand filled has three specifics and passes
+it, while Subject, Era, Occasion, Packaging and Character sit blank and eBay's
+own suggester offers all five to the seller on the very next screen. That is
+the listing a seller reported. So the caller counts the real thing where it
+can afford to — how many of the aspects eBay publishes for THIS category the
+listing holds no value for — and passes it as `blank_specifics`. The proxy
+stands wherever it could not be counted.
 
-  * an imported listing carries no notes at all, so a store mirrored out of
-    Seller Hub — every specific blank, which is exactly what the fill is for
-    — was never once offered it;
-
-  * an app-made draft carries notes like "exact measurements" and "confirm the
-    signature", which no item specific answers. That listing was offered the
-    fill forever, ran it, changed nothing, and was suggested again on the next
-    refresh.
-
-So the group is built from the specifics that are actually blank, and a
-listing the fill has already run on stops being offered it. Press the button
-once and it does its work; press it and there is nothing to do, and it stops
-asking.
+THE END. Neither count can stop the group asking. A listing whose photos
+genuinely cannot answer its category has blank specifics before the fill and
+blank specifics after it, so it sits in the group forever and is charged for
+on every press: 46 listings, "Enrich all", nothing changed, badge still 46 the
+next time the seller looked. `enriched_at` is the difference between "these
+specifics are blank" and "these specifics are blank and the AI has already
+looked".
 """
 from __future__ import annotations
 
@@ -71,7 +71,22 @@ def test_the_group_says_how_many_are_blank():
     rec = next(r for r in recommender.recommend_for(_item(missing_info=[]),
                                                     blank_specifics=14)
                if r["type"] == "specifics")
-    assert "14 fields" in rec["reason"]
+    assert "14 of eBay's item specifics" in rec["reason"]
+
+
+def test_the_listing_with_plenty_filled_and_plenty_blank_is_seen():
+    """The case the proxy is blind to, and the one a seller reported: three
+    specifics filled clears `filled_specifics`, and Subject, Era, Occasion,
+    Packaging and Character are still blank with eBay offering all five."""
+    listing = _item(missing_info=[], item_specifics=[
+        {"name": "Material", "value": "Ceramic"},
+        {"name": "Type", "value": "Trophy"},
+        {"name": "Color", "value": "Gold"},
+    ])
+    assert "specifics" not in _types(
+        recommender.recommend_for(listing, blank_specifics=None))
+    assert "specifics" in _types(
+        recommender.recommend_for(listing, blank_specifics=14))
 
 
 def test_a_listing_with_one_or_two_blanks_is_left_alone():
@@ -119,37 +134,46 @@ def test_a_fill_that_never_ran_leaves_the_offer_standing():
 
 # ------------------------------------------------------------ when nobody counted
 
-def test_without_a_count_it_falls_back_to_the_notes():
-    """No category, or the Taxonomy API down. Absence of a count is not
-    evidence that nothing is blank, so the old signal still stands."""
-    recs = recommender.recommend_for(_item(missing_info=["size"]),
+def test_without_a_count_the_proxy_still_stands():
+    """No category on the listing, the Taxonomy API down, or a store whose
+    categories ran past the lookup budget. Absence of a count is not evidence
+    that nothing is blank, so the cheap signal keeps deciding."""
+    recs = recommender.recommend_for(_item(missing_info=[]),
                                      blank_specifics=None)
     assert "specifics" in _types(recs)
 
 
-def test_an_advisory_note_alone_is_never_a_fill():
-    """"Price raised" and "eBay category" are advice to a person; no item
-    specific answers them. Unchanged by any of this."""
+def test_a_real_count_overrides_the_proxy_in_both_directions():
+    """Where it can be had, the truth wins: a listing the proxy would pass
+    over is offered the fill, and one the proxy would offer it to is left
+    alone when its category has almost nothing left to answer."""
+    bare = _item(missing_info=[])            # no specifics at all
+    assert "specifics" not in _types(
+        recommender.recommend_for(bare, blank_specifics=1))
+    assert "specifics" in _types(
+        recommender.recommend_for(bare, blank_specifics=None))
+
+
+def test_the_notes_beside_it_decide_nothing():
+    """A note is not evidence a specific is blank, and it is not evidence one
+    is filled. It earns a nudge to LOOK once the fill has nothing left."""
     recs = recommender.recommend_for(
-        _item(missing_info=["Price raised to $40 — see comps"]),
-        blank_specifics=None)
+        _item(missing_info=["Measurements — I can't measure from photos"],
+              enriched_at="2026-09-04T12:00:00+00:00"),
+        blank_specifics=14)
     assert "specifics" not in _types(recs)
     assert "verify" in _types(recs)
-
-
-def test_a_note_the_fill_can_answer_still_earns_it_even_with_few_blanks():
-    """The two signals are an OR, not a replacement: a note naming a specific
-    is the AI saying it could not read one, and that is worth the pass even
-    when the category has little else empty."""
-    recs = recommender.recommend_for(_item(missing_info=["size"]),
-                                     blank_specifics=1)
-    assert "specifics" in _types(recs)
 
 
 # ------------------------------------------------------------- across the store
 
 def test_the_count_reaches_the_listing_it_was_measured_for():
-    items = [_fresh(id="A", missing_info=[]), _fresh(id="B", missing_info=[])]
+    # B is counted by nobody and passes the proxy, so only A's count decides.
+    filled = [{"name": "Material", "value": "Ceramic"},
+              {"name": "Type", "value": "Trophy"},
+              {"name": "Color", "value": "Gold"}]
+    items = [_fresh(id="A", missing_info=[], item_specifics=filled),
+             _fresh(id="B", missing_info=[], item_specifics=filled)]
     recs = recommender.recommendations(items, blanks_by_id={"A": 14},
                                        promotion_known=False)
     by_id = {r["listing_id"]: r["type"] for r in recs}

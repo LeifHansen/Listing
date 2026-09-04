@@ -601,11 +601,34 @@ def _check_splits(client, images: list[bytes], groups: list[dict],
 
 
 def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
-    """Deterministically apply the verifier's merge instructions. Each merge
-    list combines those group indices into the FIRST one (photo order
-    preserved); invalid/overlapping instructions are dropped, never guessed."""
+    """Deterministically apply the verifier's merge instructions.
+
+    Groups named together become ONE group, and the lists are read
+    TRANSITIVELY: [[0, 1], [1, 2]] is one item spread over three groups, not
+    a merge plus a leftover. They used to be applied one list at a time
+    against a table of already-absorbed groups, which dropped any group named
+    in an earlier list -- leaving the second list with a single group, and
+    merging nothing. The order of the lists decided the answer: [[1, 2],
+    [0, 1]] lost the 0-1 merge outright. A model untangling a badly
+    over-split pile names the same group in several lists, so that path was
+    live exactly when the merge mattered most.
+
+    The lowest-numbered group of a union survives, keeping the merged item's
+    place in the queue, and takes the name of whichever group in the union
+    starts earliest in the pile -- the seller shoots the overview first, so
+    that is the group named after the item rather than after a close-up.
+    Photos come out in the pile's own order, which puts that overview first.
+    """
     n = len(groups)
-    absorbed: dict[int, int] = {}  # source group -> target group
+    parent = list(range(n))
+
+    def root(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    merged = False
     for lst in (merge_lists or []):
         if not isinstance(lst, list):
             continue
@@ -615,33 +638,73 @@ def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
                 i = int(i)
             except (TypeError, ValueError):
                 continue
-            if 0 <= i < n and i not in idxs and i not in absorbed:
+            if 0 <= i < n and i not in idxs:
                 idxs.append(i)
-        if len(idxs) >= 2:
-            target = idxs[0]
-            for src in idxs[1:]:
-                if src != target and target not in absorbed:
-                    absorbed[src] = target
-    if not absorbed:
+        if len(idxs) < 2:
+            continue
+        for a, b in zip(idxs, idxs[1:]):
+            ra, rb = root(a), root(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+                merged = True
+    if not merged:
         return groups
     out: list[dict] = []
     for gi, g in enumerate(groups):
-        if gi in absorbed:
+        if root(gi) != gi:
             continue
-        combined = list(g["indices"])
-        for src, tgt in absorbed.items():
-            if tgt == gi:
-                combined.extend(groups[src]["indices"])
-        out.append({"name": g["name"], "indices": combined})
+        union = [k for k in range(gi, n) if root(k) == gi]
+        combined = sorted(i for k in union for i in groups[k]["indices"])
+        first = min(union, key=lambda k: min(groups[k]["indices"], default=n))
+        out.append({"name": groups[first]["name"], "indices": combined})
     return out
 
 
-def _verify_groups(client, images: list[bytes], groups: list[dict]) -> list[dict]:
+# What the pile itself says about an over-split, handed to the verify pass.
+# On 2026-09-03 a seller's stained glass suncatcher came out of bulk mode as
+# one listing PER PHOTO: every group held a single photo, and the verify pass
+# — which sees exactly those photos — merged none of them. Nothing in the
+# request said the shape of the answer was itself suspicious, and the
+# seller's own note naming one item was read only by the pass that SPLITS.
+_ALL_SINGLES_HINT = (
+    "\n\nEVERY group below holds exactly ONE photo. A reseller's pile almost "
+    "never looks like that — one item takes three to five shots (front, back, "
+    "a tag, a detail) — so this shape usually means angles of the SAME item "
+    "were read as separate items. An item whose colour changes with the light "
+    "(glass, gemstone, anything shot both backlit and flat) is the classic "
+    "case. Look hard for the sets before you answer."
+)
+
+
+def _count_hint(expected: int, found: int) -> str:
+    """The gap between the seller's own inventory and what grouping found.
+
+    The notes count already sends the biggest groups for a split check when
+    it promises MORE items than were found. The opposite gap — the seller
+    naming one suncatcher and the grouping producing six groups — was read by
+    nobody, though it is the same evidence pointing the other way.
+    """
+    if not expected or found <= expected:
+        return ""
+    return (
+        f"\n\nThe seller's own notes name {expected} item(s) in this pile and "
+        f"the grouping came out with {found} groups. That gap is strong "
+        "evidence the same item was split across several of them. The count "
+        "is a hint and not a quota: merge the groups you can SEE are one "
+        "item, and leave the rest alone."
+    )
+
+
+def _verify_groups(client, images: list[bytes], groups: list[dict],
+                   expected: int = 0) -> list[dict]:
     """Second-pass duplicate check: show ONE representative photo per group and
     ask which groups are actually the same item. This catches the split the
     single-pass grouping keeps making (overview vs close-up / component of a
     set becoming two 'items'). Best-effort — any failure keeps the original
-    grouping rather than blocking the batch."""
+    grouping rather than blocking the batch.
+
+    `expected`: how many items the seller's own notes name, so a grouping that
+    came out with more groups than that can be told so."""
     if len(groups) < 2:
         return groups
     content: list[dict] = []
@@ -651,19 +714,105 @@ def _verify_groups(client, images: list[bytes], groups: list[dict]) -> list[dict
         content.append({"type": "image", "source": {
             "type": "base64", "media_type": "image/jpeg",
             "data": base64.standard_b64encode(rep).decode("ascii")}})
+    hint = _count_hint(expected, len(groups))
+    if all(len(g["indices"]) == 1 for g in groups):
+        hint += _ALL_SINGLES_HINT
     content.append({"type": "text", "text": (
         "These are the item groups made from ONE reseller's bulk photo dump. "
         "Some may accidentally be the SAME physical item split in two — that "
-        "creates duplicate eBay listings, which is the worst outcome.\n\n"
-        + _GROUP_VERIFY_SCHEMA)})
+        "creates duplicate eBay listings, which is the worst outcome."
+        + hint + "\n\n" + _GROUP_VERIFY_SCHEMA)})
     resp = client.messages.create(
         model=config.VISION_MODEL,
-        max_tokens=400,
+        # Room to answer for the pile in front of it. A flat 400 was enough
+        # for the handful of merges a good grouping needs, and far too little
+        # for the badly split pile this pass exists to rescue: 60 groups to
+        # untangle is a longer answer than that, and a cut-off one is
+        # unparseable JSON — which failed silently, leaving every accidental
+        # split standing.
+        max_tokens=max(400, min(2000, 24 * len(groups))),
         messages=[{"role": "user", "content": content}],
     )
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError(
+            f"the merge answer for {len(groups)} groups was cut off")
     text = "".join(b.text for b in resp.content if b.type == "text")
     data = _extract_json(text)
     return _apply_group_merges(groups, data.get("merge"))
+
+
+# The keys the grouping answer may arrive under. The SAME model is asked for
+# {"groups": [{"indices": ...}]} here and {"items": [{"indices": ...}]} by the
+# split check a few hundred tokens later, and it does sometimes answer with
+# the other pass's word — or with the plain-English "photos". An unrecognised
+# key used to leave every group empty, and the straggler repair below then
+# gave EVERY photo its own item: a listing per photo, each one drafted and
+# billed as a separate identify call. Reading the aliases costs nothing.
+_GROUP_LIST_KEYS = ("groups", "items")
+_INDEX_KEYS = ("indices", "indexes", "photos", "photo_indices", "index")
+
+
+def _index_list(group: dict) -> list:
+    """The photo numbers in one group of the model's answer, under whichever
+    of the known keys it used. A bare number counts as a group of one."""
+    for key in _INDEX_KEYS:
+        if key not in group:
+            continue
+        value = group[key]
+        if isinstance(value, list):
+            return value
+        if isinstance(value, (int, str)):
+            return [value]
+    return []
+
+
+def _parse_groups(data: dict, n: int) -> list[dict]:
+    """The model's grouping answer as [{"name", "indices"}] over 0..n-1.
+
+    Covers a SUBSET of the photos: a number that is out of range or used
+    twice is dropped here, and the caller decides what to do about anything
+    left over. Returns [] when nothing usable came back at all, which the
+    caller must not confuse with "the model saw no items".
+    """
+    entries: list = []
+    for key in _GROUP_LIST_KEYS:
+        value = data.get(key)
+        if isinstance(value, list) and value:
+            entries = [g for g in value if isinstance(g, dict)]
+            break
+    raw = [(str(g.get("name", "")).strip(), _index_list(g)) for g in entries]
+
+    numbers: list[int] = []
+    for _, idxs in raw:
+        for i in idxs:
+            try:
+                numbers.append(int(i))
+            except (TypeError, ValueError):
+                continue
+    # A wholly 1-based answer ("Photo 1" read as the first photo). The
+    # signature has to be one that cannot occur 0-based: nobody claimed photo
+    # 0 and somebody claimed photo n. Without this the last photo was dropped
+    # for being out of range and the first became an item of its own.
+    shift = 1 if numbers and 0 not in numbers and max(numbers) == n else 0
+
+    groups: list[dict] = []
+    seen: set[int] = set()
+    for name, idxs in raw:
+        placed: list[int] = []
+        for i in idxs:
+            try:
+                i = int(i) - shift
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < n and i not in seen:
+                seen.add(i)
+                placed.append(i)
+        if placed:
+            groups.append({"name": name or f"Item {len(groups) + 1}",
+                           "indices": placed})
+    if shift:
+        log.info("bulk grouping: the answer numbered photos from 1; shifted")
+    return groups
 
 
 def group_photos(images: list[bytes], notes: str = "") -> dict:
@@ -690,57 +839,71 @@ def group_photos(images: list[bytes], notes: str = "") -> dict:
         "You are sorting a reseller's bulk photo dump into individual items "
         "to list on eBay.\n\n" + _GROUP_SCHEMA + group_notes_block(notes))})
 
-    # Headroom matters at the batch cap: a 100-photo chunk that turns out to be
-    # ~80 distinct items needs well over 1500 tokens of JSON, and a cut-off
-    # response aborts the whole bulk job.
-    resp = client.messages.create(
-        model=config.VISION_MODEL,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": content}],
-    )
-    if resp.stop_reason == "max_tokens":
-        raise RuntimeError("grouping response was cut off; try fewer photos")
-    text = "".join(b.text for b in resp.content if b.type == "text")
-    data = _extract_json(text)
-
     n = len(images)
-    groups: list[dict] = []
-    seen: set[int] = set()
-    for g in (data.get("groups") or []):
-        if not isinstance(g, dict):
-            continue
-        idxs = []
-        for i in (g.get("indices") or []):
-            try:
-                i = int(i)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= i < n and i not in seen:
-                seen.add(i)
-                idxs.append(i)
-        if idxs:
-            groups.append({"name": str(g.get("name", "")).strip() or f"Item {len(groups) + 1}",
-                           "indices": idxs})
+
+    def ask() -> tuple[list[dict], dict]:
+        """One grouping call: the groups it placed, and the raw answer (which
+        says what the model called things when it placed nothing)."""
+        # Headroom matters at the batch cap: a 100-photo chunk that turns out
+        # to be ~80 distinct items needs well over 1500 tokens of JSON, and a
+        # cut-off response aborts the whole bulk job.
+        resp = client.messages.create(
+            model=config.VISION_MODEL,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": content}],
+        )
+        if resp.stop_reason == "max_tokens":
+            raise RuntimeError("grouping response was cut off; try fewer photos")
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        answer = _extract_json(text)
+        return _parse_groups(answer, n), answer
+
+    groups, answer = ask()
+    if not groups:
+        # Valid JSON that placed no photo at all. The repair below would turn
+        # that into one item per photo — a listing per photo, each drafted and
+        # charged for, handed to the seller as if it were the answer. Ask once
+        # more, and say so plainly rather than bill for the misreading: the
+        # pile is still staged and the batch can simply be run again.
+        log.warning("bulk grouping: no photo placed for %d photo(s) "
+                    "(answer keys: %s) — asking once more",
+                    n, ", ".join(sorted(map(str, answer))) or "none")
+        groups, answer = ask()
+        if not groups:
+            raise RuntimeError(
+                "the AI's answer for how to split these photos into items "
+                "could not be read; please run this batch again")
     # Any photo the model missed becomes its own item rather than vanishing.
-    for i in range(n):
-        if i not in seen:
-            groups.append({"name": f"Item {len(groups) + 1}", "indices": [i]})
+    seen = {i for g in groups for i in g["indices"]}
+    missing = [i for i in range(n) if i not in seen]
+    if missing:
+        log.info("bulk grouping: %d of %d photo(s) were left unplaced; each "
+                 "becomes an item of its own", len(missing), n)
+    for i in missing:
+        groups.append({"name": f"Item {len(groups) + 1}", "indices": [i]})
+    expected = expected_item_count(notes)
     # Duplicate check: a cheap second look (one photo per group) that merges
     # groups which are actually the same item. Best-effort — the batch always
-    # proceeds with the first-pass grouping if this errs.
+    # proceeds with the first-pass grouping if this errs, but never silently:
+    # a swallowed failure here is a pile of duplicate listings with nothing
+    # in the log to say why.
     try:
-        groups = _verify_groups(client, images, groups)
-    except Exception:  # noqa: BLE001 - verification is an assist, never a gate
-        pass
+        groups = _verify_groups(client, images, groups, expected=expected)
+    except Exception as exc:  # noqa: BLE001 - verification is an assist, never a gate
+        log.warning("bulk grouping: the merge check did not run (%s); "
+                    "keeping %d group(s) as first grouped", exc, len(groups))
     # The opposite mistake, checked AFTER the merges so nothing it separates
     # is put back together: a group big enough to be two of the same thing,
     # or the biggest groups when the seller's notes promised more items than
     # were found, is looked at photo by photo and split on identity evidence.
     try:
-        groups = _check_splits(client, images, groups,
-                               expected=expected_item_count(notes))
-    except Exception:  # noqa: BLE001 - an assist, never a gate
-        pass
+        groups = _check_splits(client, images, groups, expected=expected)
+    except Exception as exc:  # noqa: BLE001 - an assist, never a gate
+        log.warning("bulk grouping: the split check did not run (%s)", exc)
+    # The one line that says what this pass decided. Without it a seller
+    # reporting "it made a listing per photo" left nothing to read back.
+    log.info("bulk grouping: %d photo(s) -> %d item(s)%s", n, len(groups),
+             f"; the seller's notes name {expected}" if expected else "")
     return {"groups": groups}
 
 

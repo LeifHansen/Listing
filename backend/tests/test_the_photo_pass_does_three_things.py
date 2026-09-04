@@ -1,11 +1,16 @@
 """The photo pass does three things, and the seller does the rest.
 
 It keeps a photo as shot, it takes the background off when asked -- one run
-of the model, the item on white -- and it turns the photo the way the camera
-meant. The pipeline this replaced also guessed whether the ITEM lay
-sideways (two vision calls), rebuilt the matte's border, repaired holes in
-it, drew a shadow, cropped square around a detected subject, sharpened, and
-could hand the photo to three paid APIs. Every photo cost a minute and the
+of the model, the item on white under a soft contact shadow -- and it turns
+the photo the way the camera meant. The pipeline this replaced also guessed
+whether the ITEM lay sideways (two vision calls), rebuilt the matte's border,
+repaired holes in it, cropped square around a detected subject, sharpened,
+and could hand the photo to three paid APIs.
+
+The contact shadow went out with them and was asked for back on its own: it
+is drawn from the silhouette the model already produced, so unlike the rest
+it costs no inference and cannot change what the item looks like -- and an
+item on flat white with a hard edge reads as a sticker pasted down. Every photo cost a minute and the
 result was a surprise; the seller asked for the photos as shot or cut out,
 and to do any further editing themselves.
 
@@ -115,6 +120,40 @@ def test_the_cutout_is_the_item_on_white(tmp_path, model):
     assert model.calls == 1
     assert _px(tmp_path / "out.jpg", (4, 4)) == (255, 255, 255)
     assert max(_px(tmp_path / "out.jpg", (800, 600))) < 100
+
+
+def test_the_cutout_sits_on_a_shadow_not_on_flat_white(tmp_path, model):
+    """The shadow is under the item and down-right of it: a band that is
+    darker than the white backdrop but nowhere near as dark as the item."""
+    images.optimize(_photo(tmp_path), tmp_path / "out", remove_bg=True)
+    out = tmp_path / "out.jpg"
+    # The item spans the middle third of a 1600x1200 frame: x 533-1066,
+    # y 400-800. Just past its bottom-right corner is where the shadow falls.
+    shade = _px(out, (1080, 815))
+    assert shade != (255, 255, 255), "no shadow: the item is on flat white"
+    assert min(shade) < 250, f"shadow too faint to see: {shade}"
+    assert min(shade) > 120, f"shadow reads as a second item: {shade}"
+    # Up and LEFT of the item stays clean — the light comes from that side.
+    assert min(_px(out, (500, 380))) > 250
+
+
+def test_the_shadow_never_touches_the_item_or_the_far_corners(tmp_path, model):
+    images.optimize(_photo(tmp_path), tmp_path / "out", remove_bg=True)
+    out = tmp_path / "out.jpg"
+    assert max(_px(out, (800, 600))) < 100      # the item, unchanged
+    assert min(_px(out, (4, 4))) > 250          # corners still white
+    assert min(_px(out, (1595, 1195))) > 250
+
+
+def test_the_shadow_is_drawn_small_and_scaled_up(model):
+    """It is low-frequency by construction, so it is blurred on a copy no
+    larger than _SHADOW_SIDE and scaled back — which is what keeps it a
+    rounding error next to the model's own inference on a 12MP photo."""
+    big = Image.new("L", (4032, 3024), 0)
+    big.paste(Image.new("L", (1600, 1200), 255), (1200, 900))
+    assert images._contact_shadow(big).size == (4032, 3024)
+    # Same answer either way: the shape is the silhouette, softened.
+    assert images._contact_shadow(Image.new("L", (900, 900), 0)).getbbox() is None
 
 
 def test_a_matte_that_found_nothing_keeps_the_photo_as_shot(tmp_path, model):

@@ -1,11 +1,11 @@
-/* The seller's last background-removal choice.
+/* The seller's last background-removal choice, so the uploader's checkbox
+ * opens where they left it instead of unticked every time.
  *
- * "Remove background & replace with white" is a checkbox on the uploader, and
- * it was local to that screen — so "Add photos" on a listing the seller had
- * already cleaned up sent nothing, the server defaulted it to false, and the
- * new photos went in with their original backgrounds next to cut-out ones. No
- * toggle offered, no message afterwards; on a dark backdrop the difference is
- * the whole point of the feature.
+ * That is ALL it does. It was also read by "Add photos", to give a listing's
+ * new photos the same treatment its first ones got — which meant adding a
+ * photo silently replaced its background, from a checkbox on another screen
+ * that the seller had last touched on a different pile. It seeds the
+ * uploader's own toggle and nothing else now; see useListingForm.addImages.
  *
  * A per-device viewing preference, so it rides localStorage next to the theme
  * and the listings layout rather than the server. Every accessor is guarded:

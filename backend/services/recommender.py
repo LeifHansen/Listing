@@ -18,11 +18,6 @@ from typing import Optional
 
 STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
 FEW_PHOTOS = 3    # fewer than this → suggest adding photos
-# How many of eBay's item specifics have to be blank before filling them in is
-# worth a seller's attention (and their AI credits). One empty box is not an
-# errand; a dozen is the difference between a listing buyers can filter to and
-# one they cannot.
-FEW_BLANK_SPECIFICS = 3
 
 
 def _age_days(iso: Optional[str]) -> Optional[int]:
@@ -37,26 +32,47 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
     return max(0, (datetime.now(timezone.utc) - dt).days)
 
 
-# The app appends its own notes to missing_info beside the AI's: a price it
-# raised, a title it suggests, what to check before listing, where it looked,
-# a category or condition it could not settle. Those are advice to a person.
-# "Fill in details" runs the AI fill, which answers item specifics and nothing
-# else -- so it is offered only for notes a specific could answer. On
-# 2026-09-02 a seller pressed it on a group whose every note was one of these,
-# watched it come back "nothing the photos could answer", and could not tell
-# whether anything had worked, because the suggestion it was supposed to
-# answer never went away. The rest earn a nudge to LOOK, not a button.
-_ADVISORY_PREFIXES = (
-    "verify:", "looked up from:", "the lookup", "check before listing",
-    "for reference,", "price raised", "confirm the price", "item condition",
-    "ebay category",
-)
+# "Fill in details" fills ONE thing: eBay's item specifics for the listing's
+# category, read off its own photos. So the question that decides whether to
+# offer it is "are those specifics still blank", and nothing else.
+#
+# It used to be decided by missing_info instead -- any note the AI or the app
+# had left on the listing -- and that could not work, because a note is
+# evidence of the opposite. Every draft runs the same fill at draft time and
+# then drops the notes it answered, so a note still on a listing is one the
+# fill has ALREADY failed to answer once. Pressing the button re-ran that
+# same pass, was charged for it, added nothing, and left the note in place --
+# so the suggestion never went away and the count never moved. Narrowing
+# WHICH notes counted (2026-09-02) made the group smaller without breaking
+# the loop; the count is what breaks it.
+#
+# Below this many filled specifics, the fill has real room to work. This is
+# the CHEAP proxy for the exact truth -- how many of THIS category's aspects
+# are unanswered -- which needs eBay's aspect list for the category and so
+# cannot simply be asked for a whole store at a time. It is never wrong in the
+# direction that matters: a listing with nothing filled is always one the fill
+# can help.
+#
+# It is a proxy, though, and it is blind in one direction: a listing with
+# Material, Type and Brand filled has three specifics and passes this, while
+# Subject, Era, Occasion, Packaging and Character sit blank and eBay's own
+# suggester offers all five to the seller on the next screen. So the caller
+# now counts the real thing where it can afford to (main._blank_specifics_by_id
+# spends a small budget of cached Taxonomy lookups per dashboard load) and
+# passes it as `blank_specifics`; this stands wherever it could not.
+MIN_SPECIFICS = 3
+
+# ...and how many have to be BLANK, when the caller could afford to ask eBay
+# which aspects this listing's category actually publishes. One empty box is
+# not an errand; three is the difference between a listing buyers can filter
+# to and one they cannot.
+MIN_BLANK_SPECIFICS = 3
 
 
-def is_fillable(note: str) -> bool:
-    """Whether a missing_info note is one the AI fill could answer."""
-    text = str(note or "").strip().lower()
-    return bool(text) and not text.startswith(_ADVISORY_PREFIXES)
+def filled_specifics(listing: dict) -> int:
+    """How many of a listing's item specifics actually carry a value."""
+    return sum(1 for s in (listing.get("item_specifics") or [])
+               if isinstance(s, dict) and str(s.get("value") or "").strip())
 
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
@@ -77,10 +93,10 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     a caller that does not pass it keeps its recommendations.
 
     `blank_specifics` is how many of eBay's item specifics for this listing's
-    category it currently holds no value for — see the "Fill in details" rule
-    below for why the group cannot be built honestly without it. None means
-    nobody counted (no category, or the Taxonomy API was down), and the rule
-    falls back to the notes alone.
+    category it currently holds no value for, counted against eBay's own
+    aspect list — see the "Fill in details" rule below. None means nobody
+    counted (no category, the Taxonomy API down, or past the lookup budget one
+    dashboard load may spend), and the rule falls back to `filled_specifics`.
     """
     listing = item.get("listing") or {}
     status = item.get("status")
@@ -141,36 +157,52 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             f"Only {n} photo{'' if n == 1 else 's'} — more angles mean more sales.", 50)
     notes = [n for n in (listing.get("missing_info") or [])
              if str(n or "").strip()]
-    # "Fill in details" runs the AI item-specifics fill. What it should be
-    # offered for is therefore item specifics that are BLANK — which, until
-    # `blank_specifics` existed, is not what this rule asked. It asked whether
-    # the listing carried a free-text `missing_info` note, and that is a
-    # different question with a different answer at both ends:
+    # Two signals decide this, and they answer the same question at different
+    # prices.
     #
-    #   * a listing IMPORTED from eBay carries no notes at all, so a store
-    #     mirrored out of Seller Hub — every specific blank, which is exactly
-    #     what the fill exists for — was never once offered it;
-    #   * an app-made draft carries the notes the identify pass wrote, and
-    #     some of them ("exact measurements", "confirm the signature") are
-    #     things no item specific answers. That listing was offered the fill
-    #     forever: it ran, changed nothing, came back "nothing the photos
-    #     could answer", and was suggested again on the next refresh.
+    # `blank_specifics` is the TRUTH: how many of the aspects eBay publishes
+    # for this listing's category it holds no value for, counted by the caller
+    # (main._blank_specifics_by_id) against eBay's own aspect list. It is what
+    # the group is actually about, and it is the only one of the two that can
+    # see the case this app was shipping: a listing with Material, Type and
+    # Brand filled and Subject, Era, Occasion, Packaging and Character blank
+    # has plenty of specifics and is still missing the ones eBay's own
+    # suggester offers the seller on the next screen.
     #
-    # So the blanks decide whether to offer it, and `enriched_at` decides when
-    # to stop. A listing the fill has already run on has been asked this
-    # question and has given its answer; asking again spends the seller's AI
-    # credits to be told the same thing. What is left for them then is to
-    # LOOK, which is the other rec.
+    # `filled_specifics` is the PROXY, and it is what stands when nobody
+    # counted — no category on the listing, the Taxonomy API down, or the
+    # store's categories past the lookup budget one dashboard load may spend
+    # on a shared eBay allowance. It is never wrong in the direction that
+    # matters: a listing with nothing filled is always one the fill can help.
+    #
+    # `enriched_at` is what ENDS it, and neither count can. Set whenever the
+    # fill actually ran — including the run that added nothing, which is the
+    # one that matters — it is the difference between "these specifics are
+    # blank" and "these specifics are blank and the AI has already looked".
+    # Without it a listing whose photos genuinely cannot answer its category
+    # sits in the group forever, is charged for on every press, and moves the
+    # count not at all: the loop a seller reads, correctly, as the button not
+    # working. What is left for them then is to LOOK, which is the other rec.
     enriched = str(listing.get("enriched_at") or "").strip()
-    fillable_notes = any(is_fillable(n) for n in notes)
-    worth_filling = (blank_specifics >= FEW_BLANK_SPECIFICS
-                     if blank_specifics is not None else fillable_notes)
-    if not enriched and (worth_filling or fillable_notes):
-        reason = (f"{blank_specifics} fields buyers filter by are still blank."
-                  if blank_specifics else
-                  "Some fields buyers filter by are still blank.")
+    have = filled_specifics(listing)
+    if blank_specifics is None:
+        worth_filling = have < MIN_SPECIFICS
+        reason = ("None of eBay's item specifics are filled in — buyers filter "
+                  "by these." if not have else
+                  f"Only {have} of eBay's item specifics "
+                  f"{'is' if have == 1 else 'are'} filled in — buyers filter "
+                  "by these.")
+    else:
+        worth_filling = blank_specifics >= MIN_BLANK_SPECIFICS
+        reason = (f"{blank_specifics} of eBay's item specifics are still blank "
+                  "— buyers filter by these.")
+    if not enriched and worth_filling:
         add("specifics", "Fill in details", reason, 45)
     elif notes:
+        # Notes on a listing whose specifics are filled are what the fill
+        # could NOT answer: a measurement, an authentication, a flaw only the
+        # person holding it can see. They earn a nudge to LOOK, never a button
+        # that would charge for the same empty pass again.
         n = len(notes)
         add("verify", "Check details",
             f"{n} thing{'' if n == 1 else 's'} the AI left for you to check.", 40)

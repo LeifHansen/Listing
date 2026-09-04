@@ -764,24 +764,30 @@ problem:
   cost first, and a listing it can't reach (no category, photos gone, eBay not
   connected) is skipped **before** it is charged for.
 
-  **What decides the group** is how many of eBay's item specifics the listing
-  is actually missing (`taxonomy.fillable_blanks`, counted per listing in
-  `/api/insights`) — not, as it was until recently, whether the listing
-  carried a free-text `missing_info` note. Those are different questions with
-  different answers at both ends, and asking the wrong one made the button a
-  no-op: a listing **imported** from eBay carries no notes at all, so a store
-  mirrored out of Seller Hub — every specific blank, which is exactly what the
-  fill is for — was never offered it; while an app-made draft carried notes
-  like *"exact measurements"* that no item specific answers, and was offered
-  the fill forever, ran it, changed nothing, and was suggested again on the
-  next refresh. The count decides whether to offer it, and `enriched_at` — set
-  whenever the fill actually **ran**, including the run that added nothing —
-  decides when to stop. What is left for the seller after that is to *look*,
-  which is the **Check details** suggestion instead. Counting the blanks needs
-  eBay's aspect list per category; those are cached for six hours, and one
-  dashboard load spends at most a dozen live Taxonomy lookups (the API runs on
-  one allowance shared by every seller of the app), so a big store's
-  categories fill in over the first few loads.
+  **What decides the group** is item specifics, never the free-text
+  `missing_info` notes beside them — a note is evidence the fill has *already*
+  failed to answer something, so building the group from notes made the button
+  a permanent no-op. Two counts answer that question at different prices, and
+  a third fact ends it:
+
+  - `recommender.filled_specifics` — the cheap proxy: how many specifics the
+    listing carries a value for. Never wrong in the direction that matters (a
+    listing with nothing filled is always one the fill can help), and blind in
+    one: Material, Type and Brand filled clears it while *Subject*, *Era*,
+    *Occasion*, *Packaging* and *Character* sit blank.
+  - `taxonomy.fillable_blanks` — the truth: how many of the aspects eBay
+    publishes for **this listing's category** it holds no value for, counted
+    per listing in `/api/insights` (`_blank_specifics_by_id`). It needs eBay's
+    aspect list, so it is budgeted: cached six hours and read for free, with at
+    most a dozen live Taxonomy lookups per dashboard load (that API runs on one
+    allowance shared by every seller of the app), biggest categories first. Past
+    the budget the proxy above stands.
+  - `Listing.enriched_at` — set whenever the fill actually **ran**, including
+    the run that added nothing. Neither count can end the group on its own: a
+    listing whose photos genuinely cannot answer its category has blank
+    specifics before the fill and blank specifics after it, so it sat there
+    forever and was charged for on every press. What is left for the seller
+    afterwards is to *look*, which is the **Check details** suggestion instead.
 
 Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind

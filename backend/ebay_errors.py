@@ -36,6 +36,51 @@ def _clip(text: str, limit: int = 160) -> str:
     return text[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
 
 
+# eBay names the aspect inside the sentence when it sends no parameters:
+# "The item specific Unit Quantity is missing", "Missing required item
+# specific: Country/Region of Manufacture", "the required item specific
+# 'Type'". Pull the name out of any of those, so the editor can ring the
+# field instead of listing three examples that are already filled.
+_ASPECT_IN_TEXT = re.compile(
+    r"""(?:item\s+specifics?|aspect|required\s+attribute)   # what eBay called it
+        \s*[:\-]?\s*                                       # optional punctuation
+        ["'\u201c\u2018]?                                  # optional quote
+        ([A-Z][A-Za-z0-9]*(?:[ /&\-][A-Za-z0-9()][A-Za-z0-9()]*){0,4})
+    """,
+    re.VERBOSE)
+
+# Words that follow "item specific" without being one, so a sentence like
+# "the item specific is missing" never yields "Is".
+_NOT_AN_ASPECT = {"is", "was", "are", "were", "must", "missing", "required",
+                  "value", "values", "name", "for", "with", "and", "the",
+                  "invalid", "not", "cannot", "should"}
+
+
+# Trailing words the sentence continues with, never the end of an aspect
+# name: "The item specific Unit Quantity is missing" must yield "Unit
+# Quantity", not "Unit Quantity is missing". Trimmed only from the END, so a
+# name that legitimately contains one ("Country/Region OF Manufacture")
+# keeps it.
+_TRAILING_FILLER = {"is", "was", "are", "were", "be", "been", "must", "missing",
+                    "required", "invalid", "not", "cannot", "should", "has",
+                    "have", "value", "values", "of", "for", "and", "the", "a",
+                    "an", "in", "to", "on", "or", "this", "that", "it"}
+
+
+def _aspect_from_text(text: str) -> str:
+    """The aspect name eBay named in its sentence, or ""."""
+    for match in _ASPECT_IN_TEXT.finditer(" ".join((text or "").split())):
+        words = match.group(1).strip(" '\u2019\"\u201d").split()
+        while words and words[-1].lower().strip(".,;:") in _TRAILING_FILLER:
+            words.pop()
+        name = " ".join(words).strip(" '\u2019\"\u201d.,;:")
+        if not name or name.split()[0].lower() in _NOT_AN_ASPECT:
+            continue
+        if len(name) <= 40:
+            return name
+    return ""
+
+
 def _looks_like_weight(value: str) -> bool:
     """True for values like '3 oz', '1.5 lb', '70 lbs'."""
     parts = value.strip().lower().split()
@@ -135,7 +180,14 @@ def explain(err: dict) -> dict:
                      title="This condition isn’t valid for the selected category",
                      fix="Pick a condition from the dropdown — it now lists only the "
                          "conditions eBay allows for this category.")
-    elif has("category"):
+    elif has("category") and not has("item specific", "aspect", "required attribute"):
+        # ...but only when the category is what eBay is actually complaining
+        # about. "The aspect Unit Type is required for this category" says
+        # "category" while naming an item specific, and this branch claimed it
+        # — sending the seller to re-pick a category that was correct, over an
+        # aspect they were never told about. The specifics branch below is the
+        # more specific reading, so it gets first refusal on anything that
+        # names one.
         issue.update(target="category",
                      title="This item needs a valid eBay category",
                      fix="Use “Suggest eBay categories” and pick the closest match.")
@@ -202,19 +254,42 @@ def explain(err: dict) -> dict:
         aspect = next((v for v in (str(p.get("value", "")).strip() for p in params)
                        if v and v[:1].isupper() and len(v) <= 40
                        and not v.endswith((".", "!")) and len(v.split()) <= 5), "")
+        # ...and when it does not, read it out of the sentence. eBay does not
+        # always send parameters — a REVISE of a live listing often carries the
+        # name in the message alone — and the fallback below was pure
+        # boilerplate ("e.g. Brand, Type, Size") on a listing whose Brand, Type
+        # and Size were all filled in. That is a seller staring at a card
+        # reading "Required to publish 5/5, nothing here is blocking" beside a
+        # refusal naming a sixth aspect they were never shown.
+        if not aspect:
+            aspect = _aspect_from_text(f"{message} {long_message}")
         dimension = aspect.lower().removeprefix("item ").strip() in (
             "height", "length", "width", "depth", "diameter", "weight")
+        # Nothing named, either way: eBay's own sentence is the most
+        # informative thing we hold, so say it rather than guessing at three
+        # aspects that are probably already filled. Same rule as the 240
+        # branch above — the seller's next move depends on eBay's words, and a
+        # reason we do not render is a reason they never see.
+        said = _clip(" ".join((long_message or message or "").split()))
         issue.update(
             target="specifics",
             fields=[aspect] if aspect else [],
-            title=("Missing required item specific" + (f": {aspect}" if aspect else "")),
+            title=("Missing required item specific"
+                   + (f": {aspect}" if aspect
+                      else (f" — eBay’s reason: {said}" if said else ""))),
             fix=((f"Add “{aspect}” under Item specifics with a number and unit "
                   f"(e.g. “3 in”). Note: the shipping Package size fields don’t "
                   f"count — eBay wants it as an item specific.")
                  if aspect and dimension else
                  (f"Fill in “{aspect}” under Item specifics." if aspect else
-                  "Add the required item specifics (e.g. Brand, Type, Size) "
-                  "under Item specifics.")))
+                  ((f"eBay's words: “{said}”. Add that item specific under "
+                    "Item specifics. eBay adds new required specifics to a "
+                    "category from time to time, so one that published before "
+                    "can be refused now — the field may not be in this "
+                    "listing's list yet.")
+                   if said else
+                   "Add the required item specifics (e.g. Brand, Type, Size) "
+                   "under Item specifics."))))
     elif has("return policy", "returnpolicy"):
         issue.update(target="policies",
                      title="A return policy is required",
