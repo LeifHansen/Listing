@@ -42,6 +42,7 @@ from .marketplaces import ebay_provider
 from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
+from .money import charm_price
 from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
                      Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
@@ -3750,9 +3751,13 @@ def _research_draft(listing: Listing, image_paths: list,
     if low and low > 0:
         basis = str(found.get("value_basis") or "researched comparables")[:120]
         span = f"${_money(low)}" + (f"-${_money(high)}" if high and high > low else "")
-        if listing.price is None or float(listing.price) < low:
+        # The floor as this app would price it (money.charm_price), and the
+        # number the draft is measured against — so a raise to $24.99 does not
+        # read as still-under-$25 and raise itself again on the next pass.
+        floor = charm_price(low)
+        if floor is not None and (listing.price is None or float(listing.price) < floor):
             was = listing.price
-            listing.price = round(low, 2)
+            listing.price = floor
             notes.append(
                 f"Price raised to the bottom of what this looks worth ({span}, "
                 f"{basis})" + (f" — the photos alone suggested ${_money(was)}."
@@ -3846,7 +3851,7 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
                 f"${_money(low)}-${_money(best.get('high') or market)}.")
     else:
         return None                       # the draft's own number stands
-    listing.price = round(float(market), 2)
+    listing.price = charm_price(market)
     # In front of the seller, not just in the log: this is a number that
     # changed under them, on the field where being wrong is unrecoverable.
     listing.missing_info = [*(listing.missing_info or []), note]

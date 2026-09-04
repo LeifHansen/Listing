@@ -952,6 +952,16 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
 
 - The AI never invents serial numbers, authenticity guarantees, or unverifiable
   specs — it flags those under "missing info" for you to confirm.
+- **Every price the app chooses ends in `.99`** (`backend/money.py` →
+  `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
+  the AI's drafted price, the market number that overrules a draft priced far
+  under the comps, the floor a high-value lookup raises a draft to, the
+  headline comp suggestion, a comp row tapped in the price card, and a bulk
+  percentage cut. It moves to the NEAREST charm point rather than always down
+  — $25.00 → $24.99, $22.50 → $22.99 — so it is never more than half a dollar
+  either way, and it is floored at $0.99. What the seller TYPES is theirs and
+  is never rewritten; neither is what they paid (`purchase_price`, read off a
+  price sticker) nor the measured market range shown beside a suggestion.
 - Image optimization never zooms. A photo that keeps its background is framed
   with the largest square the frame holds, slid over the item, so the backdrop
   you composed stays in the shot and nothing gets clipped in the gallery

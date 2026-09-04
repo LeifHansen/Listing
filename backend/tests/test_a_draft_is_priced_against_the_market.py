@@ -77,7 +77,8 @@ def test_a_draft_far_under_the_market_is_repriced(market):
 
     used = main._price_against_comps(listing, uid="u1")
 
-    assert used and listing.price == 700.0
+    # The comp median as a price to list at: the nearest .99 (money.charm_price).
+    assert used and listing.price == 699.99
     note = " ".join(listing.missing_info)
     assert "85" in note and "450" in note and "1,200" in note
     assert "Confirm the price" in note
@@ -91,7 +92,7 @@ def test_a_draft_with_no_price_takes_the_market_s(market):
     listing = _listing(price=None)
 
     assert main._price_against_comps(listing, uid="u1")
-    assert listing.price == 700.0
+    assert listing.price == 699.99
     assert "wouldn't put a number on this one" in " ".join(listing.missing_info)
 
 
@@ -166,7 +167,7 @@ def test_a_title_too_specific_to_match_falls_back_to_its_head(market,
 
     assert main._price_against_comps(listing, uid="u1")
     assert calls == [title, "Fanch Ledan hand signed lithograph"]
-    assert listing.price == 700.0
+    assert listing.price == 699.99
 
 
 def test_the_fallback_is_not_a_second_identical_search(market):

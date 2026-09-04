@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from ..config import log
+from ..money import charm_price
 
 # Below this, eBay's own minimums and the seller's shipping costs make the
 # listing pointless — and a rounding-to-zero price is a bug, not a discount.
@@ -52,10 +53,13 @@ class BulkResult:
 def lower_price(current: float, percent: float) -> Optional[float]:
     """`current` reduced by `percent`, or None when the cut can't apply.
 
-    Rounded to cents the way a seller would write it, floored at MIN_PRICE, and
-    None when the listing has no usable price or the result wouldn't actually
-    be lower — a "changed" count that includes no-ops is a lie about what the
-    bulk action did.
+    Landed on a .99 the way every price this app chooses is (a 20% cut off
+    $25.00 is $20.00, and a whole dollar is the one thing these must not be),
+    floored at MIN_PRICE, and None when the listing has no usable price or the
+    result wouldn't actually be lower — a "changed" count that includes no-ops
+    is a lie about what the bulk action did. Landing on the nearest .99 moves
+    the cut by up to half a dollar in either direction, so a percentage this
+    small is reported as the no-op it is rather than applied as a rounding.
     """
     try:
         price = round(float(current or 0), 2)
@@ -63,8 +67,8 @@ def lower_price(current: float, percent: float) -> Optional[float]:
         return None
     if price <= 0:
         return None
-    new_price = round(price * (1 - percent / 100.0), 2)
-    if new_price < MIN_PRICE:
+    new_price = charm_price(price * (1 - percent / 100.0))
+    if new_price is None or new_price < MIN_PRICE:
         new_price = MIN_PRICE
     return new_price if new_price < price else None
 
