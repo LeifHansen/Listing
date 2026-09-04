@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Sparkles, FolderOpen, Trash2, Camera, MessageSquareText, Check, CheckCheck, X,
 } from "lucide-react";
 import { cn, once } from "@/lib/utils";
-import { lastRemoveBg, rememberRemoveBg } from "@/lib/photoPrefs";
 import {
   api, pollJob, downscaleAllForUpload, IMAGE_EXT_RE, UPLOAD_TIMEOUT_MS,
 } from "@/lib/api";
@@ -62,19 +61,21 @@ export function UploadPhase() {
   // A bulk upload that failed hands its pile back here — this component was
   // unmounted while it ran, so the photos would otherwise be gone.
   const [files, setFiles] = useState(() => bulkRetry?.files || []); // { file, url }
-  // Seeded from the seller's last choice so it is not re-ticked every visit,
-  // and remembered so "Add photos" later gives the same treatment.
-  const [removeBg, setRemoveBg] = useState(
-    () => (bulkRetry ? !!bulkRetry.removeBg : lastRemoveBg()));
-  const chooseRemoveBg = useCallback((on) => {
-    setRemoveBg(on);
-    rememberRemoveBg(on);
-  }, []);
+  // Off for every pile — the seller ticks it, nobody ticks it for them.
+  // It used to open pre-ticked from their last choice, so one upload where
+  // they wanted cutouts silently replaced the background of every pile after
+  // it: a decision made weeks ago about other photos, re-applied to these
+  // without being asked. Replacing a background is destructive (the shot is
+  // what the buyer trusts) and it spends a credit per photo, so it belongs to
+  // THIS pile, chosen while looking at these photos. A failed bulk upload
+  // still hands its own choice back with its files — same pile, seconds
+  // later, not a default.
+  const [removeBg, setRemoveBg] = useState(() => !!bulkRetry?.removeBg);
   // Hints for the AI, comma-separated: what the seller knows and the camera
-  // can't show. Deliberately NOT remembered across uploads the way removeBg is
-  // — it describes this pile, and last week's pile leaking into this one is
-  // worse than typing it again. Seeded from a failed bulk retry, though: the
-  // seller wrote it seconds ago.
+  // can't show. Like the cutout toggle it describes THIS pile and is never
+  // carried over — last week's pile leaking into this one is worse than
+  // typing it again. Seeded from a failed bulk retry, though: the seller
+  // wrote it seconds ago.
   const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
@@ -446,7 +447,7 @@ export function UploadPhase() {
 
               <Toggle
                 checked={removeBg}
-                onChange={chooseRemoveBg}
+                onChange={setRemoveBg}
                 label="Remove background & replace with white"
                 help="Cleaner, eBay-friendly product shots. Adds a few seconds per photo."
               />
