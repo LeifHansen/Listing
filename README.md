@@ -714,6 +714,23 @@ covers the seller's whole store — `EBAY_SYNC_KNOWN_LIMIT`, default 10000 rows,
 deliberately far above any real store, because a record the read misses is one
 the dedupe can't match.
 
+That match is deliberately wider than the account check the rest of the sync
+uses (`listing_sync.matchable` vs `owns`). `owns` refuses whatever it cannot
+prove — a record stamped with eBay's immutable account id when the connected
+account could not read its own identity, and the `previous account` sentinel a
+reconnect stamps — and both of those sit on listings the seller made here. Left
+out of the match they were imported again as `ebay-<itemId>` on every sync, and
+the seller watched a listing they created turn into an eBay import (the origin
+badge is the record's id, so a second row IS a different badge). An item id
+names one listing on one account and these ids come out of the connected
+account's own selling lists, so the id settles what the label cannot; the write
+then stamps the account it came back from, which repairs the record and lets the
+stale-mirror cleanup drop the duplicate on the same pass. A **provable**
+disagreement — a record stamped with one immutable id, a caller holding another
+— is still refused. The per-record status sweep stays strict either way: it
+calls `GetItem`, which answers for any seller's item, so nothing there may lean
+on an id the seller's own store never returned.
+
 ### One listing, one live listing
 
 Creating a listing is the only step in the publish pipeline that isn't naturally
