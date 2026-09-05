@@ -358,6 +358,36 @@ user login or seller policies). Set those two and the app will:
 
 Without them, you can still type a category ID manually in the preview.
 
+### The seller's own store shelf
+
+eBay's category says what an item **is**. A **store category** is a shelf in
+the seller's own storefront nav — "Vintage Tees", "Beanie Babies" — invented
+by them, numbered per account, and what a returning buyer browses. Only a
+seller with an eBay **Store** subscription has any, and every listing this app
+published before landed at the store's top level, because nothing ever sent
+one.
+
+Nothing can suggest a shelf from the outside (nobody but the seller knows what
+theirs mean), so the draft is matched against the store's own tree, read once
+per account per six hours from `GetStore`:
+
+- eBay's resolved category **path** is the strongest signal, then the title
+  and brand, then the item specifics — which reinforce a match and never make
+  one on their own;
+- a shelf earns it by having its **whole name** seen ("Vintage Tees" needs
+  both words), so the more specific shelf beats the general one it sits under;
+- a catch-all shelf ("Other", "More Items") is never matched into, because
+  every listing matches it equally well; and
+- below that bar the answer is **nothing**. An unfiled listing is one dropdown
+  away from filed; a wrongly filed one is invisible on the shelf it belonged
+  on.
+
+The Category card shows the shelf as a picker — the store's own list, by the
+path the seller reads in their menu — and draws nothing at all for an account
+with no Store. `Storefront.StoreCategoryID` rides the publish and the revise
+(only when the seller moved it), comes back on every sync, and eBay's `0`
+("no store category") is read as no shelf rather than as shelf number zero.
+
 > **Note on images:** eBay requires publicly reachable image URLs. In local
 > dry-run mode the payload references `http://localhost:8000/media/...`. For real
 > publishing, deploy the app on a public host (or swap in an image CDN) so eBay
@@ -408,6 +438,7 @@ digits that belong to somebody else's product.
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
+| `GET`  | `/api/ebay/store-categories` | The seller's OWN eBay Store shelves, flattened with their paths. Answers `store: false` for an account without a Store and `checked: false` when eBay could not be asked — different things, and the picker treats them differently |
 | `POST` | `/api/publish` | Publish (draft/live). Add `marketplaces: ["ebay","etsy","depop"]` to fan out; omit for the legacy eBay-only behavior |
 | `GET`  | `/api/marketplaces` | Every marketplace + connection state (drives Settings & publish chips) |
 | `GET`  | `/api/{marketplace}/connect` · `/callback` | OAuth connect flow (eBay, Etsy, Depop) |

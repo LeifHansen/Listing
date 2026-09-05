@@ -28,6 +28,8 @@ const EMPTY = {
   package_length_in: "", package_width_in: "", package_height_in: "",
   fulfillment_policy_id: "",
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
+  // The seller's own eBay Store shelf ("" = the top level of their store).
+  store_category_id: "", store_category_name: "",
   condition_description: "", description: "", item_specifics: [],
   promote: false, ad_rate_percent: 0,
   images: [], image_urls: [], currency: "USD", missing_info: [],

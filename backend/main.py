@@ -52,7 +52,7 @@ from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
                        owed_refunds, preflight, pricing, promotions,
-                       recommender, sync_guard, sync_merge,
+                       recommender, store_category, sync_guard, sync_merge,
                        taxonomy, tokens)
 from .services import etsy as etsy_service
 from .services import deletion_queue
@@ -1470,6 +1470,87 @@ def _resolve_category(listing: Listing) -> None:
     _needs_a_category(listing)
 
 
+# --- the seller's own store shelf -------------------------------------------
+
+# GetStore returns the seller's whole storefront tree, and a shop's shelving
+# changes about as often as a shop's shelving does — while a 50-photo bulk
+# batch would otherwise ask for it once per draft, fifty times, for one
+# unchanging answer. The MISS is cached too: most sellers have no eBay Store
+# at all, and finding that out must cost them one call every few hours rather
+# than one per listing.
+_STORE_CATS_TTL = int(os.getenv("STORE_CATEGORIES_TTL_HOURS", "6") or "6") * 3600
+_STORE_CATS: dict[str, tuple[float, Optional[list[dict]]]] = {}
+_STORE_CATS_LOCK = threading.Lock()
+
+
+def _store_categories(uid: str, token: str,
+                      refresh: bool = False) -> list[dict]:
+    """This account's store shelves, from cache while they are fresh.
+
+    Raises ebay_trading.NoStore for an account without a Store — the common
+    case, and not a failure — and the ordinary TradingError for a lookup that
+    actually broke. The caller decides which of those the seller hears about.
+    """
+    now = time.time()
+    if not refresh:
+        with _STORE_CATS_LOCK:
+            hit = _STORE_CATS.get(uid)
+        if hit and now - hit[0] < _STORE_CATS_TTL:
+            if hit[1] is None:
+                raise ebay_trading.NoStore(
+                    "This eBay account doesn't have a Store, so it has no "
+                    "store categories.")
+            return hit[1]
+    try:
+        cats = ebay_trading.store_categories(token)
+    except ebay_trading.NoStore:
+        with _STORE_CATS_LOCK:
+            _STORE_CATS[uid] = (now, None)
+        raise
+    with _STORE_CATS_LOCK:
+        if len(_STORE_CATS) > 500:      # tiny bound; a clear costs one call
+            _STORE_CATS.clear()
+        _STORE_CATS[uid] = (now, cats)
+    return cats
+
+
+def _assign_store_category(listing: Listing, uid: Optional[str]) -> None:
+    """File a fresh draft on the seller's own store shelf, in place.
+
+    eBay's category says what the item IS; this says where it lives in the
+    seller's store — the left-hand nav a returning buyer browses. Only a
+    seller with an eBay Store has shelves at all, and only they know what
+    theirs mean, so this reads their own tree and matches the draft against
+    it (services/store_category).
+
+    Best-effort in every direction: no Store, no confident match, no eBay
+    connection, or a lookup that fails all leave the draft exactly as drafted.
+    The shelf is a nicety; the draft is the work, and an unfiled listing is
+    one dropdown away from filed while a wrongly filed one is invisible.
+    Runs AFTER _resolve_category on purpose — eBay's own category path is the
+    strongest words the matcher gets.
+    """
+    if not uid or listing.store_category_id:
+        return
+    try:
+        creds = ebay_provider.creds_for(uid)
+        if not creds:
+            return
+        hit = store_category.match(listing, _store_categories(uid, creds["access_token"]))
+    except ebay_trading.NoStore:
+        return
+    except Exception as exc:  # noqa: BLE001 - never block a draft on this
+        log.info("store category: not assigned (%s: %s)", type(exc).__name__, exc)
+        return
+    if not hit:
+        log.info("store category: no shelf matched %r", (listing.title or "")[:60])
+        return
+    listing.store_category_id = hit["id"]
+    listing.store_category_name = hit["name"]
+    log.info("store category: %r -> %s (#%s, score %.1f)",
+             (listing.title or "")[:60], hit["name"], hit["id"], hit["score"])
+
+
 def _fit_condition_to_category(listing: Listing) -> None:
     """The category decides which conditions exist — so pick the condition
     AFTER the category, not before it.
@@ -2793,6 +2874,30 @@ def get_ebay_policies(request: Request) -> dict:
         "ship_from_postal": acct.get("ship_from_postal", ""),
         "manage_url": "https://www.bizpolicy.ebay.com/businesspolicy/manage",
     }
+
+
+@app.get("/api/ebay/store-categories")
+def get_store_categories(request: Request, refresh: bool = False) -> dict:
+    """The connected seller's own eBay Store shelves, for the editor's picker.
+
+    Three different answers, and they must not look alike (the same rule the
+    price lookup follows): the account HAS a store and here are its shelves;
+    the account has no store, so there is nothing to pick and the picker hides
+    itself; or we could not ask eBay just now — which is not evidence of
+    either, and says so instead of quietly reporting an empty store.
+    """
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first to load your store categories.")
+    try:
+        cats = _store_categories(_uid(request), creds["access_token"], refresh)
+    except ebay_trading.NoStore:
+        return {"store": False, "checked": True, "categories": []}
+    except ebay_trading.TradingError as exc:
+        log.info("store categories: lookup failed: %s", exc)
+        return {"store": False, "checked": False, "categories": [],
+                "error": str(exc)}
+    return {"store": True, "checked": True, "categories": cats}
 
 
 @app.get("/api/ebay/shipping-services")
@@ -4817,6 +4922,7 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
     _resolve_category(result.listing)
+    _assign_store_category(result.listing, _uid(request))
     # Research BEFORE comps: it can rewrite a hedged title into the real one,
     # and the comp search is only as good as the title it searches for.
     _research_draft(result.listing, paths, result.raw_observations,
@@ -5970,6 +6076,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # rather than an unchecked box that promotes anyway.
                 listing.promote = listing.promote or auto_promote
                 _resolve_category(listing)
+                _assign_store_category(listing, uid)
                 # Fill item specifics (and the maker) up front so the draft the
                 # seller reviews carries real specifics, not just the generic
                 # first pass — one consolidated call on chain v2.
@@ -6231,6 +6338,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _apply_listing_defaults(result.listing, uid, prefs)
         _beat("category")
         _resolve_category(result.listing)
+        _assign_store_category(result.listing, uid)
         # Fill the category's item specifics (and hunt the maker) so the draft
         # is SEO-ready — one consolidated call on chain v2, the original
         # multi-call chain on IDENTIFY_CHAIN=v1.

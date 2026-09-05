@@ -107,6 +107,16 @@ class Listing(BaseModel):
     condition_description: str = ""
     category_suggestion: str = ""
     category_id: str = ""
+    # The seller's OWN storefront category — the left-hand nav of their eBay
+    # Store ("Vintage Tees", "Beanie Babies"), not one of eBay's site
+    # categories. Their own invention, their own ids, and only sellers with a
+    # Store have any: "" means this listing is filed at the store's top level,
+    # which is what every listing did before this field existed. Name kept
+    # beside the id for the same reason `category_suggestion` sits beside
+    # `category_id` — so a card can say where the listing is filed without a
+    # round trip to eBay for the tree.
+    store_category_id: str = ""
+    store_category_name: str = ""
     description: str = ""  # HTML-safe plain text / light HTML
     price: Optional[float] = None
     # What the seller PAID for the item (Shop Mode "Buy", or typed in later).

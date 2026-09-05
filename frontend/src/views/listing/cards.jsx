@@ -21,6 +21,7 @@ import { PhotoTile } from "./PhotoTile";
 import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
+import { StoreCategorySelect } from "./StoreCategorySelect";
 import { TITLE_MAX } from "./blockers";
 import { issuesFor } from "./publishShared";
 
@@ -315,6 +316,18 @@ export function CategoryCard({ w }) {
             />
           </Field>
         </div>
+        {/* The seller's own shelf, which is a different question from the
+            category above: that one says what the item IS (and decides which
+            fields eBay demands), this one says where it lives in their store.
+            Draws nothing at all for a seller without an eBay Store. */}
+        <StoreCategorySelect
+          value={w.form.store_category_id}
+          name={w.form.store_category_name}
+          onChange={(id, label) => {
+            w.set("store_category_id", id);
+            w.set("store_category_name", label);
+          }}
+        />
         <div>
           <Button variant="soft" onClick={w.suggestCategories}>
             <Search aria-hidden /> Suggest eBay categories

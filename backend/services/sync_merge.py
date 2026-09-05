@@ -221,6 +221,7 @@ FIELD_LABELS = {
     "condition": "condition",
     "condition_description": "condition notes",
     "category_id": "category",
+    "store_category_id": "store category",
     "price": "price",
     "quantity": "quantity",
     "currency": "currency",
