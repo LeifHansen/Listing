@@ -2,7 +2,7 @@ import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
@@ -462,17 +462,41 @@ export const ListingCard = memo(function ListingCard({
     <div className={cn("relative group", list && "flex items-center gap-2", className)}>
       {body}
       {selectable ? (
-        <span
-          aria-hidden
-          className={cn(
-            "grid place-items-center size-7 rounded-full",
-            "border-2 shadow-card pointer-events-none transition-colors",
-            list ? "shrink-0 order-first" : "absolute top-3 right-3 z-10",
-            selected ? "bg-blue border-blue text-on-accent" : "bg-card/90 border-line-strong text-transparent",
-          )}
-        >
-          <Check size={15} strokeWidth={3} />
-        </span>
+        // Select mode still lets one listing be opened. Ticking is what the
+        // card itself does here, so without this the ONE thing a seller
+        // cannot do while sorting a grid of drafts is fix the draft they just
+        // spotted the problem on — they had to leave select mode, open it,
+        // come back, and tick everything again. A sibling of the card button
+        // (never nested: a button inside a button is invalid HTML and stops
+        // being reachable by keyboard), so its click is its own.
+        <div className={cn(
+          "z-10 flex items-center gap-1.5",
+          list ? "shrink-0 order-first" : "absolute top-3 right-3",
+        )}>
+          <button
+            type="button"
+            onClick={() => onOpen?.(item.id)}
+            aria-label="Open this listing to edit it"
+            title="Open this listing to edit it — your ticks are kept"
+            className={cn(
+              "grid place-items-center size-7 rounded-full border-2 shadow-card",
+              "bg-card/90 border-line-strong text-ink-secondary cursor-pointer",
+              "transition-colors hover:text-blue hover:border-blue",
+            )}
+          >
+            <PenLine size={14} aria-hidden />
+          </button>
+          <span
+            aria-hidden
+            className={cn(
+              "grid place-items-center size-7 rounded-full",
+              "border-2 shadow-card pointer-events-none transition-colors",
+              selected ? "bg-blue border-blue text-on-accent" : "bg-card/90 border-line-strong text-transparent",
+            )}
+          >
+            <Check size={15} strokeWidth={3} />
+          </span>
+        </div>
       ) : actions && (
         <div className={cn(
           "z-10 flex items-center gap-1.5",
