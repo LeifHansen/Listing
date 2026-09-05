@@ -1000,6 +1000,23 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
 
 - The AI never invents serial numbers, authenticity guarantees, or unverifiable
   specs — it flags those under "missing info" for you to confirm.
+- **A publish is never sent against no rules.** `sanitize_specifics` is the last
+  pass before eBay — it turns a tag's `W33 L34` into the Size eBay lists, an
+  inch mark into a number, and a colour into eBay's own spelling — and it used
+  to give up entirely when the Taxonomy lookup failed, sending every value as
+  typed. eBay then refused the listing after the photos had uploaded, and the
+  same values went through on the next press (by which time the lookup had
+  answered). The aspect list eBay last gave us for a category is now kept with
+  no expiry and stands in when the live call won't answer; where there has
+  never been one, the corrections that need no list still run.
+- **Views and watchers: a measured nought is a nought.** eBay's traffic report
+  lists what happened, not what didn't, so a listing nobody viewed is absent
+  from it. Absent used to reach the card as "no numbers", which drew no views
+  row at all beside listings that showed "0 views" — the same fact, two
+  different cards. Where the report (or the watch-count call) actually
+  answered, every live listing it covered gets the nought it earned; where the
+  call failed, nothing is filled, so an outage never reads as a store nobody
+  visited.
 - **Every price the app chooses ends in `.99`** (`backend/money.py` →
   `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
   the AI's drafted price, the market number that overrules a draft priced far
