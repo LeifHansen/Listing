@@ -13,7 +13,7 @@
  * editing stay separate actions, and the ticks are held in the app store so
  * they are still there when the seller comes back.
  */
-import { act, useEffect, useState } from "react";
+import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppProvider, useApp } from "@/store";
@@ -61,23 +61,26 @@ function Probe({ onValue }) {
   return null;
 }
 
-/** The grid, plus a switch that unmounts and remounts it — which is what
- *  opening a draft does to it for real. */
-function Harness({ onValue, mountedRef }) {
-  const [shown, setShown] = useState(true);
-  mountedRef.current = setShown;
+/** The provider tree, with the drafts grid mounted or not.
+ *
+ * `grid=false` then true again is what opening a draft does for real: the
+ * editor replaces the Sell screen, so DraftsStrip unmounts while the app
+ * context around it stays put. Re-rendering the same root is how the test
+ * takes that trip without needing a ref to reach inside the tree.
+ */
+function Tree({ onValue, grid = true }) {
   return (
-    <>
+    <ToastProvider><AppProvider>
       <Probe onValue={onValue} />
-      {shown && <DraftsStrip />}
-    </>
+      {grid && <DraftsStrip />}
+    </AppProvider></ToastProvider>
   );
 }
 
 let host;
 let root;
 let app;
-const remount = { current: null };
+const observe = (v) => { app = v; };
 
 async function mount(listings) {
   vi.stubGlobal("fetch", vi.fn((url) => {
@@ -95,13 +98,17 @@ async function mount(listings) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => {
-    root.render(
-      <ToastProvider><AppProvider>
-        <Harness onValue={(v) => { app = v; }} mountedRef={remount} />
-      </AppProvider></ToastProvider>,
-    );
-  });
+  await act(async () => { root.render(<Tree onValue={observe} />); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+}
+
+/** Off to the editor and back — the grid unmounts, the app context doesn't. */
+async function leaveAndComeBack() {
+  await act(async () => { root.render(<Tree onValue={observe} grid={false} />); });
+  // Proven, not assumed: if the grid were still mounted its state would
+  // survive for the boring reason, and the test would pass vacuously.
+  expect(host.textContent).not.toContain("Select all");
+  await act(async () => { root.render(<Tree onValue={observe} />); });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 }
 
@@ -181,8 +188,7 @@ describe("editing one draft out of a selection", () => {
     await click(cards()[0]);
     expect(app.draftSelection.ids).toEqual({ d1: true });
 
-    await act(async () => { remount.current(false); });   // off to the editor
-    await act(async () => { remount.current(true); });    // ...and back again
+    await leaveAndComeBack();
 
     expect(app.draftSelection.on).toBe(true);
     expect(app.draftSelection.ids).toEqual({ d1: true });
