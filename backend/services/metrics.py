@@ -1,5 +1,5 @@
-"""eBay listing metrics — views/impressions (Sell Analytics) + watchers
-(Trading API).
+"""eBay listing metrics — views/impressions (Sell Analytics) + watchers and
+pending Best Offers (Trading API).
 
 Best-effort and fail-soft: metrics are a nice-to-have overlay, never allowed to
 break a page. Each source is fetched independently, so one failing (e.g. the
@@ -9,7 +9,9 @@ up the same eBay calls.
 
 Views/impressions come from Sell Analytics getTrafficReport (needs the
 sell.analytics.readonly scope). Watch counts come from the Trading API's
-GetMyeBaySelling in a single call (the Sell APIs don't expose watchers).
+GetMyeBaySelling in a single call (the Sell APIs don't expose watchers), and
+that same call names which listings have ever had a Best Offer — the shortlist
+GetBestOffers then turns into "how many are waiting on you right now".
 
 Fail-soft is not the same as fail-silent: when the traffic report can't be
 read, `listing_metrics` says so through its `status` out-dict, so the UI can
@@ -144,12 +146,57 @@ def _traffic(token: str, listing_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-def _watchers(token: str) -> dict[str, int]:
-    """watch count per active listing ({item_id: watchers}). The Sell APIs
-    don't expose watchers, so this goes through the Trading API — via
-    ebay_trading so the endpoint honors EBAY_ENV (the old inline call
-    hardcoded production) and errors surface with the shared handling."""
-    return ebay_trading.watch_counts(token)
+def _active_counts(token: str) -> dict[str, dict]:
+    """{item_id: {"watchers": n, "offers_received": n}} for every active
+    listing. The Sell APIs expose neither number, so this goes through the
+    Trading API — via ebay_trading so the endpoint honors EBAY_ENV (the old
+    inline call hardcoded production) and errors surface with the shared
+    handling. One GetMyeBaySelling walk carries both; see
+    ebay_trading.active_listing_counts for why they travel together."""
+    return ebay_trading.active_listing_counts(token)
+
+
+# How many listings one sweep may ask GetBestOffers about. The ActiveList walk
+# hands over which listings have EVER had an offer; each of those costs one
+# more Trading call to turn into "and how many are pending right now". Most
+# stores have a handful, so the cap is never reached; the store that has
+# haggled on hundreds of listings gets the busiest of them answered rather
+# than spending its whole Trading allowance on a badge.
+_OFFER_LOOKUPS = 25
+
+
+def _offers(token: str, counts: dict[str, dict],
+            ids: list[str]) -> tuple[dict[str, dict], set[str]]:
+    """({item_id: pending-offer summary}, ids we can honestly report on).
+
+    Two-step, and the second step is the point. eBay's per-listing
+    BestOfferCount (already in hand from the ActiveList sweep) counts offers
+    RECEIVED, settled ones included, so it cannot answer "is a buyer waiting".
+    It answers the cheap half — a listing at zero has never had an offer at
+    all — and GetBestOffers answers the rest exactly, one listing at a time.
+
+    The second return value is which listings the caller may state a number
+    for: a zero from the sweep, or a lookup that came back. A listing whose
+    lookup failed is left out entirely rather than reported as nought, because
+    "no offer" and "we could not ask" are different things to tell a seller
+    about money on the table.
+    """
+    known = {i for i in ids if not (counts.get(i) or {}).get("offers_received")}
+    candidates = [i for i in ids if (counts.get(i) or {}).get("offers_received")]
+    # Busiest first, so a store past the cap gets the listings with the most
+    # offers answered rather than whichever happened to sort first.
+    candidates.sort(key=lambda i: -counts[i]["offers_received"])
+    out: dict[str, dict] = {}
+    for item_id in candidates[:_OFFER_LOOKUPS]:
+        try:
+            summary = ebay_trading.pending_offers(token, item_id)
+        except Exception as exc:  # noqa: BLE001 - one listing, not the sweep
+            log.info("pending offers unavailable for %s: %s", item_id, exc)
+            continue
+        known.add(item_id)
+        if summary.get("count"):
+            out[item_id] = summary
+    return out, known
 
 
 def listing_metrics(creds: Optional[dict], listing_ids: list[str],
@@ -185,11 +232,27 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
               "needs_reconnect": bool(getattr(exc, "needs_reconnect", False))}
         log.warning("traffic metrics unavailable: %s", exc)
     watchers_ok = True
+    offers_known: set = set()
     try:
-        watch = _watchers(token)
+        counts = _active_counts(token)
         for lid in ids:
-            if lid in watch:
-                out.setdefault(lid, {})["watchers"] = watch[lid]
+            if lid in counts:
+                out.setdefault(lid, {})["watchers"] = counts[lid]["watchers"]
+        # Same sweep, second question — see _offers. Its own failure is its
+        # own: a Best Offer lookup that times out must not blank the watch
+        # counts that already came back in the call above.
+        try:
+            summaries, offers_known = _offers(token, counts, ids)
+            for lid, summary in summaries.items():
+                out.setdefault(lid, {}).update({
+                    "offers": summary["count"],
+                    "top_offer": summary["top"],
+                    "offer_currency": summary["currency"],
+                    "offer_expires_at": summary["expires_at"],
+                })
+        except Exception as exc:  # noqa: BLE001
+            offers_known = set()
+            log.info("pending offers unavailable: %s", exc)
     except Exception as exc:  # noqa: BLE001
         watchers_ok = False
         log.info("watch counts unavailable: %s", exc)
@@ -209,6 +272,11 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
             result.setdefault(lid, {}).setdefault("views", 0)
         if watchers_ok:
             result.setdefault(lid, {}).setdefault("watchers", 0)
+        # Only where the answer is actually known — a listing past the lookup
+        # cap, or one whose lookup failed, says nothing rather than "no
+        # offers". See _offers.
+        if lid in offers_known:
+            result.setdefault(lid, {}).setdefault("offers", 0)
     if len(_CACHE) > 200:
         _CACHE.clear()
     _CACHE[cache_key] = (time.time(), result, st)
