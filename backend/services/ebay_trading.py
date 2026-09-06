@@ -818,12 +818,25 @@ def sold_sales(token: str, limit: Optional[int] = None,
     return out
 
 
-def watch_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, int]:
-    """{item_id: watch count} for every active listing on the account. Backs
-    the metrics overlay — the Sell APIs don't expose watchers, and routing the
-    call through here keeps the endpoint env-aware (sandbox vs production)
-    with the shared error handling."""
-    out: dict[str, int] = {}
+def active_listing_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, dict]:
+    """{item_id: {"watchers": n, "offers_received": n}} for every active
+    listing on the account. Backs the metrics overlay — the Sell APIs expose
+    neither number, and routing the call through here keeps the endpoint
+    env-aware (sandbox vs production) with the shared error handling.
+
+    ONE walk carries both, because one response already does: WatchCount and
+    BestOfferDetails/BestOfferCount sit on the same <Item>. Asking twice would
+    spend two of the account's Trading calls on a response we already had.
+
+    `offers_received` is eBay's BestOfferCount, and it is exactly what its
+    name says — how many Best Offers the listing has RECEIVED, not how many
+    are still waiting on an answer. A declined offer from last week still
+    counts here. So it is never shown to anyone; it decides which listings are
+    worth asking `pending_offers` about, and for that its reliable half — zero
+    means no offers of any kind, ever — is the half that covers most of a
+    store.
+    """
+    out: dict[str, dict] = {}
     page = 1
     while page <= max_pages:
         body = (
@@ -840,12 +853,60 @@ def watch_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, int]:
         for item in items:
             iid = _text(item, "ItemID")
             if iid:
-                out[iid] = _int(item, "WatchCount")
+                out[iid] = {
+                    "watchers": _int(item, "WatchCount"),
+                    "offers_received": _int(item, "BestOfferDetails/BestOfferCount"),
+                }
         total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
         if page >= max(1, total_pages) or not items:
             break
         page += 1
     return out
+
+
+# eBay's BestOffer.Status, as GetBestOffers reports it. "Pending" is the only
+# value that means a buyer is waiting on the seller: Accepted, Declined,
+# Expired, Retracted and Countered are all offers somebody has already dealt
+# with, and a badge built from those would call a week-old decline an offer
+# needing an answer.
+_PENDING = "pending"
+
+
+def pending_offers(token: str, item_id: str) -> dict:
+    """The Best Offers on ONE listing that are still waiting on the seller.
+
+    {"count": n, "top": float|None, "currency": str, "expires_at": str} —
+    `top` is the best money on the table right now, `expires_at` the SOONEST
+    deadline among the pending offers (the one that runs out first is the one
+    worth knowing about). Both are absent when eBay named neither.
+
+    The request asks for Active offers and the reply is filtered on Pending
+    anyway: eBay's request filter and its response status are two different
+    enumerations, and the claim being made downstream — a buyer is waiting —
+    should rest on the field that actually states it.
+    """
+    root = _call("GetBestOffers", token,
+                 f"<ItemID>{_esc(item_id)}</ItemID>"
+                 "<BestOfferStatus>Active</BestOfferStatus>")
+    count = 0
+    top: Optional[float] = None
+    currency = ""
+    expires = ""
+    for offer in _findall(root, "BestOfferArray/BestOffer"):
+        if _text(offer, "Status").strip().lower() != _PENDING:
+            continue
+        count += 1
+        price = _float(offer, "Price")
+        if price is not None and (top is None or price > top):
+            top = price
+            price_el = _find(offer, "Price")
+            currency = (price_el.get("currencyID") or "") if price_el is not None else ""
+        # ISO-8601 UTC, so a string compare orders them.
+        exp = _text(offer, "ExpirationTime")
+        if exp and (not expires or exp < expires):
+            expires = exp
+    return {"count": count, "top": top, "currency": currency,
+            "expires_at": expires}
 
 
 def get_listing(token: str, item_id: str) -> dict:

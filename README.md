@@ -1017,6 +1017,21 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
   answered, every live listing it covered gets the nought it earned; where the
   call failed, nothing is filled, so an outage never reads as a store nobody
   visited.
+- **A pending offer is a badge on the card.** eBay gives a Best Offer 48 hours;
+  miss it and the sale is lost without the seller having declined anything. A
+  live card carried views and watchers — both of which keep — and said nothing
+  about the one number attached to a person waiting, so the offer chip sits
+  beside the status badge, filled rather than tinted, naming the money on the
+  table (`Offer $45.00`, or `3 offers · $52.50` with the best of them). It is
+  read-only: accepting, countering and declining happen in eBay's own flow, and
+  the tooltip says so along with when the first offer runs out. eBay's own
+  `BestOfferCount` is deliberately NOT what draws it — that counts offers
+  *received*, so a listing whose only offer was declined last week still
+  reports 1. It picks the shortlist (a listing at zero has never had one at
+  all) and `GetBestOffers` then answers each candidate exactly, filtered on
+  `Pending`. Same honesty rule as the nought above: a lookup that failed, or
+  one past the per-sweep budget, leaves the count ABSENT and draws no badge
+  rather than telling a seller nobody is waiting.
 - **Every price the app chooses ends in `.99`** (`backend/money.py` →
   `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
   the AI's drafted price, the market number that overrules a draft priced far

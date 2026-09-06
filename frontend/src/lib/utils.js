@@ -52,3 +52,16 @@ export function timeAgo(iso) {
   if (mins < 60 * 24) return `${Math.floor(mins / 60)}h ago`;
   return `${Math.floor(mins / 1440)}d ago`;
 }
+
+// The other direction: "in 40m" / "in 3h" / "in 2d" for a deadline still
+// ahead. "" for no deadline, an unreadable one, or one that has already
+// passed — a lapsed deadline is not a countdown, and saying "in 0m" about it
+// would be the app inventing time the seller does not have.
+export function timeUntil(iso) {
+  if (!iso) return "";
+  const mins = (Date.parse(iso) - Date.now()) / 60000;
+  if (!Number.isFinite(mins) || mins <= 0) return "";
+  if (mins < 60) return `in ${Math.round(mins)}m`;
+  if (mins < 60 * 24) return `in ${Math.round(mins / 60)}h`;
+  return `in ${Math.round(mins / 1440)}d`;
+}
