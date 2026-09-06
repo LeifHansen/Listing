@@ -22,6 +22,7 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import ItemSpecific
+from . import barcodes
 
 # Simple in-process caches (token + per-marketplace tree id).
 _token_cache: dict = {"token": None, "expires_at": 0.0}
@@ -1127,6 +1128,20 @@ def sanitize_specifics(listing) -> None:
         name = (spec.name or "").strip()
         value = (spec.value or "").strip()
         if not name or not value:
+            continue
+        # A product identifier the AI read but that fails its own check digit
+        # is a misread, and this is the last place before eBay sees it. eBay
+        # matches a UPC against its CATALOGUE, so a wrong one does not fail
+        # loudly — it succeeds, and puts another company's product page,
+        # photos and price history behind this listing. `confidence` is what
+        # keeps this off the seller's own work: "" means they entered or
+        # confirmed the value, and their number stands even when it looks
+        # wrong to us.
+        if (spec.confidence and is_identifier_aspect(name)
+                and barcodes.looks_like_a_code(value)
+                and not barcodes.verified(value)):
+            log.info("specifics: dropped %r=%r (the check digit says that is "
+                     "not a valid code)", name, value)
             continue
         aspect = by_key.get(name.lower())
         if aspect is None:

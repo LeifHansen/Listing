@@ -19,11 +19,12 @@ from anthropic import Anthropic
 
 from .. import config
 from ..config import log
-from . import taxonomy
+from . import barcodes, taxonomy
 from .listing_prompt import (
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
+    STICKER_AND_BARCODE_RULE,
     expected_item_count,
     group_notes_block,
     identify_notes_block,
@@ -411,6 +412,7 @@ def identify(image_paths: list[Path], image_names: list[str],
         raw_observations=str(data.get("raw_observations", "")),
         # Raw tag boxes; tag_crops() validates each entry when cropping.
         tags=[t for t in (data.get("tags") or []) if isinstance(t, dict)][:6],
+        identifiers=barcodes.from_scan(data.get("identifiers")),
     )
 
 
@@ -1024,16 +1026,27 @@ _TAG_SCAN_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "tags": [ {"photo": <1-based photo number>,
              "box": [x0, y0, x1, y1],
-             "kind": "size|care|brand|model|barcode|other"} ] }
+             "kind": "size|care|brand|model|barcode|sticker|price|other"} ] }
 Rules:
-- Find every TAG, LABEL, STAMP, or PRINTED MARKING that could carry item
-  facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
-  hang tags, box text, model plates, barcodes.
+- Find every TAG, LABEL, STICKER, STAMP, or PRINTED MARKING that could carry
+  item facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
+  hang tags, box text, model and serial plates, backstamps, hallmarks,
+  importer/distributor and licence stickers, foil or holographic seals,
+  copyright lines, retail price stickers — and BARCODES.
+- A BARCODE IS ALWAYS WORTH A BOX, on its own, even when no other label is
+  near it and even when the bars are all you can make out at this size: the
+  digits under it name the exact product and are the single most valuable
+  thing in these photos. Box the barcode AND the digits printed beneath it.
+- SO IS ANY MARKING IN A SCRIPT YOU CANNOT READ HERE — Japanese, Korean,
+  Chinese, Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, or accented
+  Latin. A domestic-market tag often identifies the item and its era, and
+  "too small to read" is exactly what the zoom is for. Never skip a marking
+  because you cannot read it yet; that is the reason to box it.
 - box is the tag's bounding region as FRACTIONS of that photo's width/height
   (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is
   cut off.
-- Include a tag even if you can't read it at this size — it will be zoomed.
-- At most 6 entries, best candidates first. No tags at all -> {"tags": []}.
+- At most 6 entries, best candidates first — a barcode outranks a care label
+  when you have to choose. No tags at all -> {"tags": []}.
 """
 
 
@@ -1083,6 +1096,37 @@ def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
     return crops
 
 
+# What the zoomed crops are actually asked for. Hoisted out of the function so
+# the multi-language and barcode rules are the SAME text the identify pass
+# gets (STICKER_AND_BARCODE_RULE), not a paraphrase of it that drifts.
+_TAG_TRANSCRIBE_ASK = (
+    "These are zoomed-in crops of the tags, labels, stickers and barcodes on "
+    "that same item. Transcribe ALL text you can read on them, exactly as "
+    "printed — INCLUDING text in non-Latin scripts (Japanese, Korean, "
+    "Chinese, Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari) and accented "
+    "Latin. Give each such line VERBATIM in its own script, then a "
+    "romanization, then the English equivalent when you know it "
+    "(\u30e6\u30cb\u30af\u30ed = UNIQLO; \u65e5\u672c\u88fd = Made in Japan). If you cannot read a "
+    "script, describe what is there rather than guessing at it.\n\n"
+    "Then, on separate lines, state what the tags establish (only if actually "
+    "readable): SIZE (the exact marking, e.g. 'L', 'W32 L34', 'EU 42', "
+    "'US 10.5 M', and the size system), BRAND (in the Latin alphabet AND as "
+    "printed), MATERIAL percentages, COUNTRY of manufacture, MODEL/STYLE "
+    "number, RN number, LICENCE/COPYRIGHT line with its year, and PRICE if a "
+    "retail or thrift price sticker is legible.\n\n"
+    "BARCODE lines matter most: for each barcode, write "
+    "'BARCODE <type>: <digits>' on its own line with the digits exactly as "
+    "printed, left to right, leading zero included, and nothing else on the "
+    "line. Read them one digit at a time. Never complete, correct or pad a "
+    "code — if a digit is obscured write '?' in its place and say which "
+    "position it is. The server checks every code's check digit, so a "
+    "half-read code costs nothing and an invented one puts another company's "
+    "product on this listing.\n\n"
+    "If a crop is unreadable, say so — never fill in what you can't see. "
+    "Plain text only.\n\nThe rules these crops are read under:\n"
+    + STICKER_AND_BARCODE_RULE)
+
+
 def read_tag_text(image_paths: list[Path]) -> str:
     """Locate tags/labels across the photos, zoom into each, and transcribe.
 
@@ -1122,15 +1166,7 @@ def read_tag_text(image_paths: list[Path]) -> str:
     crops = tag_crops(paths, tags)
     if not crops:
         return ""
-    crops.append({"type": "text", "text": (
-        "These are zoomed-in crops of the tags/labels on that same item. "
-        "Transcribe ALL text you can read on them, exactly as printed. Then, "
-        "on separate lines, state what the tags establish (only if actually "
-        "readable): SIZE (the exact marking, e.g. 'L', 'W32 L34', 'EU 42', "
-        "'US 10.5 M', and the size system), BRAND, MATERIAL percentages, "
-        "COUNTRY of manufacture, MODEL/STYLE number, RN number, and the "
-        "digits under any BARCODE (UPC/EAN). If a crop is unreadable, say "
-        "so — never fill in what you can't see. Plain text only.")})
+    crops.append({"type": "text", "text": _TAG_TRANSCRIBE_ASK})
     resp = client.messages.create(model=config.VISION_MODEL, max_tokens=900,
                                   messages=[{"role": "user", "content": crops}])
     out = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -1147,11 +1183,24 @@ Rules:
   the required ones and nearly all of the recommended ones. Leave one out
   only when you truly cannot tell.
 - Read EVERYTHING in the photos first: care tags, sewn labels, printed marks,
-  stamps, box/packaging text, model plates — and the human-readable DIGITS
-  printed under any barcode (that's the UPC/EAN; also look there for MPN and
-  model numbers). Exact text you can read is your best source. When the
-  context includes TAG TEXT (transcribed from zoomed tag close-ups), treat it
-  as ground truth — values taken from it are confidence "high".
+  stamps, backstamps, hallmarks, box/packaging text, model plates, importer
+  and licence stickers — and the human-readable DIGITS printed under any
+  barcode (that's the UPC/EAN; also look there for MPN and model numbers).
+  Exact text you can read is your best source. When the context includes TAG
+  TEXT (transcribed from zoomed tag close-ups), treat it as ground truth —
+  values taken from it are confidence "high".
+- MARKINGS IN ANOTHER LANGUAGE STILL ANSWER THESE ASPECTS. A tag in Japanese,
+  Korean, Chinese, Cyrillic, Greek, Arabic, Hebrew, Thai or accented Latin is
+  the same evidence as an English one and is often better evidence, because a
+  domestic-market label names the market and usually the era. Read it, and
+  answer the aspect with the value eBay expects in ENGLISH: 日本製 or
+  Made in Japan both mean Country/Region of Manufacture "Japan"; ユニクロ is
+  Brand "Uniqlo"; 100% 綿 is Material "Cotton". Never invent a brand from a
+  script you cannot read — describe it and leave the aspect blank instead.
+- A copyright or licence line (© 1998 Sanrio, "Licensed by...") DATES the
+  item: it answers Year Manufactured / Era / Time Period Manufactured, and
+  names the Character or Franchise, at confidence "high" for the year printed
+  and "medium" for the era it puts the item in.
 - Clothing/shoe SIZE comes from the size tag, not from guessing: neck label,
   waistband tag, shoe tongue/heel label, or the care tag (the size often
   follows "SIZE" there). Report the marking in the aspect's expected form
@@ -1442,9 +1491,14 @@ def fill_aspects_combined(
     content: list[dict] = [_image_block(p) for p in image_paths[:8]]
     if tag_crop_blocks:
         content.append({"type": "text", "text": (
-            "Zoomed-in crops of this item's tags/labels follow. Read them "
-            "closely and treat what they say as ground truth — values taken "
-            "from them are confidence \"high\".")})
+            "Zoomed-in crops of this item's tags, labels, stickers and "
+            "barcodes follow. Read them closely and treat what they say as "
+            "ground truth — values taken from them are confidence \"high\". "
+            "Read text in ANY script (Japanese, Korean, Chinese, Cyrillic, "
+            "Greek, Arabic, Hebrew, Thai, accented Latin) and answer the "
+            "aspects with the English value eBay expects. Read the digits "
+            "under every barcode exactly as printed, and never complete or "
+            "correct one you cannot fully see.")})
         content.extend(tag_crop_blocks)
     tail = "CONTEXT:\n" + _listing_context(listing)
     if want_maker:

@@ -28,6 +28,94 @@ EBAY_CONDITIONS = [
     "FOR_PARTS_OR_NOT_WORKING",
 ]
 
+# --- stickers, labels and the codes printed on them -------------------------
+#
+# The single highest-value thing in most photos is not the item: it is the
+# sticker on it. A UPC names the exact product in eBay's own catalogue, which
+# is a better comp search than any title this app can write. A Japanese-market
+# neck tag, a Cyrillic factory stamp or a "Fabriqué en France" label names the
+# market and usually the decade. A licence line dates a piece of merchandise to
+# the year. All of it is printed, in frame, and free to read.
+#
+# What made the app miss it was the shape of the instruction, not the model.
+# The prompts said "read the tags" and named neck labels and care tags, so a
+# foil importer sticker on the back of a box, a hologram on a boxed toy or a
+# price gun label went unread; and they said "the digits under any barcode"
+# inside a paragraph about item specifics, so a barcode with no other tag near
+# it never earned a look at all. Both are now their own instruction, and both
+# say the thing the model would otherwise assume its way past: a brand written
+# in a script you cannot read is still the brand, and the digits under a
+# barcode are worth more than everything else on the label put together.
+#
+# Two hard rules ride along with it, and both exist because the alternative is
+# a live listing that is WRONG rather than incomplete:
+#
+#   * a code is transcribed, never completed. A digit hidden under a thumb is
+#     a digit the seller confirms — an identifier is the one field where a
+#     plausible guess puts SOMEBODY ELSE'S PRODUCT on the listing, because
+#     eBay matches it against its catalogue and shows that product's page.
+#   * a script you cannot read is described, never translated into a brand you
+#     can. "It says something in Cyrillic" is a fact; "it says Zenit" is one
+#     too — only when it does.
+STICKER_AND_BARCODE_RULE = """
+- STICKERS, LABELS AND PRINTED MARKINGS — READ EVERY ONE, IN ANY LANGUAGE.
+  Before you decide what this item is, find and read every piece of printed
+  matter on it and on its packaging. This is where identification and price
+  actually come from, and it is the step most often skipped. Look for:
+  * brand and maker stickers, foil and holographic seals, embossed logos,
+    woven and sewn labels, backstamps, hallmarks, maker's plates;
+  * IMPORTER, distributor and licensee stickers (usually on the back or
+    underside, often in the local language) — these name the market the item
+    was sold in and frequently the decade;
+  * copyright and licence lines (\u00a9 1998 Sanrio, TM, \u00ae, "Licensed by...") —
+    the year on one of these DATES the item;
+  * country-of-origin text in any language: "Made in Occupied Japan",
+    "Fabriqu\u00e9 en France", "Hecho en M\u00e9xico", "Made in West Germany",
+    "\u65e5\u672c\u88fd", "\u4e2d\u56fd\u88fd", "\u0421\u0434\u0435\u043b\u0430\u043d\u043e \u0432 \u0421\u0421\u0421\u0420";
+  * model, style, lot, part and serial plates; union and RN/CA numbers;
+    care/content labels; QC and warranty stickers;
+  * retail PRICE stickers and thrift price tags (these fill purchase_price,
+    never the resale price).
+  MULTIPLE LANGUAGES AND NON-LATIN SCRIPTS ARE NOT NOISE — THEY ARE THE CLUE.
+  Japanese (kanji/kana), Korean (hangul), Chinese (simplified or traditional),
+  Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, and accented Latin
+  (German, French, Spanish, Portuguese, Italian, Nordic, Polish, Czech,
+  Turkish) all appear on secondhand goods, and a domestic-market tag is often
+  what makes a piece worth more than its US equivalent. For each one:
+  * transcribe it VERBATIM in its own script, exactly as printed;
+  * add a romanization and the English equivalent when you know it
+    (\u30e6\u30cb\u30af\u30ed = UNIQLO, \u7121\u5370\u826f\u54c1 = MUJI, \u041a\u0438\u0435\u0432 = Kyiv);
+  * say what it establishes — brand, market, era, material, care;
+  * NEVER translate a mark into a brand it does not say. If you cannot read
+    the script, say what you can see (\"three Cyrillic characters stamped on
+    the base\") and put it in missing_info. A described mark is useful; an
+    invented one is a false claim about the item.
+  Put what the markings say in raw_observations and in the description's
+  Key Details, and use them for brand, Country/Region of Manufacture, era and
+  material.
+- BARCODES AND PRODUCT IDENTIFIERS — THE MOST VALUABLE DIGITS IN THE PHOTO.
+  A barcode's human-readable digits identify the EXACT product, which is worth
+  more than any adjective: it is how this app finds what the same item
+  actually sells for. Read them off every barcode you can see, on the item,
+  its tag, its box, or a sticker on any of them, and return them in the
+  "identifiers" array with the type you can justify:
+  * UPC — 12 digits, US retail packaging;
+  * EAN — 13 digits (8 on small packs), the rest of the world;
+  * ISBN — a book, 13 digits starting 978/979, or the older 10 characters
+    (which may end in X) off the copyright page;
+  * MPN / Model / Style / Part / Lot / Serial — the alphanumeric codes on a
+    plate, a sewn label or a box end. Copy the punctuation as printed.
+  Transcribe the digits ONE AT A TIME, left to right, exactly as printed —
+  including a leading zero, which is part of the code.
+  NEVER complete, correct, pad or infer a code. If a digit is obscured,
+  glared out, creased or cut off, set \"legible\": false, give what you can
+  read with the rest as \"?\", and say which position is missing. A guessed
+  identifier is not a small error: it names a DIFFERENT product in eBay's
+  catalogue, and the listing then shows a buyer the wrong item's page, photos
+  and price. An honest \"legible\": false costs nothing — the server verifies
+  every code's check digit and asks the seller about the ones that fail.
+"""
+
 LISTING_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this exact shape:
 {
@@ -49,7 +137,8 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "missing_info": ["names of ITEM details a human should verify/fill, e.g. 'exact model number', 'size'. NEVER list where the item ships from, its location, shipping/return/payment policies, or handling time — the seller's account settles those once, not per listing"],
   "confidence": "low|medium|high",
   "raw_observations": "brief notes on what you actually see in the photos",
-  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|other"} ]
+  "identifiers": [{"type": "UPC|EAN|ISBN|MPN|Model|Style|Serial|other", "value": "the code EXACTLY as printed, digit for digit — never completed or corrected", "source": "where you read it (e.g. 'barcode on the box end', 'plate under the base')", "legible": true|false}],
+  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|sticker|price|other"} ]
 }
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
@@ -243,15 +332,22 @@ Rules:
   literally read/see it or it's unambiguous, "medium" for a reasonable
   inference (fill those too — the seller sees a review flag on them). Never
   invent identifiers (UPC/EAN/ISBN/MPN/serial) you cannot actually read.
-- tags: while examining the photos, note every TAG, LABEL, STAMP, or PRINTED
-  MARKING worth reading up close: neck labels, waistband tags, care tags,
-  shoe tongue/heel labels, hang tags, box text, model plates, barcodes.
+- tags: while examining the photos, note every TAG, LABEL, STICKER, STAMP, or
+  PRINTED MARKING worth reading up close: neck labels, waistband tags, care
+  tags, shoe tongue/heel labels, hang tags, box text, model plates, importer
+  and licence stickers, foil/hologram seals, price stickers, and BARCODES —
+  a barcode is worth a box of its own even when there is no other label near
+  it, and so is any marking in a script you cannot read at this size.
   box is the tag's bounding region as FRACTIONS of that photo's width/height
   (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is cut
   off. Include a tag even when you can't read it at this size — it will be
   zoomed in on later. At most 6 entries, best candidates first; no tags at
   all -> [].
-""" % ", ".join(EBAY_CONDITIONS)
+""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE
+# Appended rather than interpolated so the rule text is one string with one
+# home: the tag-scan and tag-transcribe passes in claude_ai read the same
+# constant, and a rule that exists twice is a rule that agrees with itself
+# only until someone edits one copy.
 
 
 # The title/description ordering has to survive a refine too: a rewrite there
