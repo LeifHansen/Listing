@@ -423,6 +423,61 @@ off the item or it is wrong, and *"prefer a defensible inference to a blank"*
 in the same prompt as an empty UPC box is how a model talks itself into twelve
 digits that belong to somebody else's product.
 
+### Reading the stickers: branding in any language, and the barcode
+
+The most valuable thing in most photos is not the item — it is the sticker on
+it. A UPC names the **exact product** in eBay's own catalogue, which is a far
+better comp search than any title this app can write. A Japanese neck tag, a
+Cyrillic factory stamp, an importer label or a `Fabriqué en France` line names
+the market the item was sold in and usually the decade. A licence line
+(`© 1998 Sanrio`) dates it to the year. All of it is printed, in frame, and
+free to read.
+
+The scan now looks for it explicitly (`listing_prompt.STICKER_AND_BARCODE_RULE`,
+shared by the identify pass, the tag locator and the zoom-and-transcribe pass,
+so all three read under one set of rules rather than three paraphrases):
+
+* **every sticker, in any script.** Importer and licensee stickers, foil and
+  hologram seals, backstamps, hallmarks, model and serial plates, copyright
+  lines, retail price stickers. Text in Japanese, Korean, Chinese, Cyrillic,
+  Greek, Arabic, Hebrew, Thai, Devanagari or accented Latin is transcribed
+  **verbatim in its own script**, then romanized, then given its English
+  equivalent (`ユニクロ` = UNIQLO, `日本製` = Made in Japan) — and answers the
+  item specifics in the English form eBay expects. A script the model cannot
+  read is **described**, never translated into a brand it does not say.
+* **barcodes get a crop of their own**, even with no other label near them —
+  the tag locator used to draw a box only where a garment tag was.
+
+**Then the check digit decides what is believed.** A model reading twelve
+digits off 6-point type misreads them, and a misread UPC is the most expensive
+mistake this app can make: eBay matches it against its *catalogue*, so a wrong
+one does not bounce — it succeeds, and quietly attaches another company's
+product page, photos and price history to the listing. Every GTIN (UPC-A,
+EAN-13, EAN-8, GTIN-14) and ISBN-10 carries its own check digit, so
+`services/barcodes.py` verifies each read before anything is written:
+
+| Read | What happens |
+|------|--------------|
+| Check digit agrees | Written as `UPC` / `EAN` / `ISBN` at confidence **high** — it was read, not inferred |
+| Check digit fails | Never touches the listing. Becomes a *"confirm the barcode number"* note the seller answers in five seconds with the item in their hand |
+| Model says a digit is obscured | Dropped outright — a code with a digit missing is not a code |
+| MPN / model number | No checksum exists to agree with, so it goes on at **medium**: the editor's review flag |
+
+The same guard runs again in `taxonomy.sanitize_specifics`, the last thing that
+touches a listing before eBay does, over a code from **any** pass — but never
+over one the seller entered or confirmed themselves (`confidence == ""`). They
+are holding the item; a rule that overrides them is a rule that deletes their
+work and says nothing.
+
+**And a verified UPC prices the item.** `_price_against_comps` asks eBay Browse
+by `gtin` before it asks by keywords. That is a different question with a much
+better answer: a keyword search matches listings that *sound* like this one —
+and a good title, packed with artist, edition and size, often matches nothing
+at all — while a UPC matches the same product, so the median it returns is this
+item's price. An EAN or ISBN searches as digits instead (Browse documents
+`gtin` as taking a UPC), with an ISBN-10 converted to its ISBN-13 form first,
+because everything printed since 2007 carries the 13-digit one.
+
 ## API endpoints
 
 | Method | Path | Purpose |
@@ -483,7 +538,7 @@ free — the right default for local dev and self-hosters.
 
 | Feature | Tokens | Notes |
 |---------|-------:|-------|
-| AI listing draft | 5 | identify + category + item specifics + tag read + maker check; same per item in a bulk batch (photo grouping bundled) |
+| AI listing draft | 5 | identify (incl. sticker/barcode read) + category + item specifics + tag read + maker check; same per item in a bulk batch (photo grouping bundled) |
 | AI refine instruction | 1 | free-form "make it..." edits |
 | Autofill item specifics | 2 | the standalone button (bundled free inside a draft) |
 | Shop Mode shelf scan | 2 | one video's frames |

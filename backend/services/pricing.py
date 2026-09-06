@@ -37,8 +37,18 @@ def _condition_bucket(condition: Optional[str]) -> Optional[str]:
 
 
 def active_comps(query: str, category_id: Optional[str] = None,
-                 condition: Optional[str] = None, limit: int = 50) -> Optional[dict]:
-    """Stats over live fixed-price asking prices for comparable items."""
+                 condition: Optional[str] = None, limit: int = 50,
+                 gtin: Optional[str] = None) -> Optional[dict]:
+    """Stats over live fixed-price asking prices for comparable items.
+
+    `gtin` (a check-digit-verified UPC read off the item's barcode) searches
+    Browse by PRODUCT rather than by keywords. That is a different and much
+    better question: a keyword query matches whatever else happens to share
+    the title's words, while a UPC matches the same product and nothing else,
+    so the median it returns is the price of THIS item instead of the price
+    of items that sound like it. Browse documents the parameter as taking a
+    UPC specifically, and it replaces `q` rather than joining it.
+    """
     if not config.taxonomy_ready():
         return None
     # eBay's Browse filter spec requires `priceCurrency` to be paired with a
@@ -48,7 +58,11 @@ def active_comps(query: str, category_id: Optional[str] = None,
     bucket = _condition_bucket(condition)
     if bucket:
         filters.append("conditions:{%s}" % bucket)
-    params = {"q": query, "limit": str(limit), "filter": ",".join(filters)}
+    params = {"limit": str(limit), "filter": ",".join(filters)}
+    if gtin:
+        params["gtin"] = str(gtin)
+    else:
+        params["q"] = query
     if category_id:
         params["category_ids"] = str(category_id)
 
@@ -90,20 +104,26 @@ def active_comps(query: str, category_id: Optional[str] = None,
         q1, q3 = prices[0], prices[-1]
     return {
         "source": "active_comps",
-        "label": "Live asking prices on eBay",
+        # The label reaches the seller, and the difference matters to them:
+        # a UPC match is the same product, a keyword match is items that read
+        # like it. A number they are told the basis of is a number they can
+        # judge.
+        "label": ("Live asking prices for this exact product (barcode match)"
+                  if gtin else "Live asking prices on eBay"),
         "sold_data": False,
         "estimate": round(statistics.median(prices), 2),
         "low": round(q1, 2),
         "high": round(q3, 2),
         "count": len(prices),
         "sample": sample,
-        "search_url": ("https://www.ebay.com/sch/i.html?_nkw=" + quote_plus(query)
-                       + "&LH_BIN=1"),
+        "search_url": ("https://www.ebay.com/sch/i.html?_nkw="
+                       + quote_plus(gtin or query) + "&LH_BIN=1"),
     }
 
 
 def sold_comps(query: str, category_id: Optional[str] = None,
-               condition: Optional[str] = None) -> Optional[dict]:
+               condition: Optional[str] = None,
+               gtin: Optional[str] = None) -> Optional[dict]:
     """Plug-in point for real sold-price data (the better signal).
 
     Implement with the Marketplace Insights API once eBay approves access
@@ -128,15 +148,20 @@ _STRATEGY_PICK = {
 
 
 def suggest(query: str, category_id: Optional[str] = None,
-            condition: Optional[str] = None, strategy: str = "") -> dict:
+            condition: Optional[str] = None, strategy: str = "",
+            gtin: Optional[str] = None) -> dict:
     """Run every configured pricing source; never fail the whole call because
     one source errored (log it and keep what we have). `strategy`
     (quick_flip | median | long_sale) picks which end of the comp range the
-    headline suggestion uses; the full low/median/high always rides along."""
+    headline suggestion uses; the full low/median/high always rides along.
+    `gtin` is a verified UPC off the item's own barcode — when there is one,
+    every source is asked about that PRODUCT rather than about the words in
+    the title."""
     sources, failed = [], []
     for src in _SOURCES:
         try:
-            result = src(query, category_id=category_id, condition=condition)
+            result = src(query, category_id=category_id, condition=condition,
+                         gtin=gtin)
             if result:
                 sources.append(result)
         except Exception as exc:  # noqa: BLE001 - a source is best-effort
@@ -146,6 +171,10 @@ def suggest(query: str, category_id: Optional[str] = None,
     pick, strategy_label = _STRATEGY_PICK.get(strategy, (None, None))
     return {
         "query": query,
+        # What was actually searched for, when it was not the query: the
+        # editor shows the basis, and "we priced this off its barcode" is a
+        # different claim from "we priced this off its title".
+        "gtin": gtin or "",
         "sources": sources,
         "strategy": strategy or "median",
         # Did we actually get to look? Without this, a 429 against the shared
