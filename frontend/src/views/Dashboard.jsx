@@ -925,7 +925,8 @@ export function Dashboard() {
       </motion.div>
 
       {/* Traffic — real eBay numbers for the live listings (Sell Analytics
-          views/impressions over 30 days + watchers), with the top performer.
+          views/impressions over 90 days — eBay's longest report — + watchers),
+          with the top performer.
           Views/impressions need eBay's Sell Analytics permission: a seller who
           connected before the app asked for it keeps the original grant
           through every token refresh, so the report 401/403s. Say that plainly
@@ -945,7 +946,7 @@ export function Dashboard() {
           <motion.div variants={rise}>
             <Card className="py-3.5 px-5 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[13px] text-ink-secondary">
               <span className="inline-flex items-center gap-1.5 font-semibold text-ink">
-                <BarChart3 size={15} className="text-blue" aria-hidden /> Traffic · 30 days
+                <BarChart3 size={15} className="text-blue" aria-hidden /> Traffic · 90 days
               </span>
               {trafficOk && (
                 <span className="inline-flex items-center gap-1 tabular-nums">

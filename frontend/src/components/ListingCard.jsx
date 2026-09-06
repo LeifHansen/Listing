@@ -16,7 +16,7 @@ function MetricsRow({ views, watchers, className }) {
     <div className={cn(
       "flex items-center gap-3.5 text-[12px] font-medium text-ink-secondary", className)}>
       {views != null && (
-        <span className="inline-flex items-center gap-1" title="Views (last 30 days)">
+        <span className="inline-flex items-center gap-1" title="Views (last 90 days)">
           <Eye size={13} aria-hidden /> {views}
         </span>
       )}
