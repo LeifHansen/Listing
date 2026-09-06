@@ -818,23 +818,41 @@ def sold_sales(token: str, limit: Optional[int] = None,
     return out
 
 
-def watch_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, int]:
+# One watch-count sweep wants the whole active list and nothing else from it,
+# so it takes eBay's maximum page size rather than the gentler _PAGE_SIZE the
+# id walks use: 25 pages of 200 reaches 5,000 live listings instead of 2,500.
+_WATCH_PAGE_SIZE = 200
+
+
+def watch_counts(token: str, max_pages: int = _MAX_PAGES,
+                 status: Optional[dict] = None) -> dict[str, int]:
     """{item_id: watch count} for every active listing on the account. Backs
     the metrics overlay — the Sell APIs don't expose watchers, and routing the
     call through here keeps the endpoint env-aware (sandbox vs production)
-    with the shared error handling."""
+    with the shared error handling.
+
+    Pass a `status` dict to learn whether the walk finished: it gets
+    {'complete': bool}, false when eBay says there are more pages of active
+    listings than `max_pages` allows. Callers fill a missing listing in as
+    "0 watchers", which is only true of a listing the sweep actually reached —
+    past the page cap the honest answer is that nothing is known.
+    """
     out: dict[str, int] = {}
+    complete = False
     page = 1
     while page <= max_pages:
         body = (
             "<ActiveList><Include>true</Include>"
-            f"<Pagination><EntriesPerPage>{_PAGE_SIZE}</EntriesPerPage>"
+            f"<Pagination><EntriesPerPage>{_WATCH_PAGE_SIZE}</EntriesPerPage>"
             f"<PageNumber>{page}</PageNumber></Pagination></ActiveList>"
             "<DetailLevel>ReturnAll</DetailLevel>"
         )
         root = _call("GetMyeBaySelling", token, body)
         cont = _find(root, "ActiveList")
         if cont is None:
+            # eBay answered without the container: the account has no active
+            # listings to walk, so the sweep is over and it is over honestly.
+            complete = True
             break
         items = _findall(cont, "ItemArray/Item")
         for item in items:
@@ -843,8 +861,15 @@ def watch_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, int]:
                 out[iid] = _int(item, "WatchCount")
         total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
         if page >= max(1, total_pages) or not items:
+            complete = True
             break
         page += 1
+    if not complete:
+        log.warning("watch-count sweep stopped at the %d-page cap with more "
+                    "active listings to read; %d listings covered",
+                    max_pages, len(out))
+    if status is not None:
+        status["complete"] = complete
     return out
 
 
