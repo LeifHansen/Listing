@@ -20,6 +20,7 @@ import httpx
 
 from .. import config
 from ..config import log
+from ..money import charm_price
 from .taxonomy import _app_token
 
 # Inventory-API condition enums that count as "new" for comp matching;
@@ -158,7 +159,12 @@ def suggest(query: str, category_id: Optional[str] = None,
         # looked; only a clean sweep of failures is unknown.
         "checked": bool(sources) or not failed,
         "suggestion": None if not best else {
-            "price": best[pick] if pick else best["estimate"],
+            # The headline is a price to LIST at, so it lands on a .99 like
+            # every other price this app chooses (money.charm_price). The
+            # range and the comps beside it are measurements of the market and
+            # stay exactly as measured — a median reported as $24.99 when the
+            # median is $25.00 would be a lie about the data.
+            "price": charm_price(best[pick] if pick else best["estimate"]),
             "low": best["low"],
             "high": best["high"],
             "count": best["count"],

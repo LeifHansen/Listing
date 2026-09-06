@@ -188,6 +188,15 @@ export function AppProvider({ children }) {
   // the bottom of the file, past everything it touches.
   const [ebay, setEbay] = useState(NO_EBAY);
   const [policiesData, setPoliciesData] = useState(null); // cached /api/ebay/policies
+  // Select mode on the drafts grid: {on, ids}. Held here rather than inside
+  // DraftsStrip because opening a draft UNMOUNTS that component — so ticking
+  // twelve of thirteen and then opening one to fix it used to throw the other
+  // eleven ticks away, which is why the grid had no way to edit an item at
+  // all. Deliberately memory-only: it is a working state, not a preference.
+  const [draftSelection, setDraftSelection] = useState({ on: false, ids: {} });
+  // cached /api/ebay/store-categories — the seller's own store shelves, which
+  // every editor session reads and nobody's store rearranges mid-session.
+  const [storeCategoriesData, setStoreCategoriesData] = useState(null);
 
   const loadEbayStatus = useCallback(async () => {
     try {
@@ -1379,6 +1388,8 @@ export function AppProvider({ children }) {
     markConversationRead, messageSource, setMessageSource,
     shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
+    storeCategoriesData, setStoreCategoriesData,
+    draftSelection, setDraftSelection,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,
     metricsById, metricsStatus,
@@ -1392,6 +1403,7 @@ export function AppProvider({ children }) {
     isSuperadmin,
     listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
+    storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,

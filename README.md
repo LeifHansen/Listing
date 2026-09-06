@@ -358,6 +358,36 @@ user login or seller policies). Set those two and the app will:
 
 Without them, you can still type a category ID manually in the preview.
 
+### The seller's own store shelf
+
+eBay's category says what an item **is**. A **store category** is a shelf in
+the seller's own storefront nav — "Vintage Tees", "Beanie Babies" — invented
+by them, numbered per account, and what a returning buyer browses. Only a
+seller with an eBay **Store** subscription has any, and every listing this app
+published before landed at the store's top level, because nothing ever sent
+one.
+
+Nothing can suggest a shelf from the outside (nobody but the seller knows what
+theirs mean), so the draft is matched against the store's own tree, read once
+per account per six hours from `GetStore`:
+
+- eBay's resolved category **path** is the strongest signal, then the title
+  and brand, then the item specifics — which reinforce a match and never make
+  one on their own;
+- a shelf earns it by having its **whole name** seen ("Vintage Tees" needs
+  both words), so the more specific shelf beats the general one it sits under;
+- a catch-all shelf ("Other", "More Items") is never matched into, because
+  every listing matches it equally well; and
+- below that bar the answer is **nothing**. An unfiled listing is one dropdown
+  away from filed; a wrongly filed one is invisible on the shelf it belonged
+  on.
+
+The Category card shows the shelf as a picker — the store's own list, by the
+path the seller reads in their menu — and draws nothing at all for an account
+with no Store. `Storefront.StoreCategoryID` rides the publish and the revise
+(only when the seller moved it), comes back on every sync, and eBay's `0`
+("no store category") is read as no shelf rather than as shelf number zero.
+
 > **Note on images:** eBay requires publicly reachable image URLs. In local
 > dry-run mode the payload references `http://localhost:8000/media/...`. For real
 > publishing, deploy the app on a public host (or swap in an image CDN) so eBay
@@ -408,6 +438,7 @@ digits that belong to somebody else's product.
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
+| `GET`  | `/api/ebay/store-categories` | The seller's OWN eBay Store shelves, flattened with their paths. Answers `store: false` for an account without a Store and `checked: false` when eBay could not be asked — different things, and the picker treats them differently |
 | `POST` | `/api/publish` | Publish (draft/live). Add `marketplaces: ["ebay","etsy","depop"]` to fan out; omit for the legacy eBay-only behavior |
 | `GET`  | `/api/marketplaces` | Every marketplace + connection state (drives Settings & publish chips) |
 | `GET`  | `/api/{marketplace}/connect` · `/callback` | OAuth connect flow (eBay, Etsy, Depop) |
@@ -683,6 +714,23 @@ covers the seller's whole store — `EBAY_SYNC_KNOWN_LIMIT`, default 10000 rows,
 deliberately far above any real store, because a record the read misses is one
 the dedupe can't match.
 
+That match is deliberately wider than the account check the rest of the sync
+uses (`listing_sync.matchable` vs `owns`). `owns` refuses whatever it cannot
+prove — a record stamped with eBay's immutable account id when the connected
+account could not read its own identity, and the `previous account` sentinel a
+reconnect stamps — and both of those sit on listings the seller made here. Left
+out of the match they were imported again as `ebay-<itemId>` on every sync, and
+the seller watched a listing they created turn into an eBay import (the origin
+badge is the record's id, so a second row IS a different badge). An item id
+names one listing on one account and these ids come out of the connected
+account's own selling lists, so the id settles what the label cannot; the write
+then stamps the account it came back from, which repairs the record and lets the
+stale-mirror cleanup drop the duplicate on the same pass. A **provable**
+disagreement — a record stamped with one immutable id, a caller holding another
+— is still refused. The per-record status sweep stays strict either way: it
+calls `GetItem`, which answers for any seller's item, so nothing there may lean
+on an id the seller's own store never returned.
+
 ### One listing, one live listing
 
 Creating a listing is the only step in the publish pipeline that isn't naturally
@@ -952,6 +1000,33 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
 
 - The AI never invents serial numbers, authenticity guarantees, or unverifiable
   specs — it flags those under "missing info" for you to confirm.
+- **A publish is never sent against no rules.** `sanitize_specifics` is the last
+  pass before eBay — it turns a tag's `W33 L34` into the Size eBay lists, an
+  inch mark into a number, and a colour into eBay's own spelling — and it used
+  to give up entirely when the Taxonomy lookup failed, sending every value as
+  typed. eBay then refused the listing after the photos had uploaded, and the
+  same values went through on the next press (by which time the lookup had
+  answered). The aspect list eBay last gave us for a category is now kept with
+  no expiry and stands in when the live call won't answer; where there has
+  never been one, the corrections that need no list still run.
+- **Views and watchers: a measured nought is a nought.** eBay's traffic report
+  lists what happened, not what didn't, so a listing nobody viewed is absent
+  from it. Absent used to reach the card as "no numbers", which drew no views
+  row at all beside listings that showed "0 views" — the same fact, two
+  different cards. Where the report (or the watch-count call) actually
+  answered, every live listing it covered gets the nought it earned; where the
+  call failed, nothing is filled, so an outage never reads as a store nobody
+  visited.
+- **Every price the app chooses ends in `.99`** (`backend/money.py` →
+  `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
+  the AI's drafted price, the market number that overrules a draft priced far
+  under the comps, the floor a high-value lookup raises a draft to, the
+  headline comp suggestion, a comp row tapped in the price card, and a bulk
+  percentage cut. It moves to the NEAREST charm point rather than always down
+  — $25.00 → $24.99, $22.50 → $22.99 — so it is never more than half a dollar
+  either way, and it is floored at $0.99. What the seller TYPES is theirs and
+  is never rewritten; neither is what they paid (`purchase_price`, read off a
+  price sticker) nor the measured market range shown beside a suggestion.
 - Image optimization never zooms. A photo that keeps its background is framed
   with the largest square the frame holds, slid over the item, so the backdrop
   you composed stays in the shot and nothing gets clipped in the gallery

@@ -29,6 +29,7 @@ from .listing_prompt import (
     identify_notes_block,
 )
 from ..models import TITLE_MAX_CHARS, IdentifyResult, ItemSpecific, Listing
+from ..money import charm_price
 
 
 # One shared client, built on first use. Every call used to construct its own,
@@ -259,11 +260,11 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
     if cond not in EBAY_CONDITIONS:
         cond = "USED_EXCELLENT"
     title = (data.get("title") or "").strip()[:TITLE_MAX_CHARS]
-    price = data.get("price")
-    try:
-        price = round(float(price), 2) if price is not None else None
-    except (TypeError, ValueError):
-        price = None
+    # Every price this app chooses ends in .99 (money.charm_price): an item the
+    # AI values at about $25 lists at $24.99, the way a seller would have
+    # written it themselves. `refine` puts back a price the seller set, so this
+    # only ever shapes a number the AI picked.
+    price = charm_price(data.get("price"))
     # Price read off a store sticker in the photos (what the seller would PAY,
     # not the resale suggestion). Optional; feeds profit-per-item once sold.
     purchase_price = data.get("purchase_price")
@@ -968,6 +969,14 @@ def scan_shelf(images: list[bytes]) -> dict:
     return {"items": items}
 
 
+def _same_money(a, b) -> bool:
+    """Two amounts that are the same to the cent (either may be unreadable)."""
+    try:
+        return abs(float(a) - float(b)) < 0.005
+    except (TypeError, ValueError):
+        return False
+
+
 def refine(listing: Listing, prompt: str) -> Listing:
     """Apply a free-form user instruction to an existing listing draft."""
     client = _client()
@@ -1005,6 +1014,13 @@ def refine(listing: Listing, prompt: str) -> Listing:
     # rewrite or drop it (the model may not echo the field back).
     if listing.purchase_price is not None:
         updated.purchase_price = listing.purchase_price
+    # Nor may it move a price the seller set. A refine echoes the WHOLE draft
+    # back, so without this an instruction about the title would take a $25.00
+    # they typed and hand it back as $24.99 — the charm rule reaching a number
+    # it does not own. Echoed unchanged means unchanged; a price the
+    # instruction actually moved is the AI's and keeps its .99.
+    if listing.price is not None and _same_money(data.get("price"), listing.price):
+        updated.price = listing.price
     return updated
 
 

@@ -60,6 +60,12 @@ _SUGGEST_CACHE: dict[tuple, tuple[float, dict]] = {}
 _CONDITIONS_TTL = 24 * 3600
 _CONDITIONS_CACHE: dict[tuple, tuple[float, dict]] = {}
 
+# The last aspect list successfully read for a category, kept with NO expiry.
+# Not a cache (see last_known_aspects): the publish path's fallback for when
+# eBay's Taxonomy API will not answer, so a listing is validated against rules
+# that are slightly old rather than against none at all.
+_ASPECTS_LAST_GOOD: dict[str, dict] = {}
+
 
 def _app_token() -> str:
     now = time.time()
@@ -423,7 +429,37 @@ def item_aspects(category_id: str, marketplace_id: Optional[str] = None) -> dict
     aspects.sort(key=lambda x: (not x["required"], x["name"].lower()))
     result = {"aspects": aspects}
     _cache_put(_ASPECTS_CACHE, cache_key, result, bound=300)
+    # ...and kept beyond the TTL as the answer to fall back on. A category's
+    # aspects change about as often as eBay reorganises a department, while
+    # the lookup can fail for a minute at a time — and a publish that cannot
+    # read them sends the seller's values unvalidated, which is a rejected
+    # listing after the photos have uploaded. See last_known_aspects.
+    with _CACHE_LOCK:
+        if len(_ASPECTS_LAST_GOOD) > 500:
+            _ASPECTS_LAST_GOOD.clear()
+        _ASPECTS_LAST_GOOD[cache_key] = result
     return result
+
+
+def last_known_aspects(category_id: str,
+                       marketplace_id: Optional[str] = None) -> list[dict]:
+    """The aspect list this process last read for a category, however old.
+
+    Not a cache — a fallback, and only for the publish path. The TTL cache
+    above answers "is this fresh enough to show the seller"; this answers a
+    different question: "eBay will not tell us its rules right now, so are we
+    about to send values against no rules at all?" Sending them unvalidated is
+    what produced the report -- a jeans Size of "W33 L34", an inseam written
+    with its inch mark, a colour spelled the way the tag spells it -- each
+    refused by eBay after the photos had uploaded, and each accepted when the
+    seller submitted the very same values again, by which time the lookup had
+    answered. A list read an hour ago is a far better rulebook than none.
+    """
+    if not category_id:
+        return []
+    with _CACHE_LOCK:
+        hit = _ASPECTS_LAST_GOOD.get(f"{category_id}|{marketplace_id or ''}")
+    return list((hit or {}).get("aspects") or [])
 
 
 def cached_item_aspects(category_id: str,
@@ -1090,6 +1126,70 @@ def apply_big_and_tall(listing, aspects: Optional[list[dict]] = None) -> str:
     return big_and_tall
 
 
+def fix_size_without_ebays_list(listing) -> list[str]:
+    """The Size corrections that need nothing from eBay, for when eBay's list
+    could not be read. Returns what it did, for the log.
+
+    A publish whose aspect lookup fails used to send every specific EXACTLY as
+    the tag printed it -- so a pair of jeans went out with Size "W33 L34" and
+    an inseam written as `34"`, and eBay refused the listing after the photos
+    had uploaded. Submitting the very same values again then worked, because
+    by then the lookup had answered and the whole correction below ran. That
+    is the report: "ebay refusing legitimate inseam sizes for mens jeans,
+    works after re-submitting the same value."
+
+    Two of the three corrections never needed eBay at all. A tag's waist-by-
+    inseam IS a waist and an inseam whatever the category's list says, and a
+    measurement written with its unit is the same measurement without it. So
+    they run here, blind, and the listing goes out in the shape eBay accepts
+    instead of the shape it rejects.
+
+    What is NOT attempted blind: choosing between a category's own spellings
+    (that is `coerce_aspect_value`, and it needs the list), and the fit-word
+    move, which depends on which aspects this category actually offers.
+    """
+    specifics = list(getattr(listing, "item_specifics", None) or [])
+    if not specifics:
+        return []
+    done: list[str] = []
+
+    def _row(*names: str):
+        wanted = {n.lower() for n in names}
+        return next((s for s in specifics
+                     if (s.name or "").strip().lower() in wanted), None)
+
+    size_row = _row(SIZE_ASPECT)
+    inseam_row = _row(*INSEAM_ASPECTS)
+    pair = size_pair(size_row.value) if size_row and size_row.value else None
+    if pair:
+        waist, inseam = pair
+        size_row.value = waist
+        done.append(f"Size {waist!r} (the waist; eBay's Size for bottoms is "
+                    "the waist alone)")
+        if inseam_row is None:
+            listing.item_specifics = [
+                *listing.item_specifics,
+                ItemSpecific(name="Inseam", value=inseam,
+                             confidence=size_row.confidence or "medium"),
+            ]
+            done.append(f"Inseam {inseam!r} (from the same tag)")
+        elif not (inseam_row.value or "").strip():
+            inseam_row.value = inseam
+            done.append(f"Inseam {inseam!r} (from the same tag)")
+    # A measurement carrying its unit is the same measurement without it, and
+    # eBay's value never carries one.
+    if inseam_row is not None and (inseam_row.value or "").strip():
+        bare = _SIZE_UNIT_RE.sub("", inseam_row.value.strip().upper())
+        digits = _NUMBER_RE.search(bare)
+        if digits and digits.group() != inseam_row.value.strip():
+            done.append(f"{inseam_row.name} {inseam_row.value!r} -> "
+                        f"{digits.group()!r}")
+            inseam_row.value = digits.group()
+    for line in done:
+        log.info("size fix (no eBay list): %s", line)
+    return done
+
+
 def sanitize_specifics(listing) -> None:
     """Rewrite listing.item_specifics into publish-safe form, in place:
     canonical aspect names for the category (case drift and the "Height" vs
@@ -1105,7 +1205,22 @@ def sanitize_specifics(listing) -> None:
     try:
         aspects = item_aspects(listing.category_id).get("aspects", [])
     except Exception as exc:  # noqa: BLE001 - sanitizing is best-effort
-        log.info("sanitize_specifics skipped (cat=%s): %s", listing.category_id, exc)
+        # Best-effort, but never empty-handed. Returning here sent every value
+        # exactly as the tag printed it, and eBay refuses a good many of those
+        # -- after the photos have uploaded, for a listing that was never
+        # wrong about the item. Then the seller pressed publish again, the
+        # lookup answered that time, and the very same values went through.
+        aspects = last_known_aspects(listing.category_id)
+        log.warning("sanitize_specifics: eBay's aspect list for category %s "
+                    "could not be read (%s) — %s", listing.category_id, exc,
+                    f"validating against the {len(aspects)} aspect(s) last "
+                    "read for it" if aspects else
+                    "publishing with the corrections that need no list")
+    if not aspects:
+        # No list, live or remembered. The corrections that never needed one
+        # still run: a tag's waist-by-inseam IS a waist and an inseam whatever
+        # eBay's list says, and a measurement means the same without its unit.
+        fix_size_without_ebays_list(listing)
         return
     # BEFORE the per-aspect pass: get the Size field into the shape eBay
     # asks for (waist alone, no fit words) so the coercion below is validating

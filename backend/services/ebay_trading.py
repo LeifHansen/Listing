@@ -537,6 +537,17 @@ def _int(parent: Optional[ET.Element], path: str, default: int = 0) -> int:
         return default
 
 
+def _store_category_id(item: ET.Element) -> str:
+    """`Storefront/StoreCategoryID`, with eBay's "none" spelled as "".
+
+    eBay reports a listing filed at the store's top level as category 0, and
+    0 is not an id: stored as one it would show in the editor as a shelf the
+    store does not have, and be sent back on the next revise.
+    """
+    raw = _text(item, "Storefront/StoreCategoryID").strip()
+    return "" if raw in ("", "0", "-1") else raw
+
+
 # --- condition mapping ------------------------------------------------------
 # Trading's numeric ConditionID <-> the Inventory API's condition enum this app
 # stores on Listing.condition.
@@ -619,6 +630,12 @@ def _item_to_listing(item: ET.Element) -> dict:
         "condition_description": _text(item, "ConditionDescription"),
         "category_id": _text(item, "PrimaryCategory/CategoryID"),
         "category_suggestion": _text(item, "PrimaryCategory/CategoryName"),
+        # The store shelf, as eBay has it. "0" is eBay's way of writing "no
+        # store category" on a listing that has none, and reading it back as
+        # an id would file every such listing under a shelf that cannot
+        # exist. Only the seller's own items report Storefront at all.
+        "store_category_id": _store_category_id(item),
+        "store_category_name": _text(item, "Storefront/StoreCategoryName"),
         "description": _text(item, "Description"),
         "price": round(price, 2) if price is not None else None,
         "currency": _text(item, "Currency") or config.EBAY_CURRENCY,
@@ -845,6 +862,78 @@ def get_listing(token: str, item_id: str) -> dict:
     return _item_to_listing(item)
 
 
+# --- the seller's own store shelves -----------------------------------------
+
+# eBay's own words when the account simply has no Store. That is not a failure
+# — this feature has nothing to offer such a seller — so it is answered as
+# "no store" rather than raised. Matched on WORDING, deliberately: eBay
+# returns several codes here across sites and versions, and inventing a code
+# table we cannot verify would turn a seller with no store into an error
+# banner. Anything that does not read like this is re-raised, so a real
+# failure (an expired token, a rate limit) still reaches the caller as one.
+_NO_STORE = re.compile(
+    r"(not (found|eligible)|does ?n[o']t (have|exist)|no .{0,12}store|"
+    r"not a store (owner|subscriber)|store subscription)", re.I)
+
+
+class NoStore(TradingError):
+    """The account has no eBay Store, so there are no shelves to file into."""
+
+
+# eBay names a shelf `CustomCategory` at the top of the store and
+# `ChildCategory` everywhere below it — the same type, a different tag per
+# level. Walking only the first drops every nested shelf, which is most of a
+# real store's structure.
+_SHELF_TAGS = ("CustomCategory", "ChildCategory")
+
+
+def _custom_categories(node: ET.Element, parent: str = "",
+                       level: int = 1) -> list[dict]:
+    """One level of store shelves and everything under it, flattened.
+
+    Each entry carries the full path as the seller reads it in their store's
+    nav, because that is what the picker shows and what the matcher scores.
+    eBay allows three levels; the walk does not assume it.
+    """
+    out: list[dict] = []
+    for child in node:
+        if _name(child) not in _SHELF_TAGS:
+            continue
+        cid = _text(child, "CategoryID").strip()
+        name = _text(child, "Name").strip()
+        if not cid or not name:
+            continue
+        path = f"{parent} > {name}" if parent else name
+        out.append({"id": cid, "name": name, "path": path, "level": level})
+        out.extend(_custom_categories(child, path, level + 1))
+    return out
+
+
+def store_categories(token: str) -> list[dict]:
+    """The seller's store shelves, flattened, most-general first.
+
+    Raises NoStore when the account has no eBay Store — the common case, and
+    not an error. `CategoryStructureOnly` keeps the response to the tree
+    rather than the whole storefront (theme, logo, subscription level), which
+    is all this app has any use for.
+    """
+    body = "<CategoryStructureOnly>true</CategoryStructureOnly>"
+    try:
+        root = _call("GetStore", token, body)
+    except TradingError as exc:
+        if _NO_STORE.search(f"{exc} {getattr(exc, 'detail', '')}"):
+            raise NoStore("This eBay account doesn't have a Store, so it has "
+                          "no store categories.") from exc
+        raise
+    store = _find(root, "Store")
+    if store is None:
+        raise NoStore("This eBay account doesn't have a Store, so it has "
+                      "no store categories.")
+    cats = _custom_categories(_find(store, "CustomCategories") or store)
+    log.info("trading: GetStore -> %d store categories", len(cats))
+    return cats
+
+
 def item_id_for_sku(token: str, sku: str) -> str:
     """The item id of the listing carrying this SKU, or "".
 
@@ -906,6 +995,14 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
     if listing.category_id and wanted("category_id"):
         parts.append("<PrimaryCategory><CategoryID>"
                      f"{_esc(listing.category_id)}</CategoryID></PrimaryCategory>")
+    # The seller's own shelf in their eBay Store, which is a different thing
+    # from the site category above: eBay files the listing under it in the
+    # store's left-hand nav. Sent only when the listing carries one -- an
+    # empty <StoreCategoryID> is not "leave it where it is", and on a revise
+    # eBay reads 0 as "move it back to the top level".
+    if listing.store_category_id and wanted("store_category_id"):
+        parts.append("<Storefront><StoreCategoryID>"
+                     f"{_esc(listing.store_category_id)}</StoreCategoryID></Storefront>")
     cond_id = _CONDITION_TO_ID.get((listing.condition or "").upper())
     if cond_id and wanted("condition"):
         parts.append(f"<ConditionID>{cond_id}</ConditionID>")

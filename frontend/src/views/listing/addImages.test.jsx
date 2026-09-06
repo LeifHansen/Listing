@@ -139,6 +139,8 @@ describe("addImages", () => {
  * another screen, last touched on a different pile, with no toggle on this
  * one and no word about it afterwards. Reported as: "when uploading
  * additional photos to a listing, it auto removes background. Don't do that."
+ * (Nothing is remembered any more — the uploader's own toggle now opens off
+ * every time — but this request states its answer rather than inheriting it.)
  *
  * Cutting a photo out afterwards is one tap per photo in the image editor,
  * where it is reversible and the seller is looking at the photo when they
@@ -147,9 +149,7 @@ describe("addImages", () => {
  * one has been read the other way once already.
  */
 describe("added photos keep their background", () => {
-  it("asks for no cutout, whatever the uploader's checkbox remembers", async () => {
-    // The remembered YES is exactly the state that used to turn this on.
-    localStorage.setItem("remove-bg", "yes");
+  it("asks for no cutout, whatever the uploader's checkbox did", async () => {
     const calls = [];
     vi.stubGlobal("fetch", vi.fn((url, opts = {}) => {
       const path = String(url);

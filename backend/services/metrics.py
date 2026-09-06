@@ -184,15 +184,31 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
         st = {"traffic_ok": False,
               "needs_reconnect": bool(getattr(exc, "needs_reconnect", False))}
         log.warning("traffic metrics unavailable: %s", exc)
+    watchers_ok = True
     try:
         watch = _watchers(token)
         for lid in ids:
             if lid in watch:
                 out.setdefault(lid, {})["watchers"] = watch[lid]
     except Exception as exc:  # noqa: BLE001
+        watchers_ok = False
         log.info("watch counts unavailable: %s", exc)
 
     result = {lid: m for lid, m in out.items() if m}
+    # A listing nobody has looked at is MISSING from eBay's traffic report —
+    # it lists what happened, not what didn't — and the same goes for the
+    # watch counts. Left as absent, those listings showed no views row at all
+    # while the ones eBay did mention showed "0 views", so a seller's grid
+    # read as though the app knew about some listings and not others. It knew
+    # about all of them: the report answered, and its answer for these is
+    # nought. Filled in only where the call actually SUCCEEDED — a report that
+    # could not be read stays blank everywhere rather than turning an outage
+    # into a store with no traffic.
+    for lid in ids:
+        if st["traffic_ok"]:
+            result.setdefault(lid, {}).setdefault("views", 0)
+        if watchers_ok:
+            result.setdefault(lid, {}).setdefault("watchers", 0)
     if len(_CACHE) > 200:
         _CACHE.clear()
     _CACHE[cache_key] = (time.time(), result, st)

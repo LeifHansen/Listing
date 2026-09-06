@@ -259,3 +259,30 @@ def test_publish_leaves_a_grade_the_category_offers(monkeypatch):
     listing = _listing(condition="NEW_OTHER")
     assert ebay_provider.fit_condition_to_category(listing) == ""
     assert listing.condition == "NEW_OTHER"
+
+
+# --------------------------------------- ...and a category it could not find
+
+def test_a_draft_ebay_could_not_place_says_so_on_itself(monkeypatch):
+    """`_resolve_category` ends by writing "pick a category" onto a draft eBay
+    matched nothing for, and that note is the only thing between the seller
+    and a Publish button that fails on a field nobody asked them to fill.
+
+    Nothing covered the line. Adding the store-shelf assignment beside it
+    moved it onto the wrong function for one commit — the whole suite stayed
+    green, which is what a test here is for.
+    """
+    pytest.importorskip("fastapi")
+    pytest.importorskip("anthropic")
+    pytest.importorskip("PIL")
+    from backend import main
+
+    monkeypatch.setattr(main.config, "taxonomy_ready", lambda: True)
+    monkeypatch.setattr(main.taxonomy, "best_category_id",
+                        lambda *a, **k: {"category_id": ""})
+    listing = Listing(title="A thing no category fits", category_id="")
+
+    main._resolve_category(listing)
+
+    assert listing.category_id == ""
+    assert any("ebay category" in note.lower() for note in listing.missing_info)

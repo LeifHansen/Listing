@@ -147,6 +147,38 @@ def owns(listing: Listing | dict, account) -> bool:
     return not owner_name or not caller_name or owner_name == caller_name
 
 
+def matchable(listing: Listing | dict, account) -> bool:
+    """True when this record may be MATCHED to an item the connected account's
+    own selling lists just returned.
+
+    Wider than `owns`, and only here. `owns` answers "may this record be read
+    as this account's?" from the account LABEL, and it refuses whatever it
+    cannot prove: a record stamped with an immutable id when the caller has
+    none (an eBay connection that could not read its own identity), and the
+    UNKNOWN_ACCOUNT sentinel outright. Both of those the app stamps on a
+    seller's OWN listings -- so the sync could not see them, imported each one
+    again as `ebay-<item>`, and the seller watched a listing they made appear
+    a second time as an eBay one. On every sync, with nothing able to clean it
+    up, because the cleanup could not see the record either.
+
+    The question here is a different one, and the item id answers it: eBay's
+    active, ended and sold lists belong to the CONNECTED account, and an item
+    id names exactly one listing on exactly one seller's account. A local
+    record carrying that id IS that listing, whatever stale label it holds --
+    and the sync stamps the account it actually came back from, so the label
+    is repaired rather than trusted.
+
+    What stays refused is a disagreement that can be PROVED: a record stamped
+    with one immutable id and a caller holding another are two different
+    sellers, and no item id makes them the same one.
+    """
+    if owns(listing, account):
+        return True
+    owner_id = account_id_of(listing)
+    caller_id, _caller_name = _identity(account)
+    return not (owner_id and caller_id and owner_id != caller_id)
+
+
 def may_write(listing: Listing | dict, account) -> bool:
     """True when this record may be WRITTEN on `account`'s behalf.
 
@@ -563,17 +595,24 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # remove — so the ceiling is deliberately far above any real store rather
     # than a multiple of what eBay happened to return.
     all_known = db.list_listings(limit=_KNOWN_LIMIT, user_id=user_id)
-    # Only this account's records take part: matching, merging, and the stale-
-    # mirror cleanup all key off eBay item ids, and ids from another account
-    # are meaningless here (worse than meaningless — a collision would merge
-    # two different sellers' listings into one row).
+    # The records this run may match an item against. `matchable`, not `owns`:
+    # the two differ exactly on a record whose account label cannot be proved,
+    # which is the label the app puts on a seller's own listings whenever the
+    # connection can't read its own identity — and leaving those out is what
+    # imported each of them again as a second card. A record stamped with a
+    # different immutable id is still nobody's to touch.
     known = {r["id"]: r for r in all_known
-             if owns(r.get("listing") or {}, account)}
+             if matchable(r.get("listing") or {}, account)}
     foreign = len(all_known) - len(known)
     if foreign:
-        log.info("sync: user=%s skipping %d record(s) from another eBay "
-                 "account (connected=%s)", user_id, foreign,
+        log.info("sync: user=%s skipping %d record(s) stamped with a different "
+                 "eBay account id (connected=%s)", user_id, foreign,
                  account_name or account_id or "?")
+    unproven = sum(1 for r in known.values()
+                   if not owns(r.get("listing") or {}, account))
+    if unproven:
+        log.info("sync: user=%s matching %d record(s) this account cannot claim "
+                 "by name against eBay's own item ids", user_id, unproven)
     if len(all_known) >= _KNOWN_LIMIT:
         # Never silently: past this the dedupe is working from a partial view.
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
@@ -583,6 +622,9 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # published is already here under its session id, and keying the sync on
     # "ebay-<item>" alone imported it again as a separate card on every sync —
     # the duplicate pairs (one Thryft, one eBay) sellers were seeing.
+    # See `matchable` for why an unclaimable label doesn't keep a record out of
+    # this index: the item id came from the connected account's own selling
+    # lists, and the write below stamps that account back onto the record.
     owned = _index_by_item(known.values())
     # And by the SKU a publish went out under, so a listing this app created
     # but never got an answer for is reclaimed instead of imported as a
