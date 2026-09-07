@@ -818,32 +818,45 @@ def sold_sales(token: str, limit: Optional[int] = None,
     return out
 
 
-# One watch-count sweep wants the whole active list and nothing else from it,
+# One sweep of the active list wants the whole list and nothing else from it,
 # so it takes eBay's maximum page size rather than the gentler _PAGE_SIZE the
 # id walks use: 25 pages of 200 reaches 5,000 live listings instead of 2,500.
-_WATCH_PAGE_SIZE = 200
+_SWEEP_PAGE_SIZE = 200
 
 
-def watch_counts(token: str, max_pages: int = _MAX_PAGES,
-                 status: Optional[dict] = None) -> dict[str, int]:
-    """{item_id: watch count} for every active listing on the account. Backs
-    the metrics overlay — the Sell APIs don't expose watchers, and routing the
-    call through here keeps the endpoint env-aware (sandbox vs production)
-    with the shared error handling.
+def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
+                          status: Optional[dict] = None) -> dict[str, dict]:
+    """{item_id: {"watchers": n, "offers_received": n}} for every active
+    listing on the account. Backs the metrics overlay — the Sell APIs expose
+    neither number, and routing the call through here keeps the endpoint
+    env-aware (sandbox vs production) with the shared error handling.
+
+    ONE walk carries both, because one response already does: WatchCount and
+    BestOfferDetails/BestOfferCount sit on the same <Item>. Asking twice would
+    spend two of the account's Trading calls on a response we already had.
 
     Pass a `status` dict to learn whether the walk finished: it gets
     {'complete': bool}, false when eBay says there are more pages of active
     listings than `max_pages` allows. Callers fill a missing listing in as
     "0 watchers", which is only true of a listing the sweep actually reached —
-    past the page cap the honest answer is that nothing is known.
+    past the page cap the honest answer is that nothing is known. The same
+    goes for its offers.
+
+    `offers_received` is eBay's BestOfferCount, and it is exactly what its
+    name says — how many Best Offers the listing has RECEIVED, not how many
+    are still waiting on an answer. A declined offer from last week still
+    counts here. So it is never shown to anyone; it decides which listings are
+    worth asking `pending_offers` about, and for that its reliable half — zero
+    means no offers of any kind, ever — is the half that covers most of a
+    store.
     """
-    out: dict[str, int] = {}
+    out: dict[str, dict] = {}
     complete = False
     page = 1
     while page <= max_pages:
         body = (
             "<ActiveList><Include>true</Include>"
-            f"<Pagination><EntriesPerPage>{_WATCH_PAGE_SIZE}</EntriesPerPage>"
+            f"<Pagination><EntriesPerPage>{_SWEEP_PAGE_SIZE}</EntriesPerPage>"
             f"<PageNumber>{page}</PageNumber></Pagination></ActiveList>"
             "<DetailLevel>ReturnAll</DetailLevel>"
         )
@@ -858,19 +871,67 @@ def watch_counts(token: str, max_pages: int = _MAX_PAGES,
         for item in items:
             iid = _text(item, "ItemID")
             if iid:
-                out[iid] = _int(item, "WatchCount")
+                out[iid] = {
+                    "watchers": _int(item, "WatchCount"),
+                    "offers_received": _int(item, "BestOfferDetails/BestOfferCount"),
+                }
         total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
         if page >= max(1, total_pages) or not items:
             complete = True
             break
         page += 1
     if not complete:
-        log.warning("watch-count sweep stopped at the %d-page cap with more "
+        log.warning("active-list sweep stopped at the %d-page cap with more "
                     "active listings to read; %d listings covered",
                     max_pages, len(out))
     if status is not None:
         status["complete"] = complete
     return out
+
+
+# eBay's BestOffer.Status, as GetBestOffers reports it. "Pending" is the only
+# value that means a buyer is waiting on the seller: Accepted, Declined,
+# Expired, Retracted and Countered are all offers somebody has already dealt
+# with, and a badge built from those would call a week-old decline an offer
+# needing an answer.
+_PENDING = "pending"
+
+
+def pending_offers(token: str, item_id: str) -> dict:
+    """The Best Offers on ONE listing that are still waiting on the seller.
+
+    {"count": n, "top": float|None, "currency": str, "expires_at": str} —
+    `top` is the best money on the table right now, `expires_at` the SOONEST
+    deadline among the pending offers (the one that runs out first is the one
+    worth knowing about). Both are absent when eBay named neither.
+
+    The request asks for Active offers and the reply is filtered on Pending
+    anyway: eBay's request filter and its response status are two different
+    enumerations, and the claim being made downstream — a buyer is waiting —
+    should rest on the field that actually states it.
+    """
+    root = _call("GetBestOffers", token,
+                 f"<ItemID>{_esc(item_id)}</ItemID>"
+                 "<BestOfferStatus>Active</BestOfferStatus>")
+    count = 0
+    top: Optional[float] = None
+    currency = ""
+    expires = ""
+    for offer in _findall(root, "BestOfferArray/BestOffer"):
+        if _text(offer, "Status").strip().lower() != _PENDING:
+            continue
+        count += 1
+        price = _float(offer, "Price")
+        if price is not None and (top is None or price > top):
+            top = price
+            price_el = _find(offer, "Price")
+            currency = (price_el.get("currencyID") or "") if price_el is not None else ""
+        # ISO-8601 UTC, so a string compare orders them.
+        exp = _text(offer, "ExpirationTime")
+        if exp and (not expires or exp < expires):
+            expires = exp
+    return {"count": count, "top": top, "currency": currency,
+            "expires_at": expires}
 
 
 def get_listing(token: str, item_id: str) -> dict:

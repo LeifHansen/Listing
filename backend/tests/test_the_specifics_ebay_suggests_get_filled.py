@@ -175,8 +175,9 @@ def test_it_carries_what_the_first_pass_already_settled():
 def _stub_coverage(monkeypatch, specifics):
     seen = {}
 
-    def fake(image_paths, listing, blanks):
+    def fake(image_paths, listing, blanks, held=None):
         seen["blanks"] = [a["name"] for a in blanks]
+        seen["held"] = dict(held or {})
         return claude_ai._validate_specifics({"specifics": specifics}, blanks)
 
     monkeypatch.setattr(main.claude_ai, "fill_missing_aspects", fake)

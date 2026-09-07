@@ -2,9 +2,9 @@ import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins,
 } from "lucide-react";
-import { cn, formatMoney, mediaUrl } from "@/lib/utils";
+import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { reviewAspectCount } from "@/views/listing/specifics";
@@ -69,6 +69,46 @@ function StaleChip({ className }) {
       title="Live for 60+ days — old listings sink in eBay search. Open it and relist fresh for a placement boost."
     >
       <Clock size={11} aria-hidden /> stale
+    </span>
+  );
+}
+
+// A buyer is waiting on an answer.
+//
+// A pending Best Offer is the only thing on a live card that EXPIRES: eBay
+// gives an offer 48 hours, after which it lapses whether or not the seller
+// ever saw it. Views, watchers and a stale date all keep until the next time
+// the grid is opened; money on the table does not. So this is the one chip
+// drawn filled rather than tinted — on a grid of twenty live listings it has
+// to be the thing the eye lands on first.
+//
+// The app reads offers; it does not answer them. Accepting, countering and
+// declining all happen in eBay's own flow, so the tooltip sends the seller
+// there rather than implying a control here that doesn't exist.
+function OfferChip({ count, top, currency, expiresAt, className }) {
+  const money = formatMoney(top, currency || "USD");
+  const soon = timeUntil(expiresAt);
+  // With exactly one offer the AMOUNT is the fact worth reading and the count
+  // says nothing ("1 offer" of what?). With more than one, the count is what
+  // changes what the seller does next, and the money shown is the best of
+  // them. Either way the chip stays short enough to sit on a photo.
+  const label = count === 1
+    ? (money ? `Offer ${money}` : "1 offer")
+    : (money ? `${count} offers · ${money}` : `${count} offers`);
+  const worth = count === 1
+    ? (money ? `A buyer offered ${money}.` : "A buyer has made an offer.")
+    : (money
+      ? `${count} buyers have made offers, the highest ${money}.`
+      : `${count} buyers have made offers.`);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full bg-blue border border-blue",
+        "px-2 py-0.5 text-[11px] font-bold text-on-accent tabular-nums", className)}
+      title={`${worth} Accept, counter or decline it in eBay — `
+        + (soon ? `the first one expires ${soon}.` : "offers expire after 48 hours.")}
+    >
+      <HandCoins size={11} aria-hidden /> {label}
     </span>
   );
 }
@@ -192,6 +232,11 @@ export const ListingCard = memo(function ListingCard({
   const isLive = item.status === "published" || item.status === "live";
   const hasMetrics = isLive && metrics
     && (metrics.views != null || metrics.watchers != null);
+  // Buyers waiting on an answer. Live listings only — an offer on anything
+  // else is settled history. `> 0` is deliberately the whole test: the count
+  // is ABSENT, not zero, when eBay couldn't be asked (see services/metrics),
+  // so a missing number draws nothing rather than "no offers".
+  const offers = isLive && metrics && metrics.offers > 0 ? metrics.offers : 0;
   // Version thumbnails by updated_at so a rotate/clean-up busts the hour-long
   // /media cache the moment the listing is touched — without killing caching.
   const ver = Date.parse(item.updated_at || "") || undefined;
@@ -391,6 +436,13 @@ export const ListingCard = memo(function ListingCard({
         </span>
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <StatusBadge status={item.status} />
+          {/* Ahead of origin, staleness and traffic: those describe the
+              listing, this one is a person waiting on the seller. */}
+          {offers > 0 && (
+            <OfferChip count={offers} top={metrics.top_offer}
+              currency={metrics.offer_currency || l.currency}
+              expiresAt={metrics.offer_expires_at} />
+          )}
           {showOrigin && <OriginBadge item={item} />}
           {stale && <StaleChip />}
           {/* One or the other, never both: "3 to review" is advice, and it
@@ -423,7 +475,19 @@ export const ListingCard = memo(function ListingCard({
     <motion.button {...motionProps}>
       <div className="aspect-[4/3] bg-bg-sunken relative overflow-hidden">
         {photo}
-        <StatusBadge status={item.status} className="absolute top-3 left-3 shadow-card" />
+        {/* The status and, when a buyer is waiting, the offer — one wrapping
+            row so the offer chip never lands under the delete/end buttons in
+            the opposite corner (which is what the pr-* allowance is for).
+            The bottom-left corner keeps stale/needs-info: a live listing can
+            be all three at once. */}
+        <div className="absolute top-3 left-3 right-3 flex flex-wrap items-start gap-1.5 pr-16">
+          <StatusBadge status={item.status} className="shadow-card" />
+          {offers > 0 && (
+            <OfferChip count={offers} top={metrics.top_offer}
+              currency={metrics.offer_currency || l.currency}
+              expiresAt={metrics.offer_expires_at} className="shadow-card" />
+          )}
+        </div>
         {stale && <StaleChip className="absolute bottom-3 left-3 shadow-card" />}
         {needsInfo ? (
           <NeedsInfoChip title={needsInfoWhy}

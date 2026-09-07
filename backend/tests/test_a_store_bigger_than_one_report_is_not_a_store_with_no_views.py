@@ -128,7 +128,7 @@ def test_a_listing_in_a_pass_that_failed_reports_nothing_not_nought(monkeypatch)
     know" — a 0 is not."""
     ids = [str(i) for i in range(1000, 1300)]  # two passes: 200 + 100
     _echo_traffic(monkeypatch, fails={"1250"})  # kills the second pass only
-    monkeypatch.setattr(metrics, "_watchers", lambda *_a, **_k: {})
+    monkeypatch.setattr(metrics, "_active_counts", lambda *_a, **_k: {})
     status: dict = {}
 
     out = metrics.listing_metrics({"access_token": "tok"}, ids, status)
@@ -159,7 +159,7 @@ def test_when_every_pass_fails_the_report_is_unreadable_not_empty(monkeypatch):
     whole store in as nought."""
     ids = [str(i) for i in range(1000, 1300)]
     _echo_traffic(monkeypatch, fails=set(ids))
-    monkeypatch.setattr(metrics, "_watchers", lambda *_a, **_k: {})
+    monkeypatch.setattr(metrics, "_active_counts", lambda *_a, **_k: {})
     status: dict = {}
 
     out = metrics.listing_metrics({"access_token": "tok"}, ids, status)
@@ -192,7 +192,7 @@ def test_a_sweep_that_ran_out_of_pages_says_so(monkeypatch):
 
     monkeypatch.setattr(ebay_trading, "_call", fake_call)
     status: dict = {}
-    out = ebay_trading.watch_counts("tok", max_pages=3, status=status)
+    out = ebay_trading.active_listing_counts("tok", max_pages=3, status=status)
 
     assert len(pages) == 3 and len(out) == 3
     assert status["complete"] is False
@@ -202,7 +202,9 @@ def test_a_sweep_that_reached_the_end_says_that_too(monkeypatch):
     monkeypatch.setattr(ebay_trading, "_call",
                         lambda *_a, **_k: _active_page(["9001", "9002"], total_pages=1))
     status: dict = {}
-    assert ebay_trading.watch_counts("tok", status=status) == {"9001": 1, "9002": 2}
+    assert ebay_trading.active_listing_counts("tok", status=status) == {
+        "9001": {"watchers": 1, "offers_received": 0},
+        "9002": {"watchers": 2, "offers_received": 0}}
     assert status["complete"] is True
 
 
@@ -214,11 +216,14 @@ def test_listings_past_the_watch_sweep_are_unknown_not_unwatched(monkeypatch):
     def short_sweep(_token, status=None):
         if status is not None:
             status["complete"] = False
-        return {"42": 6}
+        return {"42": {"watchers": 6, "offers_received": 0}}
 
-    monkeypatch.setattr(metrics, "_watchers", short_sweep)
+    monkeypatch.setattr(metrics, "_active_counts", short_sweep)
 
     out = metrics.listing_metrics({"access_token": "tok"}, ["42", "43"], {})
 
-    assert out == {"42": {"watchers": 6}}
+    # The one it reached keeps both of its answers; the one past the cap gets
+    # neither — "not reached" is no more "nobody has offered on it" than it is
+    # "nobody is watching it".
+    assert out == {"42": {"watchers": 6, "offers": 0}}
     assert "43" not in out, "not reached is not nought"

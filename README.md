@@ -423,6 +423,37 @@ off the item or it is wrong, and *"prefer a defensible inference to a blank"*
 in the same prompt as an empty UPC box is how a model talks itself into twelve
 digits that belong to somebody else's product.
 
+**The checkboxes, and eBay's own suggestions.** Two properties of an eBay
+aspect vary *independently*, and running them together is what left the
+tick-box specifics half-filled:
+
+- **Cardinality** is the shape of the answer. `MULTI` is what eBay draws as
+  checkboxes — *Features*, *Style*, *Occasion*, *Season*.
+- **Mode** is what the aspect's value list *means*. `SELECTION_ONLY` makes it
+  law: a value not on it is refused at publish. `FREE_TEXT` makes it eBay's own
+  **suggestions** — the values its listing form offers under the box, which the
+  Taxonomy lookup returns for a great many free-text aspects.
+
+Every checkbox path used to test for `SELECTION_ONLY` *and* `MULTI`, so the
+tick-box aspects eBay reports as free text fell through all of them: described
+to the model as one plain text box, drawn in the editor as a single input, and
+eBay's suggested values fetched on every lookup and shown to nobody. Now
+cardinality alone decides the shape — checkboxes in the editor, "tick every
+value that applies" in the prompt — and mode alone decides whether the list is
+quoted as *allowed values* or as *eBay suggests* (with an **add your own** box
+beside an open list, and a `datalist` of the same suggestions on single-value
+free-text fields, since a publish can be refused over wording eBay would have
+handed us).
+
+**One ticked box is not an answered aspect.** A jacket whose *Features* says
+only "Pockets" is missing Breathable, Lined and Water Resistant, and each is a
+filter it never appears in — but holding any value at all read as *answered*,
+so the coverage pass was never shown the aspect. It now tops up partly-ticked
+multi-selects (`fillable_blanks(..., top_up_multi=True)`), told which boxes are
+already ticked so it adds rather than repeats. An aspect the **seller** typed or
+confirmed is never topped up, and the dashboard's "how many specifics are
+blank" count deliberately does not ask this wider question — answering it there
+would tell a seller a finished listing is unfinished.
 ### Reading the stickers: branding in any language, and the barcode
 
 The most valuable thing in most photos is not the item — it is the sticker on
@@ -1084,6 +1115,21 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
   answered, every live listing it covered gets the nought it earned; where the
   call failed, nothing is filled, so an outage never reads as a store nobody
   visited.
+- **A pending offer is a badge on the card.** eBay gives a Best Offer 48 hours;
+  miss it and the sale is lost without the seller having declined anything. A
+  live card carried views and watchers — both of which keep — and said nothing
+  about the one number attached to a person waiting, so the offer chip sits
+  beside the status badge, filled rather than tinted, naming the money on the
+  table (`Offer $45.00`, or `3 offers · $52.50` with the best of them). It is
+  read-only: accepting, countering and declining happen in eBay's own flow, and
+  the tooltip says so along with when the first offer runs out. eBay's own
+  `BestOfferCount` is deliberately NOT what draws it — that counts offers
+  *received*, so a listing whose only offer was declined last week still
+  reports 1. It picks the shortlist (a listing at zero has never had one at
+  all) and `GetBestOffers` then answers each candidate exactly, filtered on
+  `Pending`. Same honesty rule as the nought above: a lookup that failed, or
+  one past the per-sweep budget, leaves the count ABSENT and draws no badge
+  rather than telling a seller nobody is waiting.
 - **Every price the app chooses ends in `.99`** (`backend/money.py` →
   `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
   the AI's drafted price, the market number that overrules a draft priced far
