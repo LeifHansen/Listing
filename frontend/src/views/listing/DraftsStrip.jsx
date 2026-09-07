@@ -86,6 +86,7 @@ export function DraftsStrip({ search = "" }) {
     bulkDeleteListings,
     metricsById, skippedDraftIds, toggleSkipDraft,
     listingsLayout, setListingsLayout,
+    draftSelection, setDraftSelection,
   } = useApp();
   const { confirm, toast } = useToast();
   const { selected, toggle, otherConnected, effectiveTargets } = usePublishTargets();
@@ -93,8 +94,16 @@ export function DraftsStrip({ search = "" }) {
   // below — one Sell screen, one layout.
   const list = listingsLayout === "list";
 
-  const [selecting, setSelecting] = useState(false);
-  const [sel, setSel] = useState({});
+  // Select mode lives in the app store (see store.jsx): opening a draft to
+  // edit it unmounts this component, and the ticks have to be there when the
+  // seller comes back. Read here as the two values every call site below
+  // already used.
+  const selecting = draftSelection.on;
+  const sel = draftSelection.ids;
+  const setSelecting = (on) => setDraftSelection((s) => ({ ...s, on }));
+  const setSel = (next) => setDraftSelection((s) => ({
+    ...s, ids: typeof next === "function" ? next(s.ids) : next,
+  }));
   const [publishing, setPublishing] = useState({});   // id -> bool
   // Drafts eBay REFUSED, and what it said. A refusal is the seller's to fix —
   // a field to fill in, an account hold to clear — and until this existed the

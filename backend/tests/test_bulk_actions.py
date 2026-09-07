@@ -14,12 +14,15 @@ from backend.services import bulk_actions
 
 # ------------------------------------------------------------- the arithmetic
 
+# The cut, then the house rule: every price this app chooses lands on the
+# nearest .99 (money.charm_price), so a 10% cut off $100 is $89.99 and not the
+# whole $90.00 a seller asked us to stop producing.
 @pytest.mark.parametrize("price, percent, expected", [
-    (100.0, 10, 90.0),
-    (59.99, 10, 53.99),      # rounded to cents, the way a seller writes it
-    (45.0, 25, 33.75),
+    (100.0, 10, 89.99),
+    (59.99, 10, 53.99),      # already a .99 and stays exactly there
+    (45.0, 25, 33.99),       # 33.75 rounds up to the nearer charm point
     (19.99, 15, 16.99),
-    (10.0, 50, 5.0),
+    (10.0, 50, 4.99),
 ])
 def test_a_percentage_off(price, percent, expected):
     assert bulk_actions.lower_price(price, percent) == expected
@@ -33,7 +36,10 @@ def test_the_floor_holds():
 def test_a_cut_that_changes_nothing_is_not_a_change():
     """Counting no-ops as 'changed' would report work that never happened."""
     assert bulk_actions.lower_price(bulk_actions.MIN_PRICE, 10) is None
-    assert bulk_actions.lower_price(1.00, 0.1) is None  # rounds back to 1.00
+    # A percentage too small to move the price off its own charm point. The
+    # rounding is where a no-op now comes from: 0.1% of $24.99 is 2 cents, and
+    # the nearest .99 to $24.97 is the $24.99 it started on.
+    assert bulk_actions.lower_price(24.99, 0.1) is None
 
 
 def test_a_listing_with_no_real_price_is_left_alone():

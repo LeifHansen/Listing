@@ -29,6 +29,10 @@ SELLER_FIELDS = {
     # what they write
     "title", "subtitle", "description", "brand", "condition",
     "condition_description", "category_suggestion", "category_id",
+    # Their own store's shelf: matched from the draft as a starting point,
+    # then theirs to change in the editor — the same standing category_id and
+    # its label have.
+    "store_category_id", "store_category_name",
     "item_specifics", "missing_info",
     # what they price and stock
     "price", "purchase_price", "currency", "quantity", "listing_format",

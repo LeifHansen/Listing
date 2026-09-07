@@ -26,6 +26,10 @@ describe("BrandPulse", () => {
     expect(status.getAttribute("aria-live")).toBe("polite");
     expect(host.querySelector(".brand-pulse")).toBeTruthy();
     expect(host.querySelector(".brand-pulse-halo")).toBeTruthy();
+    // ...and nothing else behind it. A box-shadow here follows the element's
+    // square box rather than the logo's transparent edges, so it drew a dark
+    // rounded card the mark appeared to be sitting on.
+    expect(host.querySelector(".brand-pulse").className).not.toMatch(/shadow-/);
     expect(host.textContent).toContain("Cleaning up photo 6 of 12…");
     expect(host.textContent).toContain("Your photos are safe here.");
     // Nothing that reads as a half-loaded page.

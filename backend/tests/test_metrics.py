@@ -34,6 +34,26 @@ def _report(header: dict, records: list) -> dict:
             "endDate": "2026-08-18T07:00:00.000Z"}
 
 
+def _fake_traffic(data: dict):
+    """Stand-in for `_traffic` that reports every id it was asked about as
+    covered — which is what a successful report does, and what the nought
+    filling keys off."""
+    def fake(_token, ids, covered=None):
+        if covered is not None:
+            covered.update(ids)
+        return data
+    return fake
+
+
+def _fake_watchers(data: dict, complete: bool = True):
+    """Stand-in for `_watchers`, which reports whether its walk finished."""
+    def fake(_token, status=None):
+        if status is not None:
+            status["complete"] = complete
+        return data
+    return fake
+
+
 def _serve(monkeypatch, payload, status: int = 200, text: str = ""):
     """Answer the traffic_report call with `payload`, and record the request."""
     seen: list[dict] = []
@@ -130,20 +150,72 @@ def test_server_blip_is_not_a_reconnect(monkeypatch):
 def test_traffic_failure_is_reported_and_watchers_survive(monkeypatch):
     monkeypatch.setattr(metrics, "_traffic", lambda *_a, **_k: (_ for _ in ()).throw(
         metrics.TrafficUnavailable("nope", needs_reconnect=True)))
-    monkeypatch.setattr(metrics, "_watchers", lambda _t: {"42": 5})
+    monkeypatch.setattr(metrics, "_watchers", _fake_watchers({"42": 5}))
     status: dict = {}
     out = metrics.listing_metrics({"access_token": "tok"}, ["42"], status)
-    assert out == {"42": {"watchers": 5}}
+    assert out == {"42": {"watchers": 5}}, "no views where none could be read"
     assert status == {"traffic_ok": False, "needs_reconnect": True}
 
 
 def test_status_reports_success(monkeypatch):
-    monkeypatch.setattr(metrics, "_traffic", lambda *_a, **_k: {"42": {"views": 7}})
-    monkeypatch.setattr(metrics, "_watchers", lambda _t: {})
+    monkeypatch.setattr(metrics, "_traffic", _fake_traffic({"42": {"views": 7}}))
+    monkeypatch.setattr(metrics, "_watchers", _fake_watchers({}))
     status: dict = {}
+    # Both calls answered, so both numbers are known — the watch list simply
+    # had nothing to say about this listing, which is nought watchers.
     assert metrics.listing_metrics({"access_token": "tok"}, ["42"], status) == {
-        "42": {"views": 7}}
+        "42": {"views": 7, "watchers": 0}}
     assert status == {"traffic_ok": True, "needs_reconnect": False}
+
+
+# ------------------------------ a measured nought is a nought, on every card
+
+def test_a_listing_nobody_viewed_reports_nought_rather_than_nothing(monkeypatch):
+    """Reported as: "why do some listings say 0 views, and some don't show
+    views at all."
+
+    eBay's traffic report lists what happened, not what didn't, so a listing
+    nobody has looked at is simply absent from it. Absent reached the card as
+    "no numbers for this one" and it drew no views row, while the listing
+    beside it — mentioned by the report, with a zero in it — drew "0 views".
+    Same fact about two listings, two different cards, and a seller with no
+    way to tell which meaning either one carried.
+
+    The report answered for every id it was asked about. Its answer for these
+    is nought.
+    """
+    monkeypatch.setattr(metrics, "_traffic", _fake_traffic({"42": {"views": 7}}))
+    monkeypatch.setattr(metrics, "_watchers", _fake_watchers({"42": 3}))
+
+    out = metrics.listing_metrics({"access_token": "tok"}, ["42", "43"], {})
+
+    assert out == {"42": {"views": 7, "watchers": 3},
+                   "43": {"views": 0, "watchers": 0}}
+
+
+def test_a_report_that_could_not_be_read_fills_nothing(monkeypatch):
+    """The other half, and the reason this is filled at the source rather than
+    on the card: an outage must not read as a store nobody visited."""
+    monkeypatch.setattr(metrics, "_traffic", lambda *_a, **_k: (_ for _ in ()).throw(
+        metrics.TrafficUnavailable("nope", needs_reconnect=False)))
+    monkeypatch.setattr(metrics, "_watchers", _fake_watchers({"42": 3}))
+    status: dict = {}
+
+    out = metrics.listing_metrics({"access_token": "tok"}, ["42", "43"], status)
+
+    assert out == {"42": {"watchers": 3}, "43": {"watchers": 0}}
+    assert "views" not in out["42"] and "views" not in out["43"]
+    assert status["traffic_ok"] is False
+
+
+def test_watch_counts_that_could_not_be_read_fill_nothing_either(monkeypatch):
+    monkeypatch.setattr(metrics, "_traffic", _fake_traffic({"42": {"views": 7}}))
+    monkeypatch.setattr(metrics, "_watchers", lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError("trading api down")))
+
+    out = metrics.listing_metrics({"access_token": "tok"}, ["42", "43"], {})
+
+    assert out == {"42": {"views": 7}, "43": {"views": 0}}
 
 
 def test_cache_serves_the_status_too(monkeypatch):
@@ -151,12 +223,14 @@ def test_cache_serves_the_status_too(monkeypatch):
     — the cached entry carries the status, not just the numbers."""
     calls = []
 
-    def one_shot(_token, ids):
+    def one_shot(_token, ids, covered=None):
         calls.append(ids)
+        if covered is not None:
+            covered.update(ids)
         return {"42": {"views": 7}}
 
     monkeypatch.setattr(metrics, "_traffic", one_shot)
-    monkeypatch.setattr(metrics, "_watchers", lambda _t: {})
+    monkeypatch.setattr(metrics, "_watchers", _fake_watchers({}))
     first: dict = {}
     second: dict = {}
     assert metrics.listing_metrics({"access_token": "tok"}, ["42"], first) \

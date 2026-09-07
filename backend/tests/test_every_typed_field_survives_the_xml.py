@@ -132,6 +132,10 @@ def test_the_scan_covers_every_free_text_field_on_the_model():
         # Enums and ids the seller picks rather than types.
         "condition", "listing_format", "auction_duration", "currency",
         "category_id", "category_suggestion", "fulfillment_policy_id",
+        # eBay's own id for a shelf in the seller's store, chosen from their
+        # store's list. The name beside it is a label for the editor and is
+        # never sent — the payload carries the id alone.
+        "store_category_id", "store_category_name",
         # Server-owned: set by the sync, never sent back into the XML.
         "source", "status", "ebay_listing_id", "view_url", "sku",
         "ebay_account", "ebay_account_id", "ebay_start_time", "sold_at",

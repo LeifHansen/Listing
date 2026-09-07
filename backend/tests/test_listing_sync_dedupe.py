@@ -273,17 +273,59 @@ def test_a_published_listing_is_matched_when_the_sync_knows_who_it_is(synced_as)
     assert result["updated"] == 1
 
 
-def test_a_name_alone_cannot_see_the_records_it_has_to_match(synced_as):
-    """Why the route had to change, held in place.
+def test_a_caller_that_cannot_prove_who_it_is_still_keeps_its_own_listings(
+        synced_as):
+    """The report: "when I edit a listing in our app and save, it changes the
+    badge from Thryft to eBay."
 
-    Passing the username is not a smaller version of passing the bundle — it
-    is a caller with no id, and `owns` refuses to match an id-stamped record
-    for one. The sync then imports the very listing it published as a second
-    card. If this ever passes, the dedupe has stopped depending on the
-    identity it is given and the fix has been undone somewhere."""
+    It never was the save. The badge is the record's own id — an `ebay-<item>`
+    row is an eBay import, anything else was made here — so a Thryft listing
+    reading as an eBay one means a SECOND row appeared for it, and only the
+    sync writes those.
+
+    This is how. Passing the username is not a smaller version of passing the
+    creds bundle: it is a caller with no immutable id, and `owns` refuses to
+    match an id-stamped record for one — which every listing this app
+    publishes is. So the sync could not see the seller's own records, imported
+    each of them again, and could not clean up afterwards either, because the
+    cleanup reads the same list. The pair came back on every sync.
+
+    An eBay item id names one listing on one account and these came out of the
+    CONNECTED account's own selling lists, so the id settles it where the
+    label cannot (`matchable`). The record is matched, updated in place, and
+    stamped with the account it actually came back from — so the state that
+    caused this repairs itself rather than minting another duplicate.
+    """
     fake_db, result = synced_as([_published_record()], ACCOUNT_NAME)
-    assert result["imported"] == 1
-    assert listing_sync.record_id(ITEM) in fake_db.records
+
+    assert set(fake_db.records) == {"sess-abc"}, "a duplicate was imported"
+    assert result["imported"] == 0
+    assert result["updated"] == 1
+
+
+def test_the_stamp_that_caused_it_is_repaired_on_the_way_through(synced_as):
+    """A record the account could not be proved for is not left that way: the
+    write puts this account's own id on it, so the NEXT sync matches it by the
+    label like any other."""
+    stranded = _app_record(ebay_account=listing_sync.UNKNOWN_ACCOUNT,
+                           ebay_account_id="")
+    fake_db, result = synced_as([stranded], CREDS)
+
+    assert result["imported"] == 0
+    written = fake_db.records["sess-abc"]["listing"]
+    assert (written["ebay_account"], written["ebay_account_id"]) \
+        == (ACCOUNT_NAME, ACCOUNT_ID)
+
+
+def test_the_duplicate_it_already_left_behind_goes_too(synced_as):
+    """The pair the seller is looking at right now. The cleanup could not see
+    the record either, so these were permanent."""
+    fake_db, result = synced_as(
+        [_published_record(), _mirror_record()], ACCOUNT_NAME)
+
+    assert listing_sync.record_id(ITEM) in fake_db.deleted
+    assert set(fake_db.records) == {"sess-abc"}
+    assert result["deduped"] == 1
 
 
 def test_the_duplicates_already_in_the_store_are_cleaned_up(synced_as):

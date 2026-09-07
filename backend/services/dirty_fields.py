@@ -29,7 +29,8 @@ from ..models import Listing
 # marketplace's to report, not ours to push back.
 TRACKED = (
     "title", "subtitle", "description", "brand", "condition",
-    "condition_description", "category_id", "price", "quantity", "currency",
+    "condition_description", "category_id", "store_category_id",
+    "price", "quantity", "currency",
     "listing_format", "auction_start_price", "auction_duration",
     "package_weight_lb", "package_weight_oz", "package_length_in",
     "package_width_in", "package_height_in", "fulfillment_policy_id",

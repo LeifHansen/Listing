@@ -165,7 +165,10 @@ def test_the_price_is_raised_to_the_bottom_of_what_it_is_worth(lookup):
 
     main._research_draft(listing, [lookup.photo])
 
-    assert listing.price == 4000.0
+    # The floor as this app prices it: the nearest .99 under it, not a whole
+    # $4,000 (money.charm_price). The RANGE in the note is what was researched
+    # and is quoted as researched.
+    assert listing.price == 3999.99
     note = " ".join(listing.missing_info)
     assert "4,000" in note and "12,000" in note and "22" in note
 

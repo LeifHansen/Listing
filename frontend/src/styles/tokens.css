@@ -264,21 +264,41 @@ body {
   50% { transform: scale(1.08); }
 }
 @keyframes brand-halo {
-  0%, 100% { transform: scale(0.9); opacity: 0.35; }
-  50% { transform: scale(1.25); opacity: 0.1; }
+  0%, 100% { transform: scale(0.9); opacity: 0.55; }
+  50% { transform: scale(1.25); opacity: 0.18; }
+}
+/* The halo drifts through the logo's own four colours — cornflower, teal,
+   gold, coral — rather than sitting on one. Registered properties are what
+   make that a fade instead of four hard cuts: a gradient cannot be
+   interpolated, a <color> can. The initial values are the light-theme blue
+   and teal (a registered property's initial value must be a literal), and
+   they are declared again on the element from the tokens, so a browser
+   without @property — or a seller who asked for reduced motion, below —
+   still gets the first frame of the cycle in the theme's own colours. */
+@property --halo-core { syntax: "<color>"; inherits: false; initial-value: #2670b8; }
+@property --halo-edge { syntax: "<color>"; inherits: false; initial-value: #1f9e8b; }
+@keyframes brand-halo-colors {
+  0%, 100% { --halo-core: var(--brand-blue);   --halo-edge: var(--brand-green); }
+  25%      { --halo-core: var(--brand-green);  --halo-edge: var(--brand-yellow); }
+  50%      { --halo-core: var(--brand-yellow); --halo-edge: var(--brand-red); }
+  75%      { --halo-core: var(--brand-red);    --halo-edge: var(--brand-blue); }
 }
 .brand-pulse {
   animation: brand-pulse 2.2s ease-in-out infinite;
   will-change: transform;
 }
 .brand-pulse-halo {
+  --halo-core: var(--brand-blue);
+  --halo-edge: var(--brand-green);
   background: radial-gradient(
     circle,
-    color-mix(in srgb, var(--brand-blue) 55%, transparent) 0%,
-    color-mix(in srgb, var(--brand-yellow) 30%, transparent) 45%,
+    color-mix(in srgb, var(--halo-core) 70%, transparent) 0%,
+    color-mix(in srgb, var(--halo-edge) 38%, transparent) 45%,
     transparent 70%
   );
-  animation: brand-halo 2.2s ease-in-out infinite;
+  /* Four times the breath, so each swell arrives on a different colour. */
+  animation: brand-halo 2.2s ease-in-out infinite,
+             brand-halo-colors 8.8s linear infinite;
 }
 
 /* Reduced motion: kill the ambient animations. */

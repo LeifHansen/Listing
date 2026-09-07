@@ -102,7 +102,11 @@ export function BrandPulse({ message, detail, className }) {
     >
       <span className="relative grid place-items-center" aria-hidden>
         <span className="brand-pulse-halo absolute inset-[-40%] rounded-full" />
-        <BrandMark className="brand-pulse relative size-28 rounded-[32px] shadow-float" />
+        {/* No shadow: box-shadow follows the element's BOX, not the logo's
+            transparent edges, so it drew a dark rounded square around the
+            mark — read as a card the logo was sitting on, which is exactly
+            what this screen should not have. The halo is the depth here. */}
+        <BrandMark className="brand-pulse relative size-28 rounded-[32px]" />
       </span>
       <div className="flex flex-col items-center gap-1.5 min-w-0 max-w-md">
         <AnimatePresence mode="wait">

@@ -9,6 +9,7 @@ import { cn, formatMoney } from "@/lib/utils";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
+import { charmPrice } from "@/lib/charmPrice";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -20,6 +21,7 @@ import { PhotoTile } from "./PhotoTile";
 import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
+import { StoreCategorySelect } from "./StoreCategorySelect";
 import { TITLE_MAX } from "./blockers";
 import { issuesFor } from "./publishShared";
 
@@ -314,6 +316,18 @@ export function CategoryCard({ w }) {
             />
           </Field>
         </div>
+        {/* The seller's own shelf, which is a different question from the
+            category above: that one says what the item IS (and decides which
+            fields eBay demands), this one says where it lives in their store.
+            Draws nothing at all for a seller without an eBay Store. */}
+        <StoreCategorySelect
+          value={w.form.store_category_id}
+          name={w.form.store_category_name}
+          onChange={(id, label) => {
+            w.set("store_category_id", id);
+            w.set("store_category_name", label);
+          }}
+        />
         <div>
           <Button variant="soft" onClick={w.suggestCategories}>
             <Search aria-hidden /> Suggest eBay categories
@@ -929,6 +943,14 @@ export function PricingCard({ w }) {
     conditions.unshift({ value: curCondition, label: conditionLabel(curCondition) });
   }
   const p = w.priceData;
+  // Taking a number off the market makes it THIS listing's price, so it lands
+  // on a .99 like every other price the app chooses (lib/charmPrice, mirroring
+  // backend money.charm_price). A price typed into the field above is the
+  // seller's and passes through untouched.
+  const applyPrice = (amount) => {
+    const price = charmPrice(amount);
+    if (price !== null) w.set("price", price.toFixed(2));
+  };
   const currency = w.form.currency || "USD";
   const fmt = w.form.listing_format || "FIXED_PRICE";
   const isAuction = fmt === "AUCTION" || fmt === "AUCTION_BIN";
@@ -971,7 +993,12 @@ export function PricingCard({ w }) {
             </Field>
           )}
           {(!isAuction || fmt === "AUCTION_BIN") && (
-            <Field label={isAuction ? `Buy It Now (${currency})` : `Price (${currency})`}>
+            <Field
+              label={isAuction ? `Buy It Now (${currency})` : `Price (${currency})`}
+              help={"A price we pick for you lands on the nearest .99 — an item "
+                + "the AI values at $25 is drafted at $24.99, and tapping a "
+                + "comparable listing below does the same. Type any price you "
+                + "like; what you type is what goes out."}>
               <Input
                 type="number" step="0.01" min="0" inputMode="decimal"
                 value={w.form.price}
@@ -1077,13 +1104,19 @@ export function PricingCard({ w }) {
             <div className="flex flex-col gap-2">
               {(p.sources || []).map((src) => (
                 <div key={src.label} className="flex flex-col gap-2">
+                  {/* The row REPORTS the market (the median, as measured) and
+                      APPLIES a price (that median on the nearest .99). Rounding
+                      the reported figure instead would misstate the data; not
+                      rounding the applied one puts a whole-dollar price on the
+                      listing, which is the thing this rule exists to stop. */}
                   <SuggestionRow
-                    chosen={Number(w.form.price) === Number(src.estimate)}
-                    onClick={() => w.set("price", Number(src.estimate).toFixed(2))}
+                    chosen={Number(w.form.price) === charmPrice(src.estimate)}
+                    onClick={() => applyPrice(src.estimate)}
                     left={
                       <>
                         <strong>{src.label}</strong> — median of {src.count} listings
-                        (typical ${src.low}–${src.high}). Click to use.
+                        (typical ${src.low}–${src.high}). Click to price at{" "}
+                        ${charmPrice(src.estimate)?.toFixed(2)}.
                       </>
                     }
                     right={`$${src.estimate}`}
@@ -1091,8 +1124,8 @@ export function PricingCard({ w }) {
                   {(src.sample || []).map((c, i) => (
                     <SuggestionRow
                       key={i}
-                      chosen={Number(w.form.price) === Number(c.price)}
-                      onClick={() => w.set("price", Number(c.price).toFixed(2))}
+                      chosen={Number(w.form.price) === charmPrice(c.price)}
+                      onClick={() => applyPrice(c.price)}
                       left={
                         <>
                           {c.title}

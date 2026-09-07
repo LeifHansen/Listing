@@ -94,6 +94,8 @@ SPECS: tuple[Spec, ...] = (
          ("condition_description",), "long"),
     Spec("category", "eBay category", ("category_id", "category_suggestion"),
          "category"),
+    Spec("store_category", "Store category",
+         ("store_category_id", "store_category_name"), "category"),
     Spec("description", "Description", ("description",), "long"),
     Spec("price", "Price", ("price",), "money"),
     Spec("purchase_price", "What you paid", ("purchase_price",), "money"),
@@ -206,7 +208,11 @@ def _read(spec: Spec, data: dict) -> tuple[str, str]:
                 " × ".join(f"{d:g}" for d in dims) + " in")
 
     if spec.kind == "category":
-        cid, name = _text(data.get("category_id")), _text(data.get("category_suggestion"))
+        # (id field, label field) — this used to name eBay's two fields
+        # outright, which meant a second id+label pair (the store shelf) could
+        # not reuse the kind that exists for exactly this shape.
+        cid, name = (_text(data.get(spec.names[0])),
+                     _text(data.get(spec.names[1])))
         if not cid and not name:
             return "", ""
         # Compare on the id when there is one: two drafts pointing at the same

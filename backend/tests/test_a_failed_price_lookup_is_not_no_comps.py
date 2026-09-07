@@ -69,7 +69,8 @@ def test_one_live_source_still_counts_as_checked(monkeypatch):
     _sources(monkeypatch, _boom, lambda *a, **k: _comps())
     out = pricing.suggest("vintage levis 501")
     assert out["checked"] is True
-    assert out["suggestion"]["price"] == 40.0
+    # The $40.00 median, as a price to list at: the nearest .99.
+    assert out["suggestion"]["price"] == 39.99
 
 
 def test_a_source_returning_nothing_beside_one_that_raised_is_still_unknown(
@@ -91,5 +92,8 @@ def test_the_answer_still_carries_everything_it_used_to(monkeypatch):
     out = pricing.suggest("vintage levis 501", strategy="quick_flip")
     assert out["query"] == "vintage levis 501"
     assert out["strategy"] == "quick_flip"
-    assert out["sources"] and out["suggestion"]["price"] == 30.0
+    assert out["sources"] and out["suggestion"]["price"] == 29.99
     assert out["suggestion"]["basis"].startswith("Live asking prices on eBay")
+    # The measured range is untouched — the headline is a price we would put on
+    # a listing, the quartiles are what the market actually asks.
+    assert (out["suggestion"]["low"], out["suggestion"]["high"]) == (30.0, 55.0)
