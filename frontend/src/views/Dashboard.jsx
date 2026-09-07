@@ -471,17 +471,18 @@ function readSoldRange() {
 
 // The sold tile's second line. It has one job per state: what the total is
 // made of, or — when nothing sold in the window — what to do instead.
-function soldSub(sales, soldEnded) {
-  const ended = soldEnded.filter((i) => i.status === "ended").length;
+//
+// It used to offer "N to relist", counted off the ended listings. There are
+// none to count now: a listing that ends without selling is removed rather
+// than kept for a relist that is a fresh listing anyway.
+function soldSub(sales) {
   if (!sales.count) {
     // An undated sale is one the app knew about before it started recording
     // sale dates — a store sync backfills them from eBay's own dates.
     if (sales.undated) {
       return `sync your store to date ${sales.undated} past sale${sales.undated === 1 ? "" : "s"}`;
     }
-    return ended
-      ? `nothing in the ${sales.range.long} · ${ended} to relist`
-      : `nothing in the ${sales.range.long}`;
+    return `nothing in the ${sales.range.long}`;
   }
   // The window itself is named by the picker in the corner, so this line
   // spends its width on what the total is made of instead of repeating it.
@@ -766,7 +767,6 @@ export function Dashboard() {
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");
-  const soldEnded = items.filter((i) => i.status === "sold" || i.status === "ended");
   // Sold revenue over the chosen window. What the buyers actually PAID —
   // an accepted offer settles below the asking price, and totalling `price`
   // would report money that never arrived. See lib/sales.
@@ -796,7 +796,7 @@ export function Dashboard() {
   // — so a draft opened, published and left behind kept its "Continue" button
   // for the rest of the visit, pointing at a live listing.
   const sessionItem = session ? items.find((i) => i.id === session.sessionId) : null;
-  const DONE = ["published", "live", "sold", "ended"];
+  const DONE = ["published", "live", "sold"];
   const sessionDone = DONE.includes(session?.status)
     || DONE.includes(sessionItem?.status);
   const lastOpen = (session && !sessionDone)
@@ -914,7 +914,7 @@ export function Dashboard() {
                            : formatMoney(sales.total,
                                          sales.currency || DEFAULT_CURRENCY)
                              || "$0.00",
-                         soldSub(sales, soldEnded))}
+                         soldSub(sales))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
@@ -1104,7 +1104,7 @@ export function Dashboard() {
               illustration={ListingsIllustration}
               title="Everything's sold"
               message={"Nothing is waiting on you right now — every listing you "
-                + "have is a finished sale, filed under Inactive."}
+                + "have is a finished sale, filed under Sold."}
               action={
                 <div className="flex flex-wrap gap-2 justify-center">
                   <Button variant="primary" size="lg" onClick={startNew}>

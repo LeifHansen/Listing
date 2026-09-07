@@ -135,7 +135,12 @@ def test_existing_duplicate_is_cleaned_up(synced):
 
 def test_duplicate_is_cleaned_up_even_when_ebay_stops_returning_it(synced):
     """An ended duplicate never comes back in the active list, so the cleanup
-    can't wait for eBay to mention the item again."""
+    can't wait for eBay to mention the item again.
+
+    Reported as `removed` rather than `deduped`: this one is ended, and the
+    ended sweep runs first — deliberately, because a record about to be
+    removed must not be the one an active listing is merged into. Either way
+    the seller's outcome is the assertion above it: the row is gone."""
     old = "999888777666"
     app = dict(_app_record(), id="sess-old")
     app["listing"] = dict(app["listing"], ebay_listing_id=old)
@@ -143,7 +148,16 @@ def test_duplicate_is_cleaned_up_even_when_ebay_stops_returning_it(synced):
               "status": "ended", "listing": {"ebay_listing_id": old}}
     fake_db, result = synced([app, mirror])
     assert listing_sync.record_id(old) in fake_db.deleted
-    assert result["deduped"] == 1
+    assert result["removed"] == 1
+
+
+def test_a_still_live_duplicate_is_deduped_not_swept(synced):
+    """The dedupe path still has to work on its own: a mirror of a LIVE
+    listing is not ended, so nothing sweeps it, and the app's own record has
+    to win the item."""
+    fake_db, result = synced([_app_record(), _mirror_record()])
+    assert result == dict(result, deduped=1, removed=0)
+    assert set(fake_db.records) == {"sess-abc"}
 
 
 def test_a_real_ebay_listing_still_imports(synced):

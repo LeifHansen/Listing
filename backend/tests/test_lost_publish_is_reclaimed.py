@@ -40,13 +40,17 @@ def a_sync(monkeypatch):
 
     saved: dict[str, dict] = {}
 
-    def _run(known: list[dict], sku: str, ended: str = "") -> dict:
+    def _run(known: list[dict], sku: str, ended: str = "",
+             sold: str = "") -> dict:
         skus = {"556677": sku}
         monkeypatch.setattr(ebay_trading, "active_listing_ids",
                             lambda *a, **k: ["556677"])
         monkeypatch.setattr(ebay_trading, "unsold_listing_ids",
                             lambda *a, **k: [ended] if ended else [])
-        monkeypatch.setattr(listing_sync, "recent_sales", lambda _t: {})
+        monkeypatch.setattr(
+            listing_sync, "recent_sales",
+            lambda _t: ({sold: {"price": None, "currency": "USD",
+                                "quantity": 1, "sold_at": ""}} if sold else {}))
         monkeypatch.setattr(db, "list_listings", lambda **_k: known)
         monkeypatch.setattr(
             db, "upsert_listing",
@@ -137,17 +141,17 @@ def test_a_blank_sku_matches_nothing(a_sync):
 
 def test_a_reclaimed_relist_does_not_lose_the_new_listing(a_sync):
     """The predecessor is still on eBay's ended list, and it matches the same
-    record by item id.
+    record by the item id that record still holds.
 
     A relist has two eBay listings pointing at one card: the new live one
-    (matched here by publish key) and the ended one it replaced (matched by
-    the item id the record still holds). The import walks active listings
-    first and ended ones after, so without a guard the ended listing is
-    written over the live one -- the card goes back to Inactive and the live
-    listing has no record at all. Nothing on any screen would show it.
+    (matched here by publish key) and the ended one it replaced. The ended
+    one must never become what the card says, or the card goes back to
+    Inactive and the live listing has no record at all -- nothing on any
+    screen would show it.
 
-    The ended predecessor gets its own `ebay-<item>` mirror instead, which is
-    exactly what a relist whose response DID arrive already produces.
+    It cannot any more, from either end: ended listings are not imported at
+    all now, and the first-claim-wins guard still holds the record for the
+    active listing that took it.
     """
     saved = a_sync([_draft("sess-abc", ebay_listing_id="998877")],
                    sku="qf-sess-abc-r998877", ended="998877")
@@ -155,8 +159,8 @@ def test_a_reclaimed_relist_does_not_lose_the_new_listing(a_sync):
     assert saved["sess-abc"]["data"]["ebay_listing_id"] == "556677", \
         "the ended predecessor overwrote the live relisted listing"
     assert saved["sess-abc"]["status"] == "published"
-    assert "ebay-998877" in saved, "the ended listing should keep its own row"
-    assert saved["ebay-998877"]["status"] == "ended"
+    assert "ebay-998877" not in saved, \
+        "an ended listing must not be mirrored in as a card"
 
 
 def test_a_listing_that_never_saved_does_not_lock_the_record(a_sync,
@@ -165,9 +169,13 @@ def test_a_listing_that_never_saved_does_not_lock_the_record(a_sync,
 
     An item that matches a record and then fails to validate writes nothing.
     Marking the record claimed at the point of matching would lock out the
-    listing that follows -- which in the relist case is the one holding the
-    record's own item id -- leaving the record on its stale state with no
-    second chance in this run.
+    listing that follows -- here the SOLD predecessor, which matches the same
+    record by the item id it still holds -- leaving the record on its stale
+    state with no second chance in this run.
+
+    Told with a sale rather than an ending, because an ending no longer
+    reaches this loop at all: the pair of eBay listings resolving to one
+    record is a relist whose predecessor sold, and the guard is the same one.
     """
     from backend.models import Listing
 
@@ -183,9 +191,9 @@ def test_a_listing_that_never_saved_does_not_lock_the_record(a_sync,
 
     monkeypatch.setattr(Listing, "__init__", _reject_the_relist)
     saved = a_sync([_draft("sess-abc", ebay_listing_id="998877")],
-                   sku="qf-sess-abc-r998877", ended="998877")
+                   sku="qf-sess-abc-r998877", sold="998877")
 
-    # The live relist failed to validate and wrote nothing, so the ended
+    # The live relist failed to validate and wrote nothing, so the sold
     # predecessor -- which matches the same record by the item id it still
     # holds -- must still be free to update it.
     assert "sess-abc" in saved, "the record was locked by a write that never happened"

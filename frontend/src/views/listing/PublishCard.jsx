@@ -369,8 +369,9 @@ export function PublishBar({ w }) {
   const askEnd = async () => {
     if (await confirm({
       title: "End this listing on eBay?",
-      message: "It comes off eBay immediately. It stays here as an ended listing you can edit and relist anytime.",
-      confirmLabel: "End listing",
+      message: "It comes off eBay immediately, and this listing is removed "
+        + "from the app — photos and all. This can't be undone.",
+      confirmLabel: "End & remove",
       danger: true,
     })) w.endListing();
   };

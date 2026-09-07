@@ -7974,8 +7974,13 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
 
 @app.post("/api/ebay/end-listing")
 def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
-    """End (withdraw) this session's live eBay listing. The listing stays in
-    the app as status 'ended' so it can be edited and relisted later."""
+    """End (withdraw) this session's live eBay listing, and remove it.
+
+    An ending is a removal now: the record goes, and its photos with it. The
+    one thing that is kept is a SALE — ending can discover the item already
+    sold on eBay, and that is filed under Sold like every other sale rather
+    than thrown away. See listing_sync.drop_ended.
+    """
     rec = db.get_listing(req.session_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
@@ -8020,13 +8025,16 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
             res = listing_sync.end(creds["access_token"], listing)
     except ValueError as exc:
         raise HTTPException(502, str(exc)) from exc
-    if res.get("ended") or res.get("not_live"):
-        # Ending can discover the listing already finished on eBay — and how.
-        # A sale files it under Sold (with the same notification + storage
-        # reclaim as every other sold path); anything else lands in Inactive.
-        new_status = "sold" if res.get("status") == "sold" else "ended"
+    # Ending can discover the listing already finished on eBay — and how. A
+    # sale is archived; an ending is a removal. The third case is neither:
+    # `not_live` with no status is a record that is not on eBay AT ALL (no
+    # item id), and removing that one would delete a listing over a mis-press
+    # on a card that should not have offered End in the first place. It goes
+    # back to being a draft, which is what it is.
+    ended = bool(res.get("ended")) or res.get("status") == "ended"
+    if res.get("status") == "sold":
         data = rec.get("listing") or {}
-        if new_status == "sold" and creds:
+        if creds:
             # Record the amount it actually went for, not the asking price.
             sales = listing_sync.recent_sales(creds["access_token"])
             data = listing_sync.stamp_sale(
@@ -8037,19 +8045,45 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # happen, or the record goes on saying the listing is live with
         # nothing left to edit or relist it from.
         landed = db.upsert_listing(req.session_id, data,
-                                   status=new_status, user_id=_uid(request))
+                                   status="sold", user_id=_uid(request))
         if db.enabled() and not landed:
             log.error("end-listing: eBay ended %s but the status write failed "
                       "— photos kept", req.session_id)
             raise errors.StorageUnavailable(
                 "It came off eBay, but we couldn't update your copy here. "
                 "Refresh in a moment — don't end it again.")
-        if new_status == "sold" and rec.get("status") != "sold":
+        if rec.get("status") != "sold":
             notifications.notify_sold(
                 _uid(request) or rec.get("user_id"), req.session_id, data,
                 sold_quantity=data.get("sold_quantity") or 0)
             _purge_session_images_best_effort(req.session_id)
-        res = {**res, "status": new_status}
+        res = {**res, "status": "sold"}
+    elif ended:
+        # eBay took it down (or had already), so the ending is definitive and
+        # the record goes. Reported as `removed` so the client drops the card
+        # instead of reloading it into a status that no longer exists.
+        try:
+            listing_sync.drop_ended(req.session_id, _uid(request),
+                                    why="ended by the seller")
+        except errors.StorageUnavailable as exc:
+            log.error("end-listing: eBay ended %s but the removal failed: %s",
+                      req.session_id, exc)
+            raise errors.StorageUnavailable(
+                "It came off eBay, but we couldn't remove your copy here. "
+                "Refresh in a moment — don't end it again.") from exc
+        res = {**res, "status": "ended", "removed": True}
+    elif res.get("not_live"):
+        # Nothing on eBay to end. The record is a local draft that was
+        # mislabelled live, so it is demoted rather than removed — the seller
+        # keeps their photos and their work, and the trash button is right
+        # there if they want it gone.
+        data = rec.get("listing") or {}
+        landed = db.upsert_listing(req.session_id, data, status="draft",
+                                   user_id=_uid(request))
+        if db.enabled() and not landed:
+            raise errors.StorageUnavailable(
+                "We couldn't update your copy here — refresh in a moment.")
+        res = {**res, "status": "draft"}
     return res
 
 
@@ -8064,8 +8098,9 @@ SWEEP_SAMPLE = int(os.getenv("EBAY_SWEEP_SAMPLE", "100") or "100")
 def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     """Reconcile our 'live' listings with eBay: a sold item is auto-archived
     (status 'sold', its photos purged to reclaim storage), a listing that
-    otherwise disappeared flips to 'ended', and missing eBay item ids are
-    backfilled. Definitive answers only — an API blip changes nothing.
+    ended without selling is REMOVED along with its photos, and missing eBay
+    item ids are backfilled. Definitive answers only — an API blip changes
+    nothing.
 
     `force` (body) runs the full sweep — that's the manual "Sync store"
     button. Without it the per-item sweeps are rate-limited per account (see
@@ -8101,6 +8136,13 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     rows = db.list_listings(limit=LIST_CAP + 1, user_id=user["id"],
                             statuses=("published", "live"))
     capped = len(rows) > LIST_CAP
+    # Ended listings are not kept, and this is the pass that clears the ones
+    # already here — every store synced before that rule existed holds a card
+    # per listing that ever finished without selling. It reads ended rows
+    # only, so on a store with none it is one empty query and no eBay calls,
+    # and it runs before the sweeps below rather than after: a seller watching
+    # this sync is watching for those cards to go.
+    removed = listing_sync.clear_ended(user["id"])
     live = [i for i in rows[:LIST_CAP]
             if listing_sync.owns(i.get("listing") or {}, account)]
     changed = 0
@@ -8168,6 +8210,10 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # reports only a change count, and nothing read the field — the frontend
     # uses `changed` alone — so it is gone rather than reported as a constant 0.
     return {"checked": len(live) + len(handled), "changed": changed,
+            # Ended records swept off this store. Separate from `changed`,
+            # which counts listings whose state eBay corrected: these are
+            # cards that disappeared, and the client reloads on them.
+            "removed": removed,
             # What the sweep COULD have covered, and whether it did. `checked`
             # alone reads as "that is the whole store" on a store where it is
             # a sample of it.
@@ -8971,8 +9017,14 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
                             request: Request) -> dict:
     """End this session's live listing on ONE marketplace. eBay keeps its
     original /api/ebay/end-listing route (registered earlier, so it wins);
-    this generic one serves every other provider. The record's top-level
-    status only becomes 'ended' when nothing is live anywhere anymore."""
+    this generic one serves every other provider.
+
+    The record survives as long as the listing is live SOMEWHERE — that
+    marketplace's entry is marked ended and the card keeps the state of the
+    ones still running. Once nothing is live anywhere, the listing has ended,
+    and an ended listing is not kept: the record is removed with its photos
+    (listing_sync.drop_ended), and the answer says `removed` so the client
+    drops the card."""
     provider = _marketplace_or_404(marketplace)
     rec = db.get_listing(req.session_id)
     if not rec:
@@ -9008,10 +9060,23 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
             and rec.get("status") in ("published", "live")):
         still_live = True
     prev_status = rec.get("status") or ""
-    if prev_status in ("published", "live"):
-        new_status = prev_status if still_live else "ended"
-    else:
-        new_status = prev_status or "draft"
+    if prev_status in ("published", "live") and not still_live:
+        # Live nowhere any more: the listing has ended, and that is a removal.
+        # The provider really did end it, so a refused delete is not something
+        # to retry the ending over — it is reported, because the alternative
+        # is a card that goes on offering to revise and repromote a listing
+        # that is gone. Same rule as the eBay route.
+        try:
+            listing_sync.drop_ended(req.session_id, uid or rec.get("user_id"),
+                                    why=f"ended on {marketplace}")
+        except errors.StorageUnavailable as exc:
+            raise errors.StorageUnavailable(
+                f"{provider.label} ended the listing, but we couldn't remove "
+                "your copy here — refresh in a moment to see the right "
+                "state.") from exc
+        return {"ok": True, **res, "removed": True}
+    new_status = (prev_status if prev_status in ("published", "live")
+                  else prev_status or "draft")
     # The marketplace really did end the listing, so `ok` is not the lie —
     # the lost write is. The record would still say `published`, and the app
     # would go on offering to revise and repromote something that is gone.

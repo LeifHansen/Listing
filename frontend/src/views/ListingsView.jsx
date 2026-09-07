@@ -45,18 +45,26 @@ export const TABS = [
     },
   },
   {
-    id: "inactive", label: "Inactive", statuses: ["ended", "sold"],
-    sub: "The archive: everything that's finished on eBay — sold, and ended without selling",
+    // Sold, and only sold. This tab was "Inactive" and held ended listings
+    // too — a card per listing that ever finished without selling, kept for
+    // a relist that is a fresh listing anyway, and blank once eBay stopped
+    // serving the photos of an item that old. Those are removed now, as the
+    // seller asked, so what is left here is the archive that earns its keep:
+    // what sold, for how much, and what it made. The tab id stays `inactive`
+    // because the selection is remembered across visits.
+    id: "inactive", label: "Sold", statuses: ["sold"],
+    sub: "The archive: every sale, with what it went for",
     empty: {
-      illustration: ListingsIllustration, title: "Nothing finished yet",
-      message: "Anything that sells, plus listings you end (the ⊘ button on an active card) "
-        + "and eBay listings that end without selling, collects here.",
+      illustration: ListingsIllustration, title: "Nothing sold yet",
+      message: "Every sale collects here, with what it went for and what it "
+        + "made. Listings that end without selling aren't kept — they're "
+        + "removed from the app on their own.",
     },
   },
   {
     id: "all", label: "All", statuses: null, hide: ARCHIVED_STATUSES,
     sub: "A live mirror of your whole eBay store — every status still in play "
-      + "(sold items are archived under Inactive)",
+      + "(sales are archived under Sold)",
     empty: {
       illustration: ListingsIllustration, title: "No listings yet",
       message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
@@ -140,9 +148,16 @@ export function ListingsView({ search = "" }) {
     // folds each pair back onto the listing this app created.
     const gone = r.deduped
       ? ` ${r.deduped} duplicate${r.deduped === 1 ? "" : "s"} merged.` : "";
+    // Cards this sync took OFF the screen: listings that ended without
+    // selling, which aren't kept. Named rather than left to be noticed,
+    // because a grid that quietly shrinks is the same event as one that lost
+    // something — and "everything's already in sync" would be untrue on a run
+    // that removed five of them.
+    const cleared = r.removed
+      ? ` ${r.removed} ended listing${r.removed === 1 ? "" : "s"} removed.` : "";
     toast(
-      fresh || r.updated || r.deduped
-        ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.${gone}`
+      fresh || r.updated || r.deduped || r.removed
+        ? `Synced ${r.found} eBay listing${r.found === 1 ? "" : "s"} — ${fresh} new, ${r.updated} updated.${gone}${cleared}`
         : "Everything's already in sync with eBay.",
       { kind: "success" },
     );
@@ -162,15 +177,18 @@ export function ListingsView({ search = "" }) {
     })) deleteListing(item.id);
   };
 
-  // End a live listing straight from its card: it comes off eBay and moves to
-  // the Inactive tab, relistable anytime — never a permanent delete.
+  // End a live listing straight from its card. Ending is a REMOVAL now — the
+  // listing comes off eBay and the card goes with it, photos included — so
+  // the dialog says exactly that rather than promising an archive to relist
+  // from later. (A sale is the exception, and ending can discover one.)
   const [endingId, setEndingId] = useState(null);
   const askEnd = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     if (!(await confirm({
       title: "End this listing on eBay?",
-      message: `"${name}" comes off eBay immediately and moves to Inactive — you can edit and relist it anytime.`,
-      confirmLabel: "End listing",
+      message: `"${name}" comes off eBay immediately, and its card is removed `
+        + "from here — photos and all. This can't be undone.",
+      confirmLabel: "End & remove",
       danger: true,
     }))) return;
     setEndingId(item.id);
@@ -178,10 +196,15 @@ export function ListingsView({ search = "" }) {
       const res = await postJson("/api/ebay/end-listing", { session_id: item.id });
       await loadListings({ quiet: true });
       // Ending can discover the listing already finished on eBay — say which
-      // way it went, since a sale is archived rather than left relistable.
+      // way it went, because a sale is kept and an ending is not. And when
+      // the server did NOT remove it (a record with no eBay listing behind
+      // it, which goes back to being a draft) it says so in its own words
+      // rather than being reported as a removal that did not happen.
       toast(res.status === "sold"
-        ? "Turns out this one sold on eBay — it's archived under Inactive. 🎉"
-        : "Listing ended — find it under Inactive.", { kind: "success" });
+        ? "Turns out this one sold on eBay — it's archived under Sold. 🎉"
+        : res.removed
+          ? "Listing ended and removed."
+          : res.message || "Listing ended.", { kind: "success" });
     } catch (e) {
       toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
     } finally {

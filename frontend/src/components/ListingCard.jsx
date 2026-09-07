@@ -299,16 +299,18 @@ export const ListingCard = memo(function ListingCard({
             : <RotateCcw size={15} aria-hidden />}
         </button>
       )}
-      {/* A LIVE listing's card action is End (→ Inactive tab), never a
-          permanent delete: the listing is a real thing on eBay. Delete
-          stays for drafts/finds and already-inactive records. */}
+      {/* A LIVE listing's card action is End, never Delete: the listing is
+          a real thing on eBay, and the button has to take it off eBay before
+          it takes the card away. It does both — an ended listing is not kept
+          — so the dialog behind it says "End & remove". Delete stays for
+          drafts and finds, which were never on eBay at all. */}
       {onEnd ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onEnd(item); }}
           disabled={ending}
           aria-label="End listing on eBay"
-          title="End this listing on eBay — it moves to Inactive and can be relisted anytime"
+          title="End this listing on eBay — it comes off eBay and its card is removed from here"
           className={cn(
             "grid place-items-center size-8 rounded-full cursor-pointer",
             "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",

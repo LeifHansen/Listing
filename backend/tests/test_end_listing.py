@@ -1,6 +1,7 @@
-"""Ended listings must always land in Inactive (or Sold) — never stay Active.
+"""A finished listing must never stay Active: a sale is archived, and a
+listing that ended without selling is REMOVED.
 
-Two paths guard that:
+Three paths guard that:
 
 - end(): EndItem refuses a listing that already finished on eBay. That's the
   exact state a seller is in when a listing ends (or sells) on eBay first and
@@ -9,8 +10,12 @@ Two paths guard that:
   finished" from eBay must come back as not_live instead of raising.
 
 - reconcile_recent(): eBay's sold/unsold lists name every recently finished
-  item, so a listing that ended ON eBay flips off Active on the next sync at
-  any store size — without waiting its turn under the per-item probe caps.
+  item, so a listing that ended ON eBay leaves Active on the next sync at any
+  store size — without waiting its turn under the per-item probe caps.
+
+- drop_ended(): the removal itself. It takes the row AND the photos, so the
+  ending behind it has to be definitive — eBay's own answer for this item, or
+  an EndItem this app just made. A probe that could not tell changes nothing.
 """
 from __future__ import annotations
 
@@ -134,8 +139,13 @@ class FakeDb:
     def __init__(self):
         self.upserts: list[tuple[str, str]] = []  # (record id, status)
         self.saved: dict[str, dict] = {}          # record id -> listing written
+        self.deleted: list[str] = []              # record ids removed
 
     def enabled(self):
+        return True
+
+    def delete_listing(self, listing_id, user_id=None):
+        self.deleted.append(listing_id)
         return True
 
     def upsert_listing(self, listing_id, listing, status="draft", user_id=None,
@@ -165,6 +175,21 @@ class FakeStorage:
         self.purged.append(session_id)
 
 
+class FakeObjStore:
+    """No bucket configured, which is the ordinary test deployment. The
+    removal still has to ask, because a store that IS configured holds the
+    only remaining copy of an offloaded photo."""
+
+    def enabled(self):
+        return False
+
+    def session_prefix(self, session_id):
+        return f"sessions/{session_id}/"
+
+    def delete_prefix(self, prefix):
+        raise AssertionError("nothing to delete when the bucket is off")
+
+
 def _rec(rid, item_id, status="published"):
     return {"id": rid, "user_id": "u1", "status": status,
             "listing": {"ebay_listing_id": item_id, "title": rid}}
@@ -172,28 +197,63 @@ def _rec(rid, item_id, status="published"):
 
 @pytest.fixture
 def reconciled(monkeypatch):
-    def run(records, trading):
+    def run(records, trading, delete=None):
         fake_db, notes, store = FakeDb(), FakeNotifications(), FakeStorage()
+        if delete is not None:
+            fake_db.delete_listing = delete
         monkeypatch.setattr(listing_sync, "db", fake_db)
         monkeypatch.setattr(listing_sync, "notifications", notes)
         monkeypatch.setattr(listing_sync, "storage", store)
+        monkeypatch.setattr(listing_sync, "objstore", FakeObjStore())
         monkeypatch.setattr(listing_sync, "ebay_trading", trading)
         changed, handled = listing_sync.reconcile_recent("token", "u1", records)
         return changed, handled, fake_db, notes, store
     return run
 
 
-def test_a_listing_that_ended_on_ebay_flips_to_inactive(reconciled):
+def test_a_listing_that_ended_on_ebay_is_removed(reconciled):
+    """The card goes, rather than moving to an archive nobody asked for. Its
+    photos go with it — for an imported listing they were always eBay's, and
+    eBay stops serving them a few weeks after an item ends, which is what the
+    blank ended cards in a synced store were."""
     trading = FakeTradingLists(unsold=[ITEM],
                                statuses={ITEM: ("ended", 0, 2)})
     changed, handled, fake_db, notes, store = reconciled(
         [_rec("sess-a", ITEM), _rec("sess-b", "999888777666")], trading)
     assert changed == 1
     assert handled == {"sess-a"}
-    assert ("sess-a", "ended") in fake_db.upserts
+    assert fake_db.deleted == ["sess-a"]
+    assert store.purged == ["sess-a"]
+    # Nothing was written back under a status: the record is gone, not filed.
+    assert fake_db.upserts == []
     # The record eBay never mentioned wasn't probed or touched.
     assert trading.probed == [ITEM]
-    assert notes.sold == [] and store.purged == []
+    assert notes.sold == []
+
+
+def test_a_listing_ebay_will_not_speak_for_is_never_removed(reconciled):
+    """The whole safety of the removal is that it acts on a definitive
+    ending. An unreadable probe (a rate limit, a blip) answers None, and a
+    listing that may well be live must survive it."""
+    trading = FakeTradingLists(unsold=[ITEM], statuses={ITEM: (None, 0, 0)})
+    changed, _, fake_db, _, store = reconciled([_rec("sess-a", ITEM)], trading)
+    assert changed == 0
+    assert fake_db.deleted == [] and store.purged == []
+
+
+def test_a_removal_the_database_refuses_is_not_counted(reconciled, monkeypatch):
+    """A delete that never landed leaves the record exactly where it was, and
+    the sweep must not report it as done — the next one finds it again."""
+    trading = FakeTradingLists(unsold=[ITEM],
+                               statuses={ITEM: ("ended", 0, 2)})
+
+    def refuse(listing_id, user_id=None):
+        raise RuntimeError("the database is unreachable")
+
+    changed, _, fake_db, _, store = reconciled([_rec("sess-a", ITEM)], trading,
+                                               delete=refuse)
+    assert changed == 0
+    assert store.purged == [], "nothing is purged for a row that is still there"
 
 
 def test_a_listing_that_sold_on_ebay_is_archived_with_a_notification(reconciled):

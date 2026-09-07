@@ -99,12 +99,14 @@ export function useListingForm() {
   const sessionId = session?.sessionId;
   // Live = this session is (still) a live eBay listing being revised, so the
   // publish actions become Update / End instead of Publish / Save Draft.
-  // source==="ebay" alone is NOT enough: every Trading publish sets it, so an
-  // ENDED listing opened from the Inactive tab would wrongly show Update/End.
-  // An ENDED record gets the Publish action instead — the server relists it
-  // as a fresh listing (eBay can't revise an ended item). A SOLD record is
-  // settled too, but it never reaches the publish path at all: the editor
-  // renders SoldArchive for it and the server refuses to publish it.
+  // source==="ebay" alone is NOT enough: every Trading publish sets it, so a
+  // settled listing would wrongly show Update/End. A SOLD record is the one
+  // that reaches this in practice, and it never reaches the publish path at
+  // all: the editor renders SoldArchive for it and the server refuses to
+  // publish it. `ended` is kept in the test below for a record that has not
+  // been swept yet (they are removed now, not archived) — it gets the
+  // Publish action, and the server relists it as a fresh listing, because
+  // eBay cannot revise an item that has already ended.
   const settled = session?.status === "ended" || session?.status === "sold";
   // A sold listing is an archive record — SoldArchive replaces the whole
   // workflow rather than the workflow growing a sold-only branch.
@@ -709,9 +711,13 @@ export function useListingForm() {
   }), [collect, sessionId, setSession, loadListings, openListings, patchListing,
       toast, chipTargets, isLive]);
 
-  // End (withdraw) the live listing everywhere it's live; it stays here as an
-  // editable 'ended' record so it can be relisted later. eBay keeps its
-  // original endpoint; other marketplaces go through the generic one.
+  // End (withdraw) the live listing everywhere it's live. Once it is live
+  // nowhere, the listing has ended — and an ended listing is not kept, so the
+  // server removes the record and answers `removed`. The editor is open on
+  // it, so there is nothing left to show: it closes and goes back to the
+  // listings. A listing that turns out to have SOLD is the exception, and
+  // stays as the sale archive. eBay keeps its original endpoint; other
+  // marketplaces go through the generic one.
   const endListing = useMemo(() => once("end-listing", async () => {
     setAiBusy(["Ending the listing…"]);
     try {
@@ -724,33 +730,45 @@ export function useListingForm() {
         ? states.ebay.status === "published"
         : !!session?.listing?.ebay_listing_id;
       let message = "";
-      // Where the record actually landed: "ended" unless eBay reveals the
-      // listing had already SOLD. Both file under Inactive — a sale is
-      // archived there rather than left relistable in place.
-      let endedAs = "ended";
+      // Whether the record is gone, and — when it isn't — what the server
+      // says it became. Both come from the answers rather than being assumed
+      // here: a listing still live on another marketplace keeps the status it
+      // had, and one that was never on eBay at all goes back to being a
+      // draft. Guessing "ended" for all three is what this used to do.
+      let removed = false;
+      let landedAs = "";
+      const read = (res) => {
+        message = res?.message || message;
+        if (res?.removed) removed = true;
+        if (res?.status) landedAs = res.status;
+      };
       for (const key of others) {
         try {
-          const res = await postJson(`/api/${key}/end-listing`, { session_id: sessionId });
-          message = res.message || message;
+          read(await postJson(`/api/${key}/end-listing`, { session_id: sessionId }));
         } catch (e) {
           toast(`Couldn't end it on ${key}: ${e.message}`, { kind: "error" });
         }
       }
       if (ebayLive || !others.length) {
-        const res = await postJson("/api/ebay/end-listing", { session_id: sessionId });
-        message = res.message || message;
-        if (res.status === "sold") endedAs = "sold";
+        read(await postJson("/api/ebay/end-listing", { session_id: sessionId }));
+      }
+      setPublishResult(null);
+      if (removed) {
+        toast(message || "Listing ended and removed.", { kind: "success" });
+        setSession(null);
+        loadListings({ quiet: true });
+        openListings("active");
+        return;
       }
       toast(message || "Listing ended.", { kind: "success" });
-      setSession((s) => (s ? { ...s, status: endedAs } : s));
-      setPublishResult(null);
+      setSession((s) => (s ? { ...s, status: landedAs || s.status } : s));
       loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }), [sessionId, session, setSession, loadListings, toast]);
+  }), [sessionId, session, setSession, loadListings, openListings, toast]);
 
   // ---------- the archive (a sold listing) ----------
   // A sold record is not a draft: it is what one finished sale was, so the

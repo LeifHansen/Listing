@@ -1,4 +1,4 @@
-/* Where a listing shows up in the pipeline once it has sold.
+/* Where a listing shows up in the pipeline once it has finished.
  *
  * The defect these pin down: a sold listing stayed among the things the
  * seller could still act on. It sat in the everything-tab beside the live
@@ -6,8 +6,10 @@
  * workflow — a finished sale reading "Ready to publish", one tap from
  * re-listing the item that had already gone.
  *
- * A sale is now archived: sold and ended share the Inactive tab, and sold is
- * hidden everywhere else.
+ * A sale is archived under Sold and hidden everywhere else. A listing that
+ * ended WITHOUT selling is not filed anywhere, because it is not kept: the
+ * server removes the record, so there is no ended card for a tab to hold.
+ * The tab id stays `inactive` — the selection is remembered across visits.
  */
 import { describe, expect, it } from "vitest";
 import { TABS, STALE_TABS, inTab } from "./ListingsView";
@@ -17,12 +19,13 @@ const tab = (id) => TABS.find((t) => t.id === id);
 const item = (status) => ({ id: status, status });
 
 describe("the pipeline's tabs", () => {
-  it("archives a sold listing under Inactive", () => {
+  it("archives a sold listing under Sold", () => {
     expect(inTab(tab("inactive"), item("sold"))).toBe(true);
   });
 
-  it("keeps ended-without-selling in the same archive", () => {
-    expect(inTab(tab("inactive"), item("ended"))).toBe(true);
+  it("holds sales only — an ended listing is removed, not archived", () => {
+    expect(inTab(tab("inactive"), item("ended"))).toBe(false);
+    expect(tab("inactive").statuses).toEqual(["sold"]);
   });
 
   it("no longer has a tab of its own for sold", () => {
@@ -78,7 +81,7 @@ describe("counting", () => {
   const count = (id) => items.filter((i) => inTab(tab(id), i)).length;
 
   it("counts each sold listing once, in the archive", () => {
-    expect(count("inactive")).toBe(3);   // 1 ended + 2 sold
+    expect(count("inactive")).toBe(2);   // the two sales, and nothing else
     expect(count("active")).toBe(2);
   });
 
