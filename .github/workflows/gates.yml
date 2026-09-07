@@ -224,6 +224,8 @@ jobs:
                  backend/tests/test_the_sellers_hints_reach_the_ai.py \
                  backend/tests/test_the_specifics_ebay_suggests_get_filled.py \
                  backend/tests/test_the_ai_never_drafts_a_whole_dollar_price.py \
+                 backend/tests/test_a_draft_is_priced_against_the_market.py \
+                 backend/tests/test_a_note_for_a_person_is_not_a_fill.py \
                  backend/tests/test_ended_listings_do_not_pile_up.py \
                  -q -rs | tee /tmp/api-tests.log
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then

@@ -530,7 +530,7 @@ function SoldRangePicker({ value, onChange }) {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay, tokens, loadTokens } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay, loadEbayStatus, tokens, loadTokens } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
   const storeView = listingsView({
@@ -665,6 +665,30 @@ export function Dashboard() {
   // `bulkProgress` is what the job reports as it goes, rendered on the group.
   const [bulkProgress, setBulkProgress] = useState(null);
   const enrichAll = async (group, cap) => {
+    // Every listing in this group is LIVE on eBay (the recommender only
+    // offers the fill for published ones), and filling a live listing means
+    // revising it there. Without a connection the server refuses each one in
+    // turn and the run comes back "12 need you" — minutes of waiting, a toast
+    // carrying the same sentence twelve times, and nothing changed. Ask for
+    // the connection instead of spending the trip finding out.
+    //
+    // Asked of the SERVER, not of the cached flag: `ebay` starts out as the
+    // signed-out shape and fills in from /api/ebay/status a moment later, so
+    // reading the cache would bounce a perfectly well connected seller to
+    // Settings for pressing the button early.
+    if (!ebay.connected) {
+      const fresh = await loadEbayStatus();
+      // A lookup that FAILED is not an answer, and refusing on it would be
+      // this check making up the same blocker it exists to report. Only a
+      // status that actually came back saying "not connected" stops the run;
+      // otherwise carry on and let the server give its own reason.
+      if (fresh && !fresh.connected) {
+        toast("Connect eBay first — these listings are live there, so filling "
+          + "them in means updating them on eBay.", { kind: "warning" });
+        setView("settings");
+        return;
+      }
+    }
     // The WHOLE group is sent: the server enriches up to its own cap and
     // counts the remainder for us (a client that pre-trimmed the list would
     // be told nothing was left over). The cap it publishes on /api/insights is
@@ -687,8 +711,11 @@ export function Dashboard() {
       title: `Fill in details on ${runCount(run, total, "listing")}?`,
       message: "The AI reads each listing's own photos and fills in eBay's "
         + "recommended item specifics — the fields buyers filter by — then "
-        + "pushes them to the live listing. Anything you've already written "
-        + `is left exactly as it is.${rest}${cost}`,
+        + "pushes them straight to the live listing on eBay. No second step, "
+        + "and anything you've already written is left exactly as it is. "
+        + "Some listings will still have a note or two afterwards — those are "
+        + "the things only you can settle, like a measurement, and they wait "
+        + `for you under "Check details".${rest}${cost}`,
       confirmLabel: "Fill them in",
     }))) return;
     setBulkBusy(group.type);
@@ -932,7 +959,8 @@ export function Dashboard() {
       </motion.div>
 
       {/* Traffic — real eBay numbers for the live listings (Sell Analytics
-          views/impressions over 30 days + watchers), with the top performer.
+          views/impressions over 90 days — eBay's longest report — + watchers),
+          with the top performer.
           Views/impressions need eBay's Sell Analytics permission: a seller who
           connected before the app asked for it keeps the original grant
           through every token refresh, so the report 401/403s. Say that plainly
@@ -952,7 +980,7 @@ export function Dashboard() {
           <motion.div variants={rise}>
             <Card className="py-3.5 px-5 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[13px] text-ink-secondary">
               <span className="inline-flex items-center gap-1.5 font-semibold text-ink">
-                <BarChart3 size={15} className="text-blue" aria-hidden /> Traffic · 30 days
+                <BarChart3 size={15} className="text-blue" aria-hidden /> Traffic · 90 days
               </span>
               {trafficOk && (
                 <span className="inline-flex items-center gap-1 tabular-nums">

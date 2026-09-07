@@ -19,11 +19,12 @@ from anthropic import Anthropic
 
 from .. import config
 from ..config import log
-from . import taxonomy
+from . import barcodes, taxonomy
 from .listing_prompt import (
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
+    STICKER_AND_BARCODE_RULE,
     expected_item_count,
     group_notes_block,
     identify_notes_block,
@@ -412,6 +413,7 @@ def identify(image_paths: list[Path], image_names: list[str],
         raw_observations=str(data.get("raw_observations", "")),
         # Raw tag boxes; tag_crops() validates each entry when cropping.
         tags=[t for t in (data.get("tags") or []) if isinstance(t, dict)][:6],
+        identifiers=barcodes.from_scan(data.get("identifiers")),
     )
 
 
@@ -1040,16 +1042,27 @@ _TAG_SCAN_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "tags": [ {"photo": <1-based photo number>,
              "box": [x0, y0, x1, y1],
-             "kind": "size|care|brand|model|barcode|other"} ] }
+             "kind": "size|care|brand|model|barcode|sticker|price|other"} ] }
 Rules:
-- Find every TAG, LABEL, STAMP, or PRINTED MARKING that could carry item
-  facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
-  hang tags, box text, model plates, barcodes.
+- Find every TAG, LABEL, STICKER, STAMP, or PRINTED MARKING that could carry
+  item facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
+  hang tags, box text, model and serial plates, backstamps, hallmarks,
+  importer/distributor and licence stickers, foil or holographic seals,
+  copyright lines, retail price stickers — and BARCODES.
+- A BARCODE IS ALWAYS WORTH A BOX, on its own, even when no other label is
+  near it and even when the bars are all you can make out at this size: the
+  digits under it name the exact product and are the single most valuable
+  thing in these photos. Box the barcode AND the digits printed beneath it.
+- SO IS ANY MARKING IN A SCRIPT YOU CANNOT READ HERE — Japanese, Korean,
+  Chinese, Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, or accented
+  Latin. A domestic-market tag often identifies the item and its era, and
+  "too small to read" is exactly what the zoom is for. Never skip a marking
+  because you cannot read it yet; that is the reason to box it.
 - box is the tag's bounding region as FRACTIONS of that photo's width/height
   (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is
   cut off.
-- Include a tag even if you can't read it at this size — it will be zoomed.
-- At most 6 entries, best candidates first. No tags at all -> {"tags": []}.
+- At most 6 entries, best candidates first — a barcode outranks a care label
+  when you have to choose. No tags at all -> {"tags": []}.
 """
 
 
@@ -1099,6 +1112,37 @@ def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
     return crops
 
 
+# What the zoomed crops are actually asked for. Hoisted out of the function so
+# the multi-language and barcode rules are the SAME text the identify pass
+# gets (STICKER_AND_BARCODE_RULE), not a paraphrase of it that drifts.
+_TAG_TRANSCRIBE_ASK = (
+    "These are zoomed-in crops of the tags, labels, stickers and barcodes on "
+    "that same item. Transcribe ALL text you can read on them, exactly as "
+    "printed — INCLUDING text in non-Latin scripts (Japanese, Korean, "
+    "Chinese, Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari) and accented "
+    "Latin. Give each such line VERBATIM in its own script, then a "
+    "romanization, then the English equivalent when you know it "
+    "(\u30e6\u30cb\u30af\u30ed = UNIQLO; \u65e5\u672c\u88fd = Made in Japan). If you cannot read a "
+    "script, describe what is there rather than guessing at it.\n\n"
+    "Then, on separate lines, state what the tags establish (only if actually "
+    "readable): SIZE (the exact marking, e.g. 'L', 'W32 L34', 'EU 42', "
+    "'US 10.5 M', and the size system), BRAND (in the Latin alphabet AND as "
+    "printed), MATERIAL percentages, COUNTRY of manufacture, MODEL/STYLE "
+    "number, RN number, LICENCE/COPYRIGHT line with its year, and PRICE if a "
+    "retail or thrift price sticker is legible.\n\n"
+    "BARCODE lines matter most: for each barcode, write "
+    "'BARCODE <type>: <digits>' on its own line with the digits exactly as "
+    "printed, left to right, leading zero included, and nothing else on the "
+    "line. Read them one digit at a time. Never complete, correct or pad a "
+    "code — if a digit is obscured write '?' in its place and say which "
+    "position it is. The server checks every code's check digit, so a "
+    "half-read code costs nothing and an invented one puts another company's "
+    "product on this listing.\n\n"
+    "If a crop is unreadable, say so — never fill in what you can't see. "
+    "Plain text only.\n\nThe rules these crops are read under:\n"
+    + STICKER_AND_BARCODE_RULE)
+
+
 def read_tag_text(image_paths: list[Path]) -> str:
     """Locate tags/labels across the photos, zoom into each, and transcribe.
 
@@ -1138,15 +1182,7 @@ def read_tag_text(image_paths: list[Path]) -> str:
     crops = tag_crops(paths, tags)
     if not crops:
         return ""
-    crops.append({"type": "text", "text": (
-        "These are zoomed-in crops of the tags/labels on that same item. "
-        "Transcribe ALL text you can read on them, exactly as printed. Then, "
-        "on separate lines, state what the tags establish (only if actually "
-        "readable): SIZE (the exact marking, e.g. 'L', 'W32 L34', 'EU 42', "
-        "'US 10.5 M', and the size system), BRAND, MATERIAL percentages, "
-        "COUNTRY of manufacture, MODEL/STYLE number, RN number, and the "
-        "digits under any BARCODE (UPC/EAN). If a crop is unreadable, say "
-        "so — never fill in what you can't see. Plain text only.")})
+    crops.append({"type": "text", "text": _TAG_TRANSCRIBE_ASK})
     resp = client.messages.create(model=config.VISION_MODEL, max_tokens=900,
                                   messages=[{"role": "user", "content": crops}])
     out = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -1163,11 +1199,24 @@ Rules:
   the required ones and nearly all of the recommended ones. Leave one out
   only when you truly cannot tell.
 - Read EVERYTHING in the photos first: care tags, sewn labels, printed marks,
-  stamps, box/packaging text, model plates — and the human-readable DIGITS
-  printed under any barcode (that's the UPC/EAN; also look there for MPN and
-  model numbers). Exact text you can read is your best source. When the
-  context includes TAG TEXT (transcribed from zoomed tag close-ups), treat it
-  as ground truth — values taken from it are confidence "high".
+  stamps, backstamps, hallmarks, box/packaging text, model plates, importer
+  and licence stickers — and the human-readable DIGITS printed under any
+  barcode (that's the UPC/EAN; also look there for MPN and model numbers).
+  Exact text you can read is your best source. When the context includes TAG
+  TEXT (transcribed from zoomed tag close-ups), treat it as ground truth —
+  values taken from it are confidence "high".
+- MARKINGS IN ANOTHER LANGUAGE STILL ANSWER THESE ASPECTS. A tag in Japanese,
+  Korean, Chinese, Cyrillic, Greek, Arabic, Hebrew, Thai or accented Latin is
+  the same evidence as an English one and is often better evidence, because a
+  domestic-market label names the market and usually the era. Read it, and
+  answer the aspect with the value eBay expects in ENGLISH: 日本製 or
+  Made in Japan both mean Country/Region of Manufacture "Japan"; ユニクロ is
+  Brand "Uniqlo"; 100% 綿 is Material "Cotton". Never invent a brand from a
+  script you cannot read — describe it and leave the aspect blank instead.
+- A copyright or licence line (© 1998 Sanrio, "Licensed by...") DATES the
+  item: it answers Year Manufactured / Era / Time Period Manufactured, and
+  names the Character or Franchise, at confidence "high" for the year printed
+  and "medium" for the era it puts the item in.
 - Clothing/shoe SIZE comes from the size tag, not from guessing: neck label,
   waistband tag, shoe tongue/heel label, or the care tag (the size often
   follows "SIZE" there). Report the marking in the aspect's expected form
@@ -1182,16 +1231,22 @@ Rules:
     Occasion, estimated sizes). Fill these — a good inference beats a blank —
     the seller is shown a "review" flag on them.
 - Use the aspect's EXACT name as given.
-- FIXED-CHOICE aspects come in two shapes, and a value for either MUST be
-  copied VERBATIM from that aspect's allowed list — the verbatim copy is the
-  only thing that makes eBay's fixed-value specifics actually get selected:
-  * "(choose exactly one of: ...)" — eBay's dropdown. Give one value.
-  * "(CHECKBOXES - ...)" — eBay's multi-select tick boxes, and the specifics
+- Aspects that arrive with a value list. TWO things vary, independently: the
+  SHAPE of the answer, and whether the list is closed.
+  * SHAPE. "(choose exactly one of: ...)" is eBay's dropdown — give one value.
+    "(CHECKBOXES - ...)" is eBay's multi-select tick boxes, and the specifics
     that ship empty most often, so treat them as a priority: emit a SEPARATE
-    entry (same name, different value) for EVERY listed value that genuinely
-    applies — typically two to four. One is fine when only one applies; none
-    only when the item truly matches none. Never comma-join them into one
-    value, and never stop at the first match when others also apply.
+    entry (same name, different value) for EVERY value that genuinely applies
+    — typically two to four. One is fine when only one applies; none only when
+    the item truly matches none. Never comma-join them into one value, and
+    never stop at the first match when others also apply.
+  * CLOSED OR OPEN. A line saying "allowed values" or "choose exactly one of"
+    is CLOSED: the value MUST be copied VERBATIM from that list — the verbatim
+    copy is the only thing that makes eBay's fixed-value specifics actually get
+    selected, and anything else is refused at publish. A line saying "eBay
+    suggests" is OPEN: those are the values eBay's own listing form offers for
+    this aspect, so copy one verbatim whenever it fits, and give your own
+    concise value when none of them does.
   When a listed value is only a near fit, prefer the closest defensible one at
   "medium" over leaving the aspect blank; omit it only when nothing fits.
 - An aspect shown as "(plain number)" takes ONLY a number like "14" (one
@@ -1251,37 +1306,81 @@ _ASPECTS_SYSTEM = (
 _MAX_SHOWN_VALUES = 150
 
 
-def _choice_line(a: dict, multi: bool) -> str:
-    """The prompt line for a fixed-choice aspect. MULTI ones are eBay's
-    multi-select tick boxes — the "Item Specifics checkboxes" — and are labelled
-    as such so the model ticks every value that applies instead of one."""
+def _choice_line(a: dict, multi: bool, fixed: bool) -> str:
+    """The prompt line for an aspect eBay ships a value list with.
+
+    Two things vary here and they vary INDEPENDENTLY, which is exactly what
+    this used to run together. Cardinality decides the shape of the answer:
+    MULTI is what eBay draws as tick boxes, whatever its mode. Mode decides
+    what the list MEANS: SELECTION_ONLY makes it law (an off-list value is
+    refused at publish), FREE_TEXT makes it eBay's own SUGGESTIONS — the
+    values other sellers used in this category, which the app fetches on every
+    lookup and, until now, showed to nobody.
+
+    That mattered most on the checkbox aspects. Plenty of eBay's tick-box
+    specifics (Features, Occasion, Style, Material in many categories) come
+    back FREE_TEXT + MULTI, so they missed the SELECTION_ONLY test above and
+    were described to the model as one plain free-text box — no mention of
+    the boxes, and none of eBay's suggested values. They filled with a single
+    value or with nothing.
+    """
     values = a["values"]
     shown = ", ".join(values[:_MAX_SHOWN_VALUES])
     if len(values) > _MAX_SHOWN_VALUES:
-        shown += (f", ... (+{len(values) - _MAX_SHOWN_VALUES} more allowed values "
-                  "not shown - if the right one is missing here, give it verbatim "
-                  "anyway)")
+        shown += (f", ... (+{len(values) - _MAX_SHOWN_VALUES} more "
+                  + ("allowed" if fixed else "suggested")
+                  + " values not shown - if the right one is missing here, "
+                  "give it verbatim anyway)")
+    # The list is eBay's own suggestion set, not a closed one: say so, or the
+    # model treats it as closed and leaves the aspect blank when the real
+    # answer isn't on it.
+    offer = (f"allowed values: {shown}" if fixed else
+             f"eBay suggests: {shown} - prefer eBay's exact wording when one "
+             "of these fits, and give your own value when none does")
     if multi:
         return (f'- "{a["name"]}" (CHECKBOXES - tick every value that applies by '
-                f'repeating this aspect once per value; allowed values: {shown})')
-    return f'- "{a["name"]}" (choose exactly one of: {shown})'
+                f'repeating this aspect once per value; {offer})')
+    if fixed:
+        return f'- "{a["name"]}" (choose exactly one of: {shown})'
+    return f'- "{a["name"]}" (free text; {offer})'
 
 
-def _aspect_lines(named: list[dict]) -> str:
+def _aspect_lines(named: list[dict], held: Optional[dict] = None) -> str:
+    """One prompt line per aspect. `held` is {aspect name (lower): [values the
+    listing already carries]} — only the coverage pass passes it, and only
+    checkbox aspects can use it: those are asked about again while PARTLY
+    ticked, so the line has to say which boxes are already ticked or the model
+    re-offers the same one and adds nothing."""
     lines = []
     for a in named:
         dtype = (a.get("data_type") or "STRING").upper()
         fmt = (a.get("format") or "").lower()
         is_multi = (a.get("cardinality") or "SINGLE") == "MULTI"
         multi = " (may repeat: several values allowed)" if is_multi else ""
-        if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
-            lines.append(_choice_line(a, is_multi))
+        fixed = a.get("mode") == "SELECTION_ONLY"
+        values = a.get("values") or []
+        if fixed and values:
+            lines.append(_choice_line(a, is_multi, True))
         elif dtype == "DATE" or "yyyy" in fmt:
             lines.append(f'- "{a["name"]}" (4-digit year)')
         elif dtype == "NUMBER":
             lines.append(f'- "{a["name"]}" (plain number)')
+        elif values:
+            # Free text, and eBay named some values for it anyway. Those are
+            # the suggestions its own listing form offers the seller.
+            lines.append(_choice_line(a, is_multi, False))
+        elif is_multi:
+            # A tick-box aspect eBay offered no values for: still several
+            # answers, just nothing to tick from.
+            lines.append(f'- "{a["name"]}" (CHECKBOXES - free text; give one '
+                         'entry per value that applies)')
         else:
             lines.append(f'- "{a["name"]}" (free text){multi}')
+        if is_multi:
+            already = (held or {}).get(a["name"].strip().lower()) or []
+            if already:
+                lines[-1] += (f' [already ticked: {", ".join(already)} - add any '
+                              'OTHERS that apply; do not repeat these]')
     return "\n".join(lines)
 
 
@@ -1458,9 +1557,14 @@ def fill_aspects_combined(
     content: list[dict] = [_image_block(p) for p in image_paths[:8]]
     if tag_crop_blocks:
         content.append({"type": "text", "text": (
-            "Zoomed-in crops of this item's tags/labels follow. Read them "
-            "closely and treat what they say as ground truth — values taken "
-            "from them are confidence \"high\".")})
+            "Zoomed-in crops of this item's tags, labels, stickers and "
+            "barcodes follow. Read them closely and treat what they say as "
+            "ground truth — values taken from them are confidence \"high\". "
+            "Read text in ANY script (Japanese, Korean, Chinese, Cyrillic, "
+            "Greek, Arabic, Hebrew, Thai, accented Latin) and answer the "
+            "aspects with the English value eBay expects. Read the digits "
+            "under every barcode exactly as printed, and never complete or "
+            "correct one you cannot fully see.")})
         content.extend(tag_crop_blocks)
     tail = "CONTEXT:\n" + _listing_context(listing)
     if want_maker:
@@ -1594,10 +1698,16 @@ def _coverage_context(listing: Listing) -> str:
 
 
 def fill_missing_aspects(image_paths: list[Path], listing: Listing,
-                         blanks: list[dict]) -> list[ItemSpecific]:
+                         blanks: list[dict],
+                         held: Optional[dict] = None) -> list[ItemSpecific]:
     """Second look at the item specifics `blanks` left empty. `blanks` is the
     taxonomy aspect list narrowed by taxonomy.fillable_blanks — identifiers
     are already gone from it, and this function does not put them back.
+
+    `blanks` can also carry CHECKBOX aspects that are only partly ticked (see
+    fillable_blanks' top_up_multi): `held` says which values each already has,
+    so the pass is asked for the boxes that are still missing rather than the
+    one that is already there.
 
     Returns validated ItemSpecifics, the same shape fill_aspects returns, so
     the caller merges both through one path."""
@@ -1619,7 +1729,8 @@ def fill_missing_aspects(image_paths: list[Path], listing: Listing,
             # block changes listing to listing and a breakpoint here would
             # write a cache entry nothing ever reads.
             {"type": "text",
-             "text": "ITEM SPECIFICS STILL BLANK:\n" + _aspect_lines(named)},
+             "text": "ITEM SPECIFICS STILL TO ANSWER:\n"
+                     + _aspect_lines(named, held)},
         ],
         messages=[{"role": "user", "content": content}],
     )

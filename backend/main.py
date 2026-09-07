@@ -46,7 +46,8 @@ from .money import charm_price
 from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
                      Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
-from .services import (bulk_actions, claude_ai, dirty_fields, duplicates, ebay,
+from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
+                       duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
                        ebay_trading, image_import, images, imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
@@ -1773,11 +1774,22 @@ def _cover_remaining_specifics(listing: Listing, image_paths: list,
     if not _coverage_on():
         return 0
     try:
-        blanks = taxonomy.fillable_blanks(listing, aspects)
+        # top_up_multi: a checkbox aspect holding ONE value is not answered —
+        # it is one box ticked out of the several that apply, and every box
+        # not ticked is a buyer filter this listing is absent from. The values
+        # it already holds ride along so the pass is asked for the others.
+        blanks = taxonomy.fillable_blanks(listing, aspects, top_up_multi=True)
         if len(blanks) < _COVERAGE_MIN_BLANKS:
             return 0
+        asked = blanks[:_COVERAGE_MAX_BLANKS]
+        wanted = {(a.get("name") or "").strip().lower() for a in asked}
+        held: dict[str, list[str]] = {}
+        for s in listing.item_specifics:
+            k = (s.name or "").strip().lower()
+            if k in wanted and (s.value or "").strip():
+                held.setdefault(k, []).append(s.value.strip())
         filled = claude_ai.fill_missing_aspects(
-            image_paths, listing, blanks[:_COVERAGE_MAX_BLANKS])
+            image_paths, listing, asked, held)
     except Exception as exc:  # noqa: BLE001 - the second look is optional
         log.info("specifics coverage skipped (cat=%s): %s",
                  listing.category_id, exc)
@@ -3925,11 +3937,11 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
         return None
     strategy = _pricing_strategy(uid, prefs)
 
-    def _ask(query: str) -> dict:
+    def _ask(query: str, gtin: str = "") -> dict:
         try:
             data = pricing.suggest(query, category_id=listing.category_id or None,
                                    condition=listing.condition or None,
-                                   strategy=strategy)
+                                   strategy=strategy, gtin=gtin or None)
         except Exception as exc:  # noqa: BLE001 - a draft beats a comp
             log.info("draft price check skipped for %r: %s", query[:60], exc)
             return {}
@@ -3942,8 +3954,25 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
     # the head of the title, which by that same rule is the maker/artist and
     # the item itself: "Fanch Ledan hand signed lithograph", not "... Interior
     # with Matisse 84/250 framed 24x30".
-    best = _ask(title)
-    query = title
+    # THE BARCODE FIRST, when the scan read one and its check digit agreed.
+    # Everything below this is a keyword search, and a keyword search is a
+    # guess about which listings are comparable: a good title names the
+    # artist, the edition and the size, and a search for all of that at once
+    # matches nothing. A UPC does not guess — it is the same product, so its
+    # median is this item's price rather than the price of items that sound
+    # like it. It is also the one query that works for an item whose title
+    # this app got wrong.
+    code, gtin = barcodes.listing_code(listing)
+    best, query = {}, ""
+    if gtin:
+        best, query = _ask(title, gtin=gtin), f"UPC {gtin}"
+    elif code:
+        # An EAN or ISBN: Browse's product search takes a UPC only, but the
+        # digits are exactly what a buyer pastes into eBay's search box, and
+        # they match the same product there.
+        best, query = _ask(code), code
+    if not best.get("price"):
+        best, query = _ask(title), title
     if not best.get("price"):
         head = " ".join(title.split()[:_COMP_QUERY_WORDS])
         if head and head != title:
@@ -4928,6 +4957,10 @@ def identify(session_id: str, request: Request) -> dict:
         log.warning("identify failed (session=%s): %s", session_id, exc)
         raise HTTPException(code, message) from exc
     _apply_listing_defaults(result.listing, _uid(request))
+    # Before the category and before the comps: a verified UPC is both an
+    # item specific and the sharpest possible comp query, and both of the
+    # passes below are better for having it.
+    barcodes.apply_to_listing(result.listing, result.identifiers)
     _resolve_category(result.listing)
     _assign_store_category(result.listing, _uid(request))
     # Research BEFORE comps: it can rewrite a hedged title into the real one,
@@ -6078,6 +6111,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                                             item_names, strategy=strategy,
                                             notes=notes)
                 listing = _apply_listing_defaults(result.listing, uid, prefs)
+                barcodes.apply_to_listing(listing, result.identifiers)
                 # Carry the account's Promote default onto the draft itself, so
                 # the queue card shows what will actually happen at publish
                 # rather than an unchecked box that promotes anyway.
@@ -6343,6 +6377,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
                                     strategy=_pricing_strategy(uid, prefs),
                                     notes=storage.load_notes(session_id))
         _apply_listing_defaults(result.listing, uid, prefs)
+        barcodes.apply_to_listing(result.listing, result.identifiers)
         _beat("category")
         _resolve_category(result.listing)
         _assign_store_category(result.listing, uid)

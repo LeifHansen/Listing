@@ -22,6 +22,7 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import ItemSpecific
+from . import barcodes
 
 # Simple in-process caches (token + per-marketplace tree id).
 _token_cache: dict = {"token": None, "expires_at": 0.0}
@@ -1243,6 +1244,20 @@ def sanitize_specifics(listing) -> None:
         value = (spec.value or "").strip()
         if not name or not value:
             continue
+        # A product identifier the AI read but that fails its own check digit
+        # is a misread, and this is the last place before eBay sees it. eBay
+        # matches a UPC against its CATALOGUE, so a wrong one does not fail
+        # loudly — it succeeds, and puts another company's product page,
+        # photos and price history behind this listing. `confidence` is what
+        # keeps this off the seller's own work: "" means they entered or
+        # confirmed the value, and their number stands even when it looks
+        # wrong to us.
+        if (spec.confidence and is_identifier_aspect(name)
+                and barcodes.looks_like_a_code(value)
+                and not barcodes.verified(value)):
+            log.info("specifics: dropped %r=%r (the check digit says that is "
+                     "not a valid code)", name, value)
+            continue
         aspect = by_key.get(name.lower())
         if aspect is None:
             cleaned.append(spec)  # seller's own free-form specific — keep as-is
@@ -1312,7 +1327,8 @@ def _aspect_keys(name: str) -> set[str]:
     return {key, key[5:] if key.startswith("item ") else f"item {key}"}
 
 
-def fillable_blanks(listing, aspects: list[dict]) -> list[dict]:
+def fillable_blanks(listing, aspects: list[dict], *,
+                    top_up_multi: bool = False) -> list[dict]:
     """The category's aspects this listing holds no value for and the AI could
     still be asked to answer — every blank except the identifiers above.
 
@@ -1323,18 +1339,39 @@ def fillable_blanks(listing, aspects: list[dict]) -> list[dict]:
     eBay with Subject, Era, Occasion, Packaging and Character blank — eBay's
     own suggester offers exactly those, from the same photos, and a buyer
     filtering on any of them never sees the listing.
+
+    `top_up_multi` widens it to eBay's CHECKBOX aspects that are only partly
+    ticked. One value is not an answer on a multi-select: a jacket whose
+    Features says "Pockets" and nothing else is missing Breathable, Lined and
+    Water Resistant, and each one is a filter it does not appear in. Holding
+    any value at all read as answered here, so the coverage pass was never
+    shown those aspects and they stayed at one box for the life of the
+    listing. An aspect the SELLER answered (a row with no confidence flag —
+    typed or confirmed by hand) is never topped up; theirs is the last word.
+
+    The dashboard's own count does NOT pass this: "how many specifics are
+    blank" is a question about empty fields, and answering it with "and the
+    checkboxes that could hold more" would tell a seller a finished listing is
+    unfinished.
     """
-    held = {(s.name or "").strip().lower()
-            for s in (getattr(listing, "item_specifics", None) or [])
-            if (s.value or "").strip()}
+    rows = list(getattr(listing, "item_specifics", None) or [])
+    held = {(s.name or "").strip().lower() for s in rows if (s.value or "").strip()}
+    # Aspects carrying a value the seller typed or ticked themselves
+    # (ItemSpecific.confidence is cleared when they touch it).
+    theirs = {(s.name or "").strip().lower() for s in rows
+              if (s.value or "").strip() and not (s.confidence or "").strip()}
     if (getattr(listing, "brand", "") or "").strip():
         held.add("brand")
+        theirs.add("brand")
     out = []
     for a in aspects:
         name = (a.get("name") or "").strip()
         if not name or is_identifier_aspect(name):
             continue
-        if _aspect_keys(name) & held:
-            continue
+        keys = _aspect_keys(name)
+        if keys & held:
+            is_multi = (a.get("cardinality") or "SINGLE") == "MULTI"
+            if not (top_up_multi and is_multi) or keys & theirs:
+                continue
         out.append(a)
     return out

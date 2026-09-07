@@ -416,6 +416,11 @@ function SpecGroup({ title, note, count, children }) {
 // checkboxes hijacks every click inside it.
 function AspectChecklist({ w, a }) {
   const [showAll, setShowAll] = useState(false);
+  const [draft, setDraft] = useState("");
+  // Whether eBay's list is law or advice. SELECTION_ONLY refuses anything not
+  // on it; FREE_TEXT ships the same boxes but the values are only what eBay
+  // SUGGESTS, so the seller must be able to tick a value of their own.
+  const open = a.mode !== "SELECTION_ONLY";
   const selected = w.getSpecificValues(a.name);
   const picked = new Set(selected.map((v) => v.toLowerCase()));
   // One badge for the whole group, showing the least certain tick in it — a
@@ -447,7 +452,9 @@ function AspectChecklist({ w, a }) {
         {a.name}
         <span className="font-normal text-ink-faint inline-flex items-center gap-1.5">
           <span className="text-[12px]">
-            {selected.length ? `${selected.length} selected` : "tick all that apply"}
+            {selected.length ? `${selected.length} selected`
+              : open ? "tick all that apply — or add your own"
+                : "tick all that apply"}
           </span>
           <ConfidenceMark row={row} />
           {unreviewed && (
@@ -492,6 +499,45 @@ function AspectChecklist({ w, a }) {
           >
             Show {hidden} more
           </button>
+        )}
+        {/* An open list is a list of SUGGESTIONS, so the seller needs a way to
+            tick something eBay never thought of — a feature this item has that
+            the category's boxes don't name. Ticked values that aren't on
+            eBay's list already get a box of their own (offList above), so what
+            is added here stays visible and removable like any other tick.
+            A closed list gets no such box: there, an off-list value is one
+            eBay refuses. */}
+        {open && (
+          <div className="flex items-center gap-1.5 pt-0.5">
+            <input
+              type="text"
+              value={draft}
+              // Not the aspect's own name: "Add another features" / "Add
+              // another country/region of manufacture" is what that produces.
+              placeholder="Add your own"
+              aria-label={`Add a ${a.name} value of your own`}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter inside a listing form would otherwise submit it.
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                if (draft.trim()) w.toggleSpecificValue(a.name, draft.trim(), true);
+                setDraft("");
+              }}
+              className="min-w-0 flex-1 bg-card text-ink border border-line rounded-input px-2.5 py-1 text-[13px] placeholder:text-ink-faint hover:border-line-strong focus:border-blue focus:outline-none focus:ring-2 focus:ring-blue/25 transition-colors"
+            />
+            <button
+              type="button"
+              disabled={!draft.trim()}
+              onClick={() => {
+                w.toggleSpecificValue(a.name, draft.trim(), true);
+                setDraft("");
+              }}
+              className="shrink-0 rounded-full border border-line px-2.5 py-1 text-[12px] font-semibold text-ink-secondary cursor-pointer hover:border-blue hover:text-blue disabled:opacity-40 disabled:cursor-default disabled:hover:border-line disabled:hover:text-ink-secondary transition-colors"
+            >
+              Add
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -584,7 +630,14 @@ export function SpecificsCard({ w }) {
     // can only ever hold one answer, so rendering these as one hid the fact
     // that Features/Style/Season take several, and the AI's extra picks had
     // nowhere to land but an unexplained chip.
-    if (a.mode === "SELECTION_ONLY" && a.cardinality === "MULTI" && a.values?.length) {
+    //
+    // CARDINALITY alone decides this, not the mode. Plenty of eBay's tick-box
+    // specifics come back FREE_TEXT + MULTI (Features, Occasion, Style and
+    // Material in a lot of categories): eBay ships suggested values and draws
+    // boxes for them, while this test demanded SELECTION_ONLY and so drew a
+    // single text input instead — one answer where eBay offers twenty, and
+    // eBay's own suggestions fetched on every lookup and shown to nobody.
+    if (a.cardinality === "MULTI" && a.values?.length) {
       return <AspectChecklist key={a.name} w={w} a={a} />;
     }
     // The aspect's answer row — the first one with a VALUE (specifics.js),
@@ -608,6 +661,11 @@ export function SpecificsCard({ w }) {
       if (isBrand) w.set("brand", v);
       w.upsertSpecific(a.name, v);
     };
+    // A DOM id for this aspect's suggestion list. Aspect names carry spaces
+    // and slashes ("Country/Region of Manufacture"), and an id with those in
+    // it is not one a <input list=> reference can resolve. Names are unique
+    // within a category, so a slug of the name is unique on the page.
+    const listId = a.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     // An empty REQUIRED aspect blocks publishing — it must be unmissable in
     // the grid, not discovered via a failed publish. Amber ring + the word
     // "Required" in amber until it's filled.
@@ -661,12 +719,27 @@ export function SpecificsCard({ w }) {
             {a.values.map((v) => <option key={v} value={v}>{v}</option>)}
           </Select>
         ) : (
-          <Input
-            value={shown}
-            placeholder={a.name}
-            className={ringCls}
-            onChange={(e) => setValue(e.target.value)}
-          />
+          <>
+            {/* eBay ships suggested values for a great many free-text aspects
+                too — the ones its own listing form offers under the box. They
+                arrive on every aspect lookup and were read by nothing, so a
+                seller typing "Cotton Blend" never learned eBay spells it
+                "Cotton Blend" and a publish could be refused over the wording.
+                A datalist offers them without constraining: the box still
+                takes anything, because here anything is legal. */}
+            <Input
+              value={shown}
+              placeholder={a.name}
+              className={ringCls}
+              list={a.values?.length ? `sugg-${listId}` : undefined}
+              onChange={(e) => setValue(e.target.value)}
+            />
+            {a.values?.length > 0 && (
+              <datalist id={`sugg-${listId}`}>
+                {a.values.map((v) => <option key={v} value={v} />)}
+              </datalist>
+            )}
+          </>
         )}
         {extras.length > 0 && (
           <span className="flex flex-wrap items-center gap-1.5 mt-1.5">

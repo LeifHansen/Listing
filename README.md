@@ -423,6 +423,92 @@ off the item or it is wrong, and *"prefer a defensible inference to a blank"*
 in the same prompt as an empty UPC box is how a model talks itself into twelve
 digits that belong to somebody else's product.
 
+**The checkboxes, and eBay's own suggestions.** Two properties of an eBay
+aspect vary *independently*, and running them together is what left the
+tick-box specifics half-filled:
+
+- **Cardinality** is the shape of the answer. `MULTI` is what eBay draws as
+  checkboxes — *Features*, *Style*, *Occasion*, *Season*.
+- **Mode** is what the aspect's value list *means*. `SELECTION_ONLY` makes it
+  law: a value not on it is refused at publish. `FREE_TEXT` makes it eBay's own
+  **suggestions** — the values its listing form offers under the box, which the
+  Taxonomy lookup returns for a great many free-text aspects.
+
+Every checkbox path used to test for `SELECTION_ONLY` *and* `MULTI`, so the
+tick-box aspects eBay reports as free text fell through all of them: described
+to the model as one plain text box, drawn in the editor as a single input, and
+eBay's suggested values fetched on every lookup and shown to nobody. Now
+cardinality alone decides the shape — checkboxes in the editor, "tick every
+value that applies" in the prompt — and mode alone decides whether the list is
+quoted as *allowed values* or as *eBay suggests* (with an **add your own** box
+beside an open list, and a `datalist` of the same suggestions on single-value
+free-text fields, since a publish can be refused over wording eBay would have
+handed us).
+
+**One ticked box is not an answered aspect.** A jacket whose *Features* says
+only "Pockets" is missing Breathable, Lined and Water Resistant, and each is a
+filter it never appears in — but holding any value at all read as *answered*,
+so the coverage pass was never shown the aspect. It now tops up partly-ticked
+multi-selects (`fillable_blanks(..., top_up_multi=True)`), told which boxes are
+already ticked so it adds rather than repeats. An aspect the **seller** typed or
+confirmed is never topped up, and the dashboard's "how many specifics are
+blank" count deliberately does not ask this wider question — answering it there
+would tell a seller a finished listing is unfinished.
+### Reading the stickers: branding in any language, and the barcode
+
+The most valuable thing in most photos is not the item — it is the sticker on
+it. A UPC names the **exact product** in eBay's own catalogue, which is a far
+better comp search than any title this app can write. A Japanese neck tag, a
+Cyrillic factory stamp, an importer label or a `Fabriqué en France` line names
+the market the item was sold in and usually the decade. A licence line
+(`© 1998 Sanrio`) dates it to the year. All of it is printed, in frame, and
+free to read.
+
+The scan now looks for it explicitly (`listing_prompt.STICKER_AND_BARCODE_RULE`,
+shared by the identify pass, the tag locator and the zoom-and-transcribe pass,
+so all three read under one set of rules rather than three paraphrases):
+
+* **every sticker, in any script.** Importer and licensee stickers, foil and
+  hologram seals, backstamps, hallmarks, model and serial plates, copyright
+  lines, retail price stickers. Text in Japanese, Korean, Chinese, Cyrillic,
+  Greek, Arabic, Hebrew, Thai, Devanagari or accented Latin is transcribed
+  **verbatim in its own script**, then romanized, then given its English
+  equivalent (`ユニクロ` = UNIQLO, `日本製` = Made in Japan) — and answers the
+  item specifics in the English form eBay expects. A script the model cannot
+  read is **described**, never translated into a brand it does not say.
+* **barcodes get a crop of their own**, even with no other label near them —
+  the tag locator used to draw a box only where a garment tag was.
+
+**Then the check digit decides what is believed.** A model reading twelve
+digits off 6-point type misreads them, and a misread UPC is the most expensive
+mistake this app can make: eBay matches it against its *catalogue*, so a wrong
+one does not bounce — it succeeds, and quietly attaches another company's
+product page, photos and price history to the listing. Every GTIN (UPC-A,
+EAN-13, EAN-8, GTIN-14) and ISBN-10 carries its own check digit, so
+`services/barcodes.py` verifies each read before anything is written:
+
+| Read | What happens |
+|------|--------------|
+| Check digit agrees | Written as `UPC` / `EAN` / `ISBN` at confidence **high** — it was read, not inferred |
+| Check digit fails | Never touches the listing. Becomes a *"confirm the barcode number"* note the seller answers in five seconds with the item in their hand |
+| Model says a digit is obscured | Dropped outright — a code with a digit missing is not a code |
+| MPN / model number | No checksum exists to agree with, so it goes on at **medium**: the editor's review flag |
+
+The same guard runs again in `taxonomy.sanitize_specifics`, the last thing that
+touches a listing before eBay does, over a code from **any** pass — but never
+over one the seller entered or confirmed themselves (`confidence == ""`). They
+are holding the item; a rule that overrides them is a rule that deletes their
+work and says nothing.
+
+**And a verified UPC prices the item.** `_price_against_comps` asks eBay Browse
+by `gtin` before it asks by keywords. That is a different question with a much
+better answer: a keyword search matches listings that *sound* like this one —
+and a good title, packed with artist, edition and size, often matches nothing
+at all — while a UPC matches the same product, so the median it returns is this
+item's price. An EAN or ISBN searches as digits instead (Browse documents
+`gtin` as taking a UPC), with an ISBN-10 converted to its ISBN-13 form first,
+because everything printed since 2007 carries the 13-digit one.
+
 ## API endpoints
 
 | Method | Path | Purpose |
@@ -483,7 +569,7 @@ free — the right default for local dev and self-hosters.
 
 | Feature | Tokens | Notes |
 |---------|-------:|-------|
-| AI listing draft | 5 | identify + category + item specifics + tag read + maker check; same per item in a bulk batch (photo grouping bundled) |
+| AI listing draft | 5 | identify (incl. sticker/barcode read) + category + item specifics + tag read + maker check; same per item in a bulk batch (photo grouping bundled) |
 | AI refine instruction | 1 | free-form "make it..." edits |
 | Autofill item specifics | 2 | the standalone button (bundled free inside a draft) |
 | Shop Mode shelf scan | 2 | one video's frames |
@@ -837,6 +923,18 @@ problem:
     forever and was charged for on every press. What is left for the seller
     afterwards is to *look*, which is the **Check details** suggestion instead.
 
+  **Check details waits a day** (`recommender.VERIFY_QUIET_DAYS`). It used not
+  to, and that turned a working button into a broken-looking one: the seller
+  pressed "Enrich all" on twelve listings, waited several minutes while the AI
+  read their photos and pushed the new specifics to eBay, and the group they
+  had just cleared was replaced *in the same slot* by "Check details · 12" —
+  the same twelve listings, still flagged, and this time with no button on the
+  group at all, just a list to open one at a time. From outside, that is
+  indistinguishable from the button having done nothing, and it was reported
+  as exactly that. The notes behind it are real, but they are by construction
+  the things the fill has just declined to invent, so they are not a chore to
+  hand back in the same minute. After the quiet period they return unchanged.
+
 Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind
 a single button. The rules bulk runs follow — `services/bulk_actions.py`:
@@ -1089,6 +1187,21 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
   answered, every live listing it covered gets the nought it earned; where the
   call failed, nothing is filled, so an outage never reads as a store nobody
   visited.
+- **A pending offer is a badge on the card.** eBay gives a Best Offer 48 hours;
+  miss it and the sale is lost without the seller having declined anything. A
+  live card carried views and watchers — both of which keep — and said nothing
+  about the one number attached to a person waiting, so the offer chip sits
+  beside the status badge, filled rather than tinted, naming the money on the
+  table (`Offer $45.00`, or `3 offers · $52.50` with the best of them). It is
+  read-only: accepting, countering and declining happen in eBay's own flow, and
+  the tooltip says so along with when the first offer runs out. eBay's own
+  `BestOfferCount` is deliberately NOT what draws it — that counts offers
+  *received*, so a listing whose only offer was declined last week still
+  reports 1. It picks the shortlist (a listing at zero has never had one at
+  all) and `GetBestOffers` then answers each candidate exactly, filtered on
+  `Pending`. Same honesty rule as the nought above: a lookup that failed, or
+  one past the per-sweep budget, leaves the count ABSENT and draws no badge
+  rather than telling a seller nobody is waiting.
 - **Every price the app chooses ends in `.99`** (`backend/money.py` →
   `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
   the AI's drafted price, the market number that overrules a draft priced far
