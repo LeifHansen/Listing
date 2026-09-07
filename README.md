@@ -163,6 +163,39 @@ work on a branch  →  push  →  PR  →  CI goes green  →  merge to main
 > A hand deploy that skips the stamp is caught either way: `health-watch.yml`
 > compares production's build against recent `main` every two hours.
 
+### What the gates actually check
+
+Four jobs, defined once in `.github/workflows/gates.yml` and called by both
+`ci.yml` (on a pull request) and `deploy.yml` (before shipping), so what runs
+before a merge and what runs before production are the same definition rather
+than two copies that drift.
+
+| Job | ~time | What only it can prove |
+|-----|------:|------------------------|
+| Lint + unit tests | 35s | The modules with no heavy dependencies really have none — `listing_prompt.py` and `barcodes.py` hold rules that must stay testable without the SDK installed |
+| Cutout safety | 10s | The photo pass works on **Pillow alone**: no rembg, no model download |
+| Frontend build | 60s | The only thing that type-checks the JSX, plus lint and the 500-odd component tests |
+| App smoke test | 4m | The whole backend suite against the app's **real** dependencies, then a browser walking every screen of the built app against a booted server |
+
+**Every backend test runs, and nothing may skip.** Two thirds of this suite's
+files `importorskip` fastapi, Pillow or anthropic, and the smoke job is the
+only one that has all three — so it runs `pytest backend/tests` over the whole
+directory and **fails if a single test skips**.
+
+That guard is there because the alternative was tried. The job used to name
+its files one by one, and 44 of them — a fifth of the suite — were in no job's
+list at all: they skipped in the fast job, were absent from the smoke job, and
+reported nothing anywhere. In [#250](https://github.com/LeifHansen/Listing/pull/250)
+a function signature changed, the test doubles in one of those 44 files went
+stale, every price comp lookup started raising `TypeError` — which the caller
+swallows as "eBay is down" — and all four gates went green over it.
+
+So there is no list: the directory is the list, exactly as the smoke job's
+dependencies are `requirements.txt` rather than a second hand-written copy of
+it. If a test ever genuinely cannot run in CI, **deselect it** in the workflow
+with a marker rather than letting it skip — deselecting is visible in a diff,
+and skipping buys the whole problem back.
+
 ## First-time Fly setup
 
 A `Dockerfile` and `fly.toml` are included. eBay requires **publicly reachable
