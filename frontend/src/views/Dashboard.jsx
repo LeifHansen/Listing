@@ -23,7 +23,7 @@ import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illus
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
          salesSummary } from "@/lib/sales";
-import { isDraft, listingsView, recentListings, storeTotal }
+import { isDraft, keptWhenEnded, listingsView, recentListings, storeTotal }
   from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { storeMirrorView } from "@/lib/storeMirror";
@@ -472,17 +472,20 @@ function readSoldRange() {
 // The sold tile's second line. It has one job per state: what the total is
 // made of, or — when nothing sold in the window — what to do instead.
 //
-// It used to offer "N to relist", counted off the ended listings. There are
-// none to count now: a listing that ends without selling is removed rather
-// than kept for a relist that is a fresh listing anyway.
-function soldSub(sales) {
+// The relist nudge counts the seller's OWN ended listings and not the store's
+// mirrors of eBay's: a mirror is removed as soon as we know it ended, so it
+// is never something to relist, and counting one would offer an action on a
+// card that is already gone.
+function soldSub(sales, ended) {
   if (!sales.count) {
     // An undated sale is one the app knew about before it started recording
     // sale dates — a store sync backfills them from eBay's own dates.
     if (sales.undated) {
       return `sync your store to date ${sales.undated} past sale${sales.undated === 1 ? "" : "s"}`;
     }
-    return `nothing in the ${sales.range.long}`;
+    return ended
+      ? `nothing in the ${sales.range.long} · ${ended} to relist`
+      : `nothing in the ${sales.range.long}`;
   }
   // The window itself is named by the picker in the corner, so this line
   // spends its width on what the total is made of instead of repeating it.
@@ -767,6 +770,10 @@ export function Dashboard() {
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");
+  // Ended and still here, which after the automatic removal means one of the
+  // seller's own inside its grace period — something they can still relist.
+  const relistable = items.filter(
+    (i) => i.status === "ended" && keptWhenEnded(i)).length;
   // Sold revenue over the chosen window. What the buyers actually PAID —
   // an accepted offer settles below the asking price, and totalling `price`
   // would report money that never arrived. See lib/sales.
@@ -796,7 +803,7 @@ export function Dashboard() {
   // — so a draft opened, published and left behind kept its "Continue" button
   // for the rest of the visit, pointing at a live listing.
   const sessionItem = session ? items.find((i) => i.id === session.sessionId) : null;
-  const DONE = ["published", "live", "sold"];
+  const DONE = ["published", "live", "sold", "ended"];
   const sessionDone = DONE.includes(session?.status)
     || DONE.includes(sessionItem?.status);
   const lastOpen = (session && !sessionDone)
@@ -914,7 +921,7 @@ export function Dashboard() {
                            : formatMoney(sales.total,
                                          sales.currency || DEFAULT_CURRENCY)
                              || "$0.00",
-                         soldSub(sales))}
+                         soldSub(sales, relistable))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"

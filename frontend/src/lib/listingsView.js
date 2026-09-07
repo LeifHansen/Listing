@@ -109,17 +109,23 @@ export const isDraft = (item) => item?.status === "draft"
   || item?.status === "dry_run";
 
 
-/* The statuses that have left the pipeline. A sale is finished business: the
-   listings manager files it under Inactive and subtracts it from the
-   everything-tab, because a sold item among the live ones is the one thing in
-   that grid the seller cannot act on.
+/* The statuses that have left the pipeline. A sale is finished business, and
+   so is an ending: the listings manager files both under Inactive and
+   subtracts them from the everything-tab, because a finished listing among
+   the live ones is the one thing in that grid the seller cannot act on.
+
+   `ended` joined this list with the automatic removal. An ended card sitting
+   in All beside the live ones was the seller's actual report — and while an
+   ending is no longer permanent here (a listing of theirs is kept for a
+   month so they can relist it), the archive is where it belongs in the
+   meantime, not the everything-tab.
 
    It lives here rather than inline in the tab table because the dashboard's
    "Recent listings" strip has to ask the same question, and the two used to
    disagree — an item that sold left the Sell screen and stayed on the
    dashboard, still offering "Edit live" on a listing that was already gone.
    One list, both readers. */
-export const ARCHIVED_STATUSES = ["sold"];
+export const ARCHIVED_STATUSES = ["sold", "ended"];
 
 export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
 
@@ -136,4 +142,34 @@ export function recentListings(items, limit = 4) {
     .filter((i) => !isArchived(i))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
     .slice(0, limit);
+}
+
+
+/* How long a listing of the seller's own is kept after it ends without
+   selling. The server decides (listing_sync.ENDED_GRACE_DAYS) and publishes
+   the number on /api/health; this is only what to say before that answer has
+   arrived, so a dialog never promises a month the sweep does not measure. */
+export const DEFAULT_ENDED_GRACE_DAYS = 30;
+
+export function endedGraceDays(health) {
+  const days = Number(health?.ended_grace_days);
+  return Number.isFinite(days) && days > 0 ? days : DEFAULT_ENDED_GRACE_DAYS;
+}
+
+
+/* Does ending this listing KEEP it (for the grace period above) or remove it
+   there and then?
+
+   The server decides, and its answer comes back as `removed` — this is for
+   the dialog shown BEFORE the call, which has to say which one it is about
+   to do. It mirrors listing_sync.keeps_grace and must stay in step with it:
+
+     * a record the store sync made (`ebay-<item>`) holds nothing the seller
+       made here, and eBay stops serving an ended item's photos within weeks,
+       so it goes at once — unless
+     * the seller added photos to it here, which are then the only copy;
+     * everything else is a listing this app created, and is kept. */
+export function keptWhenEnded(item) {
+  if (!String(item?.id || "").startsWith("ebay-")) return true;
+  return (item?.listing?.images || []).length > 0;
 }

@@ -151,20 +151,21 @@ export function DuplicateListings({ onChanged }) {
   const endOne = async (item) => {
     if (!(await confirm({
       title: "End this listing on eBay?",
-      message: `Item ${item.ebay_listing_id} comes off eBay immediately and `
-        + "its card is removed from here, photos and all. Check the other "
-        + "listing is the one you want to keep first.",
-      confirmLabel: "End & remove",
+      message: `Item ${item.ebay_listing_id} comes off eBay immediately. `
+        + "Check the other listing is the one you want to keep first.",
+      confirmLabel: "End listing",
       danger: true,
     }))) return;
     setEnding(item.listing_id);
     try {
       const res = await postJson("/api/ebay/end-listing", { session_id: item.listing_id });
       toast(res.status === "sold"
-        ? "Turns out this one sold on eBay — it's archived under Sold. 🎉"
+        ? "Turns out this one sold on eBay — it's archived under Inactive. 🎉"
         : res.removed
           ? "Listing ended and removed."
-          : res.message || "Listing ended.", { kind: "success" });
+          : res.status === "ended"
+            ? "Listing ended — it's under Inactive if you want to relist it."
+            : res.message || "Listing ended.", { kind: "success" });
       await load();
       onChanged?.();
     } catch (e) {

@@ -884,8 +884,8 @@ the asking price and marks the number approximate (`≈ $30.00`) rather than
 claiming it as the take.
 
 Everything downstream reads that: the sold card shows what it went for with
-the asking price struck through and how far under it landed, the Sold tab's
-profit line measures against the real amount, and the dashboard's
+the asking price struck through and how far under it landed, the Inactive
+tab's profit line measures against the real amount, and the dashboard's
 **Sold** tile totals it over a window the seller picks (24 hours / 7 days /
 30 days / 90 days, defaulting to a week and remembered across visits).
 
@@ -895,11 +895,9 @@ Selling ends the listing. The record left behind is the app's only memory of
 what that sale was, so it stops behaving like something still on its way to
 eBay:
 
-- It files under **Sold**, the archive tab, and is hidden from **Active** and
-  **All**, where a seller looks for things they can still act on. (That tab
-  was "Inactive" and held ended listings too — see below; it holds sales
-  alone now, and its tab id is still `inactive` so a remembered selection
-  keeps working.)
+- It files under **Inactive**, the archive tab, and is hidden from **Active**
+  and **All**, where a seller looks for things they can still act on. (Ended
+  listings are hidden from those two now as well — see below.)
 - Opening it gives the archive view (`views/listing/SoldArchive.jsx`), not the
   publish workflow: what it went for, against the ask and the cost basis, how
   it was listed, and a link to the sold listing on eBay. Before this, a
@@ -924,56 +922,80 @@ Two things stay possible, because an archive needs them:
   relists with none and the response says so (`photos: 0`); an imported
   listing's eBay-hosted `image_urls` carry over as they are.
 
-## An ended listing is not kept
+## An ended listing does not pile up
 
 A sale is history worth keeping. A listing that finished **without** selling
-is not, and the app no longer keeps one.
+is worth keeping only for as long as the seller might relist it — and one
+that was never theirs to begin with is not worth keeping at all.
 
-It used to. Every ending — the seller pressing End, a listing expiring on
-eBay, and eBay's whole unsold list mirrored in on each store import — became a
-record with status `ended`, filed under the archive tab for a relist. The
-result was a pile: one card per listing that ever finished, sitting in **All**
-beside the live ones, and blank, because eBay stops serving the photos of an
-item that ended a few weeks ago and an imported listing has no other copy of
-them. The seller's report was three words: *these should be removed
-automatically*.
+It used to be kept for ever, whichever it was. Every ending — the seller
+pressing End, a listing expiring on eBay, and eBay's whole unsold list
+mirrored in on each store import — became a record with status `ended`, filed
+under the archive tab. The result was a pile: one card per listing that ever
+finished, sitting in **All** beside the live ones, and blank, because eBay
+stops serving the photos of an item that ended a few weeks ago and an imported
+listing has no other copy of them. The seller's report was three words:
+*these should be removed automatically*.
 
-So an ending is a **removal**, at every door it can come through:
+So an ending now settles the record, on a clock that depends on whose work is
+in it (`listing_sync.settle_ended`):
+
+| The record | On ending |
+| --- | --- |
+| A **mirror** the store sync made (`ebay-<item>`, no photos added here) | Removed at once, photos and all. Nothing in it is not still on eBay. |
+| A listing **this app created** (or a mirror the seller added photos to) | Kept as `ended`, stamped `ended_at`, and removed by the sweep once `EBAY_ENDED_GRACE_DAYS` (default **30**) have passed. |
+| A **sale** | Archived under Inactive for good, exactly as before. |
+
+Every door an ending can come through agrees on that:
 
 - `POST /api/ebay/end-listing` (and the generic `POST /api/{marketplace}/end-listing`,
-  once nothing is live anywhere) deletes the record and answers
-  `{"removed": true}`, so the client drops the card instead of reloading it
-  into a status that no longer exists.
+  once nothing is live anywhere) settles the record and answers `removed`
+  — true when the row went — so the client knows whether to drop the card or
+  file it under Inactive.
 - The status sweep (`listing_sync.refresh_statuses`, reached on every sync via
-  the cheap finished-list pass) deletes a record eBay reports as ended.
+  the cheap finished-list pass) settles a record eBay reports as ended.
 - The store import (`listing_sync.import_active`) no longer reads eBay's
   unsold list at all — importing an ended listing so a later sweep can delete
-  it is work in a circle — and sweeps any `ended` record it finds on the way
-  past.
-- `listing_sync.clear_ended`, run by `POST /api/ebay/sync-listings`, clears the
-  backlog: the records stored before this rule existed, which nothing else
-  would ever revisit. It reads ended rows only, so a store with none pays one
-  empty query and no eBay calls.
+  it is work in a circle — and sweeps the ended records it passes.
+- `listing_sync.clear_ended`, run by `POST /api/ebay/sync-listings`, is the
+  sweep: it removes ended mirrors and any of the seller's own past the grace
+  period, including the backlog from before this rule existed. It reads ended
+  rows only, so a store with none pays one empty query and no eBay calls.
 
-The removal takes the **photos** with it (`listing_sync.drop_ended`: the row,
-the working copies on the volume, and the R2 objects they were offloaded to).
-That is the whole reason every caller must have a *definitive* ending —
-eBay's own answer for that item, or an `EndItem` this app just made. A status
-probe that could not tell answers `None` and changes nothing, so a rate limit
-or an API blip can never delete a listing that is still live.
+An ended listing is also hidden from **Active** and **All** while it is here
+(`ARCHIVED_STATUSES`), so a finished card never sits among the ones still
+running — that was the report — and the dashboard's *Recent listings* strip
+drops it for the same reason.
 
-Two things are deliberately **not** removed:
+### Why the removal has to be sure of itself
+
+It takes the **photos** with it: the row, the working copies on the volume,
+and the R2 objects they were offloaded to (`listing_sync.drop_ended`). So
+every caller must have a *definitive* ending — eBay's own answer for that item,
+or an `EndItem` this app just made. A status probe that could not tell answers
+`None` and changes nothing, so a rate limit or an API blip can never remove a
+listing that is still live.
+
+`ended_at` is server-owned (`SERVER_OWNED_FIELDS`) for a sharper reason than
+most of that list: a client that could set it could backdate a listing into
+being deleted on the next sweep, or forward-date one to keep it for ever. It
+is written once, at the moment the app files the listing as ended, and never
+moved by a later re-file. A record that predates the field falls back to its
+`updated_at`; one with no readable date at all is **kept**, because "we could
+not tell how old this is" is not a reason to delete somebody's photos.
+
+The grace period is published on `/api/health` as `ended_grace_days`, so the
+End dialog promises the number the sweep actually measures against rather than
+a month hardcoded in the client.
+
+### Two things deliberately not settled
 
 - **A sale.** Ending can discover that the item already sold; that is archived
-  under Sold with the same notification and storage reclaim as any other sale.
+  with the same notification and storage reclaim as any other sale.
 - **A record that was never on eBay.** `not_live` with no status means there is
   no item id — nothing there can have ended — so it goes back to being a
   **draft**, with its photos. Removing it would destroy a seller's work over a
   mis-press on a card that should not have offered End in the first place.
-
-What is lost with the ended records is relisting *in place*. Relisting was
-always a genuinely new eBay listing with a new item id; it is now started from
-the sold archive's **Relist as new listing**, or by listing the item again.
 
 ## Sold notifications & shipping labels
 

@@ -133,6 +133,13 @@ SERVER_OWNED_FIELDS = (
     # "sold in the last N days" tile counting against a date a client could
     # set, and the sold archive's ordering forgeable with it.
     "sold_price", "sold_quantity", "sold_at", "watch_count", "ebay_start_time",
+    # When a listing ENDED without selling, which is the clock the automatic
+    # removal runs on (listing_sync.ENDED_GRACE_DAYS). Server-owned for a
+    # sharper reason than the rest of this list: a client that could set it
+    # could backdate a listing into being DELETED on the next sweep, or
+    # forward-date one to keep it for ever. Only the app writes it, at the
+    # moment it files the listing as ended.
+    "ended_at",
     # The EPS URLs of an imported listing's photos, written by the sync from
     # eBay's answer and never by anything the seller does. The revise reads
     # them as its fallback ("untouched photos → reuse the live EPS URLs") and

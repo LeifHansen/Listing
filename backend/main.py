@@ -764,6 +764,13 @@ def health() -> dict:
         "anthropic_configured": config.anthropic_ready(),
         "ebay_configured": config.ebay_ready(),
         "taxonomy_configured": config.taxonomy_ready(),
+        # How long a listing of the seller's own is kept after it ends
+        # without selling, before the sweep removes it. In the same category
+        # as the booleans above -- something the app DOES, which the UI reads
+        # so its End dialog can promise the number the sweep actually
+        # measures against rather than a hardcoded month that drifts the day
+        # an operator changes it. It names no secret and no variable.
+        "ended_grace_days": listing_sync.ENDED_GRACE_DAYS,
     }
 
 
@@ -7974,12 +7981,15 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
 
 @app.post("/api/ebay/end-listing")
 def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
-    """End (withdraw) this session's live eBay listing, and remove it.
+    """End (withdraw) this session's live eBay listing, and settle the record.
 
-    An ending is a removal now: the record goes, and its photos with it. The
-    one thing that is kept is a SALE — ending can discover the item already
-    sold on eBay, and that is filed under Sold like every other sale rather
-    than thrown away. See listing_sync.drop_ended.
+    What happens to the record depends on whose work is in it: a mirror the
+    sync made is removed on the spot, and a listing this app created is kept
+    as `ended` for the grace period (listing_sync.ENDED_GRACE_DAYS) so it can
+    still be relisted, then swept. `removed` in the answer says which
+    happened. A SALE is the exception to both — ending can discover the item
+    already sold on eBay, and that is archived like every other sale. See
+    listing_sync.settle_ended.
     """
     rec = db.get_listing(req.session_id)
     if not rec:
@@ -8059,19 +8069,22 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
             _purge_session_images_best_effort(req.session_id)
         res = {**res, "status": "sold"}
     elif ended:
-        # eBay took it down (or had already), so the ending is definitive and
-        # the record goes. Reported as `removed` so the client drops the card
-        # instead of reloading it into a status that no longer exists.
+        # eBay took it down (or had already), so the ending is definitive.
+        # settle_ended decides what that costs: a mirror goes now, the
+        # seller's own listing is filed as ended and swept once its grace
+        # period is up. `removed` tells the client whether to drop the card
+        # or reload it into Inactive.
         try:
-            listing_sync.drop_ended(req.session_id, _uid(request),
-                                    why="ended by the seller")
+            removed = listing_sync.settle_ended(
+                req.session_id, rec.get("listing") or {}, rec,
+                _uid(request), why="ended by the seller")
         except errors.StorageUnavailable as exc:
-            log.error("end-listing: eBay ended %s but the removal failed: %s",
-                      req.session_id, exc)
+            log.error("end-listing: eBay ended %s but the record didn't "
+                      "settle: %s", req.session_id, exc)
             raise errors.StorageUnavailable(
-                "It came off eBay, but we couldn't remove your copy here. "
+                "It came off eBay, but we couldn't update your copy here. "
                 "Refresh in a moment — don't end it again.") from exc
-        res = {**res, "status": "ended", "removed": True}
+        res = {**res, "status": "ended", "removed": removed}
     elif res.get("not_live"):
         # Nothing on eBay to end. The record is a local draft that was
         # mislabelled live, so it is demoted rather than removed — the seller
@@ -8098,7 +8111,8 @@ SWEEP_SAMPLE = int(os.getenv("EBAY_SWEEP_SAMPLE", "100") or "100")
 def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     """Reconcile our 'live' listings with eBay: a sold item is auto-archived
     (status 'sold', its photos purged to reclaim storage), a listing that
-    ended without selling is REMOVED along with its photos, and missing eBay
+    ended without selling is settled (a mirror removed outright, the seller's
+    own filed as ended and swept after the grace period), and missing eBay
     item ids are backfilled. Definitive answers only — an API blip changes
     nothing.
 
@@ -8136,9 +8150,10 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     rows = db.list_listings(limit=LIST_CAP + 1, user_id=user["id"],
                             statuses=("published", "live"))
     capped = len(rows) > LIST_CAP
-    # Ended listings are not kept, and this is the pass that clears the ones
-    # already here — every store synced before that rule existed holds a card
-    # per listing that ever finished without selling. It reads ended rows
+    # Ended listings do not pile up, and this is the pass that clears the
+    # ones that have run out of road: the mirrors of eBay's unsold list a
+    # store collects (at once — there is nothing in one the seller made), and
+    # the seller's own listings past their grace period. It reads ended rows
     # only, so on a store with none it is one empty query and no eBay calls,
     # and it runs before the sweeps below rather than after: a seller watching
     # this sync is watching for those cards to go.
@@ -9022,9 +9037,10 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
     The record survives as long as the listing is live SOMEWHERE — that
     marketplace's entry is marked ended and the card keeps the state of the
     ones still running. Once nothing is live anywhere, the listing has ended,
-    and an ended listing is not kept: the record is removed with its photos
-    (listing_sync.drop_ended), and the answer says `removed` so the client
-    drops the card."""
+    and listing_sync.settle_ended decides what that costs: a mirror is
+    removed with its photos, the seller's own listing is filed as ended and
+    swept after the grace period. `removed` in the answer says which, so the
+    client knows whether to drop the card."""
     provider = _marketplace_or_404(marketplace)
     rec = db.get_listing(req.session_id)
     if not rec:
@@ -9061,20 +9077,23 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
         still_live = True
     prev_status = rec.get("status") or ""
     if prev_status in ("published", "live") and not still_live:
-        # Live nowhere any more: the listing has ended, and that is a removal.
-        # The provider really did end it, so a refused delete is not something
-        # to retry the ending over — it is reported, because the alternative
-        # is a card that goes on offering to revise and repromote a listing
-        # that is gone. Same rule as the eBay route.
+        # Live nowhere any more: the listing has ended. settle_ended decides
+        # whether that means removing the record now (a mirror) or keeping it
+        # as ended for its grace period (the seller's own). The provider
+        # really did end it, so a write that would not land is reported
+        # rather than retried: the alternative is a card that goes on
+        # offering to revise and repromote a listing that is gone. Same rule
+        # as the eBay route.
         try:
-            listing_sync.drop_ended(req.session_id, uid or rec.get("user_id"),
-                                    why=f"ended on {marketplace}")
+            removed = listing_sync.settle_ended(
+                req.session_id, data, rec, uid or rec.get("user_id"),
+                why=f"ended on {marketplace}")
         except errors.StorageUnavailable as exc:
             raise errors.StorageUnavailable(
-                f"{provider.label} ended the listing, but we couldn't remove "
+                f"{provider.label} ended the listing, but we couldn't update "
                 "your copy here — refresh in a moment to see the right "
                 "state.") from exc
-        return {"ok": True, **res, "removed": True}
+        return {"ok": True, **res, "removed": removed}
     new_status = (prev_status if prev_status in ("published", "live")
                   else prev_status or "draft")
     # The marketplace really did end the listing, so `ok` is not the lie —

@@ -17,7 +17,9 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
-import { ARCHIVED_STATUSES, isDraft, listingsView } from "@/lib/listingsView";
+import {
+  ARCHIVED_STATUSES, endedGraceDays, isDraft, keptWhenEnded, listingsView,
+} from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
@@ -45,26 +47,27 @@ export const TABS = [
     },
   },
   {
-    // Sold, and only sold. This tab was "Inactive" and held ended listings
-    // too — a card per listing that ever finished without selling, kept for
-    // a relist that is a fresh listing anyway, and blank once eBay stopped
-    // serving the photos of an item that old. Those are removed now, as the
-    // seller asked, so what is left here is the archive that earns its keep:
-    // what sold, for how much, and what it made. The tab id stays `inactive`
-    // because the selection is remembered across visits.
-    id: "inactive", label: "Sold", statuses: ["sold"],
-    sub: "The archive: every sale, with what it went for",
+    // Everything finished, and nothing that isn't. What changed with the
+    // automatic removal is what collects here: the store sync no longer
+    // mirrors eBay's ended listings in at all (a card per listing that ever
+    // finished, blank once eBay stopped serving its photos — the pile the
+    // seller reported), and one of the seller's OWN that ends is kept here
+    // for a month so it can be relisted, then removed on its own. Sales stay
+    // for good.
+    id: "inactive", label: "Inactive", statuses: ["ended", "sold"],
+    sub: "The archive: every sale, plus your listings that ended — relist one "
+      + "or leave it, we clear it out after a month",
     empty: {
-      illustration: ListingsIllustration, title: "Nothing sold yet",
-      message: "Every sale collects here, with what it went for and what it "
-        + "made. Listings that end without selling aren't kept — they're "
-        + "removed from the app on their own.",
+      illustration: ListingsIllustration, title: "Nothing finished yet",
+      message: "Sales collect here for good, with what each one went for. "
+        + "Listings you end stay for a month in case you want to relist, "
+        + "then they're removed on their own.",
     },
   },
   {
     id: "all", label: "All", statuses: null, hide: ARCHIVED_STATUSES,
     sub: "A live mirror of your whole eBay store — every status still in play "
-      + "(sales are archived under Sold)",
+      + "(anything finished is archived under Inactive)",
     empty: {
       illustration: ListingsIllustration, title: "No listings yet",
       message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
@@ -99,6 +102,7 @@ export function ListingsView({ search = "" }) {
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
+    health,
   } = useApp();
   const { confirm, toast } = useToast();
 
@@ -148,11 +152,12 @@ export function ListingsView({ search = "" }) {
     // folds each pair back onto the listing this app created.
     const gone = r.deduped
       ? ` ${r.deduped} duplicate${r.deduped === 1 ? "" : "s"} merged.` : "";
-    // Cards this sync took OFF the screen: listings that ended without
-    // selling, which aren't kept. Named rather than left to be noticed,
-    // because a grid that quietly shrinks is the same event as one that lost
-    // something — and "everything's already in sync" would be untrue on a run
-    // that removed five of them.
+    // Cards this sync took OFF the screen: ended listings that ran out of
+    // road — the store's mirrors of eBay's unsold ones, and any of the
+    // seller's own past the grace period. Named rather than left to be
+    // noticed, because a grid that quietly shrinks is the same event as one
+    // that lost something — and "everything's already in sync" would be
+    // untrue on a run that removed five of them.
     const cleared = r.removed
       ? ` ${r.removed} ended listing${r.removed === 1 ? "" : "s"} removed.` : "";
     toast(
@@ -177,34 +182,42 @@ export function ListingsView({ search = "" }) {
     })) deleteListing(item.id);
   };
 
-  // End a live listing straight from its card. Ending is a REMOVAL now — the
-  // listing comes off eBay and the card goes with it, photos included — so
-  // the dialog says exactly that rather than promising an archive to relist
-  // from later. (A sale is the exception, and ending can discover one.)
+  // End a live listing straight from its card. What happens to the card
+  // afterwards depends on whose work is in it — kept under Inactive for the
+  // grace period, or removed there and then for a record the store sync made
+  // — so the dialog says which rather than promising an archive that may not
+  // survive the night. (A sale is the exception to both, and ending can
+  // discover one.)
   const [endingId, setEndingId] = useState(null);
   const askEnd = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
+    const kept = keptWhenEnded(item);
+    const days = endedGraceDays(health);
     if (!(await confirm({
       title: "End this listing on eBay?",
-      message: `"${name}" comes off eBay immediately, and its card is removed `
-        + "from here — photos and all. This can't be undone.",
-      confirmLabel: "End & remove",
+      message: kept
+        ? `"${name}" comes off eBay immediately and moves to Inactive, where `
+          + `you can relist it. We clear it out after ${days} days.`
+        : `"${name}" comes off eBay immediately, and its card is removed from `
+          + "here — this one is a copy of your eBay listing, so there's "
+          + "nothing of yours in it to keep.",
+      confirmLabel: kept ? "End listing" : "End & remove",
       danger: true,
     }))) return;
     setEndingId(item.id);
     try {
       const res = await postJson("/api/ebay/end-listing", { session_id: item.id });
       await loadListings({ quiet: true });
-      // Ending can discover the listing already finished on eBay — say which
-      // way it went, because a sale is kept and an ending is not. And when
-      // the server did NOT remove it (a record with no eBay listing behind
-      // it, which goes back to being a draft) it says so in its own words
-      // rather than being reported as a removal that did not happen.
+      // The server's own answer decides the wording, not the guess the
+      // dialog made: `removed` is whether the record actually went. Ending
+      // can also discover the listing already sold, which is archived.
       toast(res.status === "sold"
-        ? "Turns out this one sold on eBay — it's archived under Sold. 🎉"
+        ? "Turns out this one sold on eBay — it's archived under Inactive. 🎉"
         : res.removed
           ? "Listing ended and removed."
-          : res.message || "Listing ended.", { kind: "success" });
+          : res.status === "ended"
+            ? "Listing ended — it's under Inactive if you want to relist it."
+            : res.message || "Listing ended.", { kind: "success" });
     } catch (e) {
       toast(`Couldn't end the listing: ${e.message}`, { kind: "error" });
     } finally {

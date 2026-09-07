@@ -179,8 +179,17 @@ describe("the dashboard's Recent listings strip", () => {
     expect(recentListings(items).map((i) => i.status)).toEqual(["live"]);
   });
 
+  it("drops an ended one for the same reason", () => {
+    // It joined the archive with the automatic removal: an ending is the
+    // last thing to touch a row, so an ended listing went to the FRONT of
+    // this strip — and relisting it is a job for the archive, not the four
+    // cards the dashboard offers to carry on with.
+    const items = [at("ended", "2026-03-04"), at("live", "2026-03-01")];
+    expect(recentListings(items).map((i) => i.status)).toEqual(["live"]);
+  });
+
   it("keeps everything the seller can still act on", () => {
-    for (const status of ["draft", "dry_run", "published", "live", "unlisted", "ended"]) {
+    for (const status of ["draft", "dry_run", "published", "live", "unlisted"]) {
       expect(recentListings([at(status, "2026-03-01")])).toHaveLength(1);
     }
   });

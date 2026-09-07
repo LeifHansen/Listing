@@ -712,12 +712,14 @@ export function useListingForm() {
       toast, chipTargets, isLive]);
 
   // End (withdraw) the live listing everywhere it's live. Once it is live
-  // nowhere, the listing has ended — and an ended listing is not kept, so the
-  // server removes the record and answers `removed`. The editor is open on
-  // it, so there is nothing left to show: it closes and goes back to the
-  // listings. A listing that turns out to have SOLD is the exception, and
-  // stays as the sale archive. eBay keeps its original endpoint; other
-  // marketplaces go through the generic one.
+  // nowhere the listing has ended, and the server settles the record: the
+  // seller's own is kept under Inactive for its grace period (so the editor
+  // stays open on it, now settled, with Relist as the action), while a copy
+  // the store sync made is removed outright — `removed` says which, and on a
+  // removal there is nothing left to show, so the editor closes and goes back
+  // to the listings. A listing that turns out to have SOLD is the exception
+  // to both. eBay keeps its original endpoint; other marketplaces go through
+  // the generic one.
   const endListing = useMemo(() => once("end-listing", async () => {
     setAiBusy(["Ending the listing…"]);
     try {
@@ -760,7 +762,10 @@ export function useListingForm() {
         openListings("active");
         return;
       }
-      toast(message || "Listing ended.", { kind: "success" });
+      toast(message
+        || (landedAs === "ended"
+          ? "Listing ended — it's under Inactive if you want to relist it."
+          : "Listing ended."), { kind: "success" });
       setSession((s) => (s ? { ...s, status: landedAs || s.status } : s));
       loadListings({ quiet: true });
     } catch (e) {

@@ -6,14 +6,18 @@
  * they were expected to press — one per listing that ever ended. Their report
  * was three words: these should be removed automatically.
  *
- * So two things have to be true on this screen, and neither was:
+ * Three things have to be true on this screen, and none was:
  *
- *  1. Ending a listing takes its card away. It used to move to an "Inactive"
- *     tab, which is where the pile came from.
- *  2. A card for a listing that ended on EBAY's side goes on its own, with
- *     nothing clicked. The store sync sweeps those records; this pins that
- *     the screen actually reloads on the sweep, because a removal the client
- *     never re-reads leaves the same card sitting there until a refresh.
+ *  1. An ended card is never among the live ones. It belongs in the archive
+ *     for as long as it is here at all.
+ *  2. Ending a listing of the seller's OWN moves it there rather than
+ *     destroying it — their photos and the AI's copy are in it, and the
+ *     server keeps it for a month so they can relist.
+ *  3. A card the store sync made — a copy of an eBay listing, holding
+ *     nothing of theirs — goes on its own, with nothing clicked. The sync
+ *     sweeps those records; this pins that the screen actually reloads on the
+ *     sweep, because a removal the client never re-reads leaves the same card
+ *     sitting there until a refresh.
  */
 import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -26,7 +30,8 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const BASE = {
   "/api/auth/me": { user: { id: 7, email: "seller@example.com" } },
-  "/api/health": { anthropic_configured: true, ebay_configured: true },
+  "/api/health": { anthropic_configured: true, ebay_configured: true,
+                   ended_grace_days: 30 },
   "/api/ebay/status": { connected: true },
   "/api/ebay/policies": { policies: [] },
   "/api/notifications": { notifications: [], unread: 0, checked: true },
@@ -44,19 +49,27 @@ function json(body) {
   });
 }
 
-const live = (id, title) => ({
+// A listing this app created and published: its photos are local files.
+const mine = (id, title) => ({
   id, status: "published", updated_at: "2026-09-01T00:00:00Z",
   listing: { title, price: 34, source: "ebay", ebay_listing_id: `1${id}`,
+             images: ["img_000.jpg"] },
+});
+
+// A copy of an eBay listing the store sync made. Its photos are eBay's, and
+// eBay stops serving them weeks after the item ends — the blank cards.
+const mirrored = (item, title, status = "published") => ({
+  id: `ebay-${item}`, status, updated_at: "2026-09-01T00:00:00Z",
+  listing: { title, price: 34, source: "ebay", ebay_listing_id: item,
              image_urls: ["https://i.ebayimg.com/x.jpg"] },
 });
 
-const ended = (id, title) => ({
-  ...live(id, title), status: "ended", listing: { title, price: 34 },
-});
+/* The server, holding the seller's rows and applying the same rule it does in
+   production: a mirror is removed when it ends, the seller's own is kept as
+   `ended` and swept later. */
+const isMirror = (row) => String(row.id).startsWith("ebay-")
+  && !(row.listing?.images || []).length;
 
-/* The server, holding the seller's rows. `sweep` is what
-   /api/ebay/sync-listings answers — the real one removes ended records and
-   reports how many went. */
 function server(state) {
   return (url, opts = {}) => {
     const path = String(url);
@@ -67,14 +80,21 @@ function server(state) {
     }
     if (path === "/api/ebay/end-listing") {
       const id = JSON.parse(opts.body || "{}").session_id;
-      // What the server does now: the listing comes off eBay and the record
-      // goes with it, so the refresh that follows must not hand it back.
-      state.listings = state.listings.filter((l) => l.id !== id);
-      return json({ ended: true, removed: true, status: "ended" });
+      const row = state.listings.find((l) => l.id === id);
+      if (isMirror(row)) {
+        state.listings = state.listings.filter((l) => l.id !== id);
+        return json({ ended: true, removed: true, status: "ended" });
+      }
+      state.listings = state.listings.map(
+        (l) => (l.id === id ? { ...l, status: "ended" } : l));
+      return json({ ended: true, removed: false, status: "ended" });
     }
     if (path === "/api/ebay/sync-listings") {
       const before = state.listings.length;
-      state.listings = state.listings.filter((l) => l.status !== "ended");
+      // The sweep: mirrors that have ended, and (not modelled here) the
+      // seller's own past the grace period.
+      state.listings = state.listings.filter(
+        (l) => !(l.status === "ended" && isMirror(l)));
       return json({ checked: 0, changed: 0,
                     removed: before - state.listings.length });
     }
@@ -111,10 +131,31 @@ async function mount(listings) {
   return {
     root, host, state, app: () => app,
     text: () => host.textContent || "",
+    tab: async (id) => {
+      await act(async () => { app.setListingsTab(id); });
+    },
     settle: async (ms = 10) => {
       await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
     },
   };
+}
+
+// The End control belonging to ONE card: every card has one, and the
+// innermost wrapper holding both the title and a ⊘ is the card.
+function endButtonFor(host, title) {
+  const card = [...host.querySelectorAll("div")].filter(
+    (d) => (d.textContent || "").includes(title)
+      && d.querySelector("button[aria-label='End listing on eBay']")).pop();
+  return card && card.querySelector("button[aria-label='End listing on eBay']");
+}
+
+async function confirmWith(label) {
+  const dialog = document.querySelector("[role='dialog']");
+  const button = [...dialog.querySelectorAll("button")]
+    .find((b) => (b.textContent || "").trim() === label);
+  expect(button, `no "${label}" button in the dialog`).toBeTruthy();
+  await act(async () => { button.click(); });
+  return dialog;
 }
 
 describe("ending a listing from its card", () => {
@@ -125,41 +166,51 @@ describe("ending a listing from its card", () => {
     document.body.innerHTML = "";
   });
 
-  it("takes the card off the grid instead of filing it under a tab", async () => {
-    const ui = await mount([live("l1", "Levi's 527 Boot Cut"),
-                            live("l2", "Buc-ee's Tie-Dye Tee")]);
-    expect(ui.text()).toContain("Buc-ee's Tie-Dye Tee");
+  it("moves the seller's own listing to the archive, and says for how long",
+    async () => {
+      const ui = await mount([mine("l1", "Levi's 527 Boot Cut"),
+                              mine("l2", "Buc-ee's Tie-Dye Tee")]);
+      await act(async () => { endButtonFor(ui.host, "Buc-ee's Tie-Dye Tee").click(); });
+      // The promise the dialog makes is the number the server sweeps on.
+      const dialog = document.querySelector("[role='dialog']");
+      expect(dialog.textContent).toContain("30 days");
+      await confirmWith("End listing");
+      await ui.settle();
 
-    // The End control that belongs to THAT card: every card has one, and
-    // the innermost wrapper holding both the title and a ⊘ is the card.
-    const card = [...ui.host.querySelectorAll("div")].filter(
-      (d) => (d.textContent || "").includes("Buc-ee's Tie-Dye Tee")
-        && d.querySelector("button[aria-label='End listing on eBay']")).pop();
-    const end = card.querySelector("button[aria-label='End listing on eBay']");
-    expect(end).toBeTruthy();
-    await act(async () => { end.click(); });
-    // The dialog says what it is about to do: this is a removal, not a move.
-    const dialog = document.querySelector("[role='dialog']");
-    expect(dialog.textContent).toContain("removed");
-    const confirm = [...dialog.querySelectorAll("button")]
-      .find((b) => (b.textContent || "").trim() === "End & remove");
-    await act(async () => { confirm.click(); });
-    await ui.settle();
+      // Off the live grid...
+      expect(ui.text()).not.toContain("Buc-ee's Tie-Dye Tee");
+      // ...but still theirs, under the archive, where Relist lives.
+      await ui.tab("inactive");
+      expect(ui.text()).toContain("Buc-ee's Tie-Dye Tee");
+      await act(async () => { ui.root.unmount(); });
+    });
 
-    expect(ui.app().listingsState.items.map((i) => i.id)).toEqual(["l1"]);
-    expect(ui.text()).not.toContain("Buc-ee's Tie-Dye Tee");
-    await act(async () => { ui.root.unmount(); });
-  });
+  it("removes a card the store sync made, because nothing in it is theirs",
+    async () => {
+      const ui = await mount([mine("l1", "Levi's 527 Boot Cut"),
+                              mirrored("998877", "Buc-ee's Tie-Dye Tee")]);
+      await act(async () => { endButtonFor(ui.host, "Buc-ee's Tie-Dye Tee").click(); });
+      const dialog = document.querySelector("[role='dialog']");
+      expect(dialog.textContent).toContain("removed");
+      await confirmWith("End & remove");
+      await ui.settle();
 
-  it("has no tab left that would show an ended listing", async () => {
-    // The archive is sales only now. A record still stored as ended (an old
-    // one, before the sweep reaches it) must not reappear under a tab that
-    // says "Sold".
-    const ui = await mount([ended("e1", "Ended long ago"),
-                            { ...live("s1", "Sold one"), status: "sold" }]);
-    await act(async () => { ui.app().setListingsTab("inactive"); });
-    expect(ui.text()).toContain("Sold one");
-    expect(ui.text()).not.toContain("Ended long ago");
+      expect(ui.app().listingsState.items.map((i) => i.id)).toEqual(["l1"]);
+      await ui.tab("inactive");
+      expect(ui.text()).not.toContain("Buc-ee's Tie-Dye Tee");
+      await act(async () => { ui.root.unmount(); });
+    });
+
+  it("never shows an ended card among the live ones", async () => {
+    // The report itself. An ended listing lives in the archive while it is
+    // here at all — never in All, beside the listings still running.
+    const ui = await mount([mine("l1", "Levi's 527 Boot Cut"),
+                            { ...mine("e1", "Ended last week"), status: "ended" }]);
+    await ui.tab("all");
+    expect(ui.text()).toContain("Levi's 527 Boot Cut");
+    expect(ui.text()).not.toContain("Ended last week");
+    await ui.tab("inactive");
+    expect(ui.text()).toContain("Ended last week");
     await act(async () => { ui.root.unmount(); });
   });
 });
@@ -175,14 +226,12 @@ describe("a listing that ended on eBay's side", () => {
   it("leaves the grid on the quiet re-check, with nothing clicked", async () => {
     // The store mirror was rebuilt recently, so no import runs on mount and
     // nothing else reloads the list. What is left is the half-hourly status
-    // re-check — the pass that actually sweeps ended records — and it is the
-    // only thing that can take this card off the screen.
+    // re-check — the pass that sweeps ended records — and it is the only
+    // thing that can take this card off the screen.
     markAutoSynced(7);
-    const ui = await mount([live("l1", "Levi's 527 Boot Cut"),
-                            ended("e1", "Buc-ee's Tie-Dye Tee")]);
-    // Under "All", which is where the seller was looking at it: the archive
-    // subtracts sales, not endings, so an ended card sat among the live ones.
-    await act(async () => { ui.app().setListingsTab("all"); });
+    const ui = await mount([mine("l1", "Levi's 527 Boot Cut"),
+                            mirrored("998877", "Buc-ee's Tie-Dye Tee", "ended")]);
+    await ui.tab("inactive");
     expect(ui.text()).toContain("Buc-ee's Tie-Dye Tee");
     expect(ui.state.listings).toHaveLength(2);
 

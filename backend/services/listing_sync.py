@@ -13,11 +13,22 @@ The record id for an imported listing is "ebay-<itemId>", which is stable
 across syncs (so re-importing updates in place instead of duplicating) and can
 never collide with a session id.
 
-A listing that finishes WITHOUT selling is not kept. eBay's ended items are
-never mirrored in, and a record whose listing ends is deleted rather than
-filed under a status — see `drop_ended` for what that costs and why the
-signal has to be definitive. Sold listings are unaffected: a sale is the
-archive this app exists to keep.
+A listing that finishes WITHOUT selling does not pile up. eBay's ended items
+are never mirrored in, and an ended record is removed rather than kept for
+ever — but on a clock that depends on whose work it is:
+
+  * A MIRROR (`ebay-<item>`, this sync's own row, no photos the seller added
+    here) goes at once. There is nothing in it that is not still on eBay, and
+    eBay stops serving its photos a few weeks after the item ends — those are
+    the blank cards that piled up.
+  * A listing THIS APP created — its photos on the volume, the AI's copy, a
+    relist to make from it — is kept for ENDED_GRACE_DAYS and removed after
+    that. The grace period is the whole point: nothing the seller made is
+    deleted by a background sweep the same day it ends.
+
+See `drop_ended` for what a removal costs and why the ending behind it has to
+be definitive. Sold listings are unaffected: a sale is the archive this app
+exists to keep.
 
 Every function is best-effort about individual listings: one bad item logs and
 is skipped rather than failing the whole sync.
@@ -32,6 +43,7 @@ from typing import Callable, Optional
 
 from .. import db, ebay_auth, objstore, storage
 from ..config import log
+from ..errors import StorageUnavailable
 from ..models import Listing
 from . import (ebay_account, ebay_trading, notifications, publish_guard,
                sync_merge, taxonomy)
@@ -475,15 +487,135 @@ def drop_ended(rid: str, user_id: str, why: str = "") -> bool:
     return gone
 
 
-def drop_ended_records(records, user_id: str) -> set[str]:
-    """Remove every record already stored as `ended`; returns the ids removed.
+# How long an ended listing THIS APP created is kept before the sweep removes
+# it. The seller's own photos and the AI's copy are in it and a relist is a
+# real thing to want, so a background pass must not delete one the day it
+# ends. A mirror is not on this clock — see `keeps_grace`.
+ENDED_GRACE_DAYS = float(os.getenv("EBAY_ENDED_GRACE_DAYS", "30") or 30)
 
-    The backlog half of the rule. Ending stopped keeping records the moment
-    this shipped, but a store that has been syncing for months holds a card
-    per listing that ever ended — imported mirrors of eBay's unsold list,
-    mostly, long past the ~90 days eBay keeps their photos for. Those are what
-    the seller was looking at, and no ending will ever revisit them, so a
-    sweep over what a sync already read is what clears them.
+
+def keeps_grace(record: dict) -> bool:
+    """Is this ended record worth keeping for the grace period?
+
+    The line is whose work is in it, not who listed the item:
+
+    * A MIRROR the sync made (`ebay-<item>`) holds nothing that is not still
+      on eBay — no local photos, no drafted copy, nothing typed here. Once it
+      has ended it is a blank card waiting to happen, because eBay stops
+      serving an ended item's photos within weeks. False: remove it now.
+    * Unless the seller added PHOTOS to it here. Then it holds the only copy
+      of those, and it is theirs like any other listing.
+    * Anything else is a listing this app created. True.
+    """
+    if not _is_mirror(record):
+        return True
+    return bool((record.get("listing") or {}).get("images"))
+
+
+def _ended_since(record: dict) -> Optional[datetime]:
+    """When this record ended, as an aware datetime, or None if unreadable.
+
+    `ended_at` is stamped when the app files a listing as ended. Records that
+    ended before that field existed fall back to `updated_at`, which for an
+    ended row is the sweep or the End that settled it — close enough to
+    measure a month against, and it stops a store full of old ended records
+    from being granted a fresh grace period by the deploy that added this.
+    """
+    listing = record.get("listing") or {}
+    raw = str(listing.get("ended_at") or "").strip()
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            log.info("sync: %s has an unreadable ended_at (%r)",
+                     record.get("id"), raw)
+    stamp = record.get("updated_at")
+    if isinstance(stamp, datetime):
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    if isinstance(stamp, str) and stamp.strip():
+        try:
+            parsed = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def grace_expired(record: dict, now: Optional[datetime] = None) -> bool:
+    """Has a kept ended listing outlived its grace period?
+
+    A record whose end date cannot be read at all answers False — kept. The
+    sweep deletes photos, and "we could not tell how old this is" is not a
+    reason to; the seller can still remove it themselves.
+    """
+    since = _ended_since(record)
+    if since is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - since).total_seconds() >= ENDED_GRACE_DAYS * 86400
+
+
+def stamp_ended(data: dict, now: Optional[datetime] = None) -> dict:
+    """The listing, with `ended_at` set if it has none yet.
+
+    Not overwritten: the first ending is what the grace period runs from, and
+    a later sweep re-filing the same record must not push the clock forward
+    and keep it for ever.
+    """
+    out = dict(data or {})
+    if not str(out.get("ended_at") or "").strip():
+        out["ended_at"] = (now or datetime.now(timezone.utc)).isoformat()
+    return out
+
+
+def file_ended(rid: str, data: dict, user_id: str) -> None:
+    """Keep this ended listing, stamped with when it ended.
+
+    The other half of `drop_ended`, for the records that are the seller's own
+    work. The status is what puts it in the archive tab, and `ended_at` is
+    what the sweep will measure the grace period against.
+
+    RAISES StorageUnavailable when the write did not land, for the same
+    reason the removal does: the listing really did come off eBay, and a
+    record still saying it is live is a card offering to revise and repromote
+    something that is gone. `db.upsert_listing` swallows its own failures, so
+    the result is the only place that shows.
+    """
+    if db.enabled() and not db.upsert_listing(
+            rid, stamp_ended(data), status="ended", user_id=user_id):
+        raise StorageUnavailable(f"couldn't record {rid} as ended")
+
+
+def settle_ended(rid: str, data: dict, record: dict, user_id: str,
+                 why: str = "") -> bool:
+    """File or remove ONE listing that has just ended. True if it was removed.
+
+    The single place the two halves of the rule are chosen between, so the
+    End button, the status sweep and the marketplace routes cannot drift on
+    which listings survive an ending. Raises what either half raises — a
+    write nobody could make is reported, never assumed.
+    """
+    if keeps_grace(record):
+        file_ended(rid, data, user_id)
+        return False
+    drop_ended(rid, user_id, why=why or "a mirror of an ended eBay listing")
+    return True
+
+
+def sweep_ended_records(records, user_id: str,
+                        now: Optional[datetime] = None) -> set[str]:
+    """Remove the ended records that have run out of road; return their ids.
+
+    Two kinds go: a mirror of an eBay listing that ended (at once — there is
+    nothing in it the seller made), and one of the seller's own that has sat
+    past the grace period. Everything else is left exactly where it is.
+
+    This is also the backlog pass. A store that has been syncing for months
+    holds a card per listing that ever ended, nearly all of them mirrors of
+    eBay's unsold list, long past the ~90 days eBay keeps their photos for.
+    Those are what the seller was looking at, and no ending will ever revisit
+    them, so a sweep over rows a sync has already read is what clears them.
 
     One row that will not delete does not sink the pass: the next sweep finds
     it again, the same tolerance `_drop_stale_mirrors` has.
@@ -493,8 +625,14 @@ def drop_ended_records(records, user_id: str) -> set[str]:
         rid = str(rec.get("id") or "").strip()
         if not rid or (rec.get("status") or "") != "ended":
             continue
+        if keeps_grace(rec):
+            if not grace_expired(rec, now):
+                continue
+            why = f"ended over {ENDED_GRACE_DAYS:g} days ago"
+        else:
+            why = "a mirror of an ended eBay listing"
         try:
-            if drop_ended(rid, user_id, why="already ended"):
+            if drop_ended(rid, user_id, why=why):
                 gone.add(rid)
         except Exception as exc:  # noqa: BLE001 - one stale row, not the pass
             log.info("sync: couldn't remove ended listing %s: %s", rid, exc)
@@ -502,7 +640,7 @@ def drop_ended_records(records, user_id: str) -> set[str]:
 
 
 def clear_ended(user_id: str, limit: int = 500) -> int:
-    """Sweep the seller's store for ended records and remove them.
+    """Sweep the seller's store for ended records that have run out of road.
 
     Called from the cheap sync that runs whenever the app is open, so the
     backlog clears itself without waiting for a full store import — which a
@@ -512,7 +650,7 @@ def clear_ended(user_id: str, limit: int = 500) -> int:
 
     Account-blind on purpose, unlike everything else in this module: this is
     about what THIS APP is holding, not about whose eBay store the listing was
-    in. A record left behind by an account the seller has since disconnected
+    in. A mirror left behind by an account the seller has since disconnected
     is exactly the stale card the sweep is for, and no ending will ever come
     for it.
     """
@@ -523,7 +661,7 @@ def clear_ended(user_id: str, limit: int = 500) -> int:
         log.info("sync: couldn't read ended listings for user=%s: %s",
                  user_id, exc)
         return 0
-    return len(drop_ended_records(rows, user_id))
+    return len(sweep_ended_records(rows, user_id))
 
 
 # How many SOLD listings to mirror alongside the active ones, and how far
@@ -633,9 +771,9 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently SOLD ones (status 'sold', capped at
     EBAY_SYNC_INACTIVE_LIMIT). Listings that ENDED without selling are not
-    mirrored, and any record of one already here is removed as the run goes
-    (`removed`). Returns {"found", "imported", "updated", "deduped",
-    "removed", "failed"}.
+    mirrored, and ended records here that have run out of road are removed as
+    the run goes (`removed` — see sweep_ended_records). Returns {"found",
+    "imported", "updated", "deduped", "removed", "failed"}.
 
     `on_progress(phase, done, total)` is called as the run advances — one
     GetItem per listing means a real store takes minutes, and the caller runs
@@ -740,13 +878,13 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # but never got an answer for is reclaimed instead of imported as a
     # second card. See _index_by_publish_key.
     by_key = _index_by_publish_key(known.values())
-    # Anything already filed as ended goes now, before the indexes above are
-    # used to match this run's items: a record that is about to be removed
-    # must not be the one an active listing gets merged into. Swept from
-    # `all_known` rather than `known` — an ended row stamped with an account
+    # The ended records that have run out of road go now, before the indexes
+    # above are used to match this run's items: a record that is about to be
+    # removed must not be the one an active listing gets merged into. Swept
+    # from `all_known` rather than `known` — a mirror stamped with an account
     # the seller has since disconnected is exactly the stale card this is
     # for, and nothing else will ever come back for it.
-    cleared = drop_ended_records(all_known, user_id)
+    cleared = sweep_ended_records(all_known, user_id)
     for rid in cleared:
         known.pop(rid, None)
     if cleared:
@@ -930,9 +1068,10 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
 def refresh_statuses(token: str, user_id: str, records: list[dict],
                      sales: Optional[dict] = None, account: str = "") -> int:
     """Re-check imported listings that are still marked live: a sold item is
-    archived, one that ended without selling is REMOVED (see drop_ended), and
-    watch/sold counters are refreshed. Returns how many records changed — a
-    removal counts as one. A None status (API blip) changes nothing.
+    archived, one that ended without selling is settled (removed outright if
+    it is a mirror, otherwise filed as ended and swept after the grace period
+    — see settle_ended), and watch/sold counters are refreshed. Returns how
+    many records changed. A None status (API blip) changes nothing.
 
     `account` is the connected eBay username; records belonging to a different
     one are skipped. GetItem answers for ANY seller's item, so without this a
@@ -990,16 +1129,18 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
         if status is None:
             continue
         if status == "ended":
-            # Removed, not filed. This is eBay's own answer about THIS item
-            # (GetItem, via listing_status) and it is the definitive ending
-            # drop_ended requires: the listing is over and nothing sold, so
-            # there is no archive to keep and no card to leave behind. A probe
-            # that could not tell answered None and never reached here.
+            # eBay's own answer about THIS item (GetItem, via listing_status),
+            # which is the definitive ending both halves below require — a
+            # probe that could not tell answered None and never reached here.
+            # A mirror is removed on the spot; a listing this app made is
+            # filed with the date it ended, and the sweep takes it once the
+            # grace period is up. See settle_ended.
             try:
-                if drop_ended(rec["id"], user_id, why="ended on eBay"):
-                    changed += 1
+                settle_ended(rec["id"], rec.get("listing") or {}, rec,
+                             user_id, why="ended on eBay")
+                changed += 1
             except Exception as exc:  # noqa: BLE001 - one row, not the sweep
-                log.warning("sync: couldn't remove ended listing %s: %s",
+                log.warning("sync: couldn't settle ended listing %s: %s",
                             rec["id"], exc)
             continue
         data = rec.get("listing") or {}
@@ -1047,7 +1188,7 @@ def reconcile_recent(token: str, user_id: str, records: list[dict],
     those ids get the per-item probe — which is what rules out the false
     positive (a multi-quantity listing appears in the sold list while still
     live) and decides each record: archived as sold with fresh counters, or
-    removed because it ended without selling.
+    settled as ended without selling.
     A list that can't be fetched contributes nothing rather than failing."""
     def _ids(fetch, what: str) -> set[str]:
         try:

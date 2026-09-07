@@ -1,5 +1,6 @@
-"""A finished listing must never stay Active: a sale is archived, and a
-listing that ended without selling is REMOVED.
+"""A finished listing must never stay Active: a sale is archived, and one that
+ended without selling is SETTLED — the mirror removed, the seller's own kept
+for its grace period.
 
 Three paths guard that:
 
@@ -13,11 +14,16 @@ Three paths guard that:
   item, so a listing that ended ON eBay leaves Active on the next sync at any
   store size — without waiting its turn under the per-item probe caps.
 
-- drop_ended(): the removal itself. It takes the row AND the photos, so the
-  ending behind it has to be definitive — eBay's own answer for this item, or
-  an EndItem this app just made. A probe that could not tell changes nothing.
+- settle_ended(): which of the two endings this is. A mirror the sync made
+  (`ebay-<item>`, no photos added here) is removed with its photos; a listing
+  this app created is filed as ended and dated, for the sweep to take once
+  the grace period is up. Either way the ending behind it has to be
+  definitive — eBay's own answer for this item, or an EndItem this app just
+  made. A probe that could not tell changes nothing.
 """
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -211,19 +217,19 @@ def reconciled(monkeypatch):
     return run
 
 
-def test_a_listing_that_ended_on_ebay_is_removed(reconciled):
-    """The card goes, rather than moving to an archive nobody asked for. Its
-    photos go with it — for an imported listing they were always eBay's, and
-    eBay stops serving them a few weeks after an item ends, which is what the
-    blank ended cards in a synced store were."""
+def test_a_mirror_that_ended_on_ebay_is_removed(reconciled):
+    """A record the sync made holds nothing the seller made here, and eBay
+    stops serving an ended item's photos within weeks — which is what the
+    blank ended cards in a synced store were. It goes at once."""
+    mirror = _rec(listing_sync.record_id(ITEM), ITEM)
     trading = FakeTradingLists(unsold=[ITEM],
                                statuses={ITEM: ("ended", 0, 2)})
     changed, handled, fake_db, notes, store = reconciled(
-        [_rec("sess-a", ITEM), _rec("sess-b", "999888777666")], trading)
+        [mirror, _rec("sess-b", "999888777666")], trading)
     assert changed == 1
-    assert handled == {"sess-a"}
-    assert fake_db.deleted == ["sess-a"]
-    assert store.purged == ["sess-a"]
+    assert handled == {mirror["id"]}
+    assert fake_db.deleted == [mirror["id"]]
+    assert store.purged == [mirror["id"]]
     # Nothing was written back under a status: the record is gone, not filed.
     assert fake_db.upserts == []
     # The record eBay never mentioned wasn't probed or touched.
@@ -231,14 +237,42 @@ def test_a_listing_that_ended_on_ebay_is_removed(reconciled):
     assert notes.sold == []
 
 
-def test_a_listing_ebay_will_not_speak_for_is_never_removed(reconciled):
+def test_the_sellers_own_ended_listing_is_kept_and_dated(reconciled):
+    """The other half. This record's photos are on our own volume and its
+    copy was written here, so a sweep must not delete it the day it ends —
+    it is filed as ended, with the date the grace period runs from."""
+    trading = FakeTradingLists(unsold=[ITEM],
+                               statuses={ITEM: ("ended", 0, 2)})
+    changed, handled, fake_db, notes, store = reconciled(
+        [_rec("sess-a", ITEM)], trading)
+    assert changed == 1
+    assert handled == {"sess-a"}
+    assert fake_db.deleted == [] and store.purged == []
+    assert ("sess-a", "ended") in fake_db.upserts
+    assert fake_db.saved["sess-a"]["ended_at"], "no date to measure the grace against"
+
+
+def test_a_mirror_the_seller_added_photos_to_is_kept_too(reconciled):
+    """An imported listing the seller has since put their OWN photos on holds
+    the only copy of them. It stops being a disposable mirror."""
+    mirror = _rec(listing_sync.record_id(ITEM), ITEM)
+    mirror["listing"]["images"] = ["img_000.jpg"]
+    trading = FakeTradingLists(unsold=[ITEM],
+                               statuses={ITEM: ("ended", 0, 2)})
+    _changed, _handled, fake_db, _notes, store = reconciled([mirror], trading)
+    assert fake_db.deleted == [] and store.purged == []
+    assert (mirror["id"], "ended") in fake_db.upserts
+
+
+def test_a_listing_ebay_will_not_speak_for_is_never_settled(reconciled):
     """The whole safety of the removal is that it acts on a definitive
     ending. An unreadable probe (a rate limit, a blip) answers None, and a
-    listing that may well be live must survive it."""
+    listing that may well be live must survive it untouched."""
     trading = FakeTradingLists(unsold=[ITEM], statuses={ITEM: (None, 0, 0)})
-    changed, _, fake_db, _, store = reconciled([_rec("sess-a", ITEM)], trading)
+    changed, _, fake_db, _, store = reconciled(
+        [_rec(listing_sync.record_id(ITEM), ITEM)], trading)
     assert changed == 0
-    assert fake_db.deleted == [] and store.purged == []
+    assert fake_db.deleted == [] and fake_db.upserts == [] and store.purged == []
 
 
 def test_a_removal_the_database_refuses_is_not_counted(reconciled, monkeypatch):
@@ -250,10 +284,91 @@ def test_a_removal_the_database_refuses_is_not_counted(reconciled, monkeypatch):
     def refuse(listing_id, user_id=None):
         raise RuntimeError("the database is unreachable")
 
-    changed, _, fake_db, _, store = reconciled([_rec("sess-a", ITEM)], trading,
-                                               delete=refuse)
+    changed, _, fake_db, _, store = reconciled(
+        [_rec(listing_sync.record_id(ITEM), ITEM)], trading, delete=refuse)
     assert changed == 0
     assert store.purged == [], "nothing is purged for a row that is still there"
+
+
+# ------------------------------------------------------- the grace period
+
+def _ended(rid, days_ago=None, images=(), ended_at=None):
+    """An ended record, optionally dated `days_ago`."""
+    when = ended_at
+    if when is None and days_ago is not None:
+        when = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    return {"id": rid, "user_id": "u1", "status": "ended",
+            "listing": {"ebay_listing_id": ITEM, "title": rid,
+                        "ended_at": when or "", "images": list(images)}}
+
+
+@pytest.fixture
+def swept(monkeypatch):
+    """Run the ended sweep over some records; returns (removed ids, db)."""
+    def run(records):
+        fake_db, store = FakeDb(), FakeStorage()
+        monkeypatch.setattr(listing_sync, "db", fake_db)
+        monkeypatch.setattr(listing_sync, "storage", store)
+        monkeypatch.setattr(listing_sync, "objstore", FakeObjStore())
+        return listing_sync.sweep_ended_records(records, "u1"), fake_db, store
+    return run
+
+
+def test_the_sweep_leaves_a_listing_inside_its_grace_period(swept):
+    gone, fake_db, store = swept([_ended("sess-a", days_ago=3)])
+    assert gone == set()
+    assert fake_db.deleted == [] and store.purged == []
+
+
+def test_the_sweep_removes_one_past_its_grace_period(swept):
+    gone, fake_db, store = swept(
+        [_ended("sess-a", days_ago=listing_sync.ENDED_GRACE_DAYS + 1)])
+    assert gone == {"sess-a"}
+    assert store.purged == ["sess-a"], "its photos go with it"
+
+
+def test_the_sweep_takes_a_mirror_whatever_its_date(swept):
+    """A mirror is not on the clock at all: there is nothing in it to keep."""
+    gone, _fake_db, _store = swept(
+        [_ended(listing_sync.record_id(ITEM), days_ago=0)])
+    assert gone == {listing_sync.record_id(ITEM)}
+
+
+def test_an_undated_record_falls_back_to_when_it_was_last_touched(swept):
+    """Records that ended before `ended_at` existed still have to age out —
+    and must not be granted a fresh month by the deploy that added it.
+
+    As an ISO string, which is the shape `db.list_listings` hands back; the
+    aware datetime below is what a caller working from live rows would pass."""
+    old = _ended("sess-a")
+    old["updated_at"] = (datetime.now(timezone.utc)
+                         - timedelta(days=listing_sync.ENDED_GRACE_DAYS + 2)
+                         ).isoformat()
+    assert swept([old])[0] == {"sess-a"}
+    fresh = _ended("sess-b")
+    fresh["updated_at"] = datetime.now(timezone.utc) - timedelta(days=1)
+    assert swept([fresh])[0] == set()
+
+
+def test_a_record_with_no_readable_date_is_kept(swept):
+    """The sweep deletes photos. "We could not tell how old this is" is not a
+    reason to — the seller can still remove it themselves."""
+    gone, fake_db, store = swept([_ended("sess-a")])
+    assert gone == set() and fake_db.deleted == [] and store.purged == []
+
+
+def test_a_sale_is_never_swept(swept):
+    sold = _ended("sess-a", days_ago=999)
+    sold["status"] = "sold"
+    assert swept([sold])[0] == set()
+
+
+def test_the_first_ending_is_the_one_the_clock_runs_from():
+    """A later sweep re-filing the same record must not push the date forward
+    and keep it for ever."""
+    first = listing_sync.stamp_ended({})["ended_at"]
+    again = listing_sync.stamp_ended({"ended_at": first})
+    assert again["ended_at"] == first
 
 
 def test_a_listing_that_sold_on_ebay_is_archived_with_a_notification(reconciled):
