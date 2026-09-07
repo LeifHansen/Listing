@@ -94,7 +94,15 @@ def _no_traffic_report(monkeypatch):
     assert about a listing's metrics is only ever about offers and watchers.
     """
     metrics._CACHE.clear()
-    monkeypatch.setattr(metrics, "_traffic", lambda *_a, **_k: {})
+
+    def no_traffic(_token, ids, covered=None):
+        # A report that ANSWERED and had nothing to say, which is what
+        # `covered` distinguishes from one that could not be read at all.
+        if covered is not None:
+            covered.update(ids)
+        return {}
+
+    monkeypatch.setattr(metrics, "_traffic", no_traffic)
     yield
     metrics._CACHE.clear()
 

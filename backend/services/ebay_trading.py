@@ -818,7 +818,14 @@ def sold_sales(token: str, limit: Optional[int] = None,
     return out
 
 
-def active_listing_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, dict]:
+# One sweep of the active list wants the whole list and nothing else from it,
+# so it takes eBay's maximum page size rather than the gentler _PAGE_SIZE the
+# id walks use: 25 pages of 200 reaches 5,000 live listings instead of 2,500.
+_SWEEP_PAGE_SIZE = 200
+
+
+def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
+                          status: Optional[dict] = None) -> dict[str, dict]:
     """{item_id: {"watchers": n, "offers_received": n}} for every active
     listing on the account. Backs the metrics overlay — the Sell APIs expose
     neither number, and routing the call through here keeps the endpoint
@@ -827,6 +834,13 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, 
     ONE walk carries both, because one response already does: WatchCount and
     BestOfferDetails/BestOfferCount sit on the same <Item>. Asking twice would
     spend two of the account's Trading calls on a response we already had.
+
+    Pass a `status` dict to learn whether the walk finished: it gets
+    {'complete': bool}, false when eBay says there are more pages of active
+    listings than `max_pages` allows. Callers fill a missing listing in as
+    "0 watchers", which is only true of a listing the sweep actually reached —
+    past the page cap the honest answer is that nothing is known. The same
+    goes for its offers.
 
     `offers_received` is eBay's BestOfferCount, and it is exactly what its
     name says — how many Best Offers the listing has RECEIVED, not how many
@@ -837,17 +851,21 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, 
     store.
     """
     out: dict[str, dict] = {}
+    complete = False
     page = 1
     while page <= max_pages:
         body = (
             "<ActiveList><Include>true</Include>"
-            f"<Pagination><EntriesPerPage>{_PAGE_SIZE}</EntriesPerPage>"
+            f"<Pagination><EntriesPerPage>{_SWEEP_PAGE_SIZE}</EntriesPerPage>"
             f"<PageNumber>{page}</PageNumber></Pagination></ActiveList>"
             "<DetailLevel>ReturnAll</DetailLevel>"
         )
         root = _call("GetMyeBaySelling", token, body)
         cont = _find(root, "ActiveList")
         if cont is None:
+            # eBay answered without the container: the account has no active
+            # listings to walk, so the sweep is over and it is over honestly.
+            complete = True
             break
         items = _findall(cont, "ItemArray/Item")
         for item in items:
@@ -859,8 +877,15 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES) -> dict[str, 
                 }
         total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
         if page >= max(1, total_pages) or not items:
+            complete = True
             break
         page += 1
+    if not complete:
+        log.warning("active-list sweep stopped at the %d-page cap with more "
+                    "active listings to read; %d listings covered",
+                    max_pages, len(out))
+    if status is not None:
+        status["complete"] = complete
     return out
 
 
