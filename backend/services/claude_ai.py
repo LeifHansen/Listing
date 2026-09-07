@@ -1182,16 +1182,22 @@ Rules:
     Occasion, estimated sizes). Fill these — a good inference beats a blank —
     the seller is shown a "review" flag on them.
 - Use the aspect's EXACT name as given.
-- FIXED-CHOICE aspects come in two shapes, and a value for either MUST be
-  copied VERBATIM from that aspect's allowed list — the verbatim copy is the
-  only thing that makes eBay's fixed-value specifics actually get selected:
-  * "(choose exactly one of: ...)" — eBay's dropdown. Give one value.
-  * "(CHECKBOXES - ...)" — eBay's multi-select tick boxes, and the specifics
+- Aspects that arrive with a value list. TWO things vary, independently: the
+  SHAPE of the answer, and whether the list is closed.
+  * SHAPE. "(choose exactly one of: ...)" is eBay's dropdown — give one value.
+    "(CHECKBOXES - ...)" is eBay's multi-select tick boxes, and the specifics
     that ship empty most often, so treat them as a priority: emit a SEPARATE
-    entry (same name, different value) for EVERY listed value that genuinely
-    applies — typically two to four. One is fine when only one applies; none
-    only when the item truly matches none. Never comma-join them into one
-    value, and never stop at the first match when others also apply.
+    entry (same name, different value) for EVERY value that genuinely applies
+    — typically two to four. One is fine when only one applies; none only when
+    the item truly matches none. Never comma-join them into one value, and
+    never stop at the first match when others also apply.
+  * CLOSED OR OPEN. A line saying "allowed values" or "choose exactly one of"
+    is CLOSED: the value MUST be copied VERBATIM from that list — the verbatim
+    copy is the only thing that makes eBay's fixed-value specifics actually get
+    selected, and anything else is refused at publish. A line saying "eBay
+    suggests" is OPEN: those are the values eBay's own listing form offers for
+    this aspect, so copy one verbatim whenever it fits, and give your own
+    concise value when none of them does.
   When a listed value is only a near fit, prefer the closest defensible one at
   "medium" over leaving the aspect blank; omit it only when nothing fits.
 - An aspect shown as "(plain number)" takes ONLY a number like "14" (one
@@ -1251,37 +1257,81 @@ _ASPECTS_SYSTEM = (
 _MAX_SHOWN_VALUES = 150
 
 
-def _choice_line(a: dict, multi: bool) -> str:
-    """The prompt line for a fixed-choice aspect. MULTI ones are eBay's
-    multi-select tick boxes — the "Item Specifics checkboxes" — and are labelled
-    as such so the model ticks every value that applies instead of one."""
+def _choice_line(a: dict, multi: bool, fixed: bool) -> str:
+    """The prompt line for an aspect eBay ships a value list with.
+
+    Two things vary here and they vary INDEPENDENTLY, which is exactly what
+    this used to run together. Cardinality decides the shape of the answer:
+    MULTI is what eBay draws as tick boxes, whatever its mode. Mode decides
+    what the list MEANS: SELECTION_ONLY makes it law (an off-list value is
+    refused at publish), FREE_TEXT makes it eBay's own SUGGESTIONS — the
+    values other sellers used in this category, which the app fetches on every
+    lookup and, until now, showed to nobody.
+
+    That mattered most on the checkbox aspects. Plenty of eBay's tick-box
+    specifics (Features, Occasion, Style, Material in many categories) come
+    back FREE_TEXT + MULTI, so they missed the SELECTION_ONLY test above and
+    were described to the model as one plain free-text box — no mention of
+    the boxes, and none of eBay's suggested values. They filled with a single
+    value or with nothing.
+    """
     values = a["values"]
     shown = ", ".join(values[:_MAX_SHOWN_VALUES])
     if len(values) > _MAX_SHOWN_VALUES:
-        shown += (f", ... (+{len(values) - _MAX_SHOWN_VALUES} more allowed values "
-                  "not shown - if the right one is missing here, give it verbatim "
-                  "anyway)")
+        shown += (f", ... (+{len(values) - _MAX_SHOWN_VALUES} more "
+                  + ("allowed" if fixed else "suggested")
+                  + " values not shown - if the right one is missing here, "
+                  "give it verbatim anyway)")
+    # The list is eBay's own suggestion set, not a closed one: say so, or the
+    # model treats it as closed and leaves the aspect blank when the real
+    # answer isn't on it.
+    offer = (f"allowed values: {shown}" if fixed else
+             f"eBay suggests: {shown} - prefer eBay's exact wording when one "
+             "of these fits, and give your own value when none does")
     if multi:
         return (f'- "{a["name"]}" (CHECKBOXES - tick every value that applies by '
-                f'repeating this aspect once per value; allowed values: {shown})')
-    return f'- "{a["name"]}" (choose exactly one of: {shown})'
+                f'repeating this aspect once per value; {offer})')
+    if fixed:
+        return f'- "{a["name"]}" (choose exactly one of: {shown})'
+    return f'- "{a["name"]}" (free text; {offer})'
 
 
-def _aspect_lines(named: list[dict]) -> str:
+def _aspect_lines(named: list[dict], held: Optional[dict] = None) -> str:
+    """One prompt line per aspect. `held` is {aspect name (lower): [values the
+    listing already carries]} — only the coverage pass passes it, and only
+    checkbox aspects can use it: those are asked about again while PARTLY
+    ticked, so the line has to say which boxes are already ticked or the model
+    re-offers the same one and adds nothing."""
     lines = []
     for a in named:
         dtype = (a.get("data_type") or "STRING").upper()
         fmt = (a.get("format") or "").lower()
         is_multi = (a.get("cardinality") or "SINGLE") == "MULTI"
         multi = " (may repeat: several values allowed)" if is_multi else ""
-        if a.get("mode") == "SELECTION_ONLY" and a.get("values"):
-            lines.append(_choice_line(a, is_multi))
+        fixed = a.get("mode") == "SELECTION_ONLY"
+        values = a.get("values") or []
+        if fixed and values:
+            lines.append(_choice_line(a, is_multi, True))
         elif dtype == "DATE" or "yyyy" in fmt:
             lines.append(f'- "{a["name"]}" (4-digit year)')
         elif dtype == "NUMBER":
             lines.append(f'- "{a["name"]}" (plain number)')
+        elif values:
+            # Free text, and eBay named some values for it anyway. Those are
+            # the suggestions its own listing form offers the seller.
+            lines.append(_choice_line(a, is_multi, False))
+        elif is_multi:
+            # A tick-box aspect eBay offered no values for: still several
+            # answers, just nothing to tick from.
+            lines.append(f'- "{a["name"]}" (CHECKBOXES - free text; give one '
+                         'entry per value that applies)')
         else:
             lines.append(f'- "{a["name"]}" (free text){multi}')
+        if is_multi:
+            already = (held or {}).get(a["name"].strip().lower()) or []
+            if already:
+                lines[-1] += (f' [already ticked: {", ".join(already)} - add any '
+                              'OTHERS that apply; do not repeat these]')
     return "\n".join(lines)
 
 
@@ -1594,10 +1644,16 @@ def _coverage_context(listing: Listing) -> str:
 
 
 def fill_missing_aspects(image_paths: list[Path], listing: Listing,
-                         blanks: list[dict]) -> list[ItemSpecific]:
+                         blanks: list[dict],
+                         held: Optional[dict] = None) -> list[ItemSpecific]:
     """Second look at the item specifics `blanks` left empty. `blanks` is the
     taxonomy aspect list narrowed by taxonomy.fillable_blanks — identifiers
     are already gone from it, and this function does not put them back.
+
+    `blanks` can also carry CHECKBOX aspects that are only partly ticked (see
+    fillable_blanks' top_up_multi): `held` says which values each already has,
+    so the pass is asked for the boxes that are still missing rather than the
+    one that is already there.
 
     Returns validated ItemSpecifics, the same shape fill_aspects returns, so
     the caller merges both through one path."""
@@ -1619,7 +1675,8 @@ def fill_missing_aspects(image_paths: list[Path], listing: Listing,
             # block changes listing to listing and a breakpoint here would
             # write a cache entry nothing ever reads.
             {"type": "text",
-             "text": "ITEM SPECIFICS STILL BLANK:\n" + _aspect_lines(named)},
+             "text": "ITEM SPECIFICS STILL TO ANSWER:\n"
+                     + _aspect_lines(named, held)},
         ],
         messages=[{"role": "user", "content": content}],
     )

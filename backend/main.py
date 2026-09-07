@@ -1766,11 +1766,22 @@ def _cover_remaining_specifics(listing: Listing, image_paths: list,
     if not _coverage_on():
         return 0
     try:
-        blanks = taxonomy.fillable_blanks(listing, aspects)
+        # top_up_multi: a checkbox aspect holding ONE value is not answered —
+        # it is one box ticked out of the several that apply, and every box
+        # not ticked is a buyer filter this listing is absent from. The values
+        # it already holds ride along so the pass is asked for the others.
+        blanks = taxonomy.fillable_blanks(listing, aspects, top_up_multi=True)
         if len(blanks) < _COVERAGE_MIN_BLANKS:
             return 0
+        asked = blanks[:_COVERAGE_MAX_BLANKS]
+        wanted = {(a.get("name") or "").strip().lower() for a in asked}
+        held: dict[str, list[str]] = {}
+        for s in listing.item_specifics:
+            k = (s.name or "").strip().lower()
+            if k in wanted and (s.value or "").strip():
+                held.setdefault(k, []).append(s.value.strip())
         filled = claude_ai.fill_missing_aspects(
-            image_paths, listing, blanks[:_COVERAGE_MAX_BLANKS])
+            image_paths, listing, asked, held)
     except Exception as exc:  # noqa: BLE001 - the second look is optional
         log.info("specifics coverage skipped (cat=%s): %s",
                  listing.category_id, exc)

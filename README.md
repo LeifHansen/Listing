@@ -423,6 +423,38 @@ off the item or it is wrong, and *"prefer a defensible inference to a blank"*
 in the same prompt as an empty UPC box is how a model talks itself into twelve
 digits that belong to somebody else's product.
 
+**The checkboxes, and eBay's own suggestions.** Two properties of an eBay
+aspect vary *independently*, and running them together is what left the
+tick-box specifics half-filled:
+
+- **Cardinality** is the shape of the answer. `MULTI` is what eBay draws as
+  checkboxes — *Features*, *Style*, *Occasion*, *Season*.
+- **Mode** is what the aspect's value list *means*. `SELECTION_ONLY` makes it
+  law: a value not on it is refused at publish. `FREE_TEXT` makes it eBay's own
+  **suggestions** — the values its listing form offers under the box, which the
+  Taxonomy lookup returns for a great many free-text aspects.
+
+Every checkbox path used to test for `SELECTION_ONLY` *and* `MULTI`, so the
+tick-box aspects eBay reports as free text fell through all of them: described
+to the model as one plain text box, drawn in the editor as a single input, and
+eBay's suggested values fetched on every lookup and shown to nobody. Now
+cardinality alone decides the shape — checkboxes in the editor, "tick every
+value that applies" in the prompt — and mode alone decides whether the list is
+quoted as *allowed values* or as *eBay suggests* (with an **add your own** box
+beside an open list, and a `datalist` of the same suggestions on single-value
+free-text fields, since a publish can be refused over wording eBay would have
+handed us).
+
+**One ticked box is not an answered aspect.** A jacket whose *Features* says
+only "Pockets" is missing Breathable, Lined and Water Resistant, and each is a
+filter it never appears in — but holding any value at all read as *answered*,
+so the coverage pass was never shown the aspect. It now tops up partly-ticked
+multi-selects (`fillable_blanks(..., top_up_multi=True)`), told which boxes are
+already ticked so it adds rather than repeats. An aspect the **seller** typed or
+confirmed is never topped up, and the dashboard's "how many specifics are
+blank" count deliberately does not ask this wider question — answering it there
+would tell a seller a finished listing is unfinished.
+
 ## API endpoints
 
 | Method | Path | Purpose |
