@@ -198,10 +198,19 @@ export function AppProvider({ children }) {
   // every editor session reads and nobody's store rearranges mid-session.
   const [storeCategoriesData, setStoreCategoriesData] = useState(null);
 
+  /** Refresh the eBay panel's state, and RETURN it.
+   *
+   * The return value matters for a caller that needs the answer NOW rather
+   * than on the next render: `ebay` starts out as the signed-out shape and
+   * fills in a moment later, so anything that reads the cache to decide
+   * whether to refuse an action can refuse it for a seller who is perfectly
+   * well connected and merely early. Returns null when the lookup failed —
+   * which is not "disconnected", and callers must not read it as one.
+   */
   const loadEbayStatus = useCallback(async () => {
     try {
       const s = await api("/api/ebay/status");
-      setEbay({
+      const next = {
         connected: !!s.connected,
         env: s.env || "",
         username: s.username || "",
@@ -214,8 +223,11 @@ export function AppProvider({ children }) {
         // one — see the banner in Settings.
         foreign_listings: s.foreign_listings || 0,
         unowned_listings: s.unowned_listings || 0,
-      });
+      };
+      setEbay(next);
+      return next;
     } catch (e) { /* keep previous */ }
+    return null;
   }, []);
 
   // Publishing is live if EITHER the user connected their eBay account or the

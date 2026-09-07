@@ -99,12 +99,12 @@ describe("the admin console gate", () => {
     expect(entry).toBeDefined();
 
     await act(async () => { entry.click(); });
-    // AnimatePresence mode="wait" plays the old view's exit animation before
-    // mounting the console, so give the transition real time to finish.
-    for (let i = 0; i < 10 && !text().includes("Overview"); i++) {
-      await act(async () => { await new Promise((r) => setTimeout(r, 100)); });
-    }
-
+    // No transition to wait out any more: the screens used to render inside
+    // AnimatePresence mode="wait", which held the incoming one unmounted
+    // until the outgoing one had finished animating away — the wait this
+    // test used to have to sit through, and the way Home could come up
+    // blank (see appNeverShowsABlankScreen.test.jsx). A screen mounts on the
+    // commit that asks for it.
     expect(entry.getAttribute("aria-current")).toBe("page");
     expect(text()).toContain("Overview");
     expect(text()).toContain("Accounts");

@@ -353,6 +353,14 @@ class IdentifyResult(BaseModel):
     # Tag/label bounding boxes the identify pass spotted ({photo, box, kind}),
     # consumed by the zoom-and-transcribe step — not shown in the UI.
     tags: list = []
+    # Product identifiers read off the item's barcodes and plates, already
+    # CHECK-DIGIT VERIFIED by services.barcodes: [{"value", "kind",
+    # "symbology", "source"}]. The verified ones are written onto the listing
+    # as UPC/EAN/ISBN item specifics; the ones that failed their check digit
+    # never appear here — they become a "confirm this code" note instead,
+    # because a misread identifier names somebody else's product in eBay's
+    # catalogue. Not shown in the UI; it is the pricing lookup's best input.
+    identifiers: list = []
     # True when the server-side enrichment (category item specifics) already
     # ran for this draft — the editor's auto-autofill effect checks this so it
     # doesn't re-run (and re-charge) the same passes right after the preview
