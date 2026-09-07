@@ -56,9 +56,11 @@ def market(monkeypatch):
     calls: list[dict] = []
 
     def _install(answer):
-        def suggest(query, category_id=None, condition=None, strategy=""):
+        def suggest(query, category_id=None, condition=None, strategy="",
+                    gtin=None):
             calls.append({"query": query, "category_id": category_id,
-                          "condition": condition, "strategy": strategy})
+                          "condition": condition, "strategy": strategy,
+                          "gtin": gtin})
             if isinstance(answer, Exception):
                 raise answer
             return answer
@@ -153,7 +155,8 @@ def test_a_title_too_specific_to_match_falls_back_to_its_head(market,
     answers = {}
     calls: list[str] = []
 
-    def suggest(query, category_id=None, condition=None, strategy=""):
+    def suggest(query, category_id=None, condition=None, strategy="",
+                gtin=None):
         calls.append(query)
         return answers.get(query, {"suggestion": None, "checked": True})
 

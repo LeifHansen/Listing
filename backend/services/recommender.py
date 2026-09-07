@@ -19,6 +19,32 @@ from typing import Optional
 STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
 FEW_PHOTOS = 3    # fewer than this → suggest adding photos
 
+# How long a listing gets left alone after the AI fill has run on it, before
+# "Check details" is allowed to nudge about the notes the fill could not
+# answer.
+#
+# This exists because of what the seller actually sees. They open Home, find
+# "Fill in details · 12" with a button on it, press the button, and wait
+# several minutes while the AI reads twelve listings' photos and pushes the
+# new specifics to eBay. It works. And the group they just cleared is
+# replaced, in the same slot, by "Check details · 12" — the same twelve
+# listings, still flagged, and this time with NO button on the group at all:
+# just a list to open one at a time.
+#
+# Read from the outside that is indistinguishable from the button having done
+# nothing, which is exactly how it was reported ("it should fill in all
+# possible missing fields... I don't know why you keep showing me a list
+# view... they are not updating as far as I can tell"). The notes behind it
+# are real — "exact measurements", "confirm the signature" — but they are, by
+# construction, the things the fill just declined to invent, and turning them
+# into a fresh chore in the same minute asks the seller to finish work they
+# have this second asked the app to finish for them.
+#
+# So the nudge waits a day. Nothing is lost: these notes have been on the
+# listing since it was drafted and are not urgent, and after the quiet period
+# they come back exactly as before.
+VERIFY_QUIET_DAYS = 1
+
 
 def _age_days(iso: Optional[str]) -> Optional[int]:
     if not iso:
@@ -196,13 +222,18 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
         worth_filling = blank_specifics >= MIN_BLANK_SPECIFICS
         reason = (f"{blank_specifics} of eBay's item specifics are still blank "
                   "— buyers filter by these.")
+    # How long ago the fill last ran on this listing, in days — None when it
+    # never has. The quiet period below is the only thing that reads it.
+    since_filled = _age_days(enriched) if enriched else None
     if not enriched and worth_filling:
         add("specifics", "Fill in details", reason, 45)
-    elif notes:
+    elif notes and (since_filled is None or since_filled >= VERIFY_QUIET_DAYS):
         # Notes on a listing whose specifics are filled are what the fill
         # could NOT answer: a measurement, an authentication, a flaw only the
         # person holding it can see. They earn a nudge to LOOK, never a button
-        # that would charge for the same empty pass again.
+        # that would charge for the same empty pass again — and never in the
+        # minutes right after the fill ran, which is the whole point of
+        # VERIFY_QUIET_DAYS above.
         n = len(notes)
         add("verify", "Check details",
             f"{n} thing{'' if n == 1 else 's'} the AI left for you to check.", 40)
