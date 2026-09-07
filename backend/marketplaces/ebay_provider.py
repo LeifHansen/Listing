@@ -965,6 +965,19 @@ class EbayProvider:
                 listing.mark_dirty(*unsent)
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
+            # And the on-disk copy, which the create/relist path a few hundred
+            # lines below has always written and this one never did. The row
+            # is the truth wherever there is one, so this is a mirror — but
+            # it is the mirror a deployment with no DATABASE_URL runs on, and
+            # the one every read falls back to when an upsert did not land.
+            # A revise that reached eBay and left the local file holding the
+            # OLD specifics is the shape of "it says it worked and nothing
+            # changed".
+            try:
+                storage.save_listing(session_id, listing)
+            except Exception as exc:  # noqa: BLE001 - the row is the truth
+                log.warning("revise: disk mirror not updated for %s: %s",
+                            session_id, exc)
             if pushed_local:
                 # eBay accepted our copies: re-baseline the checksums and, in
                 # the background (after the upsert above, so it can't be

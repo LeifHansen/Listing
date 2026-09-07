@@ -844,6 +844,18 @@ problem:
     forever and was charged for on every press. What is left for the seller
     afterwards is to *look*, which is the **Check details** suggestion instead.
 
+  **Check details waits a day** (`recommender.VERIFY_QUIET_DAYS`). It used not
+  to, and that turned a working button into a broken-looking one: the seller
+  pressed "Enrich all" on twelve listings, waited several minutes while the AI
+  read their photos and pushed the new specifics to eBay, and the group they
+  had just cleared was replaced *in the same slot* by "Check details · 12" —
+  the same twelve listings, still flagged, and this time with no button on the
+  group at all, just a list to open one at a time. From outside, that is
+  indistinguishable from the button having done nothing, and it was reported
+  as exactly that. The notes behind it are real, but they are by construction
+  the things the fill has just declined to invent, so they are not a chore to
+  hand back in the same minute. After the quiet period they return unchanged.
+
 Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind
 a single button. The rules bulk runs follow — `services/bulk_actions.py`:

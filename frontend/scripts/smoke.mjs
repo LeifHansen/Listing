@@ -79,6 +79,16 @@ async function visit(page, view, errs) {
   await settle(page);
   const bodyText = (await page.textContent('body')) || '';
   if (bodyText.trim().length < 20) errs.push('rendered an empty page');
+  // The BODY is not a strict enough question, and a seller found out why: the
+  // nav bars render outside <main>, so a screen with nothing at all in it
+  // still leaves a body full of "Home Sell Shop Settings" and sails past the
+  // check above. That is precisely what "clicking home brings me to a dead
+  // screen" looked like — nav bar there, everything under it blank, no crash
+  // and no error to report. So the screen itself has to say something.
+  const screenText = ((await page.textContent('main').catch(() => '')) || '').trim();
+  if (screenText.length < 20) {
+    errs.push(`the ${view} screen rendered nothing under the nav bar`);
+  }
   return bodyText;
 }
 
