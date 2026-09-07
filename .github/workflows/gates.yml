@@ -27,9 +27,17 @@ on:
 # release exists, so the pin buys review rather than staleness.
 
 jobs:
-  # Lint + the pure-unit suite. Deliberately does NOT install the heavy image
-  # stack; the tests that need it importorskip here and run in `smoke` below,
-  # which fails on a skip so they cannot quietly stop running.
+  # Lint + the pure-unit suite: the fast half of the signal, ~35 seconds.
+  # Deliberately does NOT install the heavy image stack, so anything needing
+  # it importorskips here -- two thirds of the files do -- and runs in `smoke`
+  # below, which now runs the WHOLE directory and fails on a skip, so a test
+  # cannot quietly stop running by being left off a list.
+  #
+  # What this job proves on its own is that the modules with no heavy
+  # dependencies really have none: services/listing_prompt.py and
+  # services/barcodes.py hold rules (the prompt text; whether a barcode's
+  # check digit lets it reach a listing) that must stay testable without the
+  # SDK installed, and an import creeping into either would fail here.
   #
   # cryptography is not optional despite the name: backend/db.py imports
   # backend/crypto.py at module scope, so without it every test that touches
@@ -49,12 +57,19 @@ jobs:
       - name: Tests
         run: pytest backend/tests -q
 
-  # The image gate. The fast job above skips the image stack, so the pass
-  # that decides what a seller's photo looks like on eBay -- as shot or cut
-  # out, upright, no EXIF, resumable -- would run nowhere. Pillow only: no
-  # rembg, no onnxruntime, no model download. The model is stood in for by a
-  # matte the tests draw themselves, so what is checked is what the pass does
-  # with a matte.
+  # The image gate, and it is about a DEPENDENCY PROFILE rather than about
+  # coverage: `smoke` below runs every test in the suite, this one included,
+  # so nothing here would go unrun without it. What it proves that `smoke`
+  # cannot is that the pass deciding what a seller's photo looks like on eBay
+  # -- as shot or cut out, upright, no EXIF, resumable -- works on PILLOW
+  # ALONE: no rembg, no onnxruntime, no model download, with the model stood
+  # in for by a matte the tests draw themselves. It is also ten seconds, so
+  # a broken photo pass says so before the four-minute job gets there.
+  #
+  # Its list of files is therefore a deliberate narrowing, not the kind that
+  # bit us in `smoke` -- see the note there. A new photo test left off this
+  # list still runs (in `smoke`); it just is not additionally proved against
+  # Pillow on its own.
   cutout:
     name: Cutout safety
     runs-on: ubuntu-latest
@@ -152,83 +167,52 @@ jobs:
         run: |
           grep -vE '^(rembg|onnxruntime)' requirements.txt > /tmp/ci-reqs.txt
           pip install -r /tmp/ci-reqs.txt pytest
-      # This is the only job with fastapi AND Pillow together, so it is the
-      # only place these can run at all. In `checks` they importorskip on the
-      # missing Pillow and in `cutout` there is no fastapi — which meant they
-      # were passing by never executing. The skip guard below is what stops
-      # that happening again.
-      - name: API tests
+      # THE WHOLE SUITE, against the dependencies the app actually ships with.
+      #
+      # This is the only job with fastapi AND Pillow AND anthropic together,
+      # so it is the only place a test that importorskips any of them can run
+      # at all: in `checks` they skip on the missing stack, and in `cutout`
+      # there is no fastapi. Two thirds of this suite's files importorskip
+      # something.
+      #
+      # It used to name them one by one, and the list is what made green stop
+      # meaning anything. 44 test files — a fifth of the suite — appeared in
+      # no job's list, so they executed NOWHERE: they skipped in `checks`,
+      # were absent here, and reported nothing at all. That is not a
+      # hypothetical. #250 changed pricing.suggest()'s signature, the doubles
+      # in one of those 44 files went stale, every comp lookup started raising
+      # TypeError — which the caller swallows as "eBay is down", so drafts
+      # would silently have stopped being price-checked — and all four gates
+      # went green over it. The file was added to the list by hand afterwards,
+      # which fixes that one file and leaves the mechanism intact.
+      #
+      # So there is no list. The directory is the list, exactly as the deps
+      # above are requirements.txt rather than a second hand-written copy of
+      # it — the same lesson, one step later. A test file cannot be forgotten
+      # here, because nobody has to remember it.
+      #
+      # ~2500 tests, about two and a half minutes.
+      - name: The whole backend suite
         shell: bash
         run: |
           set -o pipefail
-          pytest backend/tests/test_readiness.py backend/tests/test_image_order.py \
-                 backend/tests/test_bulk_resume.py backend/tests/test_aspect_checkboxes.py \
-                 backend/tests/test_sold_archive.py backend/tests/test_store_scale.py \
-                 backend/tests/test_ebay_reconnect_identity.py \
-                 backend/tests/test_ebay_save_path.py \
-                 backend/tests/test_ebay_optin_route.py \
-                 backend/tests/test_session_alias_authorization.py \
-                 backend/tests/test_ebay_deletion_notices.py \
-                 backend/tests/test_strict_persistence.py \
-                 backend/tests/test_get_is_side_effect_free.py \
-                 backend/tests/test_public_surface.py \
-                 backend/tests/test_security_headers.py \
-                 backend/tests/test_no_create_on_unknown.py \
-                 backend/tests/test_sweep_scope.py \
-                 backend/tests/test_policy_terms_consent.py \
-                 backend/tests/test_csp_script_hashes.py \
-                 backend/tests/test_conflict_endpoint.py \
-                 backend/tests/test_partial_listing_update.py \
-                 backend/tests/test_payments_status_states.py \
-                 backend/tests/test_purchase_errors.py \
-                 backend/tests/test_sync_state_survives_a_save.py \
-                 backend/tests/test_taxonomy_quota_guard.py \
-                 backend/tests/test_listings_page_is_complete_or_says_so.py \
-                 backend/tests/test_marketplace_writes_are_not_assumed.py \
-                 backend/tests/test_a_merge_never_deletes_what_it_did_not_save.py \
-                 backend/tests/test_a_save_that_did_not_land_is_not_saved.py \
-                 backend/tests/test_a_full_disk_is_not_an_internal_error.py \
-                 backend/tests/test_a_storage_failure_keeps_its_own_name.py \
-                 backend/tests/test_no_route_answers_internal_server_error.py \
-                 backend/tests/test_a_photo_we_cannot_sign_for_is_not_missing.py \
-                 backend/tests/test_a_lookup_failure_reads_as_english.py \
-                 backend/tests/test_a_blip_does_not_blame_the_sellers_zip.py \
-                 backend/tests/test_the_list_does_not_ship_the_sync_ledger.py \
-                 backend/tests/test_a_settings_panel_shows_what_is_saved.py \
-                 backend/tests/test_a_number_we_could_not_read_is_not_zero.py \
-                 backend/tests/test_an_erasure_that_failed_is_not_finished.py \
-                 backend/tests/test_a_listing_we_cannot_read_is_not_missing.py \
-                 backend/tests/test_a_publish_that_cannot_check_does_not_create.py \
-                 backend/tests/test_a_count_is_not_capped_by_a_page_size.py \
-                 backend/tests/test_a_bulk_action_looks_up_what_it_was_given.py \
-                 backend/tests/test_the_unlink_reaches_what_the_banner_counted.py \
-                 backend/tests/test_the_sweep_reaches_the_live_end_of_a_big_store.py \
-                 backend/tests/test_a_truncated_page_can_say_how_many.py \
-                 backend/tests/test_the_older_listings_can_be_reached.py \
-                 backend/tests/test_an_interrupted_import_keeps_what_it_paid_for.py \
-                 backend/tests/test_a_fanned_out_unknown_outcome_is_not_a_refusal.py \
-                 backend/tests/test_condition_follows_the_category.py \
-                 backend/tests/test_enrich_fills_in_the_group.py \
-                 backend/tests/test_the_health_alarm_reads_what_the_app_serves.py \
-                 backend/tests/test_a_2xl_shirt_is_not_a_regular_size_type.py \
-                 backend/tests/test_an_edited_photo_is_not_served_from_before_the_edit.py \
-                 backend/tests/test_an_empty_fill_does_not_count_as_filled.py \
-                 backend/tests/test_a_waist_by_inseam_size_reaches_ebay.py \
-                 backend/tests/test_an_unhandled_error_answers_with_a_reference.py \
-                 backend/tests/test_a_browser_crash_reaches_the_server.py \
-                 backend/tests/test_the_error_feed_is_not_a_second_admin_door.py \
-                 backend/tests/test_the_triage_job_reads_what_the_app_serves.py \
-                 backend/tests/test_the_lookup_does_not_run_unless_asked_for.py \
-                 backend/tests/test_a_batch_can_be_stopped.py \
-                 backend/tests/test_the_account_a_record_is_judged_against.py \
-                 backend/tests/test_the_sellers_hints_reach_the_ai.py \
-                 backend/tests/test_the_specifics_ebay_suggests_get_filled.py \
-                 backend/tests/test_the_ai_never_drafts_a_whole_dollar_price.py \
-                 backend/tests/test_a_draft_is_priced_against_the_market.py \
-                 backend/tests/test_a_note_for_a_person_is_not_a_fill.py \
+          pytest backend/tests \
                  -q -rs | tee /tmp/api-tests.log
+          # NOTHING may skip here, and that is the whole guarantee. This job
+          # has every dependency the app has, so a skip means a test decided
+          # it could not run in the one place built to run it — which is
+          # indistinguishable, in the green tick, from a test that passed.
+          # -rs above prints the reason for each, so a failure says which
+          # test and why rather than only that the count was not zero.
+          #
+          # If a test ever genuinely cannot run in CI (it wants rembg, say,
+          # which is the one thing deliberately left out of the deps above),
+          # do NOT let it skip: mark it and DESELECT it here with
+          # `-m "not <marker>"`. Deselecting is visible in this file and
+          # keeps this guard meaning what it says; skipping hides the
+          # exclusion inside the test and buys back the whole problem.
           if grep -qE '[0-9]+ skipped' /tmp/api-tests.log; then
-            echo "::error::API tests skipped in the only job that can run them"
+            echo "::error::A test skipped in the only job that can run it — see the reasons above. Fix the test or deselect it explicitly (see the note in gates.yml); never leave it skipping here."
             exit 1
           fi
       # A database, because half the smoke test is a seller signing up: with
