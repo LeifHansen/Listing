@@ -20,6 +20,12 @@ and nothing else, so there is no stale copy to send.
 The allowed set is deliberately small: the fields the card controls actually
 offer. A patch route that accepts anything is a full replace with extra steps
 — the caller can just send every field and reintroduce the bug.
+
+`listing_format` joined that set for the selling-format picker on a draft
+card, and it is the one member with a rule of its own: an unrecognised value
+does not fail, it publishes. The Trading request branches on
+`startswith("AUCTION")`, so "auctoin" goes out as a Buy It Now at whatever
+`price` holds and nothing anywhere says so.
 """
 from __future__ import annotations
 
@@ -137,4 +143,79 @@ def test_a_value_the_model_rejects_is_a_client_error(api):
                         json={"category_id": {"not": "a category"}})
 
     assert 400 <= resp.status_code < 500, resp.text
+    assert saved == {}
+
+
+# --- the selling format ------------------------------------------------
+#
+# Buy It Now, auction, or both, chosen from the card rather than from inside
+# the editor. The format and the starting bid travel together: an auction is
+# priced by its opening bid, so a route that took one without the other would
+# let a card switch a draft to a format it could not then finish.
+
+
+def test_the_selling_format_can_be_changed_from_a_card(api):
+    client, saved = api
+    resp = client.patch("/api/listings/lst1", json={"listing_format": "AUCTION"})
+
+    assert resp.status_code == 200, resp.text
+    assert saved["listing_format"] == "AUCTION"
+    assert saved["title"] == "The newer title someone just fixed"
+
+
+def test_the_starting_bid_can_be_set_from_a_card(api):
+    """Without this the picker sets a format the card cannot then price, and
+    the seller has to open the editor anyway."""
+    client, saved = api
+    resp = client.patch("/api/listings/lst1",
+                        json={"listing_format": "AUCTION_BIN",
+                              "auction_start_price": 0.99})
+
+    assert resp.status_code == 200, resp.text
+    assert saved["listing_format"] == "AUCTION_BIN"
+    assert saved["auction_start_price"] == 0.99
+    # The Buy It Now price is untouched by the switch: it is what the seller
+    # wants for the item, and the opening bid is where they let it start.
+    assert saved["price"] == 30.0
+
+
+def test_a_format_we_cannot_publish_is_refused(api):
+    """The failure this guards is silent, which is why it is guarded at all:
+    an unrecognised format is not rejected by eBay, it is published as a Buy
+    It Now."""
+    client, saved = api
+    resp = client.patch("/api/listings/lst1", json={"listing_format": "auctoin"})
+
+    assert resp.status_code == 400, resp.text
+    assert saved == {}
+
+
+def test_a_format_is_stored_as_the_publisher_reads_it(api):
+    """Case and stray whitespace are the caller's, not a different format."""
+    client, saved = api
+    resp = client.patch("/api/listings/lst1", json={"listing_format": " auction "})
+
+    assert resp.status_code == 200, resp.text
+    assert saved["listing_format"] == "AUCTION"
+
+
+def test_the_format_is_queued_for_ebay(api):
+    """Marked dirty like every other patched field. eBay will not revise a
+    live listing's format -- services/ebay_trading.REVISABLE_FIELDS leaves it
+    out -- and `unsendable_revise_fields` is what tells the seller so. It can
+    only do that if the edit was recorded."""
+    client, saved = api
+    client.patch("/api/listings/lst1", json={"listing_format": "AUCTION"})
+
+    assert "listing_format" in saved["dirty_fields"]
+
+
+def test_the_auction_length_stays_a_full_editor_field(api):
+    """Not every field the format uses belongs on a card. The length defaults
+    to seven days and is chosen in the editor; the card would be a third
+    control on an already-dense tile."""
+    client, saved = api
+    resp = client.patch("/api/listings/lst1", json={"auction_duration": "DAYS_10"})
+
+    assert resp.status_code == 400, resp.text
     assert saved == {}

@@ -43,8 +43,8 @@ from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
-from .models import (TITLE_MAX_CHARS, ImageOrderRequest, ItemSpecific,
-                     Listing, MarketplaceState, PublishRequest,
+from .models import (LISTING_FORMATS, TITLE_MAX_CHARS, ImageOrderRequest,
+                     ItemSpecific, Listing, MarketplaceState, PublishRequest,
                      RefineRequest, SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        duplicates, ebay,
@@ -5351,8 +5351,17 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
 # purpose: a patch route that accepts anything is a full replace with extra
 # steps, and the caller can then send every field and reintroduce the very
 # lost update this exists to prevent.
+#
+# `listing_format` and `auction_start_price` are here for the format picker on
+# a draft card (frontend FormatQuickPick). They travel together: an auction is
+# priced by its starting bid, so a route that took the format but not the bid
+# would let a card switch a draft to a format it could not then finish -- and
+# the seller would have to open the editor anyway, which is the trip the
+# picker exists to save. `auction_duration` is deliberately NOT here; it
+# stays a full-editor field, defaulted to seven days.
 _PATCHABLE = ("fulfillment_policy_id", "category_id", "category_suggestion",
-              "price", "quantity", "condition")
+              "price", "quantity", "condition",
+              "listing_format", "auction_start_price")
 
 
 @app.patch("/api/listings/{session_id}")
@@ -5388,6 +5397,20 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
         raise HTTPException(
             400, "Nothing to change. Send one of: "
                  + ", ".join(_PATCHABLE) + ".")
+    # Checked here rather than on the model, because the model is also what
+    # every stored listing is loaded THROUGH: a validator that refused an
+    # unrecognised format would turn a bad value already on disk into a
+    # listing nobody can open or fix. This is the door being opened, so this
+    # is where the value is checked. Unlike a bad price, a bad format fails
+    # silently -- the publisher's branch is `startswith("AUCTION")`, so
+    # "auctoin" goes out as a Buy It Now and nothing anywhere says so.
+    if "listing_format" in changes:
+        fmt = str(changes["listing_format"] or "").strip().upper()
+        if fmt not in LISTING_FORMATS:
+            raise HTTPException(
+                400, "That selling format isn't one we can publish. Pick one "
+                     "of: " + ", ".join(LISTING_FORMATS) + ".")
+        changes["listing_format"] = fmt
 
     merged = dict(rec.get("listing") or {})
     merged.update(changes)

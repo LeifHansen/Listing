@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { DraftCategoryEdit } from "./CategoryQuickPick";
+import { DraftFormatEdit } from "./FormatQuickPick";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
@@ -530,6 +531,12 @@ export function DraftsStrip({ search = "" }) {
                   <div className={cn(list && "min-w-0 w-full sm:w-56")}>
                     <DraftCategoryEdit item={item} />
                   </div>
+                  {/* How it sells. Beside category and shipping because it is
+                      the same kind of decision — per item, made while looking
+                      at the item — and it was the one of the three that could
+                      only be made inside the editor, one draft at a time. */}
+                  <DraftFormatEdit item={item}
+                    className={cn(list ? "min-w-0 w-full sm:w-64" : "mt-1.5")} />
                   <DraftShipping item={item} className={cn(list ? "min-w-0" : undefined)} />
                 </div>
               )}
