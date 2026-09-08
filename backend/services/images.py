@@ -26,6 +26,7 @@ that has nobody to tell and no retry (see INFER_WAIT_SECONDS).
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -79,6 +80,47 @@ _ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "192") or 192)
 # close-up texture, a dark item on a dark table — and shipping it would ship
 # a white square. The photo is kept as shot instead, and says so.
 _MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
+
+# --- and whether what it kept is an OBJECT ----------------------------------
+#
+# Coverage above is a floor on HOW MUCH survives, and for a long time it was
+# the only question asked. It cannot see the failure that actually reaches
+# sellers, which is a matte that keeps plenty and keeps the wrong thing.
+#
+# The report that produced these two numbers: five photos of one framed
+# watercolour. The two wide shots came out right. The three close-ups came
+# back as smears of brushwork and a tree floating on white — the frame, the
+# mount and most of the painting deleted. Every one of them passed the
+# coverage floor comfortably, because a fifth of the frame did survive; it
+# was simply a fifth made of the wrong pixels.
+#
+# That is the salient-object model working exactly as built and being pointed
+# at the wrong kind of picture. Handed a photograph OF A PICTURE, it finds the
+# subject the picture depicts — the tree, the boat — rather than the physical
+# thing being sold, and dutifully deletes the artwork around it. Art, prints,
+# posters, book covers, trading cards, patterned fabric and printed packaging
+# are all the same trap, and they are a large share of what resells.
+#
+# So a second question, about SHAPE rather than quantity. One product is one
+# object, and a matte of it is one solid blob:
+#
+#   * the largest connected region must be most of what was kept. Confetti —
+#     a dozen brushstrokes scattered over the frame — fails here.
+#   * what was kept must fill its own bounding box. A tree at one edge and a
+#     boat at the other span nearly the whole photo while covering little of
+#     it; a framed picture, kept properly, fills its box almost entirely.
+#
+# Both are deliberately generous, because the two error directions are not
+# equal: a cutout wrongly refused leaves the seller's photo EXACTLY AS SHOT
+# and says why, while a cutout wrongly shipped destroys it and says nothing.
+# The first costs a feature that was opt-in anyway. The second is what this
+# comment is about.
+_MIN_LARGEST_REGION = float(os.getenv("REMBG_MIN_LARGEST_REGION", "0.6") or 0.6)
+_MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
+# The mask is judged at this size. Shape is a low-frequency question, and the
+# region labelling below is pure Python — at 160px it is a few thousand cells
+# and about a millisecond, against millions of pixels and a visible stall.
+_SHAPE_SIDE = int(os.getenv("REMBG_SHAPE_SIDE", "160") or 160)
 
 _INFER_LOCK = threading.Lock()
 # How long a caller queues for the one inference slot. A person watching the
@@ -230,6 +272,64 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
     return shifted
 
 
+def _shape_stats(kept: Image.Image) -> tuple[float, float]:
+    """(the largest connected region's share of the kept area, the kept area's
+    share of its own bounding box) for a binary mask.
+
+    Both answer "is this one object?" — the first against a matte broken into
+    pieces, the second against one spread thinly across the frame. Measured on
+    a copy no bigger than _SHAPE_SIDE: shape survives the downscale, and the
+    labelling below is pure Python.
+
+    (0.0, 0.0) for an empty mask, so a caller that reaches here without
+    checking coverage still refuses rather than dividing by zero.
+    """
+    w, h = kept.size
+    scale = _SHAPE_SIDE / max(w, h)
+    if scale < 1:
+        # BOX averages the pixels it merges rather than sampling one of them,
+        # and the low threshold then keeps a cell any part of the item touched.
+        # Both err toward CONNECTED, which errs toward letting the cutout
+        # through — the direction that cannot destroy a photo.
+        kept = kept.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                           Image.BOX).point(lambda v: 255 if v >= 32 else 0)
+    w, h = kept.size
+    px = kept.load()
+    total = 0
+    for y in range(h):
+        for x in range(w):
+            if px[x, y]:
+                total += 1
+    if not total:
+        return 0.0, 0.0
+
+    # Flood fill each unvisited region, 4-connected, with an explicit stack:
+    # a recursive fill blows Python's stack on a mask that is mostly one blob,
+    # which is precisely the healthy case.
+    seen = bytearray(w * h)
+    largest = 0
+    for sy in range(h):
+        for sx in range(w):
+            if seen[sy * w + sx] or not px[sx, sy]:
+                continue
+            size = 0
+            stack = [(sx, sy)]
+            seen[sy * w + sx] = 1
+            while stack:
+                x, y = stack.pop()
+                size += 1
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] \
+                            and px[nx, ny]:
+                        seen[ny * w + nx] = 1
+                        stack.append((nx, ny))
+            largest = max(largest, size)
+
+    box = kept.getbbox()
+    box_area = (box[2] - box[0]) * (box[3] - box[1]) if box else 0
+    return largest / total, (total / box_area if box_area else 0.0)
+
+
 def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
     """The item on white under a soft contact shadow, or None when the model
     found no item to keep.
@@ -240,6 +340,15 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     kept = alpha.point(lambda a: 255 if a >= 128 else 0)
     coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
     if coverage < _MIN_FG_COVERAGE:
+        log.info("bg-removal: no item found (coverage %.3f)", coverage)
+        return None
+    # Enough survived. Is it one object? See _MIN_LARGEST_REGION.
+    largest, box_fill = _shape_stats(kept)
+    if largest < _MIN_LARGEST_REGION or box_fill < _MIN_BBOX_FILL:
+        log.info("bg-removal: the matte is not one object — largest region "
+                 "%.2f of what it kept, filling %.2f of its own box "
+                 "(coverage %.3f); keeping the photo as shot",
+                 largest, box_fill, coverage)
         return None
     canvas = Image.new("RGB", rgb.size, WHITE)
     canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
@@ -371,6 +480,32 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
         progress=progress, should_stop=should_stop,
         done_already=len(results), grand_total=len(jobs))))
     return [results[i] for i, _src in jobs]
+
+
+def source_for(src_dir: Path, name: str) -> Optional[Path]:
+    """The original upload that produced `name` (img_NNN.jpg), or None.
+
+    optimize_all names its output from the photo's position in the naturally
+    sorted source list and says so: "the same photo maps to the same output
+    name every run". This reads that mapping backwards, which is what makes a
+    photo recoverable after the pass has done something to it the seller did
+    not want.
+
+    None when the index is out of range or the originals have been pruned —
+    both of which the caller has to say out loud rather than paper over, since
+    the alternative is telling someone their photo is restored when it is not.
+    """
+    # Exactly the shape optimize_all writes — img_{i:03d}.jpg, so three
+    # digits or more. `name` arrives off the wire and is used to index a
+    # directory listing, so it is matched against what this app produces
+    # rather than against whatever happens to parse.
+    m = re.fullmatch(r"img_(\d{3,})\.jpg", (name or "").strip())
+    if not m or not src_dir.is_dir():
+        return None
+    sources = [p for p in sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name))
+               if p.suffix.lower() in _EXTS]
+    i = int(m.group(1))
+    return sources[i] if 0 <= i < len(sources) else None
 
 
 def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
