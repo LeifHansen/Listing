@@ -21,6 +21,7 @@ import {
   ARCHIVED_STATUSES, endedGraceDays, isDraft, keptWhenEnded, listingsView,
 } from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
+import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -341,6 +342,12 @@ export function ListingsView({ search = "" }) {
                 field worth fixing before Publish. */}
             {isDraft(item) && (
               <DraftCategoryEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
+            )}
+            {/* And how it sells. The same one control the drafts strip and
+                the dashboard carry, on drafts only — a live listing's format
+                is fixed once eBay has accepted it. */}
+            {isDraft(item) && (
+              <DraftFormatEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
             )}
           </motion.div>
         ))}

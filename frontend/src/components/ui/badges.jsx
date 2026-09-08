@@ -1,5 +1,8 @@
-import { CheckCircle2, AlertCircle, Circle } from "lucide-react";
+import { CheckCircle2, AlertCircle, Circle, Gavel } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
+import {
+  formatChipLabel, formatSummary, isAuctionFormat, listingFormat,
+} from "@/lib/listingFormat";
 
 export function TagPill({ children, tone = "neutral", className, title }) {
   const tones = {
@@ -23,9 +26,15 @@ export function TagPill({ children, tone = "neutral", className, title }) {
   );
 }
 
-export function PriceBadge({ value, currency = "USD", approx = false, className, title }) {
+// `prefix` names the number when it is not a plain asking price -- "Bid" on
+// an auction, whose money field is the opening bid and not what the item
+// costs. Without it an auction starting at $0.99 sits in a grid of Buy It Now
+// prices looking like a $0.99 item (see lib/listingFormat.askingPrice).
+export function PriceBadge({
+  value, currency = "USD", approx = false, prefix, className, title,
+}) {
   const text = formatMoney(value, currency);
-  if (!text) return <TagPill className={className}>no price yet</TagPill>;
+  if (!text) return <TagPill className={className} title={title}>no price yet</TagPill>;
   return (
     <span
       title={title}
@@ -35,8 +44,38 @@ export function PriceBadge({ value, currency = "USD", approx = false, className,
         className,
       )}
     >
+      {prefix && (
+        <span className="mr-0.5 text-[11px] font-semibold uppercase tracking-wide opacity-75">
+          {prefix}
+        </span>
+      )}
       {approx && <span className="font-semibold">≈</span>}
       {text}
+    </span>
+  );
+}
+
+// How this listing sells, when that is not the obvious answer.
+//
+// Buy It Now draws NOTHING: it is the default and by far the common case, and
+// a chip on every card in the store would be noise that teaches the eye to
+// skip the row the auctions need it to read. The two auction formats say so,
+// and the tooltip carries the numbers the chip has no room for -- opening
+// bid, Buy It Now, how long it runs.
+export function FormatBadge({ listing, className }) {
+  const fmt = listingFormat(listing);
+  if (!isAuctionFormat(fmt)) return null;
+  const l = listing || {};
+  return (
+    <span
+      title={formatSummary(l, (v) => formatMoney(v, l.currency || "USD"))}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full bg-blue-soft border border-blue/25",
+        "px-2 py-0.5 text-[11px] font-bold text-blue", className,
+      )}
+    >
+      <Gavel size={11} aria-hidden />
+      {formatChipLabel(fmt)}
     </span>
   );
 }

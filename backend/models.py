@@ -39,6 +39,16 @@ TEXT_FIELD_MAX_CHARS = 4_000
 # eBay tops out around 30 aspects on a listing; an import can carry more.
 MAX_ITEM_SPECIFICS = 500
 
+# How a listing sells. FIXED_PRICE is Buy It Now (the default and the great
+# majority); AUCTION takes bids only; AUCTION_BIN is an auction that also
+# carries a Buy It Now price. The choice decides which eBay call publishes it
+# and which field holds the asking price -- `price` for Buy It Now,
+# `auction_start_price` for the opening bid -- so an unrecognised value is not
+# a cosmetic problem: it publishes as a Buy It Now at whatever `price` holds.
+# Named here so the API boundary can check a value against the same list the
+# publisher branches on (services/ebay_trading._item_fields).
+LISTING_FORMATS = ("FIXED_PRICE", "AUCTION", "AUCTION_BIN")
+
 
 class ItemSpecific(BaseModel):
     name: str

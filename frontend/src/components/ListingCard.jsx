@@ -5,8 +5,9 @@ import {
   SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
-import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
+import { FormatBadge, OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
+import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { reviewAspectCount } from "@/views/listing/specifics";
 import { keptWhenEnded } from "@/lib/listingsView";
 
@@ -286,16 +287,30 @@ export const ListingCard = memo(function ListingCard({
     </div>
   );
 
+  // What this listing is asking, in whichever field its format keeps it.
+  // A plain auction has no `price` at all -- an imported one arrives with it
+  // null -- so every auction in the store used to show "no price yet" beside
+  // a starting bid it was never asked for. See lib/listingFormat.askingPrice.
+  const asking = askingPrice(l);
+  // The chip is silent on Buy It Now (see badges.FormatBadge), so this is
+  // "does this listing sell in a way the price alone doesn't explain".
+  const showFormat = isAuctionFormat(l.listing_format);
   const price = (
     <PriceBadge
-      value={sold ? soldFor : l.price}
+      value={sold ? soldFor : asking.amount}
       currency={l.currency}
+      prefix={sold ? undefined : asking.prefix}
       approx={inventory || (sold && !knownSale)}
       title={sold
         ? (knownSale
           ? "What this actually sold for"
           : "eBay hasn't reported what this sold for — showing the asking price")
-        : undefined}
+        // Only where the number needs explaining. A Buy It Now price is the
+        // price; spelling that out on every card in the store is a tooltip
+        // nobody needed and one more thing to read wrong.
+        : showFormat
+          ? formatSummary(l, (v) => formatMoney(v, l.currency || "USD"))
+          : undefined}
     />
   );
 
@@ -443,6 +458,10 @@ export const ListingCard = memo(function ListingCard({
         </span>
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <StatusBadge status={item.status} />
+          {/* Beside the status, because it changes how the price beside it
+              is read: "Bid $0.99" on an auction is an opening bid, not a
+              99-cent item. */}
+          {showFormat && <FormatBadge listing={l} />}
           {/* Ahead of origin, staleness and traffic: those describe the
               listing, this one is a person waiting on the seller. */}
           {offers > 0 && (
@@ -489,6 +508,7 @@ export const ListingCard = memo(function ListingCard({
             be all three at once. */}
         <div className="absolute top-3 left-3 right-3 flex flex-wrap items-start gap-1.5 pr-16">
           <StatusBadge status={item.status} className="shadow-card" />
+          {showFormat && <FormatBadge listing={l} className="shadow-card bg-card/95" />}
           {offers > 0 && (
             <OfferChip count={offers} top={metrics.top_offer}
               currency={metrics.offer_currency || l.currency}

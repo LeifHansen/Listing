@@ -10,6 +10,9 @@ import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { api, postJson, isPhotoFile, PHOTO_ACCEPT } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
+import {
+  AUCTION_DURATIONS, FORMAT_HELP, LISTING_FORMATS, isAuctionFormat, normalizeFormat,
+} from "@/lib/listingFormat";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -1012,16 +1015,6 @@ export function SpecificsCard({ w }) {
   );
 }
 
-const LISTING_FORMATS = [
-  ["FIXED_PRICE", "Buy It Now"],
-  ["AUCTION", "Auction"],
-  ["AUCTION_BIN", "Auction + BIN"],
-];
-const AUCTION_DURATIONS = [
-  ["DAYS_1", "1 day"], ["DAYS_3", "3 days"], ["DAYS_5", "5 days"],
-  ["DAYS_7", "7 days"], ["DAYS_10", "10 days (eBay charges extra)"],
-];
-
 export function PricingCard({ w }) {
   const conditions = w.categoryMeta.conditions?.length
     ? w.categoryMeta.conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
@@ -1044,8 +1037,20 @@ export function PricingCard({ w }) {
     if (price !== null) w.set("price", price.toFixed(2));
   };
   const currency = w.form.currency || "USD";
-  const fmt = w.form.listing_format || "FIXED_PRICE";
-  const isAuction = fmt === "AUCTION" || fmt === "AUCTION_BIN";
+  const fmt = normalizeFormat(w.form.listing_format);
+  const isAuction = isAuctionFormat(fmt);
+  // Three of the fields below cannot be changed once eBay has the listing:
+  // format, starting bid and auction length are all absent from
+  // services/ebay_trading.REVISABLE_FIELDS, because eBay does not revise
+  // them. They stayed editable here, so a seller could switch a live Buy It
+  // Now to an auction, save, be told the listing was updated, and find it
+  // still a Buy It Now on eBay -- the app's own origin badge already says
+  // this is impossible ("the format ... can't be changed after publishing").
+  // Shown, and locked, instead of silently ignored.
+  const settled = w.isLive;
+  const settledWhy = "Set when this went live on eBay — eBay can't change it "
+    + "on a listing it's already showing. End it and relist to sell it "
+    + "another way.";
 
   return (
     <WorkflowCard
@@ -1055,16 +1060,26 @@ export function PricingCard({ w }) {
       flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
     >
       <div className="flex flex-col gap-4">
-        <Field label="Listing format">
-          <div className="inline-flex w-full sm:w-auto rounded-input border border-line p-0.5 bg-bg-sunken">
+        {/* The same three the draft cards offer, with the same names (see
+            lib/listingFormat). "Both" is an auction carrying a Buy It Now
+            price; the ⓘ says so, because the label alone cannot. */}
+        <Field label="Selling format" help={settled ? settledWhy : FORMAT_HELP[fmt]}>
+          <div className={cn(
+            "inline-flex w-full sm:w-auto rounded-input border border-line p-0.5 bg-bg-sunken",
+            settled && "opacity-60",
+          )}>
             {LISTING_FORMATS.map(([val, lbl]) => (
               <button
                 key={val} type="button" onClick={() => w.set("listing_format", val)}
                 aria-pressed={fmt === val}
+                disabled={settled}
+                title={settled ? settledWhy : FORMAT_HELP[val]}
                 className={cn(
-                  "flex-1 sm:flex-none px-3.5 h-9 rounded-[9px] text-[13px] font-semibold cursor-pointer",
+                  "flex-1 sm:flex-none px-3.5 h-9 rounded-[9px] text-[13px] font-semibold",
                   "whitespace-nowrap transition-colors duration-150",
-                  fmt === val ? "bg-card text-ink shadow-card" : "text-ink-secondary hover:text-ink",
+                  settled ? "cursor-not-allowed" : "cursor-pointer",
+                  fmt === val ? "bg-card text-ink shadow-card" : "text-ink-secondary",
+                  !settled && fmt !== val && "hover:text-ink",
                 )}
               >
                 {lbl}
@@ -1075,11 +1090,17 @@ export function PricingCard({ w }) {
 
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
           {isAuction && (
-            <Field label={`Starting bid (${currency})`}>
+            <Field label={`Starting bid (${currency})`}
+              help={settled ? settledWhy : undefined}>
               <Input
                 type="number" step="0.01" min="0" inputMode="decimal"
                 value={w.form.auction_start_price}
-                needsFix={w.fixLevel("price")}
+                needsFix={settled ? undefined : w.fixLevel("price")}
+                /* Not editable on a live auction: bids may already be against
+                   it, and the revise leaves StartPrice alone (see
+                   build_revise_item). The Buy It Now beside it still is. */
+                disabled={settled}
+                title={settled ? settledWhy : undefined}
                 onChange={(e) => w.set("auction_start_price", e.target.value)}
               />
             </Field>
@@ -1105,10 +1126,13 @@ export function PricingCard({ w }) {
               that costs money says so. */}
           {isAuction ? (
             <Field label="Duration"
-              help={w.form.auction_duration === "DAYS_10"
-                ? "eBay charges an extra fee for a 10-day auction."
-                : undefined}>
+              help={settled ? settledWhy
+                : w.form.auction_duration === "DAYS_10"
+                  ? "eBay charges an extra fee for a 10-day auction."
+                  : undefined}>
               <Select value={w.form.auction_duration}
+                disabled={settled}
+                title={settled ? settledWhy : undefined}
                 onChange={(e) => w.set("auction_duration", e.target.value)}>
                 {AUCTION_DURATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </Select>

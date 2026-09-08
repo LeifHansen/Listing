@@ -10,6 +10,9 @@ import {
 } from "@/lib/conditions";
 import { api, postJson } from "@/lib/api";
 import { apiUrl } from "@/lib/platform";
+import {
+  LISTING_FORMATS, isAuctionFormat, normalizeFormat,
+} from "@/lib/listingFormat";
 import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -54,12 +57,6 @@ function phaseMessages(phase, removeBg) {
   return PHASE_MESSAGES[phase] || ["Working…"];
 }
 
-// Selling formats, mirroring the full editor's Pricing card.
-const LISTING_FORMATS = [
-  ["FIXED_PRICE", "Buy It Now"],
-  ["AUCTION", "Auction"],
-  ["AUCTION_BIN", "Auction + BIN"],
-];
 // eBay's own recommendation replaces this at publish time; it's just the
 // starting number in the box.
 const DEFAULT_AD_RATE = 10;
@@ -103,8 +100,8 @@ function BulkItemCard({
   const reduced = useReducedMotion();
   const l = item.listing || {};
   const editable = item.status !== "error";
-  const fmt = (l.listing_format || "FIXED_PRICE").toUpperCase();
-  const isAuction = fmt.startsWith("AUCTION");
+  const fmt = normalizeFormat(l.listing_format);
+  const isAuction = isAuctionFormat(fmt);
   // Which conditions eBay offers for THIS item's category. The queue publishes
   // without ever opening the editor, so this is the only place the seller can
   // see them — and before it existed the dropdown offered all thirteen grades
