@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   RotateCcw, Crop, Eraser, Wand2, Paintbrush, Undo2, Redo2, Brush, Eye,
+  History,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -110,7 +111,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const cropStart = useRef(null);
   const liveRect = useRef(null);
   const [cropRect, setCropRect] = useState(null); // {x,y,w,h} in canvas px
-  const { toast } = useToast();
+  const { toast, confirm } = useToast();
 
   // Opening a different photo starts from a clean slate: the brush tool, no
   // half-dragged crop carried over from the last one. This is derived DURING
@@ -498,6 +499,46 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     };
   }, [name, drawCropOverlay]);
 
+  // "Restore original" — the photo as uploaded, before the pass touched it.
+  //
+  // The upload has always been on the server, in the session's original/
+  // directory, and nothing in the app could reach it. That only became
+  // survivable-until-it-wasn't when the background remover started eating
+  // photos: handed a photograph of a PICTURE it keeps what the picture
+  // depicts and deletes the artwork around it, and a seller's only option for
+  // the ruined tiles was to delete them and re-upload photos we already had.
+  //
+  // Confirmed first, because it throws away editing done since — and the
+  // server snapshots the outgoing copy to history, so it is not a one-way
+  // door either.
+  const [restoring, setRestoring] = useState(false);
+  const restoreOriginal = async () => {
+    if (!name) return;
+    if (!(await confirm({
+      title: "Restore the original photo?",
+      message: "This puts back the photo exactly as you uploaded it, before "
+        + "the background removal and any edits. Anything you have changed "
+        + "here is discarded.",
+      confirmLabel: "Restore it",
+    }))) return;
+    setRestoring(true);
+    try {
+      const fd = new FormData();
+      fd.append("session_id", sessionId);
+      fd.append("name", name);
+      await api("/api/image/restore-original", { method: "POST", body: fd });
+      await load();      // repaint from the file the server just rewrote
+      onSaved();
+      toast("Put back the photo as you shot it.", { kind: "success" });
+    } catch (e) {
+      // The originals are pruned on a timer, so "there is nothing to restore"
+      // is a real answer and the server's sentence says so.
+      toast(e.message, { kind: "error" });
+    } finally {
+      setRestoring(false);
+    }
+  };
+
   const save = async () => {
     const canvas = canvasRef.current;
     if (!canvas || !name) return;
@@ -589,7 +630,12 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
           />
         </label>
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" onClick={load} disabled={!!aiBusy}
+          <Button variant="ghost" onClick={restoreOriginal}
+            loading={restoring} disabled={!!aiBusy || restoring}
+            title="Put back the photo exactly as you uploaded it, before background removal and any edits">
+            <History aria-hidden /> Restore original
+          </Button>
+          <Button variant="ghost" onClick={load} disabled={!!aiBusy || restoring}
             title="Discard every edit and reload the saved photo">
             <RotateCcw aria-hidden /> Revert
           </Button>

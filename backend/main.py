@@ -4698,6 +4698,80 @@ async def edit_image(
     return {"ok": True, "name": name}
 
 
+@app.post("/api/image/restore-original")
+async def image_restore_original(
+    request: Request,
+    session_id: str = Form(...),
+    name: str = Form(...),
+) -> dict:
+    """Put one photo back to the shot the seller uploaded.
+
+    The uploads live in the session's original/ directory and, until this
+    route existed, nothing in the app could reach them. That was survivable
+    only for as long as the photo pass never damaged a photo — and it does:
+    the background remover handed a photograph of a PICTURE segments what the
+    picture depicts, keeps the tree and the boat, and deletes the artwork
+    around them (services/images._MIN_LARGEST_REGION, and the report that
+    produced it). The guard there stops that shipping again. This is for the
+    photos it already shipped, and for every future case where the pass does
+    something the seller simply does not want: the good copy was on the
+    server the whole time, and their only option was to delete the tile and
+    re-upload a photo we already had.
+
+    Re-optimized rather than copied: the output still has to be sized for
+    eBay, upright, and stripped of the EXIF that carries the seller's home
+    address. remove_bg is off, which is the whole point of the button.
+
+    The working copy is snapshot to history first, like every other edit, so
+    "restore" is itself undoable and cannot be the one action that destroys
+    something.
+    """
+    session_id, name = (session_id or "").strip(), (name or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "Lost track of which photo to restore.")
+    await run_in_threadpool(_assert_session_owner, session_id, request)
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents:  # path-traversal guard
+        raise HTTPException(400, "Invalid image name")
+
+    def _restore() -> None:
+        source = images.source_for(storage.original_dir(session_id), name)
+        if source is None or not source.is_file():
+            # Originals are pruned on a timer (storage.prune_originals), so
+            # this is a real answer and not an error to hide: an old listing
+            # genuinely has nothing to go back to, and saying so beats
+            # reporting a restore that did not happen.
+            raise FileNotFoundError(
+                "The original upload for this photo isn't on the server "
+                "anymore, so there's nothing to restore it from.")
+        storage.snapshot_image(session_id, name)
+        images.optimize(source, path, remove_bg=False)
+
+    try:
+        await run_in_threadpool(_restore)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.warning("restore-original failed (session=%s name=%s): %s",
+                    session_id, name, exc)
+        raise HTTPException(
+            400, f"Couldn't restore that photo: {exc}") from exc
+
+    if objstore.enabled():
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            log.warning("restore-original: R2 re-push failed (session=%s "
+                        "name=%s)", session_id, name)
+            raise HTTPException(
+                502, "Restored locally, but couldn't update the stored copy "
+                     "eBay uses. Try again in a moment.")
+    db.touch_listing(session_id)
+    log.info("restore-original: session=%s name=%s", session_id, name)
+    return {"ok": True, "name": name}
+
+
 # ---------------------------------------------------------------------------
 # Photo studio: AI-assisted clean-up + smart crop for the in-browser editor.
 # All three endpoints accept an optional `file` (the editor's current canvas,

@@ -92,7 +92,9 @@ jobs:
           pytest backend/tests/test_the_photo_pass_does_three_things.py \
                  backend/tests/test_export_pipeline.py \
                  backend/tests/test_a_transparent_photo_does_not_go_black.py \
-                 backend/tests/test_photo_resume.py -q -rs | tee /tmp/photo-pass.log
+                 backend/tests/test_photo_resume.py \
+                 backend/tests/test_the_cutout_does_not_eat_the_artwork.py \
+                 -q -rs | tee /tmp/photo-pass.log
           if grep -qE '[0-9]+ skipped' /tmp/photo-pass.log; then
             echo "::error::a photo-pass suite skipped in the job built to run it"
             exit 1
