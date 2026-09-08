@@ -27,6 +27,7 @@ import {
 import { StoreCategorySelect } from "./StoreCategorySelect";
 import { TITLE_MAX } from "./blockers";
 import { issuesFor } from "./publishShared";
+import { riskyWords, riskyWordSummary } from "@/lib/riskyWords";
 
 /* The eight workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
@@ -211,8 +212,71 @@ export function PhotosCard({ w, onEdit, onDelete }) {
   );
 }
 
+/* Words eBay's filters refuse, shown while the seller types.
+ *
+ * eBay's answer to one of these is error 240 — "the title and/or description
+ * may contain improper words" — which is all a seller gets: no word, no
+ * field, and the same refusal however many times they rewrite. The word list
+ * and the reasoning behind every entry are in lib/riskyWords.
+ *
+ * It never blocks a publish and it is not a blocker (see blockers.js). eBay
+ * keeps its list secret, so this one is inferred, and a seller who knows
+ * their word is fine — "spy" really is the collectors' term for a
+ * subminiature camera — publishes over it. What it removes is the guessing.
+ */
+function RiskyWordNotes({ text, field }) {
+  const hits = riskyWords(text);
+  if (!hits.length) return null;
+  return (
+    <div className="flex flex-col gap-2">
+      {hits.map((h) => (
+        <div key={h.id} className={cn(
+          "flex items-start gap-2.5 rounded-input border px-3 py-2.5",
+          h.severity === "high"
+            ? "border-warning/45 bg-warning-soft" : "border-line bg-bg-sunken/50",
+        )}>
+          <AlertTriangle
+            size={15} aria-hidden
+            className={cn("shrink-0 mt-0.5",
+              h.severity === "high" ? "text-warning" : "text-ink-faint")} />
+          <span className="text-[12.5px] text-ink flex-1 min-w-0">
+            <strong className="font-bold">
+              {h.severity === "high"
+                ? `eBay is likely to refuse “${h.match}” in your ${field}`
+                : `“${h.match}” can trip eBay's filters`}
+            </strong>
+            <span className="block mt-0.5 text-ink-secondary">{h.why}</span>
+            <span className="block mt-1 text-ink-secondary">
+              <strong className="font-semibold">Instead: </strong>{h.suggest}
+            </span>
+          </span>
+        </div>
+      ))}
+      {/* Said once, under the flags, because the alternative is a seller
+          deleting an accurate word they were entitled to keep. */}
+      <p className="text-[11.5px] text-ink-faint">
+        You can publish anyway — eBay doesn't publish its list, so this is a
+        warning, not a rule.
+      </p>
+    </div>
+  );
+}
+
 export function TitleCard({ w }) {
   const len = w.form.title.length;
+  // What eBay actually said, on the card holding the field it said it about.
+  // Without this the whole of a title refusal was a red ring: the seller was
+  // told a title was wrong and never told what was wrong with it, and the one
+  // sentence that would have said sits in the publish banner at the bottom of
+  // a long page. Same treatment the specifics card already gives a refusal —
+  // and the same reason it opens itself via `expand` rather than `flagged`,
+  // which belongs to whichever error came back first.
+  const refused = issuesFor(w.publishResult, "title");
+  // eBay refused this title and, as always with a 240, would not say which
+  // word. The scan can — and this is the moment it is worth most, because the
+  // seller is looking at a refusal and has no other information. Only when
+  // eBay actually named the title, and only when there is a word to name.
+  const culprit = refused.length ? riskyWordSummary(w.form.title) : "";
   // eBay's hard ceiling, enforced as the seller types rather than reported
   // back as a rejection — the input stops accepting characters at TITLE_MAX,
   // and the counter goes amber before it gets there so running out of room is
@@ -230,8 +294,28 @@ export function TitleCard({ w }) {
       id="title" icon={Type} title="Title"
       hint="What buyers see first in search"
       state={w.completion.title} flagged={w.fixTarget === "title"}
+      expand={refused.length > 0}
     >
       <div className="flex flex-col gap-4">
+        {refused.length > 0 && (
+          <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
+            {refused.map((issue, i) => (
+              <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
+                <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
+                <span className="text-[13px] text-ink flex-1 min-w-0">
+                  <strong className="font-bold">{issue.title}</strong>
+                  {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
+                </span>
+              </div>
+            ))}
+            {culprit && (
+              <p className="text-[13px] text-ink border-t border-error/25 pt-2.5">
+                <strong className="font-bold">Most likely: </strong>{culprit}
+                {" "}See the note under the title for what to write instead.
+              </p>
+            )}
+          </div>
+        )}
         <Field
           label="Title"
           hint={
@@ -256,6 +340,7 @@ export function TitleCard({ w }) {
             placeholder="e.g. Nike Air Max 90 Men's 10.5 White Leather Sneakers"
           />
         </Field>
+        <RiskyWordNotes text={w.form.title} field="title" />
         <div className="grid sm:grid-cols-2 gap-4">
           {/* Until now this was collected and thrown away — the Trading
               request never emitted a SubTitle, so a seller who typed one got
@@ -1422,12 +1507,18 @@ export function DescriptionCard({ w }) {
       {/* The AI now drafts a full SEO body — several hundred words in
           labelled sections — so a 7-row box showed a tenth of it at a time
           and made every edit a scroll hunt. It is still resize-y. */}
-      <Textarea
-        rows={18}
-        value={w.form.description}
-        needsFix={w.fixTarget === "description"}
-        onChange={(e) => w.set("description", e.target.value)}
-      />
+      <div className="flex flex-col gap-4">
+        <Textarea
+          rows={18}
+          value={w.form.description}
+          needsFix={w.fixTarget === "description"}
+          onChange={(e) => w.set("description", e.target.value)}
+        />
+        {/* Error 240 says "title AND/OR description", and the description is
+            where a payment method, a phone number or a guarantee actually
+            gets typed. Scanning only the title would leave half of it. */}
+        <RiskyWordNotes text={w.form.description} field="description" />
+      </div>
     </WorkflowCard>
   );
 }

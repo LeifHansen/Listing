@@ -15,6 +15,8 @@ import json
 import re
 from typing import Optional
 
+from .models import SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS
+
 
 def _parse(text: str) -> list[dict]:
     """Pull eBay's `errors` array out of a response body (JSON or not)."""
@@ -168,7 +170,49 @@ def explain(err: dict) -> dict:
                          "a moment and publish again.")
         return issue
 
-    if has("item.country", "merchantlocation", "merchant location",
+    # "Not entitled" is a PERMISSION on the seller's eBay account, and the word
+    # that carries it — "entitled" — contains "title". The title branch below
+    # tested for that with a plain substring `in`, so every one of these
+    # rejections landed there and came back as "There's a problem with the
+    # title. Shorten or fix the title (max 80 characters)."
+    #
+    # That is the worst possible answer to this error. It names a field that is
+    # fine, gives advice that cannot be followed (a 56-character title is
+    # already under 80), repeats on every listing the account has — because the
+    # block is on the account, not on any listing — and it hides eBay's own
+    # sentence, which says what the missing permission actually is. A seller
+    # can rewrite the title all day and never get past it.
+    #
+    # It is filed under "account" so the editor stops ringing a field over it:
+    # fixTargetFor() deliberately refuses to jump to an account target.
+    if has("not entitled", "n't entitled", "entitled to"):
+        said = _clip(long_message or message)
+        # The one entitlement this app can do something about. Business
+        # policies are an eBay program an account has to be opted into
+        # (SELLING_POLICY_MANAGEMENT); until it is, every policy id the
+        # publish sends is refused, and Settings can switch it on.
+        policies = has("business polic", "selling polic", "policy management")
+        issue.update(
+            target="account",
+            title=("Your eBay account isn’t set up for business policies"
+                   if policies else
+                   (f"eBay hasn’t granted this account: {said}" if said
+                    else "Your eBay account isn’t allowed to do this yet")),
+            fix=(("eBay refuses the listing because this account isn't opted "
+                  "into its business-policies program, which is what payment, "
+                  "shipping and return policies are attached with. Open "
+                  "Settings → eBay and turn business policies on (eBay can "
+                  "take up to 24 hours to enable it), then publish again. "
+                  "Nothing is wrong with your title or your listing.")
+                 if policies else
+                 ((f"eBay's words: “{said}”. " if said else "")
+                  + "This is a permission on your eBay account, not a problem "
+                    "with this listing — the same refusal will come back on "
+                    "every listing until it's cleared. Open eBay → My eBay → "
+                    "Selling and clear anything flagged there; if nothing is, "
+                    "eBay Customer Service can say which permission is "
+                    "missing. Your title is fine.")))
+    elif has("item.country", "merchantlocation", "merchant location",
            "inventory location", "ship-from", "ship from", "location key"):
         issue.update(target="location",
                      title="eBay needs a valid ship-from location",
@@ -245,6 +289,35 @@ def explain(err: dict) -> dict:
                      fields=["UPC"],
                      title="eBay wants a product identifier (UPC/EAN)",
                      fix="Add an item specific “UPC” set to “Does not apply” for vintage/handmade items.")
+    elif has("cannot be changed", "can not be changed", "cannot be revised"):
+        # eBay refusing to change something RIGHT NOW, which is a different
+        # thing from anything being wrong with it — and the sentence it uses
+        # says "item specifics", so the branch below claimed it and answered
+        # "Missing required item specific" on a listing whose specifics were
+        # complete. The seller was sent hunting for an empty field that did
+        # not exist, every time they saved, for as long as the offer stood.
+        #
+        # eBay's own words are the whole answer here, so they lead. Filed
+        # under "generic": there is no field to open and fix, and a "Fix this"
+        # button pointing at the specifics grid is the same wrong claim in
+        # button form.
+        said = _clip(long_message or message)
+        offer = has("best offer", "auction", "bid")
+        issue.update(
+            target="generic",
+            title=("eBay has this listing frozen for now"
+                   if offer else f"eBay won’t change that on a live listing: {said}"),
+            fix=((f"eBay's reason: “{said}” " if said else "")
+                 + ("Nothing is missing and nothing is wrong with the listing "
+                    "— eBay locks parts of a listing while a Best Offer is "
+                    "waiting on it, or an auction has a bid or ends within 12 "
+                    "hours. Your edit is saved here and goes over "
+                    "automatically once that clears. Accepting or declining "
+                    "the offer lifts it immediately."
+                    if offer else
+                    "This part of a listing can't be changed once it is live. "
+                    "The edit is saved here; end the listing and relist it if "
+                    "it has to reach eBay.")))
     elif has("item specific", "aspect", "required attribute", "missing value"):
         # The aspect name rides along in the parameters next to full-sentence
         # copies of the message ("The item specific Item Height is missing.").
@@ -306,10 +379,43 @@ def explain(err: dict) -> dict:
         issue.update(target="price",
                      title="The price is missing or invalid",
                      fix="Set a price greater than $0.")
-    elif has("title"):
-        issue.update(target="title",
-                     title="There’s a problem with the title",
-                     fix="Shorten or fix the title (max 80 characters).")
+    elif has_word("subtitle", "subtitles") or has("sub-title"):
+        # "subtitle" contains "title" too, so a rejection over the optional
+        # subtitle was answered with the TITLE's 80-character limit — advice
+        # for a field the seller hadn't touched. It shares the Title card, so
+        # it keeps that target; what changes is that the answer names the
+        # field eBay named, and its own (shorter) limit.
+        said = _clip(long_message or message)
+        issue.update(
+            target="title",
+            title=(f"eBay wouldn’t accept the subtitle: {said}" if said
+                   else "eBay wouldn’t accept the subtitle"),
+            fix=("The subtitle is the optional paid line under your title, up "
+                 f"to {SUBTITLE_MAX_CHARS} characters. Shorten it — or clear "
+                 "it, since it's optional — and publish again. Your title "
+                 "itself is not what eBay refused."))
+    elif has_word("title", "titles"):
+        # Whole-word, because "title" is a substring of "subtitle",
+        # "untitled" and "entitled", and all three used to be answered as
+        # title problems. See the entitlement branch at the top.
+        said = _clip(long_message or message)
+        # Only claim it's the LENGTH when eBay said so. The old copy said it
+        # every time, which is how a seller with a 56-character title was told
+        # to shorten it to 80 — twice, then a third time, with no other
+        # information anywhere on the screen and eBay's actual sentence thrown
+        # away here.
+        too_long = has("too long", "exceeds the maximum", "maximum length",
+                       "max length", "characters or less", "80 characters")
+        issue.update(
+            target="title",
+            title=(f"eBay wouldn’t accept the title: {said}" if said
+                   else "eBay wouldn’t accept the title"),
+            fix=(f"Shorten the title to {TITLE_MAX_CHARS} characters or fewer, "
+                 "then publish again." if too_long else
+                 ((f"eBay's words: “{said}”. " if said else "")
+                  + "Edit the title to match what eBay asked for. Titles are "
+                    f"limited to {TITLE_MAX_CHARS} characters and can't carry "
+                    "HTML, or wording eBay's listing policies don't allow.")))
     elif has("description"):
         issue.update(target="description",
                      title="The description needs work",

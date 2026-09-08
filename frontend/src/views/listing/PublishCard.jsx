@@ -24,13 +24,16 @@ const isBlocking = (it) => it.blocking !== false && it.level !== "warn";
 
 // One issue: what's wrong, how to fix it, and a button that jumps to the
 // field. `generic` issues have no field to jump to (an account-wide problem,
-// an eBay outage) so they get no button.
+// an eBay outage) so they get no button — and neither does `account`, which
+// is the same thing by another name: no card answers to it, so the button
+// scrolled nowhere and left the seller pressing "Fix this" at a page that
+// would not move.
 function IssueRow({ it, onFix }) {
   return (
     <li className="text-sm">
       <p className="font-semibold text-ink">{it.title}</p>
       {it.fix && <p className="text-ink-secondary mt-0.5">{it.fix}</p>}
-      {it.target && it.target !== "generic" && (
+      {it.target && it.target !== "generic" && it.target !== "account" && (
         <Button variant="soft" size="sm" className="mt-2" onClick={() => onFix(it.target)}>
           Fix this <ArrowRight aria-hidden />
         </Button>

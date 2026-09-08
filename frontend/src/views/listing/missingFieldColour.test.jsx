@@ -141,6 +141,39 @@ describe("colour on the fields that block a publish", () => {
     expect(get().fixLevel("price")).toBeUndefined();
   });
 
+  it("takes the refusal ring off a field the seller has just edited", async () => {
+    // The reported screen: eBay refuses over the title, the seller edits the
+    // title exactly as told, and the box stays red — beside a "Complete"
+    // badge and a bar reading "Ready to publish". Red means "the marketplace
+    // named THIS value", and the moment the value changes it is a verdict on
+    // something that is no longer on screen. Only publishing cleared it,
+    // which is the one thing the seller was trying to do.
+    const get = await mountEditor(READY);
+    await act(async () => { get().setFixTarget("title"); });
+    expect(get().fixLevel("title")).toBe("true");
+    await act(async () => { get().set("title", "Miniature Camera Made in Japan"); });
+    expect(get().fixTarget).toBe(null);
+    expect(get().fixLevel("title")).toBeUndefined();
+  });
+
+  it("leaves the ring alone while a different field is edited", async () => {
+    // Editing the price says nothing about the title eBay refused.
+    const get = await mountEditor(READY);
+    await act(async () => { get().setFixTarget("title"); });
+    await act(async () => { get().set("price", "48"); });
+    expect(get().fixLevel("title")).toBe("true");
+  });
+
+  it("still marks a field the new value cannot publish either", async () => {
+    // Clearing the refusal must not clear the app's own reading: an empty
+    // title is a blocker whatever eBay last said, so red becomes amber
+    // rather than nothing.
+    const get = await mountEditor(READY);
+    await act(async () => { get().setFixTarget("title"); });
+    await act(async () => { get().set("title", ""); });
+    expect(get().fixLevel("title")).toBe("warn");
+  });
+
   it("holds a live listing to the revise contract, not the create one", async () => {
     // eBay never asks for a package weight on a revise, so marking one on a
     // listing that is already up would be inventing a blocker.

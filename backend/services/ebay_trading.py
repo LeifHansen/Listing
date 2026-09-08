@@ -1095,18 +1095,37 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
     if listing.condition_description and wanted("condition_description"):
         parts.append("<ConditionDescription>"
                      f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
-    if not wanted("item_specifics") and not wanted("brand"):
-        specifics = []
-    else:
-        specifics = [s for s in listing.item_specifics
-                     if s.name.strip() and s.value.strip()]
+    # Is this request carrying the listing's specifics at all? A create always
+    # does; a revise only when the seller edited them (`brand` counts — it is
+    # emitted as the Brand aspect, so it lives in the same block).
+    sending_specifics = wanted("item_specifics") or wanted("brand")
+    specifics = ([s for s in listing.item_specifics
+                  if s.name.strip() and s.value.strip()]
+                 if sending_specifics else [])
     # CRITICAL: identify, the maker double-check, and the editor's Brand field
     # all write the brand to listing.brand — not to a specifics row. The old
     # Inventory path seeded the Brand aspect from it (services/ebay.py); this
     # Trading path must too, or every publish goes out brand-less: invisible
     # to brand filters and rejected outright in Brand-required categories.
     # First value only — Brand is a SINGLE-value aspect on eBay.
-    if listing.brand and not any(s.name.strip().lower() == "brand" for s in specifics):
+    #
+    # Gated on `sending_specifics` with everything else. Outside the gate — as
+    # this was — a listing with a brand put a one-row <ItemSpecifics> into
+    # EVERY revise, however unrelated the edit: the gate above emptied the
+    # list and this filled it straight back in. Two harms, and the second
+    # locked sellers out of their own listings:
+    #
+    #   * <ItemSpecifics> on a revise REPLACES the aspect set. A price edit
+    #     was quietly overwriting the live listing's specifics with a
+    #     one-aspect snapshot — the clobber-by-omission that `only` exists to
+    #     prevent, arriving through the one field that skipped it.
+    #   * eBay freezes item specifics while a Best Offer is pending (or an
+    #     auction has a bid, or ends within 12 hours) and refuses any revise
+    #     carrying them. So on a listing with a brand and an offer waiting,
+    #     every save failed — a price, a title, anything — and the seller was
+    #     told an item specific was missing.
+    if sending_specifics and listing.brand and not any(
+            s.name.strip().lower() == "brand" for s in specifics):
         specifics.insert(0, ItemSpecific(
             name="Brand", value=listing.brand.split(",")[0].strip()[:65]))
     if specifics:
@@ -1503,12 +1522,18 @@ def unsendable_revise_fields(listing: Listing) -> list[str]:
 
 
 def build_revise_item(listing: Listing, item_id: str,
-                      image_urls: Optional[list[str]] = None) -> tuple[str, str]:
+                      image_urls: Optional[list[str]] = None,
+                      without: frozenset = frozenset()) -> tuple[str, str]:
     """(call name, request body) for revising one listing.
 
     Split out of revise_listing so the payload can be asserted on without a
     network call — what this request does NOT contain is now a correctness
     rule, not a detail (see tests/test_ebay_quantity_contract.py).
+
+    `without` drops fields the seller DID edit, and exists for one case:
+    eBay refusing the whole revise over a field it will not let a live
+    listing change right now (see SPECIFICS_LOCKED). Rebuilding without that
+    field is what lets the rest of the edit land.
     """
     if not item_id:
         raise TradingError("This listing has no eBay item id to update.")
@@ -1534,7 +1559,7 @@ def build_revise_item(listing: Listing, item_id: str,
     # seller who fixed a title on eBay and later changed only the price here
     # had the stale title pushed back over their newer one, and was told the
     # update succeeded.
-    dirty = set(listing.dirty_fields)
+    dirty = set(listing.dirty_fields) - set(without)
     parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
     parts.extend(_item_fields(listing, image_urls, only=dirty))
     is_auction = (listing.listing_format or "").upper().startswith("AUCTION")
@@ -1565,15 +1590,81 @@ def build_revise_item(listing: Listing, item_id: str,
     return _revise_call_name(listing), f"<Item>{''.join(parts)}</Item>"
 
 
+# eBay's "not right now" refusal on a revise, and the fields it locks.
+#
+# "Item specifics cannot be changed if an auction-style listing has a bid or
+# ends within 12 hours, or a fixed price listing has a pending Best Offer."
+#
+# It is a TEMPORARY restriction on ONE part of the request, and it refuses the
+# whole revise. That is how a seller ends up unable to save a live listing at
+# all: something marks item_specifics edited — "Fill in details" does it
+# outright (see main._enrich_one) — the revise is refused, and marks are
+# cleared on ACCEPTANCE, so the mark survives the failure by design. Every
+# later save rebuilds the same refused request, and the listing stays
+# unsaveable for as long as the offer is pending. The seller's actual edit —
+# a price, a title — never reaches eBay either, because it was in the same
+# request.
+#
+# So the field comes out and the rest goes through. Detected by eBay's wording
+# rather than its error code: the codes in this family are not documented
+# together, and the sentence is what eBay actually returns.
+_SPECIFICS_LOCKED = (
+    "item specifics cannot be changed",
+    "item specifics can not be changed",
+)
+
+# The fields whose edits ride in <ItemSpecifics> — `brand` is emitted as the
+# Brand aspect, so it is locked by the same refusal (see _item_fields).
+SPECIFICS_LOCKED_FIELDS = frozenset({"item_specifics", "brand"})
+
+
+def specifics_locked(exc: Exception) -> bool:
+    """Is this eBay saying the listing's specifics can't be changed yet?"""
+    hay = f"{exc} {getattr(exc, 'detail', '') or ''} " \
+          f"{getattr(exc, 'said', '') or ''}".lower()
+    if any(p in hay for p in _SPECIFICS_LOCKED):
+        return True
+    # Same restriction, worded from the other end.
+    return ("cannot be changed" in hay or "can not be changed" in hay) and (
+        "best offer" in hay or "item specific" in hay)
+
+
 def revise_listing(token: str, item_id: str, listing: Listing,
                    image_urls: Optional[list[str]] = None) -> dict:
     """Push an edit back to a listing this app didn't create.
 
     Sends only the fields this app actually edits, so nothing set elsewhere on
     the listing gets clobbered by omission. Returns {"ok": True, "listing_id"}
-    or raises TradingError with eBay's own reason."""
+    or raises TradingError with eBay's own reason.
+
+    `deferred` in the result names fields eBay would not take THIS TIME and
+    that were dropped so the rest of the edit could land. Unlike `unsent`
+    those are not permanently unsendable — they go again on the next revise,
+    which is why the caller keeps them marked dirty.
+    """
     call, body = build_revise_item(listing, item_id, image_urls)
-    root = _call(call, token, body)
+    deferred: list[str] = []
+    try:
+        root = _call(call, token, body)
+    except TradingError as exc:
+        held = sorted(set(listing.dirty_fields or ()) & SPECIFICS_LOCKED_FIELDS)
+        if not specifics_locked(exc) or not held:
+            raise
+        remaining = (set(listing.dirty_fields) - SPECIFICS_LOCKED_FIELDS
+                     ) & REVISABLE_FIELDS
+        if not remaining:
+            # Specifics were the whole edit, so there is nothing left to send.
+            # An <Item> carrying only its own id is not a smaller revise, it
+            # is an empty one — and eBay's refusal is the honest answer here.
+            log.info("trading: revise of %s was item specifics only, and eBay "
+                     "will not take them yet", item_id)
+            raise
+        call, body = build_revise_item(listing, item_id, image_urls,
+                                       without=SPECIFICS_LOCKED_FIELDS)
+        log.warning("trading: eBay won't take item specifics on %s yet (%s) — "
+                    "sending the rest of the edit without them", item_id, exc)
+        root = _call(call, token, body)
+        deferred = held
     returned = _text(root, "ItemID") or item_id
     log.info("trading: %s ok item=%s", call, returned)
     out = {"ok": True, "listing_id": returned}
@@ -1594,11 +1685,13 @@ def revise_listing(token: str, item_id: str, listing: Listing,
     # Edits the seller made that this request could not carry. Reported from
     # here rather than worked out again upstream, so the one place that knows
     # what went into the XML is the one place that answers for it.
-    unsent = unsendable_revise_fields(listing)
+    unsent = sorted(set(unsendable_revise_fields(listing)) - set(deferred))
     if unsent:
         log.info("trading: revise of %s could not carry %s",
                  returned, ", ".join(unsent))
         out["unsent"] = unsent
+    if deferred:
+        out["deferred"] = deferred
     return out
 
 

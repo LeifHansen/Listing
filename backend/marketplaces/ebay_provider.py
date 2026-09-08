@@ -604,7 +604,8 @@ def _label_list(names) -> str:
 
 
 def revise_message(conflicts: Optional[dict], relist: bool,
-                   remapped: str = "", unsent: Optional[list] = None) -> str:
+                   remapped: str = "", unsent: Optional[list] = None,
+                   deferred: Optional[list] = None) -> str:
     """What to tell the seller after eBay accepted the change.
 
     A revise deliberately omits every field the seller and eBay have BOTH
@@ -636,6 +637,17 @@ def revise_message(conflicts: Optional[dict], relist: bool,
         stayed = (f" The {_label_list(unsent)} stayed here — eBay doesn't let "
                   "this app change that on a live listing. Update it in Seller "
                   "Hub, or end the listing and relist it.")
+    # A different thing from `unsent`, and it must not borrow its wording.
+    # These edits CAN be sent — just not while eBay is holding the listing
+    # still, which it does when a fixed-price listing has a Best Offer waiting
+    # or an auction is bid on or nearly over. Telling this seller to go and
+    # redo it in Seller Hub would be wrong twice: Seller Hub refuses it too,
+    # and the edit is already saved and queued here.
+    if deferred:
+        stayed += (f" The {_label_list(deferred)} couldn't go over yet — eBay "
+                   "freezes those while a Best Offer is pending, or an auction "
+                   "has a bid or ends within 12 hours. It's saved here and "
+                   "goes automatically with your next save once that clears.")
     held = [d["label"] for d in sync_merge.describe_conflicts(conflicts)]
     if not held:
         return "Your eBay listing has been updated." + moved + stayed
@@ -960,9 +972,15 @@ class EbayProvider:
             # the edits stay marked so the retry still carries them. Clearing
             # them would file the seller's correction as delivered.
             unsent = list(res.get("unsent") or ())
+            # Fields eBay would not take THIS TIME — dropped from the request
+            # so the rest of the edit could land (see
+            # ebay_trading.revise_listing). They are still the seller's
+            # pending work, so they stay marked and go again on the next
+            # revise, once eBay will have them.
+            deferred = list(res.get("deferred") or ())
             listing.clear_dirty()
-            if unsent:
-                listing.mark_dirty(*unsent)
+            if unsent or deferred:
+                listing.mark_dirty(*unsent, *deferred)
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", uid)
             # And the on-disk copy, which the create/relist path a few hundred
@@ -993,7 +1011,7 @@ class EbayProvider:
                      "local-updated" if pushed_local else "unchanged")
             listing_id = str(res.get("listing_id") or "")
             message = revise_message(listing.conflicts, relist, remapped,
-                                     unsent=unsent)
+                                     unsent=unsent, deferred=deferred)
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),

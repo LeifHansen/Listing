@@ -46,6 +46,32 @@ const EMPTY = {
   marketplaces: {},
 };
 
+// Which card each form field lives on, in the same vocabulary eBay's issues
+// use for `target`. Read by `set` to take the refusal ring off a field the
+// seller has just answered.
+//
+// Only fields whose card is unambiguous are listed. `brand` is deliberately
+// absent: it sits on the Title card but is just as often what a specifics
+// refusal ("eBay needs Brand and MPN") is about, so editing it clears
+// neither ring rather than the wrong one.
+const CARD_OF = {
+  title: "title",
+  subtitle: "title",
+  description: "description",
+  category_id: "category",
+  store_category_id: "category",
+  condition: "condition",
+  condition_description: "condition",
+  price: "price",
+  auction_start_price: "price",
+  package_weight_lb: "weight",
+  package_weight_oz: "weight",
+  package_length_in: "weight",
+  package_width_in: "weight",
+  package_height_in: "weight",
+  item_specifics: "specifics",
+};
+
 function fromListing(l) {
   if (!l) return { ...EMPTY };
   return {
@@ -138,6 +164,19 @@ export function useListingForm() {
 
   const set = useCallback((key, value) => {
     setForm((f) => ({ ...f, [key]: value }));
+    // A refusal names a field, and the editor rings that field red until the
+    // next publish. So a seller who did exactly what they were told — edit the
+    // title eBay named — watched the box stay red anyway, beside a "Complete"
+    // badge and a bar reading "Ready to publish". Three things on one screen
+    // disagreeing about the same field, and no way to make the red go away
+    // short of publishing again to find out.
+    //
+    // eBay's verdict was about the value that WAS in the box. Once that value
+    // changes, the verdict no longer describes anything on screen, so the ring
+    // comes off. What eBay said stays on the card (see TitleCard) — it is what
+    // the seller is working from — and the live blocker list still marks the
+    // field amber if the new value is itself unpublishable.
+    setFixTarget((t) => (t && CARD_OF[key] === t ? null : t));
   }, []);
 
   // Read the form back into a backend Listing payload.
