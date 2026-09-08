@@ -289,6 +289,35 @@ def explain(err: dict) -> dict:
                      fields=["UPC"],
                      title="eBay wants a product identifier (UPC/EAN)",
                      fix="Add an item specific “UPC” set to “Does not apply” for vintage/handmade items.")
+    elif has("cannot be changed", "can not be changed", "cannot be revised"):
+        # eBay refusing to change something RIGHT NOW, which is a different
+        # thing from anything being wrong with it — and the sentence it uses
+        # says "item specifics", so the branch below claimed it and answered
+        # "Missing required item specific" on a listing whose specifics were
+        # complete. The seller was sent hunting for an empty field that did
+        # not exist, every time they saved, for as long as the offer stood.
+        #
+        # eBay's own words are the whole answer here, so they lead. Filed
+        # under "generic": there is no field to open and fix, and a "Fix this"
+        # button pointing at the specifics grid is the same wrong claim in
+        # button form.
+        said = _clip(long_message or message)
+        offer = has("best offer", "auction", "bid")
+        issue.update(
+            target="generic",
+            title=("eBay has this listing frozen for now"
+                   if offer else f"eBay won’t change that on a live listing: {said}"),
+            fix=((f"eBay's reason: “{said}” " if said else "")
+                 + ("Nothing is missing and nothing is wrong with the listing "
+                    "— eBay locks parts of a listing while a Best Offer is "
+                    "waiting on it, or an auction has a bid or ends within 12 "
+                    "hours. Your edit is saved here and goes over "
+                    "automatically once that clears. Accepting or declining "
+                    "the offer lifts it immediately."
+                    if offer else
+                    "This part of a listing can't be changed once it is live. "
+                    "The edit is saved here; end the listing and relist it if "
+                    "it has to reach eBay.")))
     elif has("item specific", "aspect", "required attribute", "missing value"):
         # The aspect name rides along in the parameters next to full-sentence
         # copies of the message ("The item specific Item Height is missing.").
