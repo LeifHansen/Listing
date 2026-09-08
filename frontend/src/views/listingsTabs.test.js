@@ -1,4 +1,4 @@
-/* Where a listing shows up in the pipeline once it has sold.
+/* Where a listing shows up in the pipeline once it has finished.
  *
  * The defect these pin down: a sold listing stayed among the things the
  * seller could still act on. It sat in the everything-tab beside the live
@@ -6,8 +6,12 @@
  * workflow — a finished sale reading "Ready to publish", one tap from
  * re-listing the item that had already gone.
  *
- * A sale is now archived: sold and ended share the Inactive tab, and sold is
- * hidden everywhere else.
+ * Anything finished is archived under Inactive and hidden everywhere else —
+ * a sale, and a listing that ended without selling. The ended ones do not
+ * stay: the store sync's own mirrors are removed as soon as we know they
+ * ended, and one of the seller's own is removed a month later. What this
+ * file pins is where they are while they are here, which is the archive and
+ * nowhere else — an ended card among the live ones was the report.
  */
 import { describe, expect, it } from "vitest";
 import { TABS, STALE_TABS, inTab } from "./ListingsView";
@@ -21,7 +25,7 @@ describe("the pipeline's tabs", () => {
     expect(inTab(tab("inactive"), item("sold"))).toBe(true);
   });
 
-  it("keeps ended-without-selling in the same archive", () => {
+  it("keeps an ended one there too, for as long as it is here", () => {
     expect(inTab(tab("inactive"), item("ended"))).toBe(true);
   });
 
@@ -42,9 +46,14 @@ describe("the pipeline's tabs", () => {
   });
 
   it("still shows everything else in the everything-tab", () => {
-    for (const status of ["draft", "dry_run", "published", "live", "unlisted", "ended"]) {
+    for (const status of ["draft", "dry_run", "published", "live", "unlisted"]) {
       expect(inTab(tab("all"), item(status))).toBe(true);
     }
+  });
+
+  it("keeps an ended listing out of the everything-tab", () => {
+    // The report itself: an "Ended" card sitting among the live ones.
+    expect(inTab(tab("all"), item("ended"))).toBe(false);
   });
 
   it("leaves drafts and finds where they were", () => {
@@ -77,13 +86,13 @@ describe("counting", () => {
   ];
   const count = (id) => items.filter((i) => inTab(tab(id), i)).length;
 
-  it("counts each sold listing once, in the archive", () => {
-    expect(count("inactive")).toBe(3);   // 1 ended + 2 sold
+  it("counts each finished listing once, in the archive", () => {
+    expect(count("inactive")).toBe(3);   // 2 sold + 1 ended
     expect(count("active")).toBe(2);
   });
 
-  it("leaves the sold ones out of the All count", () => {
-    expect(count("all")).toBe(items.length - 2);
+  it("leaves the finished ones out of the All count", () => {
+    expect(count("all")).toBe(items.length - 3);
   });
 });
 

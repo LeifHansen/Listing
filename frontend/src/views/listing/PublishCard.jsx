@@ -11,6 +11,7 @@ import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
 import { MarketTargetChips, usePublishTargets } from "./publishShared";
 import { Button } from "@/components/ui/Button";
+import { endedGraceDays, keptWhenEnded } from "@/lib/listingsView";
 
 function nameFor(data, key, field) {
   return ((data.policies[key] || []).find((p) => p.id === data.selected[field]) || {}).name || "not set";
@@ -329,7 +330,8 @@ function MarketplaceChips({ w }) {
 // chip is a field eBay itself refuses the listing over, each carrying its own
 // label and jump target, and an empty list means Publish will go through.
 export function PublishBar({ w }) {
-  const { canPublishLive, deleteListing, setSession, openListings } = useApp();
+  const { canPublishLive, deleteListing, setSession, openListings,
+    health, listingsState } = useApp();
   const { confirm } = useToast();
   const blockers = w.blockers;
   const ready = blockers.length === 0;
@@ -367,10 +369,25 @@ export function PublishBar({ w }) {
   };
 
   const askEnd = async () => {
+    // Which of the two endings this is — kept under Inactive for the grace
+    // period, or removed on the spot because the record is only a copy of an
+    // eBay listing. The server decides; this reads the same rule so the
+    // dialog can say which before the call is made. The record is looked up
+    // in the store because `keptWhenEnded` asks about the ROW (its id, its
+    // local photos), not about the form being edited.
+    const item = listingsState.items.find((i) => i.id === w.sessionId)
+      || { id: w.sessionId };
+    const kept = keptWhenEnded(item);
+    const days = endedGraceDays(health);
     if (await confirm({
       title: "End this listing on eBay?",
-      message: "It comes off eBay immediately. It stays here as an ended listing you can edit and relist anytime.",
-      confirmLabel: "End listing",
+      message: kept
+        ? "It comes off eBay immediately and moves to Inactive, where you can "
+          + `relist it. We clear it out after ${days} days.`
+        : "It comes off eBay immediately, and this listing is removed from "
+          + "the app — it's a copy of your eBay listing, so there's nothing "
+          + "of yours in it to keep.",
+      confirmLabel: kept ? "End listing" : "End & remove",
       danger: true,
     })) w.endListing();
   };

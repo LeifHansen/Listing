@@ -141,7 +141,7 @@ export function SoldArchive({ w }) {
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={() => openListings("inactive")}>
-            <ArrowLeft aria-hidden /> Inactive
+            <ArrowLeft aria-hidden /> Sold
           </Button>
           <Button variant="ghost" onClick={() => { setSession(null); setView("dashboard"); }}
             aria-label="Close this listing">
@@ -270,7 +270,7 @@ export function SoldArchive({ w }) {
                 This one's sold
               </span>
               <span className="block text-[13px] text-ink-secondary leading-snug mt-0.5">
-                It's archived under Inactive. Got another? Start a fresh
+                It's archived under Sold. Got another? Start a fresh
                 listing from this one.
               </span>
             </span>

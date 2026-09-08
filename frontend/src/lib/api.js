@@ -381,7 +381,37 @@ export async function downscaleAllForUpload(files, limit = 4) {
 
 // HEIC/HEIF often arrive with an empty MIME type (Chrome, Windows), so accept
 // by extension too — the server decodes anything Pillow can.
-export const IMAGE_EXT_RE = /\.(jpe?g|png|webp|bmp|gif|tiff?|heic|heif|hif)$/i;
+//
+// This list mirrors services/images._EXTS, and it has to: a file the server
+// would have decoded happily but this list does not name is dropped HERE,
+// before anything is uploaded, and the seller is left looking at a screen
+// where their photo simply did not appear. It was missing .avif (which
+// current Android phones produce), .jfif and .jpe — `jpe?g` matches jpg and
+// jpeg, never jpe.
+export const IMAGE_EXT_RE =
+  /\.(jpe|jpeg|jpg|jfif|png|webp|bmp|gif|tiff?|heic|heif|hif|avif)$/i;
+
+// What the file pickers advertise. One string, because two pickers that
+// disagree about what they accept are two different bugs waiting: this is on
+// the uploader's Browse Files and on the editor's Add photos alike.
+//
+// The extensions are here for the phones. iOS hands over the ORIGINAL HEIC
+// when a page says it takes one (and transcodes to JPEG when it does not),
+// and Chrome on Windows gives HEIC an empty MIME type, so `image/*` alone
+// leaves both looking like files this app cannot open.
+export const PHOTO_ACCEPT = "image/*,.heic,.heif,.hif,.avif";
+
+// Is this something the uploader should take? A picked file counts as a photo
+// when the browser says it is one, or when its name says so — the two
+// disagree constantly on phones, where HEIC arrives with an empty type.
+//
+// It is deliberately NOT "anything the browser handed us". A file picker can
+// return a folder, a PDF or a video, and those reach the server as an upload
+// that fails there instead of here, which is a worse place to find out.
+export function isPhotoFile(file) {
+  return (file?.type || "").toLowerCase().startsWith("image/")
+    || IMAGE_EXT_RE.test(file?.name || "");
+}
 
 // Sample up to `maxFrames` evenly-spaced JPEG frames from a recorded video,
 // scaled down so the upload stays small. Runs entirely in the browser.

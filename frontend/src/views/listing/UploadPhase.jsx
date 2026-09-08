@@ -5,7 +5,8 @@ import {
 } from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import {
-  api, pollJob, downscaleAllForUpload, IMAGE_EXT_RE, UPLOAD_TIMEOUT_MS,
+  api, pollJob, downscaleAllForUpload, isPhotoFile, PHOTO_ACCEPT,
+  UPLOAD_TIMEOUT_MS,
 } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -105,20 +106,50 @@ export function UploadPhase() {
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
 
+  // Same photo, twice? Name AND size: an iPhone calls every photo in the
+  // library `image.jpg`, so matching on the name alone would throw away a
+  // whole pile of different photos as one.
+  const alreadyHere = (f, list) =>
+    list.some((e) => e.file.name === f.name && e.file.size === f.size);
+
   const addFiles = (fileList) => {
+    // Copied before anything else runs. `fileList` is the input's own LIVE
+    // FileList, and the change handler clears the input the moment this
+    // returns (`e.target.value = ""`, without which picking the same photo
+    // twice in a row fires no second event) — which, per the HTML spec,
+    // empties the very list this is reading. Nothing here may hold onto it
+    // past this line. The editor's "Add photos" has always copied first.
+    const picked = Array.from(fileList || []);
+    const rejected = picked.filter((f) => !isPhotoFile(f));
+    // Everything is decided out here rather than inside the state updater: an
+    // updater has to be pure (React runs it again, and twice over in
+    // development), and this both mints object URLs and counts what the
+    // seller is about to be told. The merge is against `files` as it stands,
+    // which is what the picker was just opened on top of.
+    const added = [];
+    let duplicates = 0;
     let overflow = 0;
-    setFiles((cur) => {
-      const next = [...cur];
-      for (const f of fileList) {
-        // HEIC/HEIF often arrive with an empty MIME type; accept by extension too.
-        if (!f.type.startsWith("image/") && !IMAGE_EXT_RE.test(f.name || "")) continue;
-        // Skip duplicates (same file picked twice) so we don't upload it twice.
-        if (next.some((e) => e.file.name === f.name && e.file.size === f.size)) continue;
-        if (next.length >= MAX_BATCH_FILES) { overflow += 1; continue; }
-        next.push({ file: f, url: URL.createObjectURL(f) });
-      }
-      return next;
-    });
+    for (const f of picked.filter(isPhotoFile)) {
+      if (alreadyHere(f, files) || alreadyHere(f, added)) { duplicates += 1; continue; }
+      if (files.length + added.length >= MAX_BATCH_FILES) { overflow += 1; continue; }
+      added.push({ file: f, url: URL.createObjectURL(f) });
+    }
+    if (added.length) setFiles((cur) => [...cur, ...added]);
+    // Nothing is dropped in silence. A photo that does not arrive leaves a
+    // screen identical to one where the picker never worked at all — which is
+    // exactly how this was reported: chose photos from the library, nothing
+    // happened. Whatever the reason, it is on screen, with the file named.
+    if (rejected.length) {
+      const names = rejected.slice(0, 3).map((f) => f.name || "that file").join(", ");
+      const more = rejected.length > 3 ? ` and ${rejected.length - 3} more` : "";
+      toast(`${names}${more} ${rejected.length === 1 ? "isn't" : "aren't"} a photo `
+        + "we can use — pick JPEG, PNG, HEIC or WebP images.", { kind: "warning" });
+    }
+    if (duplicates) {
+      toast(duplicates === 1
+        ? "That photo is already in the pile."
+        : `${duplicates} of those are already in the pile.`, { kind: "warning" });
+    }
     if (overflow) {
       toast(`A batch takes up to ${MAX_BATCH_FILES} photos — ${overflow} weren't added. Run them as a second batch.`,
         { kind: "warning" });
@@ -284,11 +315,11 @@ export function UploadPhase() {
           </div>
         </div>
         <input
-          ref={inputRef} type="file" accept="image/*,.heic,.heif,.hif" multiple hidden
+          ref={inputRef} type="file" accept={PHOTO_ACCEPT} multiple hidden
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
         />
         <input
-          ref={cameraRef} type="file" accept="image/*,.heic,.heif,.hif" capture="environment" hidden
+          ref={cameraRef} type="file" accept={PHOTO_ACCEPT} capture="environment" hidden
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
         />
       </Card>

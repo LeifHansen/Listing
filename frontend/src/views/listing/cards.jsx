@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
-import { api, postJson, IMAGE_EXT_RE } from "@/lib/api";
+import { api, postJson, isPhotoFile, PHOTO_ACCEPT } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
 import { useToast } from "@/components/ui/Toaster";
@@ -52,6 +52,7 @@ function EbayPhotos({ urls }) {
 
 export function PhotosCard({ w, onEdit, onDelete }) {
   const formImages = w.form.images || [];
+  const { toast } = useToast();
 
   // Move a photo one place, or to the front. Both go through reorderImages,
   // which persists the order and rolls the card back if the server refuses.
@@ -112,15 +113,28 @@ export function PhotosCard({ w, onEdit, onDelete }) {
     setFileDrag(false);
     if (w.addingPhotos) return;
     // Only images: a stray PDF or folder would otherwise ride along to the
-    // uploader and come back as a server-side error. Extension too, not just
-    // MIME: HEIC/HEIF routinely arrive with an EMPTY type on iOS and Windows,
-    // so a MIME-only filter silently threw away every photo an iPhone offered
-    // -- which is what IMAGE_EXT_RE exists for, and what the main uploader
-    // already checks.
-    const files = Array.from(e.dataTransfer.files || [])
-      .filter((f) => (f.type || "").startsWith("image/")
-                     || IMAGE_EXT_RE.test(f.name || ""));
-    if (files.length) w.addImages(files);
+    // uploader and come back as a server-side error. isPhotoFile checks the
+    // extension as well as the MIME type -- HEIC/HEIF routinely arrive with
+    // an EMPTY type on iOS and Windows, so a MIME-only filter silently threw
+    // away every photo an iPhone offered.
+    addPhotos(Array.from(e.dataTransfer.files || []));
+  };
+
+  // One way in for both the drop above and the file picker below, so what
+  // counts as a photo cannot differ between them -- the picker used to hand
+  // EVERYTHING to the server, including the PDF the drop had refused. And
+  // nothing is refused in silence: a photo that does not appear leaves a
+  // screen indistinguishable from one where the button did nothing.
+  const addPhotos = (files) => {
+    const usable = files.filter(isPhotoFile);
+    const rejected = files.filter((f) => !isPhotoFile(f));
+    if (rejected.length) {
+      const names = rejected.slice(0, 3).map((f) => f.name || "that file").join(", ");
+      const more = rejected.length > 3 ? ` and ${rejected.length - 3} more` : "";
+      toast(`${names}${more} ${rejected.length === 1 ? "isn't" : "aren't"} a photo `
+        + "we can use — pick JPEG, PNG, HEIC or WebP images.", { kind: "warning" });
+    }
+    if (usable.length) w.addImages(usable);
   };
 
   const ebayUrls = w.form.image_urls || [];
@@ -172,9 +186,14 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           w.addingPhotos && "pointer-events-none opacity-70",
         )}>
           <input
-            type="file" accept="image/*,.heic,.heif,.hif" multiple className="sr-only"
+            type="file" accept={PHOTO_ACCEPT} multiple className="sr-only"
             disabled={w.addingPhotos}
-            onChange={(e) => { w.addImages(e.target.files); e.target.value = ""; }}
+            onChange={(e) => {
+              // Copied before the input is cleared: `value = ""` empties this
+              // very FileList, so anything that reads it later reads nothing.
+              addPhotos(Array.from(e.target.files || []));
+              e.target.value = "";
+            }}
           />
           <span className="flex flex-col items-center gap-1 text-[12px] font-semibold">
             {w.addingPhotos

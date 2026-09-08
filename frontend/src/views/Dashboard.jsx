@@ -23,7 +23,7 @@ import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illus
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
          salesSummary } from "@/lib/sales";
-import { isDraft, listingsView, recentListings, storeTotal }
+import { isDraft, keptWhenEnded, listingsView, recentListings, storeTotal }
   from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { storeMirrorView } from "@/lib/storeMirror";
@@ -471,8 +471,12 @@ function readSoldRange() {
 
 // The sold tile's second line. It has one job per state: what the total is
 // made of, or — when nothing sold in the window — what to do instead.
-function soldSub(sales, soldEnded) {
-  const ended = soldEnded.filter((i) => i.status === "ended").length;
+//
+// The relist nudge counts the seller's OWN ended listings and not the store's
+// mirrors of eBay's: a mirror is removed as soon as we know it ended, so it
+// is never something to relist, and counting one would offer an action on a
+// card that is already gone.
+function soldSub(sales, ended) {
   if (!sales.count) {
     // An undated sale is one the app knew about before it started recording
     // sale dates — a store sync backfills them from eBay's own dates.
@@ -793,7 +797,10 @@ export function Dashboard() {
   const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
   const live = items.filter((i) => i.status === "published" || i.status === "live");
   const inventory = items.filter((i) => i.status === "unlisted");
-  const soldEnded = items.filter((i) => i.status === "sold" || i.status === "ended");
+  // Ended and still here, which after the automatic removal means one of the
+  // seller's own inside its grace period — something they can still relist.
+  const relistable = items.filter(
+    (i) => i.status === "ended" && keptWhenEnded(i)).length;
   // Sold revenue over the chosen window. What the buyers actually PAID —
   // an accepted offer settles below the asking price, and totalling `price`
   // would report money that never arrived. See lib/sales.
@@ -941,7 +948,7 @@ export function Dashboard() {
                            : formatMoney(sales.total,
                                          sales.currency || DEFAULT_CURRENCY)
                              || "$0.00",
-                         soldSub(sales, soldEnded))}
+                         soldSub(sales, relistable))}
           action={<SoldRangePicker value={soldRangeId} onChange={pickSoldRange} />}
           onClick={() => openListings("inactive")} />
         <StatCard icon={Rocket} tone="red" label="Listed today"
@@ -1132,7 +1139,7 @@ export function Dashboard() {
               illustration={ListingsIllustration}
               title="Everything's sold"
               message={"Nothing is waiting on you right now — every listing you "
-                + "have is a finished sale, filed under Inactive."}
+                + "have is a finished sale, filed under Sold."}
               action={
                 <div className="flex flex-wrap gap-2 justify-center">
                   <Button variant="primary" size="lg" onClick={startNew}>

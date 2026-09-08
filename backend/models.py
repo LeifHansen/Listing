@@ -214,6 +214,14 @@ class Listing(BaseModel):
     # updated_at can't stand in for it, because an imported record's timestamp
     # is the listing's START time.
     sold_at: str = ""
+    # ISO-8601 UTC of when this listing ENDED without selling — the moment the
+    # app filed it that way, whether the seller pressed End or eBay reported
+    # it finished. An ended listing this app created is kept for a grace
+    # period and then removed automatically (listing_sync.ENDED_GRACE_DAYS),
+    # and this is the clock that measures it. `updated_at` cannot: a relist,
+    # an edit, or any sweep that touches the row moves it, which would keep
+    # renewing the grace period on a listing nobody is coming back for.
+    ended_at: str = ""
     # eBay's own view URL for an imported listing (avoids guessing the domain).
     view_url: str = ""
     # Per-marketplace publish state, keyed by marketplace ("ebay", "etsy",

@@ -8,6 +8,7 @@ import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { reviewAspectCount } from "@/views/listing/specifics";
+import { keptWhenEnded } from "@/lib/listingsView";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
 function MetricsRow({ views, watchers, className }) {
@@ -344,16 +345,22 @@ export const ListingCard = memo(function ListingCard({
             : <RotateCcw size={15} aria-hidden />}
         </button>
       )}
-      {/* A LIVE listing's card action is End (→ Inactive tab), never a
-          permanent delete: the listing is a real thing on eBay. Delete
-          stays for drafts/finds and already-inactive records. */}
+      {/* A LIVE listing's card action is End, never Delete: the listing is a
+          real thing on eBay, and the button has to take it off eBay before
+          anything happens to the card. What happens next depends on whose
+          work the record holds — kept under Inactive for a month, or removed
+          on the spot when it is only the sync's copy of an eBay listing — so
+          the tooltip and the dialog behind it say which. Delete stays for
+          drafts and finds, which were never on eBay at all. */}
       {onEnd ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onEnd(item); }}
           disabled={ending}
           aria-label="End listing on eBay"
-          title="End this listing on eBay — it moves to Inactive and can be relisted anytime"
+          title={keptWhenEnded(item)
+            ? "End this listing on eBay — it moves to Inactive, where you can relist it"
+            : "End this listing on eBay — its card is removed from here too"}
           className={cn(
             "grid place-items-center size-8 rounded-full cursor-pointer",
             "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",

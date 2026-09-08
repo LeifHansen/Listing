@@ -781,7 +781,10 @@ export function AppProvider({ children }) {
       postJson("/api/ebay/sync-listings", { force })
         .then((r) => {
           setStoreSync((s) => ({ ...s, partial: !!r.partial }));
-          if (r.changed) loadListings({ quiet: true });
+          // `removed` as well as `changed`: the sweep that clears ended
+          // listings takes cards OFF this screen, and those are the ones the
+          // seller is watching for. Without it they sit there until a reload.
+          if (r.changed || r.removed) loadListings({ quiet: true });
         })
         .catch(() => {});
       // job_id: the import runs in the background and we watch it. A body with
@@ -823,8 +826,8 @@ export function AppProvider({ children }) {
   // shell) can stay open for days, and a listing that ends or sells ON eBay
   // in that time would sit under Active until a manual sync. Quietly re-check
   // live statuses when the app comes back into focus and on a slow heartbeat
-  // while it stays visible, so those records slide into the Inactive
-  // archive on their own.
+  // while it stays visible, so a sale is archived and a listing that ended
+  // without selling leaves the grid on its own.
   //
   // Cadence is a QUOTA decision, not a UI one: every check fans out real eBay
   // calls server-side, and eBay's Trading API is capped per DAY for the whole
@@ -841,7 +844,7 @@ export function AppProvider({ children }) {
     try {
       const r = await postJson("/api/ebay/sync-listings", {});
       setStoreSync((s) => ({ ...s, partial: !!r.partial }));
-      if (r.changed) loadListings({ quiet: true });
+      if (r.changed || r.removed) loadListings({ quiet: true });
     } catch (e) { /* best-effort — the next pass tries again */ }
   }, [user, ebay.connected, loadListings]);
   useEffect(() => {
