@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageFile, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageFile, ImageFilter, ImageOps
 
 from ..config import log
 from ..storage import natural_key
@@ -121,6 +121,53 @@ _MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
 # region labelling below is pure Python — at 160px it is a few thousand cells
 # and about a millisecond, against millions of pixels and a visible stall.
 _SHAPE_SIDE = int(os.getenv("REMBG_SHAPE_SIDE", "160") or 160)
+
+# --- and whether it is SOLID rather than see-through -------------------------
+#
+# Both measures above read a BINARISED matte — "the pixels at least half
+# opaque" — and neither can see the one thing the seller actually gets, which
+# is the matte used as an alpha channel. A pixel the model was half sure about
+# is not kept or dropped; it is composited at half strength onto white, and a
+# whole item's worth of those is an item half rubbed out.
+#
+# The report, with a screenshot: a grid of clothing. The maroon shirt came
+# out right. The white oxford and the cream fleece came back as pale smears
+# dissolving into the background — only the collar label, the placket and a
+# printed logo still solid, the fabric around them a ghost.
+#
+# That correlation is the whole diagnosis. The model is confident where there
+# is contrast and unsure where there is not, so a PALE ITEM ON A PALE
+# BACKDROP — a white shirt on white foamboard, exactly what sellers are told
+# to shoot on — comes back with its high-contrast details at 255 and its
+# fabric somewhere in the middle of the range. The shape guards then see the
+# details, which really are one solid blob filling its own box, and pass it.
+# What ships is the item at a third of its opacity over white, i.e. gone.
+#
+# So the third question, asked of the alpha as it will be USED: is the item
+# opaque where it is not an edge? Softness at the boundary is a good matte
+# doing its job — fur, flyaway hair, the anti-aliased rim of anything — so
+# the measure looks at the INTERIOR, the visible region eroded away from the
+# background, and asks what share of it is kept solid. Fur and lace answer
+# well above 0.6 there because their bodies are opaque and only their
+# fringes are not. A ghost answers below 0.15, because its middle is the
+# part that is see-through.
+#
+# The exception this knowingly refuses is genuinely sheer fabric — tulle,
+# organza, a chiffon scarf — which mattes half-opaque all over and is
+# indistinguishable from a model that never committed. Nothing here can tell
+# those apart, and the same error-direction argument decides it: a sheer
+# skirt kept as shot is a photo, and a sheer skirt composited on white is a
+# rumour of one.
+_MIN_INTERIOR_SOLIDITY = float(
+    os.getenv("REMBG_MIN_SOLIDITY", "0.4") or 0.4)
+# What counts as opaque. _harden already snaps everything from _ALPHA_HIGH up
+# to a flat 255, so an interior cell is exactly 255 or it is a pixel the model
+# hedged on; the slack is for cells that straddle a fold the matte dipped in.
+_SOLID_ALPHA = 250
+# How far in from the background the interior starts, in cells of the
+# _SHAPE_SIDE copy. Two is about 1% of the frame — enough to clear the soft
+# rim of a well-cut matte, small enough to leave an interior on a bracelet.
+_INTERIOR_ERODE = 2
 
 _INFER_LOCK = threading.Lock()
 # How long a caller queues for the one inference slot. A person watching the
@@ -330,6 +377,42 @@ def _shape_stats(kept: Image.Image) -> tuple[float, float]:
     return largest / total, (total / box_area if box_area else 0.0)
 
 
+def _interior_solidity(alpha: Image.Image) -> float:
+    """The share of the item's interior that the matte keeps fully opaque.
+
+    "Interior" is the visible region eroded away from the background by
+    _INTERIOR_ERODE, which is what separates the two kinds of soft matte: a
+    fur collar or an anti-aliased rim is soft only at the boundary and scores
+    near 1.0 once the boundary is taken off, while a matte the model hedged
+    across the whole item is see-through in the middle and scores near 0.
+
+    Measured on the same _SHAPE_SIDE copy as _shape_stats, and unlike it this
+    is all C — an erosion and two histograms, no per-pixel Python.
+
+    1.0 when erosion leaves nothing, which is a chain or a filigree earring
+    rather than a ghost: there is no interior, so this measure has nothing to
+    say and must not be what refuses the photo.
+    """
+    w, h = alpha.size
+    scale = _SHAPE_SIDE / max(w, h)
+    if scale < 1:
+        # BOX averages rather than sampling, so a cell is solid only if what
+        # it merged was solid — a rim cell that is half 255 and half 0 lands
+        # in the middle and is not counted as opaque. It is also eroded away
+        # below, which is the point: rims are not what this is measuring.
+        alpha = alpha.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                             Image.BOX)
+    visible = alpha.point(lambda a: 255 if a else 0)
+    solid = alpha.point(lambda a: 255 if a >= _SOLID_ALPHA else 0)
+    inner = visible
+    for _ in range(_INTERIOR_ERODE):
+        inner = inner.filter(ImageFilter.MinFilter(3))
+    interior = inner.histogram()[255]
+    if not interior:
+        return 1.0
+    return ImageChops.darker(inner, solid).histogram()[255] / interior
+
+
 def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
     """The item on white under a soft contact shadow, or None when the model
     found no item to keep.
@@ -342,7 +425,17 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     if coverage < _MIN_FG_COVERAGE:
         log.info("bg-removal: no item found (coverage %.3f)", coverage)
         return None
-    # Enough survived. Is it one object? See _MIN_LARGEST_REGION.
+    # Enough survived. Is it SOLID, or an item rubbed out to a third of
+    # itself? See _MIN_INTERIOR_SOLIDITY. Asked before the shape question
+    # because it is the cheaper of the two, and because the ghost it catches
+    # is a matte whose shape is perfectly respectable.
+    solidity = _interior_solidity(alpha)
+    if solidity < _MIN_INTERIOR_SOLIDITY:
+        log.info("bg-removal: the matte is see-through — only %.2f of the "
+                 "item's interior is opaque (coverage %.3f); keeping the "
+                 "photo as shot", solidity, coverage)
+        return None
+    # And is it one object? See _MIN_LARGEST_REGION.
     largest, box_fill = _shape_stats(kept)
     if largest < _MIN_LARGEST_REGION or box_fill < _MIN_BBOX_FILL:
         log.info("bg-removal: the matte is not one object — largest region "
@@ -564,8 +657,9 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     if out is None:
         raise ValueError(
             "Couldn't separate this photo from its background — it's likely "
-            "a close-up, dark, or low-contrast shot. Try cropping in tighter, "
-            "or paint the background out with the white brush.")
+            "a close-up, a dark shot, or a pale item on a pale backdrop. Try "
+            "cropping in tighter, shooting against a contrasting surface, or "
+            "painting the background out with the white brush.")
     return out, "local"
 
 
