@@ -5,7 +5,9 @@ import {
   SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
-import { FormatBadge, OriginBadge, PriceBadge, StatusBadge } from "@/components/ui/badges";
+import {
+  ConfidenceChip, FormatBadge, OriginBadge, PriceBadge, StatusBadge,
+} from "@/components/ui/badges";
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { reviewAspectCount } from "@/views/listing/specifics";
@@ -226,11 +228,15 @@ export const ListingCard = memo(function ListingCard({
 }) {
   const list = layout === "list";
   const l = item.listing || {};
+  const draft = item.status === "draft" || item.status === "dry_run";
   // Drafts with AI-inferred specifics awaiting a glance get a ⚠ count chip —
   // review those fields and the draft is publish-ready.
-  const reviewCount = (item.status === "draft" || item.status === "dry_run")
-    ? reviewAspectCount(l.item_specifics)
-    : 0;
+  const reviewCount = draft ? reviewAspectCount(l.item_specifics) : 0;
+  // How sure the AI was of what this IS when it drafted it (see
+  // badges.ConfidenceChip). Drafts only: once a listing is live the seller
+  // has stood behind it, and the AI's doubts about the first draft are not
+  // a fact about the listing that is selling.
+  const confidence = draft ? l.ai_confidence : "";
   const isLive = item.status === "published" || item.status === "live";
   const hasMetrics = isLive && metrics
     && (metrics.views != null || metrics.watchers != null);
@@ -477,6 +483,9 @@ export const ListingCard = memo(function ListingCard({
           {needsInfo
             ? <NeedsInfoChip title={needsInfoWhy} />
             : reviewCount > 0 && <ReviewChip count={reviewCount} />}
+          {/* After the blockers and the review count: those say what to
+              fix, this says how far to trust the rest. */}
+          {confidence && <ConfidenceChip level={confidence} />}
           <MarketplaceChips listing={l} />
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
@@ -535,6 +544,10 @@ export const ListingCard = memo(function ListingCard({
           <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
         )}
         <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
+          {/* In the body, not on the photo: the photo's corners already
+              hold the status and the needs-info / review chip, and on a
+              phone-width tile a third would sit on top of one of them. */}
+          {confidence && <ConfidenceChip level={confidence} />}
           <MarketplaceChips listing={l} />
         </div>
         {sold && (

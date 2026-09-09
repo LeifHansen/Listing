@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertCircle, Circle, Gavel } from "lucide-react";
+import { CheckCircle2, AlertCircle, Circle, Gavel, Sparkles } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
 import {
   formatChipLabel, formatSummary, isAuctionFormat, listingFormat,
@@ -190,5 +190,52 @@ export function ConfidenceBadge({ level, className }) {
     <TagPill tone={tone} className={className}>
       AI confidence: {l}
     </TagPill>
+  );
+}
+
+// ConfidenceChip — the same verdict as ConfidenceBadge, sized for a card.
+//
+// This is how sure the AI was of what the item IS when it drafted the
+// listing: the identify pass's overall confidence, stamped onto the draft
+// itself (listing.ai_confidence) so it survives the trip through the store.
+// It used to reach only the editor's header, on the session, and was gone
+// the moment the draft was saved — so a grid of forty bulk drafts all looked
+// equally sure, and the one drafted from photos that settled nothing looked
+// exactly like the ones read off a label.
+//
+// A different fact from the per-specific ✓/⚠ flags (ReviewChip): those say
+// which FIELDS want a glance; this says whether the title, the brand and the
+// price — the three a wrong answer costs most on — were read or guessed. The
+// tooltip spells that out, because the word alone reads as a grade on the
+// draft rather than a pointer to what to check. Draws nothing for a listing
+// the AI never drafted (an import, a relist, a stub) — "" is not "medium".
+const CONFIDENCE_CHIP = {
+  high: {
+    cls: "bg-green-soft border-green/30 text-green",
+    tip: "The AI was sure what this is — the title, brand and price were read off the photos.",
+  },
+  medium: {
+    cls: "bg-yellow-soft border-warning/30 text-warning",
+    tip: "The AI drafted this with some guesswork — give the title, brand and price a glance before publishing.",
+  },
+  low: {
+    cls: "bg-red-soft border-error/40 text-error",
+    tip: "The AI couldn't pin this item down from the photos — check the title, brand and price before publishing.",
+  },
+};
+
+export function ConfidenceChip({ level, className }) {
+  const meta = CONFIDENCE_CHIP[level];
+  if (!meta) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold",
+        meta.cls, className,
+      )}
+      title={`AI confidence: ${level} — ${meta.tip}`}
+    >
+      <Sparkles size={11} aria-hidden /> AI: {level}
+    </span>
   );
 }

@@ -337,7 +337,19 @@ function Workflow() {
             {w.form.title || "New listing"}
           </h1>
           <div className="flex items-center gap-2 mt-1">
-            {session.confidence && <ConfidenceBadge level={session.confidence} />}
+            {/* A fresh draft carries the verdict on the session; one
+                reopened from its card carries it on the listing itself
+                (ai_confidence), and the header says what the card said.
+                Not on a live or ended listing — the AI's doubts about the
+                first draft are not a fact about the listing that is
+                selling. Only `session.confidence` means "fresh": it is also
+                what triggers the paid specifics autofill, so the stored
+                value is read here and never copied onto the session. */}
+            {(session.confidence
+              || (!w.isLive && session.status !== "ended" && session.listing?.ai_confidence)) && (
+              <ConfidenceBadge
+                level={session.confidence || session.listing.ai_confidence} />
+            )}
             {w.isLive && (
               <span title="Editing updates the real listing on eBay">
                 <TagPill tone="green">

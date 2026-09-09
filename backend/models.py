@@ -167,6 +167,26 @@ class Listing(BaseModel):
     image_urls: list[str] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
     missing_info: list[str] = Field(default_factory=list)
+    # How sure the identify pass was of what this item IS: "low", "medium" or
+    # "high", as claude_ai.identify reported it, or "" for a listing the AI
+    # never drafted (an eBay import, a relist, a stub saved when the AI
+    # failed). Stamped by every drafting path in main -- the synchronous
+    # route, the polled job behind the uploader and "Start over", the bulk
+    # worker -- the moment the draft exists.
+    #
+    # The same answer used to reach only the editor's header, on the
+    # IdentifyResult, and was gone the moment the draft was saved. So the
+    # cards a seller actually triages from -- the drafts strip, the bulk
+    # queue, the dashboard -- showed forty drafts that all looked equally
+    # sure, and the one drafted from photos that settled nothing looked
+    # exactly like the ones read off a label. This is a different fact from
+    # the per-specific ✓/⚠ flags: those say which FIELDS want a glance, this
+    # says whether the title, the brand and the price -- the three a wrong
+    # answer costs most on -- were read or guessed.
+    #
+    # Server-owned (state.SERVER_OWNED_FIELDS): a refine rebuilds the listing
+    # from the model's echo and would drop it; a relist clears it on purpose.
+    ai_confidence: str = ""
     # When the AI item-specifics fill last actually RAN on this listing
     # (ISO-8601 UTC), set by main._enrich_listing whichever path called it.
     # "" means it has never run — an imported listing, or one whose category
@@ -309,6 +329,16 @@ class Listing(BaseModel):
         if isinstance(value, (list, tuple, set, frozenset)):
             return sorted({str(v) for v in value if v})
         return value
+
+    @field_validator("ai_confidence", mode="before")
+    @classmethod
+    def _known_confidence(cls, value):
+        """Only the three levels the UI knows reach the record. The field is
+        rendered into the DOM as a chip, so anything else -- a prompt-injected
+        string echoed back by a refine, a client's typo -- is treated as
+        "the AI never said", the same guard claude_ai puts on the response."""
+        level = str(value or "").strip().lower()
+        return level if level in ("low", "medium", "high") else ""
 
     @field_validator("quantity", mode="before")
     @classmethod
