@@ -16,7 +16,12 @@ import logging
 
 import pytest
 
+# The route half imports backend.main, which needs the full image (the
+# AI client, Pillow); CI's minimal job skips this file and the smoke job
+# runs it, like every other route test here.
 pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
 
 from fastapi.testclient import TestClient
 

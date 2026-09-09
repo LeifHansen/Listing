@@ -11,6 +11,8 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
 
 from fastapi.testclient import TestClient
 
