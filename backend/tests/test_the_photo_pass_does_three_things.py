@@ -3,9 +3,14 @@
 It keeps a photo as shot, it takes the background off when asked -- one run
 of the model, the item on white under a soft contact shadow -- and it turns
 the photo the way the camera meant. The pipeline this replaced also guessed
-whether the ITEM lay sideways (two vision calls), rebuilt the matte's border,
-repaired holes in it, cropped square around a detected subject, sharpened,
-and could hand the photo to three paid APIs.
+whether the ITEM lay sideways (two vision calls, written around a shirt),
+rebuilt the matte's border, repaired holes in it, cropped square around a
+detected subject, sharpened, and could hand the photo to three paid APIs.
+
+The orientation guess came back on its own, rebuilt for objects and held to
+its own rules -- test_the_item_is_turned_upright_whatever_it_is.py. It is
+off throughout this file (conftest), so everything here is the pass with no
+model asked which way is up.
 
 The contact shadow went out with them and was asked for back on its own: it
 is drawn from the silhouette the model already produced, so unlike the rest

@@ -9,7 +9,9 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { gridOrder, listingsView, recentListings, storeTotal } from "./listingsView.js";
+import {
+  buyerWaiting, listingsView, orderListings, recentListings, storeTotal,
+} from "./listingsView.js";
 
 const USER = { id: "u1" };
 
@@ -236,18 +238,37 @@ describe("the dashboard's Recent listings strip", () => {
 });
 
 
-describe("the order a tab's grid shows its cards in", () => {
+describe("the archive's place in the grid", () => {
   // Written for All, which holds the whole store. A sale or an ending is the
   // last thing to touch a row, so by recency alone the finished listings
   // would head the tab the seller opened to work on the live ones.
   const at = (status, updated_at) => ({ id: status + updated_at, status, updated_at });
+
+  it("is behind everything still in play, which is behind a buyer waiting", () => {
+    // The three tiers together. The older live listing has a bid on it and
+    // heads the grid; the sale is the newest row of all and still goes last.
+    const items = [
+      at("sold", "2026-03-09"), at("live", "2026-03-08"),
+      at("live", "2026-03-07"), at("ended", "2026-03-06"),
+    ];
+    const out = orderListings(items, { "live2026-03-07": { bids: 1 } });
+    expect(out.map((i) => i.id)).toEqual([
+      "live2026-03-07", "live2026-03-08", "sold2026-03-09", "ended2026-03-06",
+    ]);
+  });
+
+  it("is not lifted out of by a bid, because a finished listing is settled", () => {
+    const items = [at("sold", "2026-03-09"), at("live", "2026-03-01")];
+    expect(orderListings(items, { "sold2026-03-09": { bids: 5 } }).map((i) => i.status))
+      .toEqual(["live", "sold"]);
+  });
 
   it("puts the archive after everything still in play", () => {
     const items = [
       at("sold", "2026-03-09"), at("ended", "2026-03-08"),
       at("live", "2026-03-05"), at("draft", "2026-03-07"),
     ];
-    expect(gridOrder(items).map((i) => i.status))
+    expect(orderListings(items).map((i) => i.status))
       .toEqual(["draft", "live", "sold", "ended"]);
   });
 
@@ -256,28 +277,80 @@ describe("the order a tab's grid shows its cards in", () => {
       at("live", "2026-03-01"), at("sold", "2026-03-02"),
       at("live", "2026-03-03"), at("sold", "2026-03-04"),
     ];
-    expect(gridOrder(items).map((i) => i.updated_at))
+    expect(orderListings(items).map((i) => i.updated_at))
       .toEqual(["2026-03-03", "2026-03-01", "2026-03-04", "2026-03-02"]);
   });
 
   it("is plain recency for a tab that holds one kind only", () => {
     // Active, Finds and Inactive: nothing there to move to the back.
     const live = [at("live", "2026-03-01"), at("live", "2026-03-03")];
-    expect(gridOrder(live).map((i) => i.updated_at))
+    expect(orderListings(live).map((i) => i.updated_at))
       .toEqual(["2026-03-03", "2026-03-01"]);
     const archive = [at("sold", "2026-03-01"), at("ended", "2026-03-03")];
-    expect(gridOrder(archive).map((i) => i.updated_at))
+    expect(orderListings(archive).map((i) => i.updated_at))
       .toEqual(["2026-03-03", "2026-03-01"]);
   });
 
   it("leaves the caller's array alone", () => {
     const items = [at("live", "2026-03-01"), at("live", "2026-03-05")];
-    gridOrder(items);
+    orderListings(items);
     expect(items.map((i) => i.updated_at)).toEqual(["2026-03-01", "2026-03-05"]);
   });
 
   it("survives a listing that has never been updated, and no list at all", () => {
-    expect(gridOrder([{ id: "a", status: "live" }])).toHaveLength(1);
-    expect(gridOrder()).toEqual([]);
+    expect(orderListings([{ id: "a", status: "live" }])).toHaveLength(1);
+    expect(orderListings()).toEqual([]);
+  });
+});
+
+
+describe("a listing a buyer has acted on", () => {
+  const live = (id, updated) => ({ id, status: "published", updated_at: updated });
+
+  it("is a live listing with a bid or an offer on it", () => {
+    expect(buyerWaiting(live("a"), { bids: 2 })).toBe(true);
+    expect(buyerWaiting(live("a"), { offers: 1 })).toBe(true);
+    expect(buyerWaiting(live("a"), { bids: 0, offers: 0 })).toBe(false);
+  });
+
+  it("is never one the app could not ask about", () => {
+    // No number at all is "we don't know", not "nobody".
+    expect(buyerWaiting(live("a"), undefined)).toBe(false);
+    expect(buyerWaiting(live("a"), { views: 3 })).toBe(false);
+  });
+
+  it("is never one that has finished", () => {
+    expect(buyerWaiting({ id: "s", status: "sold" }, { bids: 7 })).toBe(false);
+    expect(buyerWaiting({ id: "e", status: "ended" }, { offers: 1 })).toBe(false);
+    expect(buyerWaiting({ id: "d", status: "draft" }, { bids: 1 })).toBe(false);
+  });
+
+  it("goes to the top of the grid, ahead of newer edits", () => {
+    const items = [
+      live("new", "2026-09-04T00:00:00Z"),
+      live("mid", "2026-09-03T00:00:00Z"),
+      live("bid", "2026-09-01T00:00:00Z"),
+      live("offer", "2026-09-02T00:00:00Z"),
+    ];
+    const out = orderListings(items, {
+      bid: { bids: 1 }, offer: { offers: 2 }, new: { bids: 0 } });
+    // Lifted cards keep their own recency order; so do the rest.
+    expect(out.map((i) => i.id)).toEqual(["offer", "bid", "new", "mid"]);
+  });
+
+  it("leaves the order alone when nobody has acted", () => {
+    const items = [
+      live("older", "2026-09-01T00:00:00Z"),
+      live("newer", "2026-09-02T00:00:00Z"),
+    ];
+    expect(orderListings(items, {}).map((i) => i.id)).toEqual(["newer", "older"]);
+    // And without any metrics at all — before eBay has answered.
+    expect(orderListings(items).map((i) => i.id)).toEqual(["newer", "older"]);
+  });
+
+  it("does not sort the caller's array in place", () => {
+    const items = [live("a", "2026-09-01T00:00:00Z"), live("b", "2026-09-02T00:00:00Z")];
+    orderListings(items, { a: { bids: 1 } });
+    expect(items.map((i) => i.id)).toEqual(["a", "b"]);
   });
 });

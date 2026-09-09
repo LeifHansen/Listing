@@ -4,6 +4,7 @@ import {
   Sparkles, FolderOpen, Trash2, Camera, MessageSquareText, Check, CheckCheck, X,
 } from "lucide-react";
 import { cn, once } from "@/lib/utils";
+import { turnedUprightMessage } from "@/lib/turnedUpright";
 import {
   api, pollJob, downscaleAllForUpload, isPhotoFile, PHOTO_ACCEPT,
   UPLOAD_TIMEOUT_MS,
@@ -226,6 +227,10 @@ export function UploadPhase() {
         const warning = bgFailureMessage(optResults, prepped.length);
         if (warning) toast(warning, { kind: "warning", ttl: 10000 });
       }
+      // A photo the pass turned upright is a photo the seller did not see
+      // change. Say so, and how to turn it back if the pass got it wrong.
+      const turned = turnedUprightMessage(optResults);
+      if (turned) toast(turned, { kind: "info", ttl: 10000 });
       files.forEach((f) => URL.revokeObjectURL(f.url));
       setSession({
         sessionId: up.session_id,

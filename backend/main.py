@@ -4627,12 +4627,15 @@ def _run_upload_more_job(job_id: str, session_id: str,
     # optimize_results carries each photo's bg_error, exactly as /api/upload
     # returns it: a photo that kept its background has to be SAID, or the
     # seller is left wondering why two photos look nothing like the others.
+    # And its turn, for the same reason the other way round: a photo the
+    # orientation pass turned is a photo the seller did not see change.
     _bulk_set(job_id, done=True, phase="done", result={
         "added": new_names, "optimized": storage.list_optimized(session_id),
         "optimize_results": [
-            {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error")}
+            {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error"),
+             "rotated": res.get("rotated", 0)}
             for (idx, _src), res in zip(staged, results)
-            if not res.get("error") and res.get("bg_error")]})
+            if not res.get("error") and (res.get("bg_error") or res.get("rotated"))]})
 
 
 @app.post("/api/edit-image")

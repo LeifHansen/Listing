@@ -18,7 +18,7 @@ import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
-  endedGraceDays, gridOrder, isDraft, keptWhenEnded, listingsView,
+  endedGraceDays, isDraft, keptWhenEnded, listingsView, orderListings,
 } from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
@@ -69,7 +69,7 @@ export const TABS = [
     // The whole store, so its count is what the other tabs add up to. It
     // used to leave the archive out, and the badges said so — "Active 355,
     // Inactive 11, All 355" was the report. The finished listings sit after
-    // the live ones here (gridOrder), not among them.
+    // the live ones here (orderListings), not among them.
     id: "all", label: "All", statuses: null,
     sub: "Your whole store in one place — everything live, plus drafts, finds "
       + "and the archive (finished listings sit at the end)",
@@ -231,15 +231,17 @@ export function ListingsView({ search = "" }) {
   };
 
   const q = search.trim().toLowerCase();
-  // Most recently touched first, with the archive after everything still in
-  // play — which only matters on All, where a sale (the last thing to touch
-  // a row) would otherwise head the whole store.
-  const items = gridOrder(listingsState.items
+  // Newest first, except that a listing a buyer has bid or made an offer on
+  // goes to the top and the archive goes to the bottom: see
+  // lib/listingsView.orderListings. The card itself says why it is where it
+  // is (the green glow and its chip, or a Sold / Ended badge, in ListingCard).
+  const shown = listingsState.items
     .filter((i) => inTab(tab, i))
     .filter((i) => !q
       || (i.listing?.title || i.title || "").toLowerCase().includes(q)
       || (i.listing?.brand || "").toLowerCase().includes(q)
-      || (i.listing?.description || "").toLowerCase().includes(q)));
+      || (i.listing?.description || "").toLowerCase().includes(q));
+  const items = orderListings(shown, metricsById);
 
   // "Create Listing" from an empty tab used to look broken: this list now
   // lives on the Sell screen, so startNew() lands you where you already are

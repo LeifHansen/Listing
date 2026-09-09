@@ -22,7 +22,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { TABS, STALE_TABS, inTab } from "./ListingsView";
-import { ARCHIVED_STATUSES, gridOrder, recentListings } from "@/lib/listingsView";
+import { ARCHIVED_STATUSES, orderListings, recentListings } from "@/lib/listingsView";
 
 const tab = (id) => TABS.find((t) => t.id === id);
 const item = (status) => ({ id: status, status });
@@ -124,7 +124,7 @@ describe("the dashboard's strip and the Sell screen's grid", () => {
       const finished = { id: status, status, updated_at: "2026-03-02" };
       const live = { id: "live", status: "live", updated_at: "2026-03-01" };
       expect(recentListings([finished, live])).toEqual([live]);
-      expect(gridOrder([finished, live])).toEqual([live, finished]);
+      expect(orderListings([finished, live])).toEqual([live, finished]);
     }
   });
 

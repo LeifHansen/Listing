@@ -62,8 +62,9 @@ jobs:
   # so nothing here would go unrun without it. What it proves that `smoke`
   # cannot is that the pass deciding what a seller's photo looks like on eBay
   # -- as shot or cut out, upright, no EXIF, resumable -- works on PILLOW
-  # ALONE: no rembg, no onnxruntime, no model download, with the model stood
-  # in for by a matte the tests draw themselves. It is also ten seconds, so
+  # ALONE: no rembg, no onnxruntime, no model download, no Anthropic SDK,
+  # with the cutout model stood in for by a matte the tests draw themselves
+  # and the orientation model by canned answers. It is also ten seconds, so
   # a broken photo pass says so before the four-minute job gets there.
   #
   # Its list of files is therefore a deliberate narrowing, not the kind that
@@ -90,6 +91,7 @@ jobs:
         run: |
           set -o pipefail
           pytest backend/tests/test_the_photo_pass_does_three_things.py \
+                 backend/tests/test_the_item_is_turned_upright_whatever_it_is.py \
                  backend/tests/test_export_pipeline.py \
                  backend/tests/test_a_transparent_photo_does_not_go_black.py \
                  backend/tests/test_photo_resume.py \

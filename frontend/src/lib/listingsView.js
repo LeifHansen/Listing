@@ -112,7 +112,7 @@ export const isDraft = (item) => item?.status === "draft"
 /* The statuses that have left the pipeline. A sale is finished business, and
    so is an ending: the listings manager files both under Inactive, the
    dashboard's "Recent listings" strip leaves them out, and the All tab shows
-   them after everything still in play (gridOrder, below).
+   them after everything still in play (orderListings, below).
 
    They used to be subtracted from All as well, and the tab badges said so:
    "Active 355 · Inactive 11 · All 355" was the report. A tab called All that
@@ -135,21 +135,6 @@ export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
 const byRecency = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "");
 
 
-/* The order a tab's grid shows its cards in: everything still in play first,
-   most recently touched at the top, and the archive after it.
-
-   One rule for every tab. On Active, Finds and Inactive it is plain recency,
-   since each holds one kind or the other. It is written for All, which holds
-   the archive too — and a sale or an ending is the last thing that ever
-   touches a row, so recency alone would put the finished listings at the top
-   of the whole store, ahead of everything the seller opened the tab to work
-   on. Sorts a copy; the store's `items` is what React renders from. */
-export function gridOrder(items) {
-  return [...(items || [])].sort((a, b) =>
-    (Number(isArchived(a)) - Number(isArchived(b))) || byRecency(a, b));
-}
-
-
 /* The newest listings the seller can still do something about, most recently
    touched first — what the dashboard shows under "Recent listings".
 
@@ -162,6 +147,50 @@ export function recentListings(items, limit = 4) {
     .filter((i) => !isArchived(i))
     .sort(byRecency)
     .slice(0, limit);
+}
+
+
+/* A live listing a buyer has ACTED on: a bid on an auction, or a Best Offer
+   waiting for an answer. Either one is money on the table, and both come
+   from the same eBay read (services/metrics) with the same rule: the count
+   is ABSENT, not zero, when the app could not ask — so a missing number is
+   "we don't know", never "nobody". Only live listings qualify; a bid or an
+   offer on anything else is settled history.
+
+   This is the one question behind the green glow on the card and its place
+   at the top of the grid, so it is asked in one place and answered once. */
+export const isLive = (item) => item?.status === "published"
+  || item?.status === "live";
+
+export function buyerWaiting(item, metrics) {
+  if (!isLive(item) || !metrics) return false;
+  return Number(metrics.offers) > 0 || Number(metrics.bids) > 0;
+}
+
+
+/* The grid's order, in three tiers: the listings a buyer is waiting on
+   first, then everything else still in play, then the archive — and newest
+   touched first within each tier, which is the order the grid always had.
+
+   The lift is the whole point of knowing. A bid or an offer used to be a
+   chip on a card that sat wherever its last edit put it, which on a store of
+   a few hundred is below the fold. The card the seller has to look at now
+   is the one they should not have to scroll for.
+
+   The archive goes last for the mirror-image reason. All holds the whole
+   store, and a sale or an ending is the last thing that ever touches a row,
+   so by recency alone the finished listings would head the tab the seller
+   opened to work on the live ones. On Active, Finds and Inactive the last
+   tier never separates anything — each holds one kind — so the order there
+   is the lift, then recency, as before.
+
+   Stable, so two cards in the same tier keep their own recency order rather
+   than whichever sorted first. Sorts a copy; the store's `items` is what
+   React renders from. */
+export function orderListings(items, metricsById = {}) {
+  const tier = (i) => (buyerWaiting(i, metricsById?.[i.id]) ? 0
+    : isArchived(i) ? 2 : 1);
+  return [...(items || [])].sort((a, b) => (tier(a) - tier(b)) || byRecency(a, b));
 }
 
 

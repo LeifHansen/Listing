@@ -3,6 +3,7 @@ import { api, pollJob, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
+import { turnedUprightMessage } from "@/lib/turnedUpright";
 import { nearestCondition } from "@/lib/conditions";
 import {
   publishListing, usePublishTargets, blockedReason, fixTargetFor,
@@ -605,7 +606,11 @@ export function useListingForm() {
         // shown -- the same trap reorderImages above documents having fixed.
         // The outer catch turns it into "Couldn't add photos: ...".
         await postJson(`/api/save/${sessionId}`, { ...collect(), images: next });
-        toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`, { kind: "success" });
+        // ...and which of them the pass turned upright, so a wrong turn is
+        // found now rather than on the live listing.
+        const turned = turnedUprightMessage(res.optimize_results);
+        toast(`Added ${added.length} photo${added.length === 1 ? "" : "s"}.`
+          + (turned ? ` ${turned}` : ""), { kind: "success" });
         // New photos were saved onto the listing — and if it had none, the
         // card was rendering the no-photo placeholder.
         invalidateListings();
