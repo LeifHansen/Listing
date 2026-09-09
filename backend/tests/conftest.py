@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # data/ directory and a warning on every run.
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="thryft-tests-"))
 os.environ.setdefault("SECRET_KEY", "test-secret")
+# The orientation pass asks a vision model which way up the ITEM is. Off for
+# the suite: a developer's shell may carry a real key, and every photo test
+# would otherwise spend it on synthetic squares. The tests of the pass itself
+# switch it on and stand in for the model.
+os.environ.setdefault("AUTO_ORIENT", "off")
 
 from backend import config, objstore  # noqa: E402
 

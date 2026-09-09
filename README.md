@@ -21,7 +21,7 @@ payload when you don't have eBay credentials yet).
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
-| Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (when removal is on), square-frame on the item at the photo's own scale — never a zoom — resize to 1600px, finishing sharpen | Pillow |
+| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on), resize to 1600px, strip the metadata | Pillow + Anthropic API |
 | Identify | Photos sent to Claude vision; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
@@ -787,14 +787,29 @@ production bundle automatically.
 
 ## Photo pipeline
 
-Per photo, the pass does three things and nothing else: it honours the
-camera's EXIF orientation, it takes the background off when the seller asked
-(one run of the local rembg model, the matte hardened a little, the item
+Per photo, the pass does four things and nothing else: it honours the
+camera's EXIF orientation, it turns the item upright when it was photographed
+lying sideways or on its head, it takes the background off when the seller
+asked (one run of the local rembg model, the matte hardened a little, the item
 composited on white), and it sizes the result for eBay -- the longest side to
 1600px, never upscaled -- saved as a JPEG with no metadata, so the GPS of the
 seller's home never rides along to a listing. The frame the seller composed is
-the frame that ships; cropping, straightening an item that lay sideways, and
-fixing a cutout the model got wrong are the seller's, in the photo studio.
+the frame that ships; cropping and fixing a cutout the model got wrong are the
+seller's, in the photo studio.
+
+The item's orientation is the one thing EXIF cannot tell, so a vision model is
+asked (`backend/services/orient.py`). The first version of that pass was
+written around a shirt laid flat and was wrong about most other things; the
+rebuilt one starts from how the item sits in the frame -- standing, hanging,
+worn, a garment laid flat, anything else laid flat, or a close-up -- with
+readable text winning over everything, and it never turns a flat-lay or a
+close-up that carries no text, because those have no wrong way up. A proposed
+turn ships only after a second, different question: the photo at all four
+quarter-turns, and the model must pick the proposal. Best-effort and bounded
+(`ORIENT_BUDGET_SECONDS`); anything it cannot answer for stays as shot, a
+wrong turn is one tap of the rotate button on the tile or the card, and
+Restore original goes back to the photo as shot. `AUTO_ORIENT=off` disables
+it.
 
 Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,
 baked into the image; needs the 4GB VM). `u2netp` is the 4MB fallback for a
