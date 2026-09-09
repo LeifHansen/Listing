@@ -62,10 +62,6 @@ EXEMPT = {
         "`session_id` is a Stripe Checkout session, not a listing session — "
         "a different namespace. It requires a login and confirms against "
         "Stripe scoped to that user.",
-    "ebay_shipping_label_download":
-        "eBay scopes it. The download goes out on the CALLER's own OAuth "
-        "token, so a shipment id belonging to another seller is refused at "
-        "eBay rather than here — there is no local record to check against.",
     "admin_get_listing":
         "A superadmin console route: the cross-user read is the point. "
         "Access is gated by _require_superadmin — fail-closed, the role "
@@ -144,7 +140,7 @@ def test_the_scan_found_the_routes_it_is_meant_to_guard():
     assert len(SCOPED) >= 20, f"only found {len(SCOPED)}: {sorted(SCOPED)}"
     for expected in ("save_listing", "patch_listing", "get_listing",
                      "relist_listing", "upload_more", "bulk_status",
-                     "import_status", "ebay_shipping_label_download"):
+                     "import_status", "easypost_refund"):
         assert expected in SCOPED, f"{expected} is no longer being scanned"
 
 

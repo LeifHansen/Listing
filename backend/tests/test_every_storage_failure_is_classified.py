@@ -131,6 +131,15 @@ WHY_A_BLANK_IS_SAFE = {
         "the tolerant twin, for panels that hide themselves rather than claim",
     "get_marketplace_account_best_effort":
         "the tolerant twin, same reasoning as the eBay one",
+    "labels_for_order_best_effort":
+        "the tolerant twin: decorates an order with what was bought; the "
+        "purchase route reads the strict labels_for_order, which raises",
+    "labels_for_orders":
+        "decorates a page of orders with their labels in one query; a blank "
+        "costs a badge, and the purchase route never reads it",
+    "labels_for_listing":
+        "decorates a sold notification's jump with the label it went with; the "
+        "screen it feeds already has an honest empty state",
     "save_ebay_account_best_effort":
         "returns False, which the caller checks; it never reports a save",
 
@@ -214,6 +223,12 @@ WHY_A_BLANK_IS_SAFE = {
         "the token is what matters and is cleared first; the rest is preference",
     "disconnect_marketplace_account":
         "same as the eBay disconnect, and the caller re-reads the connection state",
+    "update_shipping_label":
+        "returns False, which the purchase route logs; a bought label whose row "
+        "did not update is still bought, and the next open reconciles it",
+    "mark_label_ebay":
+        "returns how many changed; the fulfillment already happened on eBay and "
+        "this only keeps the dialog's badge honest",
     "update_user":
         "None is surfaced by the caller as a failed save rather than a silent one",
     "mutate_listing_data":

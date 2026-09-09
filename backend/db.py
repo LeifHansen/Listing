@@ -290,6 +290,51 @@ class Notification(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ShippingLabel(Base):
+    """One row per label the seller bought (or set out to buy) for an order.
+
+    Written BEFORE the purchase, as `status="buying"`, and flipped to
+    `"bought"` after: a lost answer from EasyPost then leaves a row that says
+    "we may have paid for this", and the next open of the order settles it
+    against EasyPost instead of asking the seller to go and look. Without the
+    row, closing the dialog lost the tracking number, the label file and the
+    shipment id -- everything a seller needs the moment the buyer asks.
+
+    Also the local record that scopes every shipment id to its owner: a label
+    carries the BUYER's name and address, so a shipment id from another
+    seller's account has to be a 404 here, not a lookup at EasyPost.
+
+    Deliberately no ForeignKeys, matching the rest of the schema."""
+
+    __tablename__ = "shipping_labels"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    # The eBay order it ships, and our own listing record when the order
+    # matched one ("" otherwise) -- how a sold notification finds the label
+    # after the order has left the awaiting-shipment pile.
+    order_id: Mapped[str] = mapped_column(String(64), index=True)
+    listing_record_id: Mapped[str] = mapped_column(String(64), default="")
+    shipment_id: Mapped[str] = mapped_column(String(64), index=True)
+    rate_id: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(16), default="buying")
+    tracking_number: Mapped[str] = mapped_column(String(64), default="")
+    carrier: Mapped[str] = mapped_column(String(32), default="")
+    service: Mapped[str] = mapped_column(String(64), default="")
+    cost: Mapped[str] = mapped_column(String(16), default="")
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    label_url: Mapped[str] = mapped_column(String(1024), default="")
+    tracker_url: Mapped[str] = mapped_column(String(1024), default="")
+    # When eBay accepted the tracking (createShippingFulfillment); None until
+    # it has, with the reason it hasn't in ebay_error so the dialog can offer
+    # a retry rather than a shrug.
+    ebay_marked_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    ebay_error: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AdminAuditLog(Base):
     """Append-only record of every superadmin ACTION.
 
@@ -1286,6 +1331,9 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(delete(TokenLedger).where(TokenLedger.user_id == user_id))
             s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(Notification).where(Notification.user_id == user_id))
+            # Bought labels carry a buyer's name and address; they go with
+            # the seller who bought them.
+            s.execute(delete(ShippingLabel).where(ShippingLabel.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             # In THIS transaction, before the commit: the rows that name these
             # photos are about to stop existing, so the obligation to erase
@@ -2430,6 +2478,219 @@ def mark_notifications_read(user_id: str,
 # probe honest about outages without paying a SELECT on every call.
 _STATUS_TTL = 30  # seconds
 _status_cache: tuple[float, dict] | None = None
+
+
+# --- shipping labels (EasyPost) --------------------------------------------
+
+_LABEL_FIELDS = ("order_id", "listing_record_id", "shipment_id", "rate_id",
+                 "status", "tracking_number", "carrier", "service", "cost",
+                 "currency", "label_url", "tracker_url", "ebay_marked_at",
+                 "ebay_error")
+
+
+def _label_to_dict(row: ShippingLabel) -> dict:
+    return {
+        "label_id": row.id,
+        "order_id": row.order_id,
+        "listing_record_id": row.listing_record_id or "",
+        "shipment_id": row.shipment_id,
+        "rate_id": row.rate_id or "",
+        "status": row.status or "",
+        "tracking_number": row.tracking_number or "",
+        "carrier": row.carrier or "",
+        "service": row.service or "",
+        "cost": row.cost or "",
+        "currency": row.currency or "USD",
+        "label_url": row.label_url or "",
+        "tracker_url": row.tracker_url or "",
+        "ebay_marked": row.ebay_marked_at is not None,
+        "ebay_error": row.ebay_error or "",
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def create_shipping_label(user_id: str, **fields) -> dict:
+    """Record a label the seller is about to buy. RAISES on a write failure --
+    this row is written BEFORE the money moves, and if it cannot be written
+    the purchase must not happen, because a bought label nothing remembers
+    is the thing this table exists to prevent."""
+    eng = _get_engine()
+    if eng is None or not user_id:
+        raise StorageUnavailable(
+            "Labels need the database, and none is configured.")
+    try:
+        with Session(eng) as s:
+            row = ShippingLabel(id=_uuid.uuid4().hex, user_id=user_id,
+                                created_at=_now(), updated_at=_now())
+            for key in _LABEL_FIELDS:
+                if key in fields and fields[key] is not None:
+                    setattr(row, key, fields[key])
+            s.add(row)
+            s.commit()
+            return _label_to_dict(row)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: create_shipping_label failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn't record this label just now, so nothing was bought. "
+            "Try again in a moment.") from exc
+
+
+def update_shipping_label(user_id: str, label_id: str, **fields) -> bool:
+    """Scoped to the owner. Returns whether the write landed; never raises.
+    A label that was bought but cannot be recorded as bought is still bought
+    -- the caller reports the purchase and the row settles on the next open
+    (see the reconcile in main.py)."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id or not label_id:
+            return False
+        with Session(eng) as s:
+            row = s.get(ShippingLabel, label_id)
+            if row is None or row.user_id != user_id:
+                return False
+            for key in _LABEL_FIELDS:
+                if key in fields and fields[key] is not None:
+                    setattr(row, key, fields[key])
+            row.updated_at = _now()
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: update_shipping_label failed: {exc}")
+        return False
+
+
+def get_shipping_label_by_shipment(user_id: str,
+                                   shipment_id: str) -> Optional[dict]:
+    """This seller's label for an EasyPost shipment id -- None for another
+    seller's, which is how a shipment id is scoped to its owner. RAISES on a
+    read failure."""
+    eng = _get_engine()
+    if eng is None or not user_id or not shipment_id:
+        return None
+    try:
+        with Session(eng) as s:
+            row = s.execute(
+                select(ShippingLabel)
+                .where(ShippingLabel.user_id == user_id,
+                       ShippingLabel.shipment_id == shipment_id)
+            ).scalars().first()
+            return _label_to_dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_shipping_label_by_shipment failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn't look up that label just now. Try again in a "
+            "moment.") from exc
+
+
+def labels_for_order(user_id: str, order_id: str) -> list[dict]:
+    """Every label this seller bought (or set out to buy) for one order,
+    newest first. RAISES on a read failure: the purchase route reads this to
+    decide whether to buy, and a failed read must not read as "never
+    bought"."""
+    eng = _get_engine()
+    if eng is None or not user_id or not order_id:
+        return []
+    try:
+        with Session(eng) as s:
+            rows = s.execute(
+                select(ShippingLabel)
+                .where(ShippingLabel.user_id == user_id,
+                       ShippingLabel.order_id == order_id)
+                .order_by(ShippingLabel.created_at.desc())
+            ).scalars().all()
+            return [_label_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: labels_for_order failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn't check this order's labels just now. Try again in a "
+            "moment.") from exc
+
+
+def labels_for_orders(user_id: str, order_ids: list[str]) -> dict[str, list[dict]]:
+    """{order_id: [labels, newest first]} for a page of orders in ONE query --
+    the awaiting-shipment list is up to fifty orders, and one read per order
+    across the cross-region link is the shape this codebase keeps finding.
+    Never raises: this only decorates orders with what was bought here, and
+    an unreadable table costs a badge, not a decision (the purchase route
+    reads labels_for_order, which does raise)."""
+    ids = [o for o in (order_ids or []) if o]
+    out: dict[str, list[dict]] = {o: [] for o in ids}
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id or not ids:
+            return out
+        with Session(eng) as s:
+            rows = s.execute(
+                select(ShippingLabel)
+                .where(ShippingLabel.user_id == user_id,
+                       ShippingLabel.order_id.in_(ids[:200]))
+                .order_by(ShippingLabel.created_at.desc())
+            ).scalars().all()
+            for r in rows:
+                out.setdefault(r.order_id, []).append(_label_to_dict(r))
+            return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: labels_for_orders failed: {exc}")
+        return out
+
+
+def labels_for_order_best_effort(user_id: str, order_id: str) -> list[dict]:
+    """labels_for_order for callers that only DECORATE an order with what
+    was bought -- an unreadable row costs a badge, not a decision."""
+    try:
+        return labels_for_order(user_id, order_id)
+    except StorageUnavailable:
+        return []
+
+
+def labels_for_listing(user_id: str, listing_record_id: str) -> list[dict]:
+    """Labels bought for orders that matched one of our listing records,
+    newest first -- how "Ship it" on a sold notification finds the label
+    after the order has left the awaiting pile. Never raises: this only
+    decorates a screen that already has an honest empty state."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id or not listing_record_id:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(ShippingLabel)
+                .where(ShippingLabel.user_id == user_id,
+                       ShippingLabel.listing_record_id == listing_record_id)
+                .order_by(ShippingLabel.created_at.desc())
+            ).scalars().all()
+            return [_label_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: labels_for_listing failed: {exc}")
+        return []
+
+
+def mark_label_ebay(user_id: str, order_id: str, ok: bool,
+                    error: str = "") -> int:
+    """Record that eBay accepted (or refused) the tracking for this order's
+    bought labels. Best effort -- the fulfillment already happened on eBay;
+    this only keeps the dialog's badge honest. Returns rows changed."""
+    try:
+        eng = _get_engine()
+        if eng is None or not user_id or not order_id:
+            return 0
+        with Session(eng) as s:
+            rows = s.execute(
+                select(ShippingLabel)
+                .where(ShippingLabel.user_id == user_id,
+                       ShippingLabel.order_id == order_id,
+                       ShippingLabel.status == "bought")
+            ).scalars().all()
+            for row in rows:
+                row.ebay_marked_at = _now() if ok else None
+                row.ebay_error = "" if ok else (error or "")[:500]
+                row.updated_at = _now()
+            s.commit()
+            return len(rows)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: mark_label_ebay failed: {exc}")
+        return 0
+
 
 
 def db_status(refresh: bool = False) -> dict:

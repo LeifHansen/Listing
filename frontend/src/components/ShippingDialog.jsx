@@ -1,32 +1,36 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  CheckCircle2, ExternalLink, FileDown, Loader2, MapPin, Package,
-  Printer, RefreshCw, Ship, Truck,
+  AlertTriangle, CheckCircle2, ExternalLink, Link2, Loader2, MapPin, Package,
+  Printer, RefreshCw, Truck,
 } from "lucide-react";
-import { cn, formatMoney } from "@/lib/utils";
+import { formatMoney } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Select } from "@/components/ui/fields";
+import { Field, Input } from "@/components/ui/fields";
+import { TagPill } from "@/components/ui/badges";
 
 /* ShippingDialog — sold → label, without leaving the app.
 
    Opens from a sold notification (one listing's order) or the Listings
-   header (every order awaiting shipment). Two ways to get the label:
+   header (every order awaiting shipment). Labels are bought through the
+   seller's OWN EasyPost account — connected once in Settings, their wallet
+   paying for postage — so the one flow here is: package → ship-from → live
+   rates → buy → print, with the tracking number posted to the eBay order
+   automatically (which emails the buyer).
 
-   - eBay: live eBay-negotiated rates via the Logistics API → buy → print.
-     Limited-release on eBay's side, so when it isn't enabled for this app
-     the option explains itself and Pirate Ship carries the workflow.
-   - Pirate Ship: no public API exists, so this exports the order(s) as a
-     CSV shaped for Pirate Ship's spreadsheet importer, links the seller
-     there, and takes the tracking number back to mark the order shipped
-     on eBay (which emails the buyer). */
-
-const PIRATE_SHIP_URL = "https://ship.pirateship.com";
+   Every purchase is recorded server-side, so an order that already has a
+   label opens on that label rather than offering to buy a second one, and a
+   purchase whose answer was lost is settled against EasyPost before anything
+   is bought again. */
 
 const emptyPkg = { weight_lb: "", weight_oz: "", length_in: "", width_in: "", height_in: "" };
+const emptyShipFrom = {
+  name: "", address1: "", address2: "", city: "", state: "", postal_code: "",
+  country: "US", phone: "",
+};
 
 function pkgFrom(order) {
   const p = order?.package || {};
@@ -35,6 +39,35 @@ function pkgFrom(order) {
     length_in: p.length_in || "", width_in: p.width_in || "",
     height_in: p.height_in || "",
   };
+}
+
+const boughtLabel = (order) => (order?.labels || []).find((l) => l.status === "bought") || null;
+const pendingLabel = (order) => (order?.labels || []).find((l) => l.status === "buying") || null;
+
+/* What an empty awaiting-shipment list means. The server's answer carries
+   eBay's own count of every order in the window, the account it looked at
+   and the environment, because "No orders are waiting to ship" said the
+   same thing whether every order was already shipped, a different account
+   had sold, or the server was on eBay's sandbox — the three things a seller
+   who KNOWS something sold needs told apart. Exported for its test. */
+export function emptyPileCopy({ recent_total, ebay_username, env } = {}) {
+  const who = ebay_username ? ` on ${ebay_username}` : "";
+  let text;
+  if (recent_total === 0) {
+    text = `eBay has no orders at all in the last 90 days${who}. If the sale was on a `
+      + "different eBay account, connect that one in Settings.";
+  } else if (recent_total > 0) {
+    text = `No orders are waiting to ship — eBay shows ${recent_total} order`
+      + `${recent_total === 1 ? "" : "s"} in the last 90 days${who}, all already `
+      + "shipped or marked shipped.";
+  } else {
+    text = `No orders are waiting to ship${who}.`;
+  }
+  if (env && env !== "production") {
+    text += " This app is connected to the eBay sandbox, which has no real orders — "
+      + "the server needs EBAY_ENV=production.";
+  }
+  return text;
 }
 
 function AddressBlock({ order }) {
@@ -56,9 +89,77 @@ function AddressBlock({ order }) {
   );
 }
 
+/* The bought label: tracking, the PDF, and where eBay stands. The PDF opens
+   from EasyPost's own URL rather than through this server, because a
+   same-origin navigation is exactly what the native shell cannot
+   authenticate — one URL works on the web and in the app alike. */
+function LabelPanel({ label, onRetryEbay, marking, onVoid, voiding, onDone }) {
+  const voided = label.status === "refund_requested";
+  return (
+    <div className="rounded-input bg-green-soft border border-green/30 px-4 py-4 flex flex-col gap-2">
+      <p className="flex items-center gap-2 font-semibold text-sm text-ink">
+        <CheckCircle2 size={17} className="text-green" aria-hidden />
+        {voided ? "Label voided — refund requested" : "Label purchased"}
+        {label.cost ? ` — ${formatMoney(label.cost, label.currency || "USD")}` : ""}
+      </p>
+      {label.tracking_number && (
+        <p className="text-[13px] text-ink-secondary">
+          Tracking: <span className="font-mono text-ink">{label.tracking_number}</span>
+          {label.carrier ? ` (${label.carrier} ${label.service || ""})` : ""}
+        </p>
+      )}
+      {label.ebay_marked ? (
+        <p className="text-[13px] text-ink-secondary">
+          Tracking added to the eBay order — eBay is emailing the buyer.
+        </p>
+      ) : (
+        <div className="rounded-input bg-warning-soft border border-warning/30 px-3 py-2 text-[13px] text-ink-secondary flex flex-col gap-2">
+          <p className="flex items-start gap-2">
+            <AlertTriangle size={15} className="text-warning shrink-0 mt-0.5" aria-hidden />
+            <span>
+              Label bought, but eBay couldn't be updated
+              {label.ebay_error ? `: ${label.ebay_error}` : "."}
+              {label.ebay_outcome_unknown
+                ? " Check the order on eBay before retrying — it may already show shipped."
+                : ""}
+            </span>
+          </p>
+          <div>
+            <Button variant="secondary" size="sm" onClick={onRetryEbay} loading={marking}>
+              <RefreshCw aria-hidden /> Retry marking shipped on eBay
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2 mt-1">
+        {label.label_url && (
+          <Button variant="primary" size="sm"
+            onClick={() => window.open(label.label_url, "_blank", "noopener")}>
+            <Printer aria-hidden /> Open label PDF
+          </Button>
+        )}
+        {label.tracker_url && (
+          <Button variant="secondary" size="sm"
+            onClick={() => window.open(label.tracker_url, "_blank", "noopener")}>
+            <ExternalLink aria-hidden /> Track package
+          </Button>
+        )}
+        {!voided && (
+          <Button variant="ghost" size="sm" onClick={onVoid} loading={voiding}>
+            Void label
+          </Button>
+        )}
+        <Button variant="ghost" size="sm" onClick={onDone}>Done</Button>
+      </div>
+    </div>
+  );
+}
+
 export function ShippingDialog() {
-  const { shipping, closeShipping, ebay, loadNotifications } = useApp();
-  const { toast } = useToast();
+  const {
+    shipping, closeShipping, easypost, loadNotifications, setView,
+  } = useApp();
+  const { toast, confirm } = useToast();
   const open = shipping != null;
   const listingId = shipping?.listingId || null;
 
@@ -70,57 +171,70 @@ export function ShippingDialog() {
   const [notice, setNotice] = useState("");
   const [orders, setOrders] = useState([]);       // generic mode: the pick list
   const [order, setOrder] = useState(null);       // the order being shipped
+  const [pastLabel, setPastLabel] = useState(null); // for-listing mode: already shipped
   const [pkg, setPkg] = useState(emptyPkg);
-  const [method, setMethod] = useState("ebay");   // "ebay" | "pirateship"
 
-  // eBay label path
-  const [shipFrom, setShipFrom] = useState({
-    name: "", address1: "", city: "", state: "", postal_code: "",
-  });
-  const [quote, setQuote] = useState(null);       // {shipping_quote_id, rates}
+  const [shipFrom, setShipFrom] = useState(emptyShipFrom);
+  const [quote, setQuote] = useState(null);       // {shipment_id, rates, messages, test}
   const [rateId, setRateId] = useState("");
   const [quoting, setQuoting] = useState(false);
   const [buying, setBuying] = useState(false);
-  const [label, setLabel] = useState(null);       // purchase result
-
-  // Pirate Ship path
-  const [tracking, setTracking] = useState("");
-  const [carrier, setCarrier] = useState("USPS");
+  const [label, setLabel] = useState(null);       // the bought label
+  const [checking, setChecking] = useState(false); // settling a lost purchase
   const [marking, setMarking] = useState(false);
-  const [shipped, setShipped] = useState(false);
+  const [voiding, setVoiding] = useState(false);
 
   const reset = useCallback(() => {
-    setOrders([]); setOrder(null); setPkg(emptyPkg); setQuote(null);
-    setRateId(""); setLabel(null); setTracking(""); setShipped(false);
+    setOrders([]); setOrder(null); setPastLabel(null); setPkg(emptyPkg);
+    setQuote(null); setRateId(""); setLabel(null); setChecking(false);
     setLoadError(""); setNotice("");
   }, []);
+
+  /* A purchase whose answer never came back leaves a "buying" label on the
+     order. Ask the server to settle it against EasyPost before offering to
+     buy again — that is what stops one lost answer becoming two charges. */
+  const settlePending = useCallback(async (o) => {
+    setChecking(true);
+    try {
+      const res = await postJson("/api/easypost/label", { order_id: o.order_id });
+      if (res.status === "bought") {
+        setLabel(res);
+        toast("An earlier purchase had gone through — here is that label.", { kind: "success" });
+      }
+    } catch (e) {
+      toast(e.message, { kind: "error" });
+    } finally {
+      setChecking(false);
+    }
+  }, [toast]);
 
   const pickOrder = useCallback((o) => {
     setOrder(o);
     setPkg(pkgFrom(o));
-    setQuote(null); setRateId(""); setLabel(null);
-    setTracking(""); setShipped(false);
-  }, []);
+    setQuote(null); setRateId("");
+    // An order that already has a label opens ON that label — buying a
+    // second one is the mistake this whole surface exists to prevent.
+    setLabel(boughtLabel(o));
+    if (!boughtLabel(o) && pendingLabel(o)) settlePending(o);
+  }, [settlePending]);
 
   /* Opening the dialog starts a fresh shipping session, so the previous one's
-     order, package, quote and label have to be cleared and the default label
-     path re-picked. That clearing happens DURING RENDER, tracking the previous
-     session in state, which is React's documented way to reset state when an
-     input changes (react.dev/learn/you-might-not-need-an-effect). Doing it in
-     the effect below instead — as this used to — painted one frame of the
-     *last* order's details (and its "Label purchased" panel) before the reset
-     landed, and cost an extra render every time.
+     order, package, quote and label have to be cleared. That clearing happens
+     DURING RENDER, tracking the previous session in state, which is React's
+     documented way to reset state when an input changes
+     (react.dev/learn/you-might-not-need-an-effect). Doing it in the effect
+     below instead painted one frame of the *last* order's details before the
+     reset landed, and cost an extra render every time.
 
      A session is identified by: the dialog being open, which listing it was
-     opened for, and whether eBay labels are available — the same three inputs
+     opened for, and whether EasyPost is connected — the same three inputs
      the loading effect keys off, so a change to any of them re-runs both. */
-  const sessionKey = open ? `${listingId}|${ebay.labels_enabled ? 1 : 0}` : null;
+  const sessionKey = open ? `${listingId}|${easypost.connected ? 1 : 0}` : null;
   const [prevSessionKey, setPrevSessionKey] = useState(null);
   if (sessionKey !== prevSessionKey) {
     setPrevSessionKey(sessionKey);
     if (open) {
       reset();
-      setMethod(ebay.labels_enabled ? "ebay" : "pirateship");
       setLoading(true);
     }
   }
@@ -133,19 +247,20 @@ export function ShippingDialog() {
         if (listingId) {
           const res = await api(`/api/ebay/orders/for-listing/${listingId}`);
           if (res.order) pickOrder(res.order);
-          else setLoadError("No open order found for this listing — it may already be shipped.");
+          else {
+            const done = (res.labels || []).find((l) => l.status === "bought");
+            if (done) setPastLabel(done);
+            else setLoadError("No open order found for this listing — it may already be shipped.");
+          }
         } else {
           const res = await api("/api/ebay/orders");
           const list = res.orders || [];
           setOrders(list);
           if (list.length === 1) pickOrder(list[0]);
-          else if (list.length === 0) setLoadError("No orders are waiting to ship. 🎉");
-          // One page, not necessarily the pile. Saying so beats a seller
-          // reading fifty as everything and leaving thirty unshipped — eBay
-          // scores late dispatch.
-          // Its own channel, not loadError: this is not a failure, and
-          // overloading the error state with a notice is how the next bug
-          // gets written.
+          else if (list.length === 0) setLoadError(emptyPileCopy(res));
+          // One page, not necessarily the pile. Its own channel, not
+          // loadError: this is not a failure, and overloading the error
+          // state with a notice is how the next bug gets written.
           else if (res.partial) {
             setNotice(`Showing the first ${list.length} of ${res.total} orders `
               + "waiting to ship — ship these and reopen this for the rest.");
@@ -162,20 +277,20 @@ export function ShippingDialog() {
         if (saved) setShipFrom((f) => ({ ...f, ...saved }));
       } catch (e) { /* logged out or no prefs — the form stays blank */ }
     })();
-  }, [open, listingId, ebay.labels_enabled, pickOrder]);
+  }, [open, listingId, easypost.connected, pickOrder]);
 
   const getRates = async () => {
     setQuoting(true);
     setQuote(null); setRateId("");
     try {
-      const res = await postJson("/api/ebay/shipping-quote", {
+      const res = await postJson("/api/easypost/rates", {
         order_id: order.order_id,
         package: pkg,
         ship_from: shipFrom,
       });
       setQuote(res);
       if (res.rates?.length) setRateId(res.rates[0].rate_id);
-      else toast("eBay returned no rates for that package.", { kind: "warning" });
+      else if (!res.messages?.length) toast("EasyPost returned no rates for that package.", { kind: "warning" });
     } catch (e) {
       toast(e.message, { kind: "error" });
     } finally {
@@ -186,12 +301,19 @@ export function ShippingDialog() {
   const buyLabel = async () => {
     setBuying(true);
     try {
-      const res = await postJson("/api/ebay/shipping-label", {
-        shipping_quote_id: quote.shipping_quote_id, rate_id: rateId,
+      const res = await postJson("/api/easypost/label", {
+        order_id: order.order_id,
+        shipment_id: quote.shipment_id,
+        rate_id: rateId,
+        listing_record_id: order.listing_record_id || "",
       });
       setLabel(res);
       loadNotifications();
-      toast("Label purchased — tracking was added to the order automatically.", { kind: "success" });
+      if (res.ebay_marked) {
+        toast("Label purchased — tracking was added to the eBay order.", { kind: "success" });
+      } else {
+        toast("Label purchased, but eBay couldn't be updated — retry from the panel.", { kind: "warning" });
+      }
     } catch (e) {
       toast(e.message, { kind: "error" });
     } finally {
@@ -199,14 +321,15 @@ export function ShippingDialog() {
     }
   };
 
-  const markShipped = async () => {
-    if (!tracking.trim()) { toast("Paste the tracking number first.", { kind: "warning" }); return; }
+  const retryEbay = async () => {
     setMarking(true);
     try {
       await postJson("/api/ebay/mark-shipped", {
-        order_id: order.order_id, tracking_number: tracking, carrier,
+        order_id: label.order_id || order?.order_id,
+        tracking_number: label.tracking_number,
+        carrier: label.ebay_carrier || label.carrier || "USPS",
       });
-      setShipped(true);
+      setLabel({ ...label, ebay_marked: true, ebay_error: "", ebay_outcome_unknown: false });
       loadNotifications();
       toast("Order marked shipped — eBay is emailing the buyer the tracking.", { kind: "success" });
     } catch (e) {
@@ -216,11 +339,31 @@ export function ShippingDialog() {
     }
   };
 
-  const csvHref = order
-    ? `/api/shipping/pirateship.csv?order_id=${encodeURIComponent(order.order_id)}`
-    : "/api/shipping/pirateship.csv";
+  const voidLabel = async () => {
+    if (!(await confirm({
+      title: "Void this label?",
+      message: "EasyPost asks the carrier to refund the postage. Only void a label you "
+        + "haven't used — the tracking number stays on the eBay order until you "
+        + "change it in Seller Hub.",
+      confirmLabel: "Void label",
+      danger: true,
+    }))) return;
+    setVoiding(true);
+    try {
+      await postJson(`/api/easypost/label/${encodeURIComponent(label.shipment_id)}/refund`, {});
+      setLabel({ ...label, status: "refund_requested" });
+      toast("Void requested — EasyPost confirms the refund within a few days.", { kind: "success" });
+    } catch (e) {
+      toast(e.message, { kind: "error" });
+    } finally {
+      setVoiding(false);
+    }
+  };
 
   const itemTitle = order?.line_items?.map((li) => li.title).filter(Boolean).join("; ");
+  const chosen = quote?.rates?.find((r) => r.rate_id === rateId);
+  const testMode = !!(quote?.test ?? easypost.test);
+  const shownLabel = label || pastLabel;
 
   return (
     <Dialog open={open} onClose={closeShipping} title="Ship a sold item" wide>
@@ -230,7 +373,7 @@ export function ShippingDialog() {
         </p>
       )}
 
-      {!loading && loadError && !order && (
+      {!loading && loadError && !order && !pastLabel && (
         <p className="py-6 text-center text-sm text-ink-secondary">{loadError}</p>
       )}
 
@@ -255,6 +398,7 @@ export function ShippingDialog() {
                   </span>
                   <span className="block text-[12px] text-ink-secondary">
                     {o.ship_to?.name} · {o.ship_to?.city}, {o.ship_to?.state}
+                    {boughtLabel(o) ? " · label bought" : ""}
                   </span>
                 </span>
                 <span className="font-semibold text-sm text-ink tabular-nums shrink-0">
@@ -264,6 +408,18 @@ export function ShippingDialog() {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* For-listing mode after the order has shipped: the label it went with. */}
+      {!loading && !order && pastLabel && (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-ink-secondary">
+            This order has already shipped — here is the label it went with.
+          </p>
+          <LabelPanel label={pastLabel} onRetryEbay={retryEbay} marking={marking}
+            onVoid={() => { setLabel(pastLabel); voidLabel(); }} voiding={voiding}
+            onDone={closeShipping} />
+        </div>
       )}
 
       {order && (
@@ -281,228 +437,160 @@ export function ShippingDialog() {
             <AddressBlock order={order} />
           </div>
 
-          {/* Package — shared by both label paths. */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <Field label="Weight (lb)">
-              <Input type="number" min="0" inputMode="decimal" value={pkg.weight_lb}
-                onChange={(e) => setPkg({ ...pkg, weight_lb: e.target.value })} />
-            </Field>
-            <Field label="Weight (oz)">
-              <Input type="number" min="0" inputMode="decimal" value={pkg.weight_oz}
-                onChange={(e) => setPkg({ ...pkg, weight_oz: e.target.value })} />
-            </Field>
-            <Field label="L (in)" help="Optional — needed for accurate rates on larger boxes">
-              <Input type="number" min="0" inputMode="decimal" value={pkg.length_in}
-                onChange={(e) => setPkg({ ...pkg, length_in: e.target.value })} />
-            </Field>
-            <Field label="W (in)">
-              <Input type="number" min="0" inputMode="decimal" value={pkg.width_in}
-                onChange={(e) => setPkg({ ...pkg, width_in: e.target.value })} />
-            </Field>
-            <Field label="H (in)">
-              <Input type="number" min="0" inputMode="decimal" value={pkg.height_in}
-                onChange={(e) => setPkg({ ...pkg, height_in: e.target.value })} />
-            </Field>
-          </div>
+          {shownLabel ? (
+            <LabelPanel label={shownLabel} onRetryEbay={retryEbay} marking={marking}
+              onVoid={voidLabel} voiding={voiding} onDone={closeShipping} />
+          ) : checking ? (
+            <p className="flex items-center gap-2 text-sm text-ink-secondary">
+              <Loader2 size={16} className="animate-spin" aria-hidden />
+              We may already have bought this label — checking with EasyPost…
+            </p>
+          ) : !easypost.loaded ? (
+            <p className="flex items-center gap-2 text-sm text-ink-secondary">
+              <Loader2 size={16} className="animate-spin" aria-hidden />
+              Checking your EasyPost connection…
+            </p>
+          ) : !easypost.connected ? (
+            <div className="rounded-input bg-warning-soft border border-warning/30 px-4 py-4 flex flex-col gap-3">
+              <p className="text-[13px] text-ink-secondary">
+                Labels are bought through your own EasyPost account — discounted USPS
+                and UPS rates, with the postage billed to you. Connect it once in
+                Settings and every sale ships from here.
+              </p>
+              <div>
+                <Button variant="primary" size="sm"
+                  onClick={() => { closeShipping(); setView("settings"); }}>
+                  <Link2 aria-hidden /> Connect EasyPost
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Package */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                <Field label="Weight (lb)">
+                  <Input type="number" min="0" inputMode="decimal" value={pkg.weight_lb}
+                    onChange={(e) => setPkg({ ...pkg, weight_lb: e.target.value })} />
+                </Field>
+                <Field label="Weight (oz)">
+                  <Input type="number" min="0" inputMode="decimal" value={pkg.weight_oz}
+                    onChange={(e) => setPkg({ ...pkg, weight_oz: e.target.value })} />
+                </Field>
+                <Field label="L (in)" help="Optional — needed for accurate rates on larger boxes">
+                  <Input type="number" min="0" inputMode="decimal" value={pkg.length_in}
+                    onChange={(e) => setPkg({ ...pkg, length_in: e.target.value })} />
+                </Field>
+                <Field label="W (in)">
+                  <Input type="number" min="0" inputMode="decimal" value={pkg.width_in}
+                    onChange={(e) => setPkg({ ...pkg, width_in: e.target.value })} />
+                </Field>
+                <Field label="H (in)">
+                  <Input type="number" min="0" inputMode="decimal" value={pkg.height_in}
+                    onChange={(e) => setPkg({ ...pkg, height_in: e.target.value })} />
+                </Field>
+              </div>
 
-          {/* Method tabs */}
-          <div className="flex items-center gap-1.5">
-            {[
-              { id: "ebay", label: "eBay label", icon: Truck },
-              { id: "pirateship", label: "Pirate Ship", icon: Ship },
-            ].map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => setMethod(m.id)}
-                aria-pressed={method === m.id}
-                className={cn(
-                  "inline-flex items-center gap-1.5 h-9 px-3.5 rounded-full text-[13px]",
-                  "font-semibold cursor-pointer transition-colors duration-150 border",
-                  method === m.id
-                    ? "bg-blue text-on-accent border-blue"
-                    : "bg-card text-ink-secondary border-line hover:text-ink hover:border-line-strong",
+              {/* Ship-from — remembered in prefs on first use so it's one-time. */}
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+                <Field label="Ship from — name" className="col-span-2">
+                  <Input value={shipFrom.name} autoComplete="name"
+                    onChange={(e) => setShipFrom({ ...shipFrom, name: e.target.value })} />
+                </Field>
+                <Field label="Street address" className="col-span-2">
+                  <Input value={shipFrom.address1} autoComplete="street-address"
+                    onChange={(e) => setShipFrom({ ...shipFrom, address1: e.target.value })} />
+                </Field>
+                <Field label="Apt / suite" className="col-span-2">
+                  <Input value={shipFrom.address2}
+                    onChange={(e) => setShipFrom({ ...shipFrom, address2: e.target.value })} />
+                </Field>
+                <Field label="City" className="col-span-2">
+                  <Input value={shipFrom.city}
+                    onChange={(e) => setShipFrom({ ...shipFrom, city: e.target.value })} />
+                </Field>
+                <Field label="State">
+                  <Input value={shipFrom.state} maxLength={2} placeholder="CA"
+                    onChange={(e) => setShipFrom({ ...shipFrom, state: e.target.value.toUpperCase() })} />
+                </Field>
+                <Field label="ZIP">
+                  <Input value={shipFrom.postal_code} inputMode="numeric"
+                    onChange={(e) => setShipFrom({ ...shipFrom, postal_code: e.target.value })} />
+                </Field>
+                <Field label="Phone" help="UPS and FedEx rates need one" className="col-span-2">
+                  <Input value={shipFrom.phone} inputMode="tel" autoComplete="tel"
+                    onChange={(e) => setShipFrom({ ...shipFrom, phone: e.target.value })} />
+                </Field>
+                <Field label="Country">
+                  <Input value={shipFrom.country} maxLength={2} placeholder="US"
+                    onChange={(e) => setShipFrom({ ...shipFrom, country: e.target.value.toUpperCase() })} />
+                </Field>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button variant="secondary" onClick={getRates} loading={quoting}>
+                  <RefreshCw aria-hidden /> Get rates
+                </Button>
+                {testMode && (
+                  <TagPill tone="yellow" title="EasyPost test keys buy free sample labels that carriers won't accept">
+                    Test mode — sample labels
+                  </TagPill>
                 )}
-              >
-                <m.icon size={15} aria-hidden /> {m.label}
-              </button>
-            ))}
-          </div>
+              </div>
 
-          {/* --- eBay label path --- */}
-          {method === "ebay" && (
-            <div className="flex flex-col gap-4">
-              {!ebay.labels_enabled && (
-                <p className="text-[13px] text-ink-secondary rounded-input bg-warning-soft border border-warning/30 px-4 py-3">
-                  eBay label purchasing isn't enabled for this app yet (eBay approves
-                  its Logistics API per application). Use the Pirate Ship tab — same
-                  discounted USPS/UPS rates, two extra clicks.
-                </p>
-              )}
-              {label ? (
-                <div className="rounded-input bg-green-soft border border-green/30 px-4 py-4 flex flex-col gap-2">
-                  <p className="flex items-center gap-2 font-semibold text-sm text-ink">
-                    <CheckCircle2 size={17} className="text-green" aria-hidden />
-                    Label purchased{label.cost ? ` — ${formatMoney(label.cost, label.currency)}` : ""}
-                  </p>
-                  {label.tracking_number && (
-                    <p className="text-[13px] text-ink-secondary">
-                      Tracking: <span className="font-mono text-ink">{label.tracking_number}</span>
-                      {" "}({label.carrier} {label.service}) — already on the order.
-                    </p>
-                  )}
-                  <div className="flex flex-wrap gap-2 mt-1">
-                    {(label.download_path || label.label_url) && (
-                      <Button variant="primary" size="sm"
-                        onClick={() => window.open(label.download_path || label.label_url, "_blank")}>
-                        <Printer aria-hidden /> Open label PDF
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={closeShipping}>Done</Button>
-                  </div>
+              {quote && !quote.rates?.length && quote.messages?.length > 0 && (
+                <div className="rounded-input bg-warning-soft border border-warning/30 px-4 py-3 text-[13px] text-ink-secondary">
+                  <p className="font-semibold text-ink mb-1">No rates for that package:</p>
+                  <ul className="list-disc pl-5">
+                    {quote.messages.map((m, i) => (
+                      <li key={i}>{m.carrier ? `${m.carrier}: ` : ""}{m.message}</li>
+                    ))}
+                  </ul>
                 </div>
-              ) : (
-                <>
-                  {/* Ship-from — the Logistics API needs a full return address;
-                      saved to prefs on first use so it's one-time. */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <Field label="Ship from — name" className="col-span-2">
-                      <Input value={shipFrom.name} autoComplete="name"
-                        onChange={(e) => setShipFrom({ ...shipFrom, name: e.target.value })} />
-                    </Field>
-                    <Field label="Street address" className="col-span-2">
-                      <Input value={shipFrom.address1} autoComplete="street-address"
-                        onChange={(e) => setShipFrom({ ...shipFrom, address1: e.target.value })} />
-                    </Field>
-                    <Field label="City" className="col-span-2 sm:col-span-2">
-                      <Input value={shipFrom.city}
-                        onChange={(e) => setShipFrom({ ...shipFrom, city: e.target.value })} />
-                    </Field>
-                    <Field label="State">
-                      <Input value={shipFrom.state} maxLength={2} placeholder="CA"
-                        onChange={(e) => setShipFrom({ ...shipFrom, state: e.target.value.toUpperCase() })} />
-                    </Field>
-                    <Field label="ZIP">
-                      <Input value={shipFrom.postal_code} inputMode="numeric"
-                        onChange={(e) => setShipFrom({ ...shipFrom, postal_code: e.target.value })} />
-                    </Field>
-                  </div>
+              )}
 
+              {quote?.rates?.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <ul className="divide-y divide-line border border-line rounded-input overflow-hidden">
+                    {quote.rates.map((r) => (
+                      <li key={r.rate_id}>
+                        <label className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-bg-sunken">
+                          <input type="radio" name="ship-rate" className="accent-[var(--brand-blue)]"
+                            checked={rateId === r.rate_id}
+                            onChange={() => setRateId(r.rate_id)} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block font-semibold text-[13px] text-ink">
+                              {r.carrier} {r.service}
+                            </span>
+                            {r.delivery_days ? (
+                              <span className="block text-[12px] text-ink-secondary">
+                                About {r.delivery_days} day{r.delivery_days === 1 ? "" : "s"}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="font-bold text-sm text-ink tabular-nums shrink-0">
+                            {formatMoney(r.cost, r.currency)}
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
                   <div>
-                    <Button variant="secondary" onClick={getRates} loading={quoting}
-                      disabled={!ebay.labels_enabled}>
-                      <RefreshCw aria-hidden /> Get eBay rates
+                    <Button variant="primary" onClick={buyLabel} loading={buying}
+                      disabled={!rateId}>
+                      <Truck aria-hidden /> Buy label
+                      {chosen ? ` — ${formatMoney(chosen.cost, chosen.currency)}` : ""}
                     </Button>
                   </div>
-
-                  {quote?.rates?.length > 0 && (
-                    <div className="flex flex-col gap-2">
-                      <ul className="divide-y divide-line border border-line rounded-input overflow-hidden">
-                        {quote.rates.map((r) => (
-                          <li key={r.rate_id}>
-                            <label className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-bg-sunken">
-                              <input type="radio" name="ship-rate" className="accent-[var(--brand-blue)]"
-                                checked={rateId === r.rate_id}
-                                onChange={() => setRateId(r.rate_id)} />
-                              <span className="min-w-0 flex-1">
-                                <span className="block font-semibold text-[13px] text-ink">
-                                  {r.carrier} {r.service}
-                                </span>
-                                {r.delivery_est && (
-                                  <span className="block text-[12px] text-ink-secondary">
-                                    Est. delivery {new Date(r.delivery_est).toLocaleDateString()}
-                                  </span>
-                                )}
-                              </span>
-                              <span className="font-bold text-sm text-ink tabular-nums shrink-0">
-                                {formatMoney(r.cost, r.currency)}
-                              </span>
-                            </label>
-                          </li>
-                        ))}
-                      </ul>
-                      <div>
-                        <Button variant="primary" onClick={buyLabel} loading={buying}
-                          disabled={!rateId}>
-                          <Printer aria-hidden /> Buy label
-                          {rateId && quote.rates.find((r) => r.rate_id === rateId)
-                            ? ` — ${formatMoney(quote.rates.find((r) => r.rate_id === rateId).cost,
-                              quote.rates.find((r) => r.rate_id === rateId).currency)}`
-                            : ""}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {/* --- Pirate Ship path --- */}
-          {method === "pirateship" && (
-            <div className="flex flex-col gap-4">
-              {shipped ? (
-                <div className="rounded-input bg-green-soft border border-green/30 px-4 py-4 flex flex-col gap-2">
-                  <p className="flex items-center gap-2 font-semibold text-sm text-ink">
-                    <CheckCircle2 size={17} className="text-green" aria-hidden />
-                    Marked shipped — eBay is emailing the buyer the tracking number.
-                  </p>
-                  <div><Button variant="ghost" size="sm" onClick={closeShipping}>Done</Button></div>
                 </div>
-              ) : (
-                <>
-                  <ol className="flex flex-col gap-2 text-[13px] text-ink-secondary list-decimal pl-5 leading-relaxed">
-                    <li>
-                      Download this order as a CSV (buyer address, weight, and
-                      dimensions ride along).
-                    </li>
-                    <li>
-                      In Pirate Ship, choose <strong className="text-ink">Ship → Upload a
-                      Spreadsheet</strong> and drop the file in — their importer maps the
-                      columns automatically. Buy the label there (their discounted
-                      USPS/UPS rates).
-                    </li>
-                    <li>
-                      Paste the tracking number back here — that marks the order
-                      shipped on eBay and emails the buyer.
-                    </li>
-                  </ol>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="secondary" size="sm"
-                      onClick={() => { window.location.href = csvHref; }}>
-                      <FileDown aria-hidden /> Download CSV
-                    </Button>
-                    <Button variant="secondary" size="sm"
-                      onClick={() => window.open(PIRATE_SHIP_URL, "_blank", "noopener")}>
-                      <ExternalLink aria-hidden /> Open Pirate Ship
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-[1fr_10rem_auto] gap-3 items-end">
-                    <Field label="Tracking number">
-                      <Input value={tracking} placeholder="9400 1000 0000 …"
-                        onChange={(e) => setTracking(e.target.value)} />
-                    </Field>
-                    <Field label="Carrier">
-                      <Select value={carrier} onChange={(e) => setCarrier(e.target.value)}>
-                        <option value="USPS">USPS</option>
-                        <option value="UPS">UPS</option>
-                        <option value="FEDEX">FedEx</option>
-                      </Select>
-                    </Field>
-                    <Button variant="primary" onClick={markShipped} loading={marking}>
-                      <CheckCircle2 aria-hidden /> Mark shipped
-                    </Button>
-                  </div>
-                </>
               )}
-            </div>
+            </>
           )}
 
           {/* Back to the pick list in multi-order mode. */}
           {orders.length > 1 && (
             <button
               type="button"
-              onClick={() => setOrder(null)}
+              onClick={() => { setOrder(null); setLabel(null); }}
               className="self-start text-[13px] font-semibold text-blue cursor-pointer hover:underline"
             >
               ← All orders awaiting shipment

@@ -54,10 +54,15 @@ const METRICS_STATUSES = ["published", "live"];
 // just booted or someone just left, and two copies of these drift.
 const NO_EBAY = {
   connected: false, env: "", username: "", email: "", oauth_ready: false,
-  oauth_missing: [], labels_enabled: false, messaging_enabled: false,
+  oauth_missing: [], messaging_enabled: false,
   foreign_listings: 0,
   unowned_listings: 0,
 };
+// The seller's own EasyPost account, which is what buys shipping labels.
+// `loaded` separates "not connected" from "not asked yet": the shipping
+// dialog must not offer to connect an account the shell simply hasn't
+// checked on.
+const NO_EASYPOST = { connected: false, test: false, key_hint: "", loaded: false };
 const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_MESSAGES = {
   conversations: [], unread: 0, sources: [], available: false, reason: "",
@@ -237,7 +242,6 @@ export function AppProvider({ children }) {
         email: s.email || "",
         oauth_ready: !!s.oauth_ready,
         oauth_missing: s.oauth_missing || [],
-        labels_enabled: !!s.labels_enabled,
         messaging_enabled: !!s.messaging_enabled,
         // Listings still here from an eBay account other than the connected
         // one — see the banner in Settings.
@@ -245,6 +249,26 @@ export function AppProvider({ children }) {
         unowned_listings: s.unowned_listings || 0,
       };
       setEbay(next);
+      return next;
+    } catch (e) { /* keep previous */ }
+    return null;
+  }, []);
+
+  // The EasyPost connection, loaded beside the eBay status: same keep-previous
+  // rule on failure, because a fetch that fails is not "disconnected", and the
+  // shipping dialog reads this to decide whether to offer rates or a Connect
+  // button.
+  const [easypost, setEasypost] = useState(NO_EASYPOST);
+  const loadEasypostStatus = useCallback(async () => {
+    try {
+      const s = await api("/api/easypost/status");
+      const next = {
+        connected: !!s.connected,
+        test: !!s.test,
+        key_hint: s.key_hint || "",
+        loaded: true,
+      };
+      setEasypost(next);
       return next;
     } catch (e) { /* keep previous */ }
     return null;
@@ -1285,6 +1309,7 @@ export function AppProvider({ children }) {
     setMessageSource("");
     setThreads({});
     setEbay(NO_EBAY);
+    setEasypost(NO_EASYPOST);
     setPoliciesData(null);
     setMarketplaces([]);
     setStoreSync(NO_STORE_SYNC);
@@ -1315,7 +1340,8 @@ export function AppProvider({ children }) {
     setAuthOpen(true);
 
     loadEbayStatus();
-  }, [loadEbayStatus]);
+    loadEasypostStatus();
+  }, [loadEbayStatus, loadEasypostStatus]);
 
   const logout = useCallback(async () => {
     // Best effort, and first: the cookie is the server's to clear, and once
@@ -1451,8 +1477,9 @@ export function AppProvider({ children }) {
     loadHealth();
     loadAuth();
     loadEbayStatus();
+    loadEasypostStatus();
     loadMarketplaces();
-  }, [loadHealth, loadAuth, loadEbayStatus, loadMarketplaces]);
+  }, [loadHealth, loadAuth, loadEbayStatus, loadEasypostStatus, loadMarketplaces]);
 
   // Refresh the listings cache (and per-user marketplace connections) when
   // auth changes (login/logout).
@@ -1507,6 +1534,7 @@ export function AppProvider({ children }) {
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
+    easypost, loadEasypostStatus,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
@@ -1531,6 +1559,7 @@ export function AppProvider({ children }) {
     isSuperadmin,
     listingsLayout, setListingsLayout,
     loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
+    easypost, loadEasypostStatus,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
