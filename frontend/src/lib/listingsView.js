@@ -110,15 +110,17 @@ export const isDraft = (item) => item?.status === "draft"
 
 
 /* The statuses that have left the pipeline. A sale is finished business, and
-   so is an ending: the listings manager files both under Inactive and
-   subtracts them from the everything-tab, because a finished listing among
-   the live ones is the one thing in that grid the seller cannot act on.
+   so is an ending: the listings manager files both under Inactive, the
+   dashboard's "Recent listings" strip leaves them out, and the All tab shows
+   them after everything still in play (gridOrder, below).
 
-   `ended` joined this list with the automatic removal. An ended card sitting
-   in All beside the live ones was the seller's actual report — and while an
-   ending is no longer permanent here (a listing of theirs is kept for a
-   month so they can relist it), the archive is where it belongs in the
-   meantime, not the everything-tab.
+   They used to be subtracted from All as well, and the tab badges said so:
+   "Active 355 · Inactive 11 · All 355" was the report. A tab called All that
+   holds less than Active plus Inactive reads as a miscount, and the reasons
+   for hiding the archive there are gone — a sold card no longer offers
+   "Relist" (it says "View sale"), and the blank cards for eBay's own ended
+   mirrors are removed the moment they end. What is left is the whole store,
+   and All is it.
 
    It lives here rather than inline in the tab table because the dashboard's
    "Recent listings" strip has to ask the same question, and the two used to
@@ -128,6 +130,24 @@ export const isDraft = (item) => item?.status === "draft"
 export const ARCHIVED_STATUSES = ["sold", "ended"];
 
 export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
+
+/* Most recently touched first. */
+const byRecency = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "");
+
+
+/* The order a tab's grid shows its cards in: everything still in play first,
+   most recently touched at the top, and the archive after it.
+
+   One rule for every tab. On Active, Finds and Inactive it is plain recency,
+   since each holds one kind or the other. It is written for All, which holds
+   the archive too — and a sale or an ending is the last thing that ever
+   touches a row, so recency alone would put the finished listings at the top
+   of the whole store, ahead of everything the seller opened the tab to work
+   on. Sorts a copy; the store's `items` is what React renders from. */
+export function gridOrder(items) {
+  return [...(items || [])].sort((a, b) =>
+    (Number(isArchived(a)) - Number(isArchived(b))) || byRecency(a, b));
+}
 
 
 /* The newest listings the seller can still do something about, most recently
@@ -140,7 +160,7 @@ export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
 export function recentListings(items, limit = 4) {
   return (items || [])
     .filter((i) => !isArchived(i))
-    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
+    .sort(byRecency)
     .slice(0, limit);
 }
 

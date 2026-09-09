@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { listingsView, recentListings, storeTotal } from "./listingsView.js";
+import { gridOrder, listingsView, recentListings, storeTotal } from "./listingsView.js";
 
 const USER = { id: "u1" };
 
@@ -232,5 +232,52 @@ describe("the dashboard's Recent listings strip", () => {
     // yet" — the same rule as `unavailable` above: don't tell a seller they
     // have no listings when the reason the strip is empty is something else.
     expect(recentListings([at("sold", "2026-03-01")])).toEqual([]);
+  });
+});
+
+
+describe("the order a tab's grid shows its cards in", () => {
+  // Written for All, which holds the whole store. A sale or an ending is the
+  // last thing to touch a row, so by recency alone the finished listings
+  // would head the tab the seller opened to work on the live ones.
+  const at = (status, updated_at) => ({ id: status + updated_at, status, updated_at });
+
+  it("puts the archive after everything still in play", () => {
+    const items = [
+      at("sold", "2026-03-09"), at("ended", "2026-03-08"),
+      at("live", "2026-03-05"), at("draft", "2026-03-07"),
+    ];
+    expect(gridOrder(items).map((i) => i.status))
+      .toEqual(["draft", "live", "sold", "ended"]);
+  });
+
+  it("keeps the most recently touched first within each half", () => {
+    const items = [
+      at("live", "2026-03-01"), at("sold", "2026-03-02"),
+      at("live", "2026-03-03"), at("sold", "2026-03-04"),
+    ];
+    expect(gridOrder(items).map((i) => i.updated_at))
+      .toEqual(["2026-03-03", "2026-03-01", "2026-03-04", "2026-03-02"]);
+  });
+
+  it("is plain recency for a tab that holds one kind only", () => {
+    // Active, Finds and Inactive: nothing there to move to the back.
+    const live = [at("live", "2026-03-01"), at("live", "2026-03-03")];
+    expect(gridOrder(live).map((i) => i.updated_at))
+      .toEqual(["2026-03-03", "2026-03-01"]);
+    const archive = [at("sold", "2026-03-01"), at("ended", "2026-03-03")];
+    expect(gridOrder(archive).map((i) => i.updated_at))
+      .toEqual(["2026-03-03", "2026-03-01"]);
+  });
+
+  it("leaves the caller's array alone", () => {
+    const items = [at("live", "2026-03-01"), at("live", "2026-03-05")];
+    gridOrder(items);
+    expect(items.map((i) => i.updated_at)).toEqual(["2026-03-01", "2026-03-05"]);
+  });
+
+  it("survives a listing that has never been updated, and no list at all", () => {
+    expect(gridOrder([{ id: "a", status: "live" }])).toHaveLength(1);
+    expect(gridOrder()).toEqual([]);
   });
 });
