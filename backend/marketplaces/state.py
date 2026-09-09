@@ -160,6 +160,13 @@ SERVER_OWNED_FIELDS = (
     # back in the group the fill just finished with — the same staleness every
     # other field here is protected from.
     "enriched_at",
+    # How sure the AI was when it drafted the listing (Listing.ai_confidence).
+    # Written by the identify pass alone, and read by the draft cards. A
+    # refine round-trips the draft through the model and rebuilds the listing
+    # from what comes back, which does not carry this; a tab opened before
+    # "Start over" re-drafted carries the old answer. Either would overwrite
+    # the one the pass just recorded.
+    "ai_confidence",
 )
 
 

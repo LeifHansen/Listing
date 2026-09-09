@@ -22,7 +22,7 @@ payload when you don't have eBay credentials yet).
 | Stage | What happens | Tech |
 |-------|--------------|------|
 | Optimize | Auto-orient, cut the background onto a white canvas with a soft contact shadow (when removal is on), square-frame on the item at the photo's own scale — never a zoom — resize to 1600px, finishing sharpen | Pillow |
-| Identify | Photos sent to Claude vision; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + confidence + "missing info" to verify | Anthropic API |
+| Identify | Photos sent to Claude vision; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
@@ -541,6 +541,34 @@ at all — while a UPC matches the same product, so the median it returns is thi
 item's price. An EAN or ISBN searches as digits instead (Browse documents
 `gtin` as taking a UPC), with an ISBN-10 converted to its ISBN-13 form first,
 because everything printed since 2007 carries the 13-digit one.
+
+### How sure the AI was, on the card
+
+The identify pass grades its own draft — `low`, `medium` or `high` — and that
+grade used to reach exactly one screen: the editor's header, for as long as the
+session that made the draft stayed open. It rode on the identify *response*,
+never on the listing, so the record every card is drawn from never had it, and
+a seller triaging forty bulk drafts had no way to tell the one the AI was
+guessing at from the ones it read off a label, short of opening each.
+
+Every drafting path — the uploader's job, "Start over", the bulk worker, Shop
+Mode's synchronous route — now stamps the grade onto the draft itself
+(`Listing.ai_confidence`), and the cards read it from there: an **AI: low /
+medium / high** chip on the drafts strip, the dashboard, the listings manager
+and the bulk queue, with a tooltip naming what the grade is about (the title,
+the brand and the price — the three fields a wrong answer costs most on). It is
+a different fact from the per-specific ✓/⚠ flags, which say which *fields*
+want a glance; this says whether the AI knew what the item *was*.
+
+Three rules keep it honest. It is server-owned (`SERVER_OWNED_FIELDS`): a
+refine rebuilds the listing from the model's echo and would drop it, so the
+save path restores the stored value the way it does `enriched_at`. A relist
+starts without one — the copy is of a listing the seller already reviewed,
+published and sold. And it draws only on drafts: once a listing is live the
+seller has stood behind it, and the AI's doubts about the first draft are not a
+fact about the listing that is selling. A listing the AI never drafted (an
+import, a hand-made one, a stub saved when the AI failed) carries `""`, which
+is *no verdict*, not "medium".
 
 ## API endpoints
 

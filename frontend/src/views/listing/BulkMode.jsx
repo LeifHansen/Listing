@@ -17,7 +17,7 @@ import { useApp } from "@/store";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input, Select, Toggle } from "@/components/ui/fields";
-import { TagPill } from "@/components/ui/badges";
+import { ConfidenceChip, TagPill } from "@/components/ui/badges";
 import { AIStatusCard } from "@/components/ui/AIStatus";
 import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
@@ -213,7 +213,11 @@ function BulkItemCard({
             </div>
           ))}
         </div>
-        <div className="shrink-0">
+        <div className="shrink-0 flex items-center gap-1.5">
+          {/* How sure the AI was of this one. The queue is where a seller
+              decides which of forty drafts to open first, and this is the
+              only thing on the card that says which ones were guessed at. */}
+          {item.status === "draft" && <ConfidenceChip level={l.ai_confidence} />}
           {item.status === "published" && (
             <TagPill tone="green">
               <CheckCircle2 size={12} aria-hidden /> Live{item.listing_id ? ` · ${item.listing_id}` : ""}

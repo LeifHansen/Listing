@@ -5030,6 +5030,10 @@ def identify(session_id: str, request: Request) -> dict:
         code, message = claude_ai.ai_error_message(exc)
         log.warning("identify failed (session=%s): %s", session_id, exc)
         raise HTTPException(code, message) from exc
+    # The pass's own confidence, onto the draft it goes with -- the cards read
+    # it from the record, and the record is all that outlives this request
+    # (see Listing.ai_confidence).
+    result.listing.ai_confidence = result.confidence
     _apply_listing_defaults(result.listing, _uid(request))
     # Before the category and before the comps: a verified UPC is both an
     # item specific and the sharpest possible comp query, and both of the
@@ -6207,6 +6211,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 result = claude_ai.identify([item_dir / n for n in item_names],
                                             item_names, strategy=strategy,
                                             notes=notes)
+                # Each item's confidence onto its own draft: the queue card
+                # is where a seller decides which of forty to open first.
+                result.listing.ai_confidence = result.confidence
                 listing = _apply_listing_defaults(result.listing, uid, prefs)
                 barcodes.apply_to_listing(listing, result.identifiers)
                 # Carry the account's Promote default onto the draft itself, so
@@ -6473,6 +6480,9 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         result = claude_ai.identify([opt_dir / n for n in names], names,
                                     strategy=_pricing_strategy(uid, prefs),
                                     notes=storage.load_notes(session_id))
+        # Onto the draft itself, not only the job's answer: the editor reads
+        # the job, the cards read the record (see Listing.ai_confidence).
+        result.listing.ai_confidence = result.confidence
         _apply_listing_defaults(result.listing, uid, prefs)
         barcodes.apply_to_listing(result.listing, result.identifiers)
         _beat("category")
@@ -7706,6 +7716,10 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     data = dict(rec.get("listing") or {})
     data.update(_SALE_ONLY_FIELDS)
     data["marketplaces"] = {}
+    # The AI's confidence in the ORIGINAL draft, from before the seller
+    # reviewed it, published it and sold it. Carried over, "AI: low" would sit
+    # on the new draft's card as a verdict on copy that has already sold once.
+    data["ai_confidence"] = ""
     listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
 
     new_id = storage.new_session_id()
