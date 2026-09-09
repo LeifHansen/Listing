@@ -9,7 +9,9 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { listingsView, recentListings, storeTotal } from "./listingsView.js";
+import {
+  buyerWaiting, listingsView, orderListings, recentListings, storeTotal,
+} from "./listingsView.js";
 
 const USER = { id: "u1" };
 
@@ -232,5 +234,57 @@ describe("the dashboard's Recent listings strip", () => {
     // yet" — the same rule as `unavailable` above: don't tell a seller they
     // have no listings when the reason the strip is empty is something else.
     expect(recentListings([at("sold", "2026-03-01")])).toEqual([]);
+  });
+});
+
+
+describe("a listing a buyer has acted on", () => {
+  const live = (id, updated) => ({ id, status: "published", updated_at: updated });
+
+  it("is a live listing with a bid or an offer on it", () => {
+    expect(buyerWaiting(live("a"), { bids: 2 })).toBe(true);
+    expect(buyerWaiting(live("a"), { offers: 1 })).toBe(true);
+    expect(buyerWaiting(live("a"), { bids: 0, offers: 0 })).toBe(false);
+  });
+
+  it("is never one the app could not ask about", () => {
+    // No number at all is "we don't know", not "nobody".
+    expect(buyerWaiting(live("a"), undefined)).toBe(false);
+    expect(buyerWaiting(live("a"), { views: 3 })).toBe(false);
+  });
+
+  it("is never one that has finished", () => {
+    expect(buyerWaiting({ id: "s", status: "sold" }, { bids: 7 })).toBe(false);
+    expect(buyerWaiting({ id: "e", status: "ended" }, { offers: 1 })).toBe(false);
+    expect(buyerWaiting({ id: "d", status: "draft" }, { bids: 1 })).toBe(false);
+  });
+
+  it("goes to the top of the grid, ahead of newer edits", () => {
+    const items = [
+      live("new", "2026-09-04T00:00:00Z"),
+      live("mid", "2026-09-03T00:00:00Z"),
+      live("bid", "2026-09-01T00:00:00Z"),
+      live("offer", "2026-09-02T00:00:00Z"),
+    ];
+    const out = orderListings(items, {
+      bid: { bids: 1 }, offer: { offers: 2 }, new: { bids: 0 } });
+    // Lifted cards keep their own recency order; so do the rest.
+    expect(out.map((i) => i.id)).toEqual(["offer", "bid", "new", "mid"]);
+  });
+
+  it("leaves the order alone when nobody has acted", () => {
+    const items = [
+      live("older", "2026-09-01T00:00:00Z"),
+      live("newer", "2026-09-02T00:00:00Z"),
+    ];
+    expect(orderListings(items, {}).map((i) => i.id)).toEqual(["newer", "older"]);
+    // And without any metrics at all — before eBay has answered.
+    expect(orderListings(items).map((i) => i.id)).toEqual(["newer", "older"]);
+  });
+
+  it("does not sort the caller's array in place", () => {
+    const items = [live("a", "2026-09-01T00:00:00Z"), live("b", "2026-09-02T00:00:00Z")];
+    orderListings(items, { a: { bids: 1 } });
+    expect(items.map((i) => i.id)).toEqual(["a", "b"]);
   });
 });

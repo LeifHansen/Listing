@@ -826,14 +826,26 @@ _SWEEP_PAGE_SIZE = 200
 
 def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
                           status: Optional[dict] = None) -> dict[str, dict]:
-    """{item_id: {"watchers": n, "offers_received": n}} for every active
-    listing on the account. Backs the metrics overlay — the Sell APIs expose
-    neither number, and routing the call through here keeps the endpoint
+    """{item_id: {"watchers": n, "offers_received": n, "bids": n,
+    "high_bid": float|None, "bid_currency": str}} for every active listing on
+    the account. Backs the metrics overlay — the Sell APIs expose none of
+    these numbers, and routing the call through here keeps the endpoint
     env-aware (sandbox vs production) with the shared error handling.
 
-    ONE walk carries both, because one response already does: WatchCount and
-    BestOfferDetails/BestOfferCount sit on the same <Item>. Asking twice would
-    spend two of the account's Trading calls on a response we already had.
+    ONE walk carries all of them, because one response already does:
+    WatchCount, BestOfferDetails/BestOfferCount and SellingStatus/BidCount
+    sit on the same <Item>. Asking twice would spend two of the account's
+    Trading calls on a response we already had.
+
+    `bids` is eBay's BidCount — how many bids an AUCTION has taken, which is
+    the auction's own version of "a buyer is waiting": unlike a Best Offer a
+    bid needs no answer, but it is the moment the listing stops being an
+    item nobody wanted and starts being a sale in progress, and the grid
+    lifts it to the top for exactly that reason. A Buy It Now listing has
+    no bids and reports 0. `high_bid` is SellingStatus/CurrentPrice, and it
+    is only read once there IS a bid: on an auction with none CurrentPrice
+    is the starting price, and on a fixed-price listing it is the price — a
+    number a card would otherwise show as money somebody put down.
 
     Pass a `status` dict to learn whether the walk finished: it gets
     {'complete': bool}, false when eBay says there are more pages of active
@@ -871,9 +883,15 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
         for item in items:
             iid = _text(item, "ItemID")
             if iid:
+                bids = _int(item, "SellingStatus/BidCount")
+                price_el = _find(item, "SellingStatus/CurrentPrice") if bids else None
                 out[iid] = {
                     "watchers": _int(item, "WatchCount"),
                     "offers_received": _int(item, "BestOfferDetails/BestOfferCount"),
+                    "bids": bids,
+                    "high_bid": _float(item, "SellingStatus/CurrentPrice") if bids else None,
+                    "bid_currency": ((price_el.get("currencyID") or "")
+                                     if price_el is not None else ""),
                 }
         total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
         if page >= max(1, total_pages) or not items:

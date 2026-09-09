@@ -53,6 +53,18 @@
   --shadow-card-hover: 0 4px 10px rgb(16 24 40 / 0.06), 0 2px 4px rgb(16 24 40 / 0.05);
   --shadow-float: 0 8px 28px rgb(16 24 40 / 0.09), 0 2px 8px rgb(16 24 40 / 0.05);
   --shadow-pop: 0 16px 48px rgb(16 24 40 / 0.16), 0 4px 12px rgb(16 24 40 / 0.08);
+
+  /* The green back glow on a live card a buyer has acted on — a bid on an
+     auction, or a Best Offer waiting for an answer. A ring the card's own
+     colour cannot hide plus a soft halo behind it; the hover variant lifts
+     the halo with the card. Declared per theme, beside the shadows they
+     stack on, so the dark canvas gets its brighter teal. */
+  --glow-buyer: 0 0 0 1.5px var(--brand-green),
+    0 0 18px 3px color-mix(in srgb, var(--brand-green) 38%, transparent),
+    var(--shadow-card);
+  --glow-buyer-hover: 0 0 0 1.5px var(--brand-green),
+    0 0 28px 6px color-mix(in srgb, var(--brand-green) 50%, transparent),
+    var(--shadow-card-hover);
 }
 
 .dark {
@@ -91,6 +103,13 @@
   --shadow-card-hover: 0 4px 10px rgb(0 0 0 / 0.45);
   --shadow-float: 0 8px 28px rgb(0 0 0 / 0.5);
   --shadow-pop: 0 16px 48px rgb(0 0 0 / 0.6);
+
+  --glow-buyer: 0 0 0 1.5px var(--brand-green),
+    0 0 22px 4px color-mix(in srgb, var(--brand-green) 45%, transparent),
+    var(--shadow-card);
+  --glow-buyer-hover: 0 0 0 1.5px var(--brand-green),
+    0 0 32px 7px color-mix(in srgb, var(--brand-green) 58%, transparent),
+    var(--shadow-card-hover);
 }
 
 /* Expose tokens to Tailwind utilities (bg-card, text-secondary, rounded-card…) */
@@ -299,6 +318,16 @@ body {
   /* Four times the breath, so each swell arrives on a different colour. */
   animation: brand-halo 2.2s ease-in-out infinite,
              brand-halo-colors 8.8s linear infinite;
+}
+
+/* A listing card with a buyer on it (ListingCard). Unlayered on purpose: it
+   has to beat the `shadow-card` utility the card wears, and Tailwind's
+   utilities layer loses to any unlayered rule. The card's hover animation
+   swaps in --glow-buyer-hover for the same reason the plain card swaps in
+   --shadow-card-hover. No motion here, so there is nothing for
+   prefers-reduced-motion to switch off. */
+.card-buyer-glow {
+  box-shadow: var(--glow-buyer);
 }
 
 /* Reduced motion: kill the ambient animations. */

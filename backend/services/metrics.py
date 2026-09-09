@@ -300,9 +300,14 @@ def _offers(token: str, counts: dict[str, dict], ids: list[str],
 def listing_metrics(creds: Optional[dict], listing_ids: list[str],
                     status: Optional[dict] = None,
                     fresh: bool = False) -> dict[str, dict]:
-    """Combined {listing_id: {views, impressions, watchers}} for the given eBay
-    listing ids. Best-effort per source; returns {} if nothing was fetched.
-    Cached for a short window keyed by the token + id set.
+    """Combined {listing_id: {views, impressions, watchers, offers, bids}}
+    for the given eBay listing ids. Best-effort per source; returns {} if
+    nothing was fetched. Cached for a short window keyed by the token + id
+    set.
+
+    `bids` (with `high_bid` and `bid_currency` once it is above zero) is the
+    auction-side twin of `offers`: both say a buyer has acted on a live
+    listing, and the grid draws and orders the card on either.
 
     Pass a `status` dict to also learn whether the traffic report itself came
     back — it gets {'traffic_ok': bool, 'needs_reconnect': bool}, which is how
@@ -350,7 +355,21 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
         counts = _active_counts(token, wst)
         for lid in ids:
             if lid in counts:
-                out.setdefault(lid, {})["watchers"] = counts[lid]["watchers"]
+                entry = counts[lid]
+                m = out.setdefault(lid, {})
+                m["watchers"] = entry["watchers"]
+                # Same sweep, third question: bids on an auction. Zero is a
+                # real answer here (the sweep reached the listing and eBay
+                # said nobody has bid), which is what lets the card tell it
+                # apart from a listing the walk never got to. The high bid
+                # rides along only where there is one -- see
+                # ebay_trading.active_listing_counts for why CurrentPrice
+                # without a bid is not a bid.
+                bids = int(entry.get("bids") or 0)
+                m["bids"] = bids
+                if bids:
+                    m["high_bid"] = entry.get("high_bid")
+                    m["bid_currency"] = entry.get("bid_currency") or ""
         # Same sweep, second question — see _offers. Its own failure is its
         # own: a Best Offer lookup that times out must not blank the watch
         # counts that already came back in the call above.
@@ -393,6 +412,10 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
             result.setdefault(lid, {}).setdefault("views", 0)
         if watchers_complete:
             result.setdefault(lid, {}).setdefault("watchers", 0)
+            # Bids come from the same walk, so what is known about them is
+            # known on the same terms: a listing the sweep reached and did
+            # not mention has none, and one past the page cap is unknown.
+            result.setdefault(lid, {}).setdefault("bids", 0)
         # Only where the answer is actually known — a listing past the lookup
         # cap, or one whose lookup failed, says nothing rather than "no
         # offers". See _offers.

@@ -165,7 +165,7 @@ def test_traffic_failure_is_reported_and_watchers_survive(monkeypatch):
     monkeypatch.setattr(metrics, "_active_counts", _fake_counts({"42": 5}))
     status: dict = {}
     out = metrics.listing_metrics({"access_token": "tok"}, ["42"], status)
-    assert out == {"42": {"watchers": 5, "offers": 0}}, \
+    assert out == {"42": {"watchers": 5, "offers": 0, "bids": 0}}, \
         "no views where none could be read"
     assert status == {"traffic_ok": False, "needs_reconnect": True}
 
@@ -178,7 +178,7 @@ def test_status_reports_success(monkeypatch):
     # simply had nothing to say about this listing, which is nought watchers
     # and nought offers.
     assert metrics.listing_metrics({"access_token": "tok"}, ["42"], status) == {
-        "42": {"views": 7, "watchers": 0, "offers": 0}}
+        "42": {"views": 7, "watchers": 0, "offers": 0, "bids": 0}}
     assert status == {"traffic_ok": True, "needs_reconnect": False}
 
 
@@ -203,8 +203,8 @@ def test_a_listing_nobody_viewed_reports_nought_rather_than_nothing(monkeypatch)
 
     out = metrics.listing_metrics({"access_token": "tok"}, ["42", "43"], {})
 
-    assert out == {"42": {"views": 7, "watchers": 3, "offers": 0},
-                   "43": {"views": 0, "watchers": 0, "offers": 0}}
+    assert out == {"42": {"views": 7, "watchers": 3, "offers": 0, "bids": 0},
+                   "43": {"views": 0, "watchers": 0, "offers": 0, "bids": 0}}
 
 
 def test_a_report_that_could_not_be_read_fills_nothing(monkeypatch):
@@ -217,8 +217,8 @@ def test_a_report_that_could_not_be_read_fills_nothing(monkeypatch):
 
     out = metrics.listing_metrics({"access_token": "tok"}, ["42", "43"], status)
 
-    assert out == {"42": {"watchers": 3, "offers": 0},
-                   "43": {"watchers": 0, "offers": 0}}
+    assert out == {"42": {"watchers": 3, "offers": 0, "bids": 0},
+                   "43": {"watchers": 0, "offers": 0, "bids": 0}}
     assert "views" not in out["42"] and "views" not in out["43"]
     assert status["traffic_ok"] is False
 
