@@ -1,22 +1,28 @@
 """Listing photos: as shot, or with the background taken off — and upright.
 
-Per photo the pass does exactly three things. It honours the camera's EXIF
-orientation. It takes the background off when the seller asked for that:
-one run of the local model, the matte hardened a little, the item composited
-on white under a soft contact shadow. And it sizes the result for eBay — the longest side to 1600px,
-never upscaled — saved as a JPEG that carries no metadata, so the GPS of the
-seller's home never rides along to a public listing.
+Per photo the pass does four things. It honours the camera's EXIF
+orientation. It turns the ITEM upright when it was photographed lying
+sideways or on its head — which EXIF knows nothing about, so a vision model
+is asked; see services/orient for how, and for why the last one was wrong
+about everything that was not a shirt. It takes the background off when the
+seller asked for that: one run of the local model, the matte hardened a
+little, the item composited on white under a soft contact shadow. And it
+sizes the result for eBay — the longest side to 1600px, never upscaled —
+saved as a JPEG that carries no metadata, so the GPS of the seller's home
+never rides along to a public listing.
 
-Deliberately nothing else. The pass used to be a pipeline: a two-round vision
-call to guess whether the ITEM lay sideways, a matte refined by a border
+Deliberately nothing else. The pass used to be a pipeline: the orientation
+guess in its shirt-shaped first form, a matte refined by a border
 solidifier, an interior-hole repair, a square crop with subject detection, a
 finishing sharpen, three paid cutout APIs as alternate engines, and a guard
-for every way those could go wrong. Each was reasonable
-on its own; together they made every photo cost a minute and every result a
-surprise, and the seller asked for the photos as shot or cut out, and to do
-the rest themselves in the editor. So: the model's own matte ships, the
-frame the seller composed is the frame that ships, and a wrong cutout is one
-tap of Revert.
+for every way those could go wrong. Each was reasonable on its own; together
+they made every photo cost a minute and every result a surprise, and the
+seller asked for the photos as shot or cut out, and to do the rest
+themselves in the editor. So: the model's own matte ships, the frame the
+seller composed is the frame that ships, and a wrong cutout is one tap of
+Revert. Orientation came back on its own and on its own terms — rebuilt for
+objects, applied only when two different looks agree, never in the way of
+an upload — and a wrong turn is one tap of the rotate button.
 
 One model inference runs at a time (_INFER_LOCK): two at once double peak
 memory and kill a small machine. Callers queue for the slot with a deadline —
@@ -58,6 +64,13 @@ TARGET_SIZE = 1600  # px, longest side per eBay's zoom recommendation
 # eBay's own re-encode discards anyway.
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90") or 90)
 WHITE = (255, 255, 255)
+# Clockwise degrees -> the exact (lossless) Pillow transpose for it. Pillow
+# names its rotations counter-clockwise.
+CW_TRANSPOSE = {
+    90: Image.Transpose.ROTATE_270,
+    180: Image.Transpose.ROTATE_180,
+    270: Image.Transpose.ROTATE_90,
+}
 
 # --- the local model --------------------------------------------------------
 # u2netp (~4MB) runs on a 2GB machine; isnet-general-use (~176MB) has the
@@ -489,11 +502,25 @@ def _load(src: Path) -> tuple[Image.Image, tuple[int, int]]:
     return img, shot
 
 
-def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
+def optimize(src: Path, dst: Path, remove_bg: bool = False,
+             rotate: int = 0) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that finds nothing keeps the photo as shot
-    and says so in `bg_error`, so the caller can give the charge back."""
+    and says so in `bg_error`, so the caller can give the charge back.
+
+    `rotate` is clockwise degrees (0/90/180/270): the ITEM's turn, decided by
+    services/orient and applied right after the camera's EXIF — before the
+    cutout, so the contact shadow falls below an upright item rather than
+    beside a sideways one. Anything but a clean quarter turn is ignored: it
+    would resample the photo and report a turn that did not happen. Reported
+    as `rotated` when applied. Nothing here asks for a turn: the studio's
+    Restore original and every other direct caller ship the photo as shot,
+    and only the batch pass (optimize_batch) decides one."""
     img, shot = _load(src)
+    turn = int(rotate or 0) % 360
+    turn = turn if turn in CW_TRANSPOSE else 0
+    if turn:
+        img = img.transpose(CW_TRANSPOSE[turn])
     bg_removed, bg_error = False, None
     if remove_bg:
         try:
@@ -523,6 +550,8 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False) -> dict:
         raise
     out = {"file": dst.name, "original_size": shot, "output_size": img.size,
            "background_removed": bg_removed}
+    if turn:
+        out["rotated"] = turn
     if bg_removed:
         out["bg_engine"] = "local"
     if bg_error:
@@ -615,11 +644,19 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     total = grand_total or len(jobs)
     done = done_already
     results = []
+    if jobs and should_stop is not None and should_stop():
+        raise Stopped()
+    # One batched look at every photo still to do, up front, for the ones
+    # whose ITEM lies sideways or on its head, so each is turned before its
+    # cutout rather than after. Best-effort and bounded: a photo the pass
+    # cannot answer for stays as shot.
+    rotations = _rotations_for([src for src, _dst in jobs], should_stop)
     for src, dst in jobs:
         if should_stop is not None and should_stop():
             raise Stopped()
         try:
-            result = optimize(src, dst, remove_bg)
+            result = optimize(src, dst, remove_bg,
+                              rotate=rotations.get(src.name, 0))
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         results.append(result)
@@ -630,6 +667,27 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
             except Exception:  # noqa: BLE001 - progress is display-only
                 pass
     return results
+
+
+def _rotations_for(sources: list[Path], should_stop=None) -> dict[str, int]:
+    """{filename: clockwise degrees} for the photos in `sources` whose ITEM
+    lies sideways or on its head, per services/orient. Never raises and never
+    costs a photo: with the API off, over budget, or on any failure the
+    answer is "as shot". Keyed by name, which is unique within a batch (one
+    directory) and is how optimize_batch looks a photo's turn up.
+
+    Imported here, not at module scope: orient reaches the Anthropic SDK, and
+    everything else in this file is Pillow. Keeping the AI dependency inside
+    the one function that needs it is what lets the photo gate in CI prove
+    the pass on Pillow alone."""
+    if not sources:
+        return {}
+    try:
+        from . import orient
+        return orient.detect_rotations(sources, should_stop=should_stop)
+    except Exception as exc:  # noqa: BLE001 - orientation is an enhancement
+        log.warning("auto-orient: skipped (%s)", exc)
+        return {}
 
 
 def warm() -> None:
@@ -696,15 +754,34 @@ def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
 
 # --- copies for the AI ---------------------------------------------------------
 
-def thumb_jpeg(path: Path, side: int = 512) -> bytes:
-    """Small JPEG bytes for AI grouping calls — keeps a 40-photo request light."""
+def thumb_jpeg(path: Path, side: int = 512, quality: int = 72) -> bytes:
+    """Small JPEG bytes for AI grouping calls — keeps a 40-photo request
+    light. Upright per the camera's EXIF and opaque. `quality` goes up for a
+    call that has to read a label off the copy."""
     from io import BytesIO
     with Image.open(path) as img:
         img = _flatten(ImageOps.exif_transpose(img))
         img.thumbnail((side, side), Image.LANCZOS)
         buf = BytesIO()
-        img.save(buf, "JPEG", quality=72)
+        img.save(buf, "JPEG", quality=quality)
         return buf.getvalue()
+
+
+def quarter_turns_jpeg(path: Path, side: int = 448) -> dict[int, bytes]:
+    """The same photo at each of its four clockwise quarter-turns, as small
+    JPEGs keyed by degrees — 0 is the photo as the camera meant it. What the
+    orientation pass lays side by side when it asks which one is upright."""
+    from io import BytesIO
+    with Image.open(path) as img:
+        img = _flatten(ImageOps.exif_transpose(img))
+        img.thumbnail((side, side), Image.LANCZOS)
+        out: dict[int, bytes] = {}
+        for deg in (0, 90, 180, 270):
+            turned = img.transpose(CW_TRANSPOSE[deg]) if deg else img
+            buf = BytesIO()
+            turned.save(buf, "JPEG", quality=80)
+            out[deg] = buf.getvalue()
+        return out
 
 
 # The size vision calls send. Claude reads images in 28px patches and never
