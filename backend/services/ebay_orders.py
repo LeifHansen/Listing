@@ -1,36 +1,21 @@
-"""eBay orders + shipping labels (Sell Fulfillment API + Sell Logistics API).
+"""eBay orders (Sell Fulfillment API): what happens AFTER an item sells.
 
-Two jobs live here, both about what happens AFTER an item sells:
+1. Orders: getOrders lists the seller's recent orders — most usefully the
+   ones still awaiting shipment, with the buyer's ship-to address, which is
+   what the label workflow needs. Requires the sell.fulfillment scope
+   (connections made before it was added must reconnect once — same story
+   as sell.marketing).
 
-1. Orders: getOrders (Fulfillment API) lists the seller's recent orders —
-   most usefully the ones still awaiting shipment, with the buyer's ship-to
-   address. That address is what both label workflows below need. Requires
-   the sell.fulfillment scope (connections made before it was added must
-   reconnect once — same story as sell.marketing).
-
-2. Labels, two ways:
-   - eBay's own labels (Logistics API): createShippingQuote returns live
-     eBay-negotiated rates for a package, createFromShippingQuote buys one
-     and returns a label download URL; eBay uploads the tracking number to
-     the order automatically. NOTE: the Logistics API is a LIMITED RELEASE
-     API — eBay must enable it for your application keyset, and it needs the
-     sell.logistics scope. Every call degrades into a clear "not available
-     for this app yet" message instead of a stack trace, so the UI can fall
-     back to Pirate Ship.
-   - Pirate Ship: there is no public Pirate Ship API, so the integration is
-     their spreadsheet-import flow — pirate_ship_rows() shapes awaiting-
-     shipment orders into the columns Pirate Ship's importer maps
-     (recipient address + per-row weight/dimensions), main.py serves it as
-     a CSV download, and the tracking number the user gets back is posted
-     to the order via mark_shipped() (createShippingFulfillment).
+2. mark_shipped: createShippingFulfillment attaches the tracking number a
+   label carries to the order. That is what flips it to "shipped" on eBay and
+   emails the buyer. Labels themselves are bought through the seller's own
+   EasyPost account (services/easypost.py); this module only tells eBay.
 
 Everything raises OrdersError with a user-facing message; no raw eBay JSON
 escapes this module.
 """
 from __future__ import annotations
 
-import csv
-import io
 from typing import Optional
 
 import httpx
@@ -40,7 +25,6 @@ from ..config import log
 
 _TIMEOUT = 30
 _FULFILLMENT = "/sell/fulfillment/v1"
-_LOGISTICS = "/sell/logistics/v1_beta"
 
 
 class OrdersError(ValueError):
@@ -57,16 +41,14 @@ class OrdersError(ValueError):
 class UnknownOutcome(OrdersError):
     """The request went out and we never learned what eBay did with it.
 
-    Raised only for the calls that CHANGE something and cannot be repeated for
-    free: buying a label spends the seller's postage money, and filing a
-    shipping fulfillment tells eBay the order shipped and emails the buyer the
-    tracking. Both used to answer a lost response with "Couldn't reach eBay",
-    which reads as "nothing happened" -- so the seller buys a second label, or
-    files a second fulfillment against one order.
+    Raised only for the call that CHANGES something and cannot be repeated
+    for free: filing a shipping fulfillment tells eBay the order shipped and
+    emails the buyer the tracking. It used to answer a lost response with
+    "Couldn't reach eBay", which reads as "nothing happened" -- so the seller
+    filed a second fulfillment against one order.
 
-    A shipping QUOTE is deliberately not in this class: it costs nothing and
-    reserves nothing, so asking again is free and there is no outcome to be in
-    doubt about. Nor are the reads.
+    The reads are deliberately not in this class: asking again is free and
+    there is no outcome to be in doubt about.
     """
 
     outcome_unknown = True
@@ -100,13 +82,9 @@ def _lost(exc: Exception, unknown: str) -> OrdersError:
     return UnknownOutcome(unknown)
 
 
-# What the seller is told when a spend or a fulfillment may have landed.
-# Neither says "nothing happened", which is the one thing that cannot be
-# justified here and the one thing that leads to doing it twice.
-_LABEL_UNKNOWN = (
-    "We lost contact with eBay while buying this label, so we can't tell "
-    "whether it went through. Check the order's labels on eBay before buying "
-    "again — otherwise you may be charged for two.")
+# What the seller is told when a fulfillment may have landed. It never says
+# "nothing happened", which is the one thing that cannot be justified here
+# and the one thing that leads to doing it twice.
 _FULFILLMENT_UNKNOWN = (
     "We lost contact with eBay while marking this order shipped, so we can't "
     "tell whether it went through. Check the order on eBay before marking it "
@@ -223,6 +201,22 @@ def awaiting_shipment(token: str, limit: int = 50) -> list[dict]:
     return awaiting_page(token, limit)["orders"]
 
 
+def orders_total(token: str) -> Optional[int]:
+    """eBay's own count of EVERY order in the default 90-day window, whatever
+    its status. One call at limit=1, no filter.
+
+    This is what turns an empty awaiting-shipment list into a sentence a
+    seller can act on: "N orders, all already shipped" is a different fact
+    from "no orders at all on this account", and the sandbox environment is a
+    third. None when eBay omitted `total` -- never invented.
+    """
+    data = _get(token, f"{_FULFILLMENT}/order", params={"limit": "1"})
+    try:
+        return int(data.get("total"))
+    except (TypeError, ValueError):
+        return None
+
+
 def get_order(token: str, order_id: str) -> dict:
     """One order, flattened. Raises OrdersError if it can't be read."""
     if not order_id:
@@ -245,9 +239,12 @@ def order_for_item(token: str, ebay_listing_id: str) -> Optional[dict]:
 def mark_shipped(token: str, order_id: str, tracking_number: str,
                  carrier_code: str, line_items: Optional[list[dict]] = None) -> dict:
     """Attach a tracking number to an order (createShippingFulfillment) —
-    this is what flips it to 'shipped' on eBay and emails the buyer. Used for
-    labels bought outside eBay (Pirate Ship); eBay-bought labels upload their
-    tracking automatically."""
+    this is what flips it to 'shipped' on eBay and emails the buyer.
+
+    `carrier_code` is sent as given: eBay spells its carriers USPS, UPS,
+    FedEx, DHL and links the tracking number to the carrier's site by that
+    exact string (easypost.ebay_carrier_code produces it). Upper-casing it,
+    as this once did, turned FedEx into FEDEX."""
     if not order_id or not tracking_number:
         raise OrdersError("An order id and tracking number are required.")
     items = line_items
@@ -258,7 +255,7 @@ def mark_shipped(token: str, order_id: str, tracking_number: str,
     body = {
         "lineItems": items,
         "trackingNumber": tracking_number.strip(),
-        "shippingCarrierCode": (carrier_code or "USPS").strip().upper(),
+        "shippingCarrierCode": (carrier_code or "USPS").strip(),
     }
     try:
         resp = httpx.post(
@@ -280,220 +277,3 @@ def mark_shipped(token: str, order_id: str, tracking_number: str,
             f"{resp.text[:200]}")
     log.info("orders: tracking added to order %s", order_id)
     return {"ok": True, "order_id": order_id}
-
-
-# --- shipping labels (Logistics API — limited release) ----------------------
-
-_LOGISTICS_UNAVAILABLE = (
-    "eBay label purchasing isn't enabled for this app yet — eBay's Logistics "
-    "API is a limited-release API that eBay has to approve per application. "
-    "Use the Pirate Ship option instead, then paste the tracking number back "
-    "here.")
-
-
-def _logistics_error(resp: httpx.Response, doing: str) -> OrdersError:
-    if resp.status_code in (401, 403, 404):
-        # 404s here usually mean the API isn't provisioned for the keyset at
-        # all; 401/403 the scope. Either way the seller's fix is the same.
-        return OrdersError(_LOGISTICS_UNAVAILABLE)
-    detail = ""
-    try:
-        errs = resp.json().get("errors") or []
-        if errs:
-            detail = errs[0].get("message") or ""
-    except Exception:  # noqa: BLE001 - non-JSON error body
-        pass
-    return OrdersError(
-        f"eBay couldn't {doing} ({resp.status_code})"
-        + (f": {detail[:200]}" if detail else "."))
-
-
-def create_shipping_quote(token: str, order: dict, package: dict,
-                          ship_from: dict) -> dict:
-    """Live eBay-negotiated rates for one order's package.
-
-    `package`: {weight_lb, weight_oz, length_in, width_in, height_in}
-    `ship_from`: {name, address1, city, state, postal_code, country, phone}
-    Returns {"shipping_quote_id", "rates": [{rate_id, carrier, service,
-    cost, currency, delivery_est}]}.
-    """
-    ship_to = order.get("ship_to") or {}
-    if not ship_to.get("address1"):
-        raise OrdersError("This order has no ship-to address yet — eBay may "
-                          "still be finalizing payment.")
-    weight_oz = (float(package.get("weight_lb") or 0) * 16.0
-                 + float(package.get("weight_oz") or 0))
-    if weight_oz <= 0:
-        raise OrdersError("Enter the package weight first.")
-    dims = {}
-    if all(float(package.get(k) or 0) > 0
-           for k in ("length_in", "width_in", "height_in")):
-        dims = {"dimensions": {
-            "length": float(package["length_in"]),
-            "width": float(package["width_in"]),
-            "height": float(package["height_in"]),
-            "unit": "INCH",
-        }}
-    body = {
-        "orders": [{"orderId": order["order_id"], "channel": "EBAY"}],
-        "packageSpecification": {
-            "weight": {"value": round(weight_oz / 16.0, 2), "unit": "POUND"},
-            **dims,
-        },
-        "shipFrom": {
-            "fullName": ship_from.get("name") or "Seller",
-            "contactAddress": {
-                "addressLine1": ship_from.get("address1") or "",
-                "city": ship_from.get("city") or "",
-                "stateOrProvince": ship_from.get("state") or "",
-                "postalCode": ship_from.get("postal_code") or "",
-                "countryCode": ship_from.get("country") or "US",
-            },
-            **({"primaryPhone": {"phoneNumber": ship_from["phone"]}}
-               if ship_from.get("phone") else {}),
-        },
-        "shipTo": {
-            "fullName": ship_to.get("name") or "",
-            "contactAddress": {
-                "addressLine1": ship_to.get("address1") or "",
-                **({"addressLine2": ship_to["address2"]}
-                   if ship_to.get("address2") else {}),
-                "city": ship_to.get("city") or "",
-                "stateOrProvince": ship_to.get("state") or "",
-                "postalCode": ship_to.get("postal_code") or "",
-                "countryCode": ship_to.get("country") or "US",
-            },
-            **({"primaryPhone": {"phoneNumber": ship_to["phone"]}}
-               if ship_to.get("phone") else {}),
-        },
-    }
-    try:
-        resp = httpx.post(f"{config.EBAY_API_BASE}{_LOGISTICS}/shipping_quote",
-                          headers=_headers(token), json=body, timeout=_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001
-        raise OrdersError(f"Couldn't reach eBay: {exc}") from exc
-    if resp.status_code not in (200, 201):
-        raise _logistics_error(resp, "quote shipping rates")
-    data = resp.json()
-    rates = []
-    for r in data.get("rates") or []:
-        cost = r.get("totalShippingCost") or r.get("baseShippingCost") or {}
-        rates.append({
-            "rate_id": r.get("rateId") or "",
-            "carrier": r.get("shippingCarrierName")
-                       or r.get("shippingCarrierCode") or "",
-            "service": r.get("shippingServiceName")
-                       or r.get("shippingServiceCode") or "",
-            "cost": cost.get("value") or "",
-            "currency": cost.get("currency") or "USD",
-            "delivery_est": r.get("maxEstimatedDeliveryDate") or "",
-        })
-    rates.sort(key=lambda r: float(r["cost"] or 1e9))
-    return {"shipping_quote_id": data.get("shippingQuoteId") or "",
-            "rates": rates}
-
-
-def purchase_label(token: str, shipping_quote_id: str, rate_id: str) -> dict:
-    """Buy the selected rate. eBay generates the label AND uploads tracking to
-    the order itself — no mark_shipped needed on this path."""
-    if not shipping_quote_id or not rate_id:
-        raise OrdersError("Pick a shipping rate first.")
-    body = {"shippingQuoteId": shipping_quote_id, "rateId": rate_id,
-            "labelSize": "4\"x6\""}
-    try:
-        resp = httpx.post(
-            f"{config.EBAY_API_BASE}{_LOGISTICS}/shipment/create_from_shipping_quote",
-            headers=_headers(token), json=body, timeout=_TIMEOUT)
-    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
-        raise _lost(exc, _LABEL_UNKNOWN) from exc
-    if resp.status_code >= 500:
-        raise UnknownOutcome(_LABEL_UNKNOWN)
-    if resp.status_code not in (200, 201):
-        raise _logistics_error(resp, "purchase the label")
-    data = resp.json()
-    rate = data.get("rate") or {}
-    cost = rate.get("totalShippingCost") or {}
-    return {
-        "shipment_id": data.get("shipmentId") or "",
-        "tracking_number": data.get("shipmentTrackingNumber") or "",
-        "label_url": data.get("labelDownloadUrl") or "",
-        "carrier": rate.get("shippingCarrierName")
-                   or rate.get("shippingCarrierCode") or "",
-        "service": rate.get("shippingServiceName")
-                   or rate.get("shippingServiceCode") or "",
-        "cost": cost.get("value") or "",
-        "currency": cost.get("currency") or "USD",
-    }
-
-
-def download_label(token: str, shipment_id: str) -> bytes:
-    """The label file (PDF) for a purchased shipment."""
-    if not shipment_id:
-        raise OrdersError("No shipment id given.")
-    try:
-        resp = httpx.get(
-            f"{config.EBAY_API_BASE}{_LOGISTICS}/shipment/{shipment_id}/download_label_file",
-            headers={"Authorization": f"Bearer {token}"}, timeout=_TIMEOUT,
-            follow_redirects=True)
-    except Exception as exc:  # noqa: BLE001
-        raise OrdersError(f"Couldn't reach eBay: {exc}") from exc
-    if resp.status_code != 200:
-        raise _logistics_error(resp, "download the label")
-    return resp.content
-
-
-# --- Pirate Ship (spreadsheet import) ---------------------------------------
-
-# Column headers Pirate Ship's importer auto-maps. One row per order; weights
-# in ounces and dimensions in inches ride each row so mixed packages price
-# correctly in one upload.
-PIRATE_SHIP_COLUMNS = [
-    "Order ID", "Recipient Name", "Company", "Email", "Phone",
-    "Address 1", "Address 2", "City", "State", "Zipcode", "Country",
-    "Weight (oz)", "Length (in)", "Width (in)", "Height (in)",
-    "Item Title", "Rubber Stamp",
-]
-
-
-def pirate_ship_csv(orders: list[dict],
-                    packages: Optional[dict[str, dict]] = None) -> str:
-    """A Pirate Ship-importable CSV for these orders.
-
-    `packages` optionally maps order_id -> {weight_lb, weight_oz, length_in,
-    width_in, height_in} (taken from the matching listing's package fields);
-    rows without one just leave those cells blank and the user fills the
-    weight in on Pirate Ship's side.
-    """
-    packages = packages or {}
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(PIRATE_SHIP_COLUMNS)
-    for order in orders:
-        ship_to = order.get("ship_to") or {}
-        if not ship_to.get("address1"):
-            continue  # no address yet — can't ship it from anywhere
-        pkg = packages.get(order.get("order_id") or "") or {}
-        weight_oz = (float(pkg.get("weight_lb") or 0) * 16.0
-                     + float(pkg.get("weight_oz") or 0))
-        titles = "; ".join(li["title"] for li in order.get("line_items") or []
-                           if li.get("title"))[:120]
-        dims = [pkg.get("length_in") or "", pkg.get("width_in") or "",
-                pkg.get("height_in") or ""]
-        writer.writerow([
-            order.get("order_id") or "",
-            ship_to.get("name") or "",
-            ship_to.get("company") or "",
-            ship_to.get("email") or "",
-            ship_to.get("phone") or "",
-            ship_to.get("address1") or "",
-            ship_to.get("address2") or "",
-            ship_to.get("city") or "",
-            ship_to.get("state") or "",
-            ship_to.get("postal_code") or "",
-            ship_to.get("country") or "US",
-            f"{weight_oz:g}" if weight_oz > 0 else "",
-            *[f"{float(d):g}" if d else "" for d in dims],
-            titles,
-            (order.get("order_id") or "")[:20],  # printed on the label corner
-        ])
-    return buf.getvalue()

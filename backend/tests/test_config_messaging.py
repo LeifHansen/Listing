@@ -8,7 +8,6 @@ until an operator opts in.
 """
 
 _MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
-_LOGISTICS = "https://api.ebay.com/oauth/api_scope/sell.logistics"
 
 
 def test_messaging_off_by_default(fresh_config):
@@ -35,13 +34,3 @@ def test_messaging_leaves_the_other_scopes_alone(fresh_config):
     on = fresh_config(EBAY_MESSAGING_ENABLED="1").EBAY_OAUTH_SCOPES
     assert [s for s in on if s != _MESSAGE] == base
 
-
-def test_messaging_and_logistics_are_independent(fresh_config):
-    """Two limited-release flags, separately approved by eBay — enabling one
-    must never smuggle in the other's scope."""
-    cfg = fresh_config(EBAY_MESSAGING_ENABLED="1")
-    assert _LOGISTICS not in cfg.EBAY_OAUTH_SCOPES
-    cfg = fresh_config(EBAY_LOGISTICS_ENABLED="1")
-    assert _MESSAGE not in cfg.EBAY_OAUTH_SCOPES
-    cfg = fresh_config(EBAY_MESSAGING_ENABLED="1", EBAY_LOGISTICS_ENABLED="1")
-    assert _MESSAGE in cfg.EBAY_OAUTH_SCOPES and _LOGISTICS in cfg.EBAY_OAUTH_SCOPES

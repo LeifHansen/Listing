@@ -71,6 +71,12 @@ SHIPPED = {
         "body", "created_at", "data", "dedupe_key", "id", "kind",
         "listing_id", "read_at", "title", "user_id",
     ),
+    "shipping_labels": (
+        "carrier", "cost", "created_at", "currency", "ebay_error",
+        "ebay_marked_at", "id", "label_url", "listing_record_id", "order_id",
+        "rate_id", "service", "shipment_id", "status", "tracker_url",
+        "tracking_number", "updated_at", "user_id",
+    ),
     "token_accounts": (
         "free_period", "free_used", "purchased", "updated_at", "user_id",
     ),

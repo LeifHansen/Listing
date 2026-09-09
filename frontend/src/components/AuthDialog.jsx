@@ -17,7 +17,8 @@ export function AuthDialog() {
   // identity coming out of the context object) and allows the `.current` write
   // below. Same object either way — rename only.
   const { authOpen, setAuthOpen, authMode: mode, setAuthMode: setMode,
-          setUser, loadEbayStatus, afterLogin: afterLoginRef } = useApp();
+          setUser, loadEbayStatus, loadEasypostStatus,
+          afterLogin: afterLoginRef } = useApp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -44,6 +45,7 @@ export function AuthDialog() {
       setPassword("");
       setAuthOpen(false);
       loadEbayStatus();
+      loadEasypostStatus();
       // Resume the action that was interrupted by the login prompt.
       const resume = afterLoginRef.current;
       afterLoginRef.current = null;

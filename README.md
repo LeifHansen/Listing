@@ -601,6 +601,14 @@ is *no verdict*, not "medium".
 | `GET`  | `/api/messages/{id}` | One conversation's messages, oldest first |
 | `POST` | `/api/messages/send` | Reply into a conversation |
 | `POST` | `/api/messages/read` | Mark one conversation read |
+| `GET`  | `/api/ebay/orders` | Orders awaiting shipment (Fulfillment API) with ship-to, the listing's package and any label bought here; when empty, eBay's 90-day order count, the connected username and the environment, so the empty state can say which kind of empty it is |
+| `GET`  | `/api/ebay/orders/for-listing/{id}` | The awaiting order for one of our listing records (a sold notification's "Ship it"), plus the labels bought for it once it has shipped |
+| `POST` | `/api/ebay/mark-shipped` | Attach a tracking number to an order (`createShippingFulfillment`) — the retry when eBay refused it at purchase time |
+| `GET`  | `/api/easypost/status` | Whether this seller has connected EasyPost (test mode, last four of the key — never the key) |
+| `POST` | `/api/easypost/connect` · `/disconnect` | Store the seller's own EasyPost API key after proving it works; forget it |
+| `POST` | `/api/easypost/rates` | Live rates for one order's package from the seller's EasyPost account (creates a Shipment; buys nothing) |
+| `POST` | `/api/easypost/label` | Buy the chosen rate, record it, post the tracking to eBay. Never buys twice for one order; settles a lost answer against EasyPost first |
+| `POST` | `/api/easypost/label/{shipment_id}/refund` | Void an unused label (scoped to the seller's own record of it) |
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
 | `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
@@ -1172,22 +1180,62 @@ existing store's historical sales stays silent.
 The shipping dialog (also reachable via **Ship orders** on the Listings page)
 reads the orders still awaiting shipment through the Fulfillment API — buyer
 address included — pre-fills the package weight/dims from the matching
-listing, and offers two label workflows:
+listing, and buys the label through **EasyPost**:
 
-- **eBay labels** (Logistics API): live eBay-negotiated rates → buy → print,
-  with tracking uploaded to the order automatically. The Logistics API is
-  **limited-release** — eBay must enable it for your keyset; set
-  `EBAY_LOGISTICS_ENABLED=1` once approved and its scope joins the connect
-  flow. Until then the option explains itself and defers to Pirate Ship.
-- **Pirate Ship**: no public API exists, so the app exports the order(s) as a
-  CSV shaped for Pirate Ship's spreadsheet importer (recipient address +
-  per-row weight/dims), links the seller there, and takes the tracking number
-  back — marking the order shipped on eBay via `createShippingFulfillment`,
-  which emails the buyer.
+- **The seller's own EasyPost account.** Each seller pastes their EasyPost
+  API key once under Settings → *EasyPost shipping labels*. The key is proved
+  to work with one EasyPost read before it is stored, held Fernet-encrypted in
+  `marketplace_accounts` like every other marketplace credential, erased with
+  the account, and only ever shown back as its last four characters. Postage
+  is billed to that account's wallet. There is deliberately **no app-wide
+  EasyPost key** and no server setting: the operator never pays for a
+  seller's postage.
+- **Rates → buy → print.** `POST /api/easypost/rates` creates a Shipment on
+  the seller's account (free; nothing is bought) and returns the rates
+  cheapest first; `POST /api/easypost/label` buys the chosen one and then
+  posts the tracking number to the eBay order via `createShippingFulfillment`,
+  which flips it to shipped and emails the buyer. The label PDF opens from
+  EasyPost's own URL, which works identically on the web and inside the iOS
+  shell (a same-origin download is exactly what the native webview cannot
+  authenticate). A test key (`EZTK…`) buys free sample labels; a production
+  key (`EZAK…`) buys real postage.
+- **Every purchase is on record** (`shipping_labels`). The row is written
+  *before* the money moves, so a lost answer from EasyPost leaves a row that
+  says "we may have paid for this" and the next open of the order settles it
+  against EasyPost instead of buying again; an order that already has a label
+  opens on that label; and "Ship it" on a notification for an order that has
+  already gone shows the tracking and the PDF rather than a shrug. The same
+  record scopes a shipment id to its owner — a label carries the buyer's name
+  and address, so another seller's id is a 404 here, never a lookup at
+  EasyPost.
+- **eBay refusing the tracking never hides the label.** A purchase that
+  succeeds but whose tracking eBay rejects comes back as the label with
+  `ebay_marked: false` and the reason; the dialog offers **Retry marking
+  shipped** (`POST /api/ebay/mark-shipped`), and says to check the order on
+  eBay first when the refusal was itself a lost answer.
+- **Void** (`POST /api/easypost/label/{shipment_id}/refund`) asks the carrier
+  to refund an unused label. EasyPost answers "submitted" and settles it
+  asynchronously; eBay has no edit-tracking call, so a voided-then-rebought
+  label leaves the old number on the order until it is changed in Seller Hub,
+  and the dialog says so.
+
+**An empty order list explains itself.** "No orders are waiting to ship" used
+to be the whole answer whether every order in eBay's 90-day window was already
+shipped, a different eBay account than the one that sold was connected, or the
+server was on eBay's sandbox (which has no real orders; `EBAY_ENV` defaults to
+`sandbox`). An empty pile now costs one extra read — eBay's own count of every
+order in the window — and the dialog names the account, the count, and shouts
+if the server is on sandbox. A full pile costs nothing extra.
 
 Reading orders and posting tracking needs the `sell.fulfillment` OAuth scope;
 sellers who connected eBay before it was added reconnect once to grant it
 (same as every scope addition).
+
+**Trying it with a test key.** Connect an EasyPost *test* key in Settings,
+open Ship orders, pick an order, Get rates, Buy the cheapest. The PDF is a
+sample and the tracking number is fake, so verify against a sandbox eBay
+order — or, on a real order, void immediately rather than let a fake number
+reach the buyer. Swap in the production key for the first real label.
 
 ## Buyer messages (the unified inbox)
 
@@ -1226,7 +1274,7 @@ TTL means several open tabs cost one upstream call.
 **Turning it on.** The Message API needs the `commerce.message` OAuth scope,
 which is limited-release: eBay approves it per keyset, and requesting it
 unapproved fails the *whole* consent screen — nobody could connect eBay, and
-publishing would stop with it. So it is opt-in, exactly like `sell.logistics`:
+publishing would stop with it. So it is opt-in:
 set `EBAY_MESSAGING_ENABLED=1` once eBay has approved the app, and connected
 sellers reconnect once to grant it. Until then the icon simply isn't there.
 Flipping the flag can't disturb existing connections — the refresh grant

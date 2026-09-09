@@ -96,7 +96,7 @@ function failFetch() {
 describe("what a dropped connection may tell the seller", () => {
   it("does not tell a write to just try again", async () => {
     failFetch();
-    const err = await api("/api/ebay/shipping-label", { method: "POST" })
+    const err = await api("/api/easypost/label", { method: "POST" })
       .then(() => null, (e) => e);
     expect(err).toBeTruthy();
     expect(err.message.toLowerCase()).not.toMatch(/try again in a few seconds/);
