@@ -1065,6 +1065,29 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // Turn one of a saved listing's photos 90° clockwise, from its card. The
+  // same server call the editor's tile makes (see useListingForm.rotateImage),
+  // for the seller who can see from the grid that a photo is sideways and
+  // used to have to open the full editor to turn it. Resolves with the
+  // rotated file's own version -- the cache-buster no load of this photo has
+  // used, which is what the card needs to show the new bytes -- and RETHROWS
+  // after the toast: the card turns the photo ahead of the answer and takes
+  // that turn back on a rejection, which a swallowed error made unreachable.
+  const rotateListingPhoto = useCallback(async (id, name) => {
+    try {
+      const res = await postJson("/api/rotate-image", { session_id: id, name });
+      // The saved file changed, so every card showing this listing -- the
+      // dashboard, the drafts strip, the manager -- is showing a photo that
+      // no longer exists. Their thumbnails are versioned by updated_at, which
+      // the server has just bumped; see invalidateListings.
+      invalidateListings();
+      return Number.isFinite(res?.version) ? res.version : undefined;
+    } catch (e) {
+      toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  }, [invalidateListings, toast]);
+
   // ---------- active bulk job (survives navigation + reload) ----------
   // { jobId } — persisted so leaving the progress screen (or a reload)
   // never strands a running batch. Completed items also auto-save to Drafts.
@@ -1499,6 +1522,7 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
+    rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
@@ -1520,7 +1544,8 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, startNew, openListing,
-    deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,
+    deleteListing, bulkDeleteListings, rotateListingPhoto,
+    skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
   ]);

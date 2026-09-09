@@ -1,7 +1,7 @@
-import { memo, useState } from "react";
+import { memo, useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, Loader2,
+  ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, RotateCw, Loader2,
   SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
@@ -9,6 +9,7 @@ import { FormatBadge, OriginBadge, PriceBadge, StatusBadge } from "@/components/
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { reviewAspectCount } from "@/views/listing/specifics";
+import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
 import { keptWhenEnded } from "@/lib/listingsView";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
@@ -204,6 +205,29 @@ function CtaHint({ status, className }) {
   );
 }
 
+// The turn a rotate shows ahead of the server, as inline style on the box
+// around the card's photo. A quarter turn swaps the photo's width and
+// height, and in the 4:3 tile that means the box has to be re-cut before it
+// is turned: object-cover crops the picture to the box it sits in, and the
+// box that turns INTO a 4:3 frame is a 3:4 one — 75% wide, 133% tall,
+// centred (the translate is in the box's own units: 1/6 of its width right,
+// 1/8 of its height up). Cut that way, what is on screen after the turn is
+// exactly the crop the re-encoded file gets: the same scale and the same
+// centre, only from the file the server now holds, so the swap when it
+// loads moves no pixel. The list row's thumbnail is square, so there the
+// box already is its own turned self and only the rotation is needed. A
+// half turn (two taps before the first has loaded) keeps the frame's shape
+// either way.
+function turnStyle(spin, square) {
+  if (!spin) return undefined;
+  const transform = `rotate(${spin}deg)`;
+  if (square || (spin / 90) % 2 === 0) return { transform };
+  return {
+    width: "75%", height: "133.333%",
+    transform: `translate(16.667%, -12.5%) ${transform}`,
+  };
+}
+
 // ListingCard — one saved listing, as a grid tile (`layout="grid"`, the
 // default) or as a compact row (`layout="list"`). Click opens it in the
 // workflow; when onDelete is provided, a trash button removes it. The delete
@@ -212,6 +236,13 @@ function CtaHint({ status, className }) {
 // `metrics` (optional) shows eBay views/watchers for a live listing.
 // In select mode (`selectable`), clicking toggles `selected` via `onSelect`
 // instead of opening — powers mass actions like delete-selected in Drafts.
+// `onRotate(id, name)` puts a rotate button on the photo: one tap turns the
+// listing's main photo 90° clockwise on the server, so a photo that is
+// visibly sideways on the grid is fixed there rather than in the full editor.
+// It resolves with the rotated file's version and rejects if the turn did
+// not happen. Callers pass it for drafts: the corner it takes on the tile is
+// the origin badge's once a listing has been on eBay, and a live listing's
+// photos are already eBay's copy anyway.
 // `needsInfo` paints the whole card amber: this listing will not reach eBay
 // until something on it is filled in. See the cardClass comment below.
 // memo'd, and it earns it: the app context holds the 60s notification poll, so
@@ -221,7 +252,7 @@ function CtaHint({ status, className }) {
 // parents already keep stable.
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
-  stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
   layout = "grid", className,
 }) {
   const list = layout === "list";
@@ -242,11 +273,43 @@ export const ListingCard = memo(function ListingCard({
   // Version thumbnails by updated_at so a rotate/clean-up busts the hour-long
   // /media cache the moment the listing is touched — without killing caching.
   const ver = Date.parse(item.updated_at || "") || undefined;
+  // The photo this card shows, when the listing has one on the server.
   // Listings imported from eBay have no local files — their photos are
-  // eBay-hosted absolute URLs, used as-is.
-  const thumb = l.images && l.images[0]
-    ? mediaUrl(item.id, l.images[0], ver)
+  // eBay-hosted absolute URLs, used as-is (and cannot be rotated from here).
+  const photoName = (l.images && l.images[0]) || null;
+  // A rotate from this card rewrites that file, and the card must never ask
+  // for it again by a version it has already shown: a browser reuses an
+  // image it has loaded in this page for an identical URL without asking, so
+  // the old `?v=` would paint the old orientation over a file that is turned.
+  // The server's bump of updated_at is the version every card gets
+  // eventually, but it lands in the background, and the listings refetch a
+  // rotate triggers can come back BEFORE it — with the updated_at the card
+  // already had. So the card keeps the rotated file's own version, taken from
+  // the server's answer, for as long as updated_at is the one it was rotated
+  // under. The moment updated_at moves on (that bump, or any later edit),
+  // the record is authoritative again and the override is let go.
+  const [turned, setTurned] = useState(null);   // { version, at: updated_at }
+  const photoVersion = turned && turned.at === (item.updated_at || "")
+    ? turned.version : ver;
+  const thumb = photoName
+    ? mediaUrl(item.id, photoName, photoVersion)
     : (l.image_urls && l.image_urls[0]) || null;
+  // One tap, one quarter turn, shown before the server has answered and
+  // held until the rotated file is the one on screen — see useOptimisticTurn.
+  const rotatePhoto = useCallback(async () => {
+    const version = await onRotate(item.id, photoName);
+    setTurned({
+      // A version the server did not send is still a version this photo has
+      // never been asked for: later than anything the card has shown.
+      version: Number.isFinite(version)
+        ? version : Math.max(Date.now(), (photoVersion || 0) + 1),
+      at: item.updated_at || "",
+    });
+  }, [onRotate, item.id, item.updated_at, photoName, photoVersion]);
+  const turn = useOptimisticTurn({
+    version: photoVersion,
+    onRotate: onRotate && photoName ? rotatePhoto : undefined,
+  });
   const inventory = item.status === "unlisted";
   // A sold listing is shown at what the buyer PAID (l.sold_price) whenever
   // eBay reported it; without that we fall back to the asking price and mark
@@ -272,15 +335,21 @@ export const ListingCard = memo(function ListingCard({
   // matters (the listing exists on eBay). Hover for exactly what each allows.
   const showOrigin = isLive || item.status === "ended" || item.status === "sold";
 
+  // The turn goes on a box around the <img>, not on the <img>: the image
+  // animates its own transform for the hover zoom, and a turn coming off
+  // through that transition would show the rotated file spinning back.
   const photo = thumb && !imgFailed ? (
-    <img
-      src={thumb}
-      alt=""
-      loading="lazy"
-      className={cn("size-full object-cover transition-transform duration-200",
-        !list && "group-hover:scale-[1.03]")}
-      onError={() => setImgFailed(true)}
-    />
+    <span className="block size-full" style={turnStyle(turn.spin, list)}>
+      <img
+        src={thumb}
+        alt=""
+        loading="lazy"
+        className={cn("size-full object-cover transition-transform duration-200",
+          !list && "group-hover:scale-[1.03]")}
+        onLoad={turn.settle}
+        onError={(e) => { turn.settle(e); setImgFailed(true); }}
+      />
+    </span>
   ) : (
     <div className="grid place-items-center size-full text-ink-faint">
       <ImageOff size={list ? 20 : 28} aria-hidden />
@@ -314,8 +383,38 @@ export const ListingCard = memo(function ListingCard({
     />
   );
 
-  const actions = (onDelete || onEnd || onStartOver || onSkip) && (
+  // Rotate: turn the photo the card is showing, right here. Only where there
+  // is a photo of the listing's own to turn and it is actually on screen (a
+  // turn applied to the placeholder is a turn applied blind), and never
+  // while selecting — that mode turns the whole card into a tick box. In the
+  // grid it sits on the photo itself, in the corner a draft leaves free; in a
+  // list row the thumbnail is too small to carry it, so it joins the row's
+  // controls beside the skip and start-over buttons.
+  const rotatable = !!onRotate && !!photoName && !!thumb && !imgFailed && !selectable;
+  const rotateButton = rotatable && (
+    <button
+      type="button"
+      onClick={turn.rotate}
+      disabled={turn.rotating}
+      aria-label="Rotate photo 90°"
+      title="Rotate the photo 90° clockwise"
+      className={cn(
+        "grid place-items-center size-8 rounded-full cursor-pointer",
+        "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+        "hover:text-blue hover:border-blue/40 transition-colors",
+        turn.rotating && "cursor-wait text-blue",
+        !list && "absolute bottom-3 right-3 pointer-events-auto",
+      )}
+    >
+      {turn.rotating
+        ? <Loader2 size={15} className="animate-spin" aria-hidden />
+        : <RotateCw size={15} aria-hidden />}
+    </button>
+  );
+
+  const actions = (onDelete || onEnd || onStartOver || onSkip || (list && rotatable)) && (
     <>
+      {list && rotateButton}
       {/* Skip: set this draft aside. It stays in Drafts, but the queue
           after a publish stops offering it as the next one to work on. */}
       {onSkip && (
@@ -552,6 +651,18 @@ export const ListingCard = memo(function ListingCard({
   return (
     <div className={cn("relative group", list && "flex items-center gap-2", className)}>
       {body}
+      {/* The rotate button, on the photo's own bottom-right corner. A sibling
+          of the card button like every other control here (a button inside a
+          button is invalid HTML and drops out of the tab order), laid over
+          the card in a box the exact shape of the photo — the card's width,
+          inside its border, at the photo's 4:3 — so "bottom-right of the
+          photo" is a place the wrapper can name without knowing how tall the
+          photo is. The box itself lets clicks through to the card. */}
+      {!list && rotateButton && (
+        <div className="absolute inset-x-px top-px aspect-[4/3] z-10 pointer-events-none">
+          {rotateButton}
+        </div>
+      )}
       {selectable ? (
         // Select mode still lets one listing be opened. Ticking is what the
         // card itself does here, so without this the ONE thing a seller

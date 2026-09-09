@@ -84,7 +84,7 @@ function resultSummary(res) {
 export function DraftsStrip({ search = "" }) {
   const {
     listingsState, openListing, loadListings, patchListing, deleteListing,
-    bulkDeleteListings,
+    bulkDeleteListings, rotateListingPhoto,
     metricsById, skippedDraftIds, toggleSkipDraft,
     listingsLayout, setListingsLayout,
     draftSelection, setDraftSelection,
@@ -472,6 +472,9 @@ export function DraftsStrip({ search = "" }) {
               <ListingCard item={item} layout={listingsLayout} onOpen={openListing}
                 onStartOver={startOver}
                 startingOver={startingOver === item.id}
+                /* A sideways photo is the one thing on a draft card the
+                   seller could see but not fix without opening the editor. */
+                onRotate={rotateListingPhoto}
                 onSkip={() => toggleSkipDraft(item.id)}
                 skipped={skippedDraftIds.has(item.id)}
                 metrics={metricsById[item.id]}

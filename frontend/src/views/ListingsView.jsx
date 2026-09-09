@@ -100,6 +100,7 @@ const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
 export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
+    rotateListingPhoto,
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
@@ -331,6 +332,9 @@ export function ListingsView({ search = "" }) {
               item={item} onOpen={openListing} onDelete={askDelete}
               onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
               ending={endingId === item.id}
+              /* Drafts only, like the category and format controls below: a
+                 live listing's photos are the copy eBay already took. */
+              onRotate={isDraft(item) ? rotateListingPhoto : undefined}
               skipped={skippedDraftIds.has(item.id)}
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
