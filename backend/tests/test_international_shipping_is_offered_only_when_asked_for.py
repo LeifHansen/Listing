@@ -454,6 +454,12 @@ def test_the_switch_is_a_saved_preference():
     """It lives with the other new-listing defaults, as an on/off int, so
     the Settings screen's one Save carries it and the read is fail-closed
     like the rest."""
+    # backend.main pulls the whole app in. The CI `checks` job installs
+    # neither of these, so it skips this test; the smoke job's "API tests"
+    # step is where it runs.
+    pytest.importorskip("fastapi")
+    pytest.importorskip("anthropic")
+    pytest.importorskip("PIL")
     from backend import main
 
     assert main._PREF_FIELDS["ebay_international_shipping"] == (int, 0, 1)
