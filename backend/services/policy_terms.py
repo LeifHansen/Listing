@@ -38,11 +38,43 @@ def _days(period: dict, word: str = "") -> str:
     return f"{value} {unit}{plural}"
 
 
+def _where_to(body: dict) -> dict:
+    """The "Where you post to" term, from the option type and the eIS flag.
+
+    eBay International Shipping does not change the shipping option -- that
+    stays DOMESTIC, because the seller only ever posts to eBay's US hub. What
+    it changes is who the listing is shown to and sold to, which is the part
+    a seller needs to know before agreeing: an overseas sale is still a
+    domestic label, but it is a sale to a buyer eBay handles the rest of the
+    way, with eBay's terms for the international leg.
+    """
+    option = (body.get("shippingOptions") or [{}])[0]
+    domestic = option.get("optionType") == "DOMESTIC"
+    if body.get("globalShipping") is True:
+        return {
+            "label": "Where you post to",
+            "value": "The United States, and worldwide through eBay "
+                     "International Shipping",
+            "detail": "You post every sale to eBay's US shipping hub with an "
+                      "ordinary domestic label. eBay carries it abroad, "
+                      "clears customs and handles any return from overseas, "
+                      "and charges the buyer for that leg. You need to be "
+                      "enrolled in eBay International Shipping on eBay for "
+                      "it to apply.",
+        }
+    return {
+        "label": "Where you post to",
+        "value": "The United States only" if domestic else "International",
+        "detail": "You can add international postage later in Seller Hub, "
+                  "or turn on eBay International Shipping in Settings "
+                  "before creating this policy.",
+    }
+
+
 def _fulfillment(body: dict, svc: dict) -> list[dict]:
     option = (body.get("shippingOptions") or [{}])[0]
     handling = body.get("handlingTime", {})
     calculated = option.get("costType") == "CALCULATED"
-    domestic = option.get("optionType") == "DOMESTIC"
     return [
         {"label": "Carrier and service",
          "value": svc.get("label", svc.get("code", "")),
@@ -58,9 +90,7 @@ def _fulfillment(body: dict, svc: dict) -> list[dict]:
          "detail": "You are not offering free postage. The buyer is charged, "
                    "and the amount depends on the weight and dimensions you "
                    "enter on each listing."},
-        {"label": "Where you post to",
-         "value": "The United States only" if domestic else "International",
-         "detail": "You can add international postage later in Seller Hub."},
+        _where_to(body),
     ]
 
 
@@ -111,7 +141,8 @@ def _returns(body: dict) -> list[dict]:
 def describe(*, service_code: str = "",
              return_days: Optional[int] = None,
              return_payer: str = "",
-             immediate_pay: bool = True) -> dict:
+             immediate_pay: bool = True,
+             international_shipping: bool = False) -> dict:
     """What creating the three policies would commit the seller to.
 
     Pure: it reads constants and builds request bodies. It makes no network
@@ -125,7 +156,8 @@ def describe(*, service_code: str = "",
                else ebay_auth.DEFAULT_RETURN_DAYS)
     payer = (return_payer or ebay_auth.DEFAULT_RETURN_PAYER).upper()
 
-    fulfillment = ebay_auth.fulfillment_body(svc)
+    fulfillment = ebay_auth.fulfillment_body(
+        svc, international_shipping=bool(international_shipping))
     payment = ebay_auth.payment_body(immediate_pay)
     returns = ebay_auth.return_body(days, payer)
     return {
@@ -144,5 +176,6 @@ def describe(*, service_code: str = "",
                        "body": returns},
         },
         "options": {"service_code": svc["code"], "return_days": days,
-                    "return_payer": payer, "immediate_pay": immediate_pay},
+                    "return_payer": payer, "immediate_pay": immediate_pay,
+                    "international_shipping": bool(international_shipping)},
     }

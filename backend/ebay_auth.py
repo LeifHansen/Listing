@@ -450,8 +450,17 @@ def _policy_summary(kind: str, p: dict) -> str:
             codes = [s_["code"] for s_ in _policy_services(p)]
             if codes:
                 pretty = ", ".join(_friendly_service(c) for c in codes[:3])
-                return pretty + ("…" if len(codes) > 3 else "")
-            return "Shipping configured"
+                pretty += "…" if len(codes) > 3 else ""
+            else:
+                pretty = "Shipping configured"
+            # The one thing about a shipping policy a seller cannot tell from
+            # its carrier list: whether listings under it go abroad through
+            # eBay International Shipping. Said in the picker so the seller
+            # choosing between two Ground Advantage policies can see which is
+            # which.
+            if ships_international(p):
+                pretty += " · eBay International Shipping"
+            return pretty
         if kind == "payment":
             return "Managed payments"
     except Exception:  # noqa: BLE001
@@ -636,11 +645,30 @@ def _is_ground_policy(p: dict) -> bool:
                for s in _policy_services(p))
 
 
+def ships_international(p: dict) -> bool:
+    """Does this fulfillment policy put its listings into eBay International
+    Shipping? `globalShipping` is the Account API's name for the flag: it was
+    the Global Shipping Program's switch, and eBay kept the field when eIS
+    replaced GSP for US sellers."""
+    return p.get("globalShipping") is True
+
+
 def find_policy_for_service(access_token: str,
-                            service_code: str) -> tuple[Optional[dict], bool]:
+                            service_code: str, *,
+                            international_shipping: bool = False,
+                            ) -> tuple[Optional[dict], bool]:
     """(the seller's first fulfillment policy shipping `service_code`, did
     eBay answer). Same three-state contract as _first_existing_policy, and for
-    the same reason: it feeds a decision to CREATE one."""
+    the same reason: it feeds a decision to CREATE one.
+
+    With `international_shipping` the policy must ALSO be in eBay
+    International Shipping. A domestic-only policy that happens to ship the
+    same service is not a match: reusing it would hand the seller back the
+    policy they already had, and the terms they just agreed to -- worldwide
+    reach through eIS -- would never come to exist on eBay. Without the flag
+    any policy shipping the service does, international or not; the switch
+    being off means "leave that to eBay and my policies", not "domestic only".
+    """
     norm = (service_code or "").lower().replace("_", "")
     path, list_field, id_field = _POLICY_SPECS["fulfillment"]
     try:
@@ -648,6 +676,8 @@ def find_policy_for_service(access_token: str,
     except Exception:  # noqa: BLE001 - reported via the flag, not raised
         return None, False
     for p in data.get(list_field, []):
+        if international_shipping and not ships_international(p):
+            continue
         if any(s["code"].lower().replace("_", "") == norm
                for s in _policy_services(p)):
             return {"id": p.get(id_field, ""), "name": p.get("name", "")}, True
@@ -661,17 +691,46 @@ def find_policy_for_service(access_token: str,
 DEFAULT_HANDLING_DAYS = 2
 
 
-def fulfillment_body(svc: dict) -> dict:
+# eBay caps a business policy's name at 64 characters. The international
+# suffix is abbreviated to fit under it behind the longest service label
+# ("USPS Priority Mail Express"); a name over the cap is a 400 from eBay, and
+# the seller would be told the policy could not be created for a reason no
+# field on screen explains.
+POLICY_NAME_MAX = 64
+INTERNATIONAL_NAME_SUFFIX = " + eBay Intl Shipping"
+
+
+def fulfillment_policy_name(svc: dict, international_shipping: bool = False) -> str:
+    """What the policy is called in Seller Hub.
+
+    An international policy gets its own name rather than the domestic one:
+    eBay refuses a second policy with a name already in use, and a seller who
+    turns eBay International Shipping on after creating the domestic policy
+    needs a second, distinct policy -- see find_policy_for_service.
+    """
+    if international_shipping:
+        return f"{svc['label']}{INTERNATIONAL_NAME_SUFFIX} (Thryft Shop)"
+    return (f"{svc['label']} (Thryft Shop)"
+            if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
+
+
+def fulfillment_body(svc: dict, international_shipping: bool = False) -> dict:
     """The exact JSON a fulfillment policy would be created with.
 
     Split out of ensure_service_policy so the terms the seller is shown come
     from the request itself rather than a second description of it. A preview
     that is written twice is a preview that eventually lies.
+
+    `international_shipping` opts every listing under the policy into eBay
+    International Shipping: the seller posts each sale to eBay's US hub with
+    the same domestic label as any other order, and eBay carries it abroad,
+    clears customs and handles returns from overseas, charging the buyer for
+    the international leg. The shipping option stays DOMESTIC because that
+    is the leg the seller actually ships. The flag is `globalShipping`,
+    which is the Account API's name for it (see ships_international).
     """
-    name = (f"{svc['label']} (Thryft Shop)"
-            if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
-    return {
-        "name": name,
+    body = {
+        "name": fulfillment_policy_name(svc, international_shipping),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
         "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
         "handlingTime": {"value": DEFAULT_HANDLING_DAYS, "unit": "DAY"},
@@ -685,20 +744,27 @@ def fulfillment_body(svc: dict) -> dict:
             }],
         }],
     }
+    if international_shipping:
+        body["globalShipping"] = True
+    return body
 
 
-def ensure_service_policy(access_token: str, svc: dict) -> dict:
+def ensure_service_policy(access_token: str, svc: dict, *,
+                          international_shipping: bool = False) -> dict:
     """Find — or create — a fulfillment policy that ships `svc` (an entry from
-    SHIPPING_SERVICES): calculated cost, domestic, 2-day handling. Returns
-    {id, name, created}."""
-    existing, known = find_policy_for_service(access_token, svc["code"])
+    SHIPPING_SERVICES): calculated cost, domestic, 2-day handling, and eBay
+    International Shipping on top when `international_shipping` is set.
+    Returns {id, name, created}."""
+    existing, known = find_policy_for_service(
+        access_token, svc["code"],
+        international_shipping=international_shipping)
     if existing and existing["id"]:
         return {**existing, "created": False}
     if not known:
         raise PolicyLookupUnavailable(
             "We couldn't check your existing eBay shipping policies just now, "
             "so nothing was created. Try again in a moment.")
-    body = fulfillment_body(svc)
+    body = fulfillment_body(svc, international_shipping)
     name = body["name"]
     resp = httpx.post(
         f"{config.EBAY_API_BASE}/sell/account/v1/fulfillment_policy",
@@ -721,8 +787,9 @@ def ensure_service_policy(access_token: str, svc: dict) -> dict:
             f"({resp.status_code})",
             description=resp.text[:300], status=resp.status_code)
     created = resp.json()
-    log.info("ebay: created %s fulfillment policy %s", svc["code"],
-             created.get("fulfillmentPolicyId", ""))
+    log.info("ebay: created %s fulfillment policy %s%s", svc["code"],
+             created.get("fulfillmentPolicyId", ""),
+             " (eBay International Shipping)" if international_shipping else "")
     return {"id": created.get("fulfillmentPolicyId", ""),
             "name": created.get("name", name), "created": True}
 

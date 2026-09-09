@@ -117,7 +117,8 @@ def test_a_disconnected_account_is_told_to_connect(monkeypatch):
 
 def test_a_partial_failure_still_reports_what_was_created(connected, monkeypatch):
     monkeypatch.setattr(main.ebay_auth, "ensure_service_policy",
-                        lambda t, svc: {"id": "FP-1", "name": "Ship", "created": True})
+                        lambda t, svc, **kw: {"id": "FP-1", "name": "Ship",
+                                              "created": True})
     monkeypatch.setattr(main.ebay_auth, "ensure_payment_policy",
                         lambda t: {"id": "PP-1", "name": "Pay", "created": False})
 

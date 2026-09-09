@@ -1323,7 +1323,8 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
                    idempotency_key: str = "",
-                   best_offer: bool = False) -> dict:
+                   best_offer: bool = False,
+                   international_shipping: bool = False) -> dict:
     """Publish a NEW listing through the Trading API.
 
     This is what keeps a listing editable everywhere. A listing published via
@@ -1349,7 +1350,8 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     AlreadyListedError instead of duplicating. Pass "" to opt out.
 
     `best_offer` enables Best Offer on the new listing, with no minimum —
-    see build_add_item.
+    see build_add_item. `international_shipping` opts it into eBay
+    International Shipping — likewise.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -1359,7 +1361,8 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
             "eBay needs to know where this ships from. Add your ship-from ZIP "
             "in Settings → Listing settings and publish again.")
     call, body = build_add_item(listing, image_urls, policies, postal_code,
-                                idempotency_key, best_offer=best_offer)
+                                idempotency_key, best_offer=best_offer,
+                                international_shipping=international_shipping)
     try:
         root = _call(call, token, body)
     except TradingError as exc:
@@ -1397,7 +1400,8 @@ def build_add_item(listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
                    idempotency_key: str = "",
-                   best_offer: bool = False) -> tuple[str, str]:
+                   best_offer: bool = False,
+                   international_shipping: bool = False) -> tuple[str, str]:
     """(call name, <Item> XML) for a NEW listing.
 
     Exactly the body create_listing sends, built without touching the network
@@ -1413,6 +1417,13 @@ def build_add_item(listing: Listing, image_urls: list[str],
     prices are eBay's auto-decline / auto-accept thresholds, and picking
     either on the seller's behalf would sell an item, or bin a buyer, at a
     number they never named.
+
+    `international_shipping` opts this listing into eBay International
+    Shipping — the seller's "Use eBay International Shipping" account switch
+    (see listing_sync.international_shipping_enabled). Off sends NOTHING, not
+    false: an explicit false would opt the listing OUT, and a seller enrolled
+    on eBay whose listings went abroad before this switch existed must not
+    lose that because they never touched a toggle.
     """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
     is_auction = fmt.startswith("AUCTION")
@@ -1448,6 +1459,18 @@ def build_add_item(listing: Listing, image_urls: list[str],
         parts.append(f"<PostalCode>{_esc(postal_code)}</PostalCode>")
     parts.append("<CategoryMappingAllowed>true</CategoryMappingAllowed>")
     parts.append(_package_details(listing))
+
+    if international_shipping:
+        # ShippingDetails.GlobalShipping is the Trading API's per-listing
+        # opt-in. The name is the Global Shipping Program's; eBay kept the
+        # field when eBay International Shipping replaced GSP for US sellers,
+        # the same way the Account API kept `globalShipping` on a fulfillment
+        # policy (ebay_auth.fulfillment_body sets that one). Only this element
+        # goes in the container: the postage services themselves come from
+        # the SellerShippingProfile below, and naming them here as well would
+        # be a second copy of the policy for eBay to reconcile.
+        parts.append("<ShippingDetails><GlobalShipping>true</GlobalShipping>"
+                     "</ShippingDetails>")
 
     p = policies or {}
     profiles = ""
@@ -1499,7 +1522,8 @@ _VERIFY_CALL = {"AddItem": "VerifyAddItem",
 def verify_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
-                   best_offer: bool = False) -> None:
+                   best_offer: bool = False,
+                   international_shipping: bool = False) -> None:
     """Ask eBay whether it WOULD accept this listing. Nothing is listed.
 
     Returns None when eBay says it would take it, and raises TradingError —
@@ -1513,7 +1537,8 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
     the real publish it is diagnosing.
     """
     call, body = build_add_item(listing, image_urls, policies, postal_code,
-                                idempotency_key="", best_offer=best_offer)
+                                idempotency_key="", best_offer=best_offer,
+                                international_shipping=international_shipping)
     _call(_VERIFY_CALL[call], token, body)
 
 
