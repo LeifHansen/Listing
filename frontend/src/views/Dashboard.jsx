@@ -135,7 +135,7 @@ const BULK_ACTIONS = {
     verb: "Promote all",
     icon: Megaphone,
     shared: true,
-    run: (ctx) => ctx.promoteAll((ctx.group?.recs || []).length),
+    run: (ctx) => ctx.promoteAll(ctx.group, ctx.cap),
   },
   // "Fill in details" used to be a prompt to go and do it: open each listing,
   // wait for the AI to read its photos, save, repeat. It is the same edit
@@ -613,22 +613,45 @@ export function Dashboard() {
       toast(`Couldn't promote: ${e.message}`, { kind: "error" });
     } finally { setPromoting(null); }
   };
-  const promoteAll = async (count = 0) => {
-    // Promoting costs money on every sale it touches, and this button reaches
-    // EVERY live listing at once — the one action in the app that spends
-    // across the whole store from a single tap. Say what it will do first.
+  const promoteAll = async (group, cap) => {
+    // Promoting costs money on every sale it touches, so the button says what
+    // it will do first — and does exactly that. It sends the group's own
+    // listings, like the other bulk verbs: the suggestions list is capped, so
+    // a badge reading 50 can sit over a store with far more unpromoted
+    // listings, and the old body ({}) had the server promote the WHOLE store
+    // right after a dialog that had named 50. The server keeps its own cap
+    // per run and reports the rest as deferred, which the dialog says too.
+    const ids = (group?.recs || []).map((r) => r.listing_id);
+    const total = ids.length;
+    const run = runSize(total, cap);
     if (!(await confirm({
-      title: count ? `Promote ${count} listings?` : "Promote every live listing?",
+      title: total ? `Promote ${runCount(run, total, "listing")}?`
+        : "Promote every live listing?",
       message: "Each gets eBay's recommended ad rate. Promoted Listings is "
         + "pay-per-sale — you're charged that percentage only when a listing "
-        + "sells through its ad, but it applies to every listing this touches.",
+        + "sells through its ad, but it applies to every listing this touches."
+        + (run < total
+          ? ` One run covers ${run} of them — the other ${total - run} stay on the list for a second run.`
+          : ""),
       confirmLabel: "Promote them",
     }))) return;
     setPromoting("all");
     try {
-      const res = await postJson("/api/ebay/promote-all", {});
-      if (res.promoted) toast(`Promoting ${res.promoted} listing${res.promoted === 1 ? "" : "s"} at eBay's recommended rate.`, { kind: "success" });
-      else if (!res.needs_reconnect) toast("No live listings to promote.", { kind: "info" });
+      const res = await postJson("/api/ebay/promote-all", { listing_ids: ids });
+      const parts = [];
+      if (res.promoted) parts.push(`Promoting ${res.promoted} listing${res.promoted === 1 ? "" : "s"} at eBay's recommended rate`);
+      // The server checks eBay's own ad list before spending — the same list
+      // the group was built from — so a listing promoted in Seller Hub since
+      // the group was computed is reported, not promoted twice.
+      if (res.already_promoted) parts.push(`${res.already_promoted} already promoted on eBay`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      if (res.skipped) parts.push(`${res.skipped} no longer live`);
+      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
+      if (!res.needs_reconnect) {
+        toast(parts.join(" · ") || "No live listings to promote.", {
+          kind: res.promoted ? "success" : res.failed ? "error" : "info",
+        });
+      }
       afterPromote(res);
     } catch (e) {
       toast(`Couldn't promote all: ${e.message}`, { kind: "error" });

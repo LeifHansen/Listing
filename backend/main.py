@@ -6951,17 +6951,26 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> tuple[set, bool]
     if not creds:
         return set(), False
     ads, known = promotions.active_ads_status(creds)
-    if not ads:
-        return set(), known
     promoted = set()
+    live = 0
     for it in items:
         if it.get("status") not in ("published", "live"):
             continue
+        live += 1
         listing = it.get("listing") or {}
         eid = str(listing.get("ebay_listing_id") or "")
         sku = ebay.sku_for(it["id"])
         if (eid and eid in ads) or (sku and sku in ads):
             promoted.add(it["id"])
+    # The one line that says why the "Promote listings" group holds what it
+    # holds. A seller whose whole store is promoted in Seller Hub and who is
+    # still shown fifty listings to promote is either looking at ads eBay
+    # did not list (matched=0 against ad_keys=0 -- see the campaign summary
+    # active_ads_status logs) or at ads keyed by something other than the
+    # item id our records carry (ad_keys>0, matched=0); nothing else on the
+    # screen can tell those apart.
+    log.info("active ads: known=%s ad_keys=%d live=%d matched=%d",
+             known, len(ads), live, len(promoted))
     return promoted, known
 
 
@@ -7152,21 +7161,75 @@ def promote_one(payload: dict, request: Request) -> dict:
 
 
 @app.post("/api/ebay/promote-all")
-def promote_all(request: Request) -> dict:
-    """Promote every live, not-yet-promoted listing at eBay's recommended rate
-    (falling back to the default). Best-effort per item; stops early and asks the
-    user to reconnect if the token lacks ad permissions."""
+def promote_all(request: Request, payload: Optional[dict] = None) -> dict:
+    """Promote the listings the Dashboard's "Promote listings" group names, at
+    eBay's recommended rate (falling back to the default). Best-effort per
+    item; stops early and asks the user to reconnect if the token lacks ad
+    permissions.
+
+    "Already promoted" means here exactly what it means to the suggestion
+    this button sits on. The group is built from two signals -- this app's
+    own Promote flag and eBay's live ad list, which is what catches an ad the
+    seller created in Seller Hub -- and this route used to read only the
+    first. So it disagreed with the group it belonged to: it promoted every
+    live listing without our flag, Seller-Hub-promoted ones included, and it
+    did so during an ads outage too, when the group had (rightly) gone quiet.
+    Promoting costs a percentage of the sale, and the whole point of reading
+    eBay's list is to not pay for it twice; the route reads it now and
+    refuses to spend on an unanswered question, the same rule the recommender
+    already keeps.
+
+    The caller names the listings, like the other bulk verbs, so the button
+    promotes the group the seller confirmed rather than the seller's whole
+    store: the suggestions panel is capped, so a badge reading 50 could sit
+    over a store with 900 unpromoted listings, and "Promote 50 listings?"
+    was then a promise about 900. No ids keeps the old whole-store reach for
+    anything that still calls it that way, with the same ad check.
+    """
     user = auth.current_user(request)
     creds = _ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
-    items = [i for i in db.list_listings(limit=LIST_CAP, user_id=user["id"],
-                                        statuses=("published", "live"))
-             if not (i.get("listing") or {}).get("promote")]
-    rates = _rates_by_record_id(creds, items)
+    ids = [str(i).strip() for i in ((payload or {}).get("listing_ids") or [])
+           if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    # Bounded for the same reason lower-prices is: the lookup is BY id, and
+    # an unbounded body is an unbounded `IN (...)`.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    if ids:
+        # Ownership is enforced inside the read; an id that does not come
+        # back is not the seller's, or is gone.
+        mine = db.get_listings(ids, user["id"])
+    else:
+        mine = db.list_listings(limit=LIST_CAP, user_id=user["id"],
+                                statuses=("published", "live"))
+    live = [i for i in mine if i.get("status") in ("published", "live")]
+    promoted_ids, known = _promoted_record_ids(creds, live)
+    if not known:
+        # No fee on the strength of a question nobody managed to ask -- see
+        # _promoted_record_ids. Not a 4xx: the seller did nothing wrong.
+        raise HTTPException(
+            503, "We couldn't read your eBay ads just now, so nothing was "
+                 "promoted. Try again in a moment.")
+    targets: list[dict] = []
+    already = 0
+    for it in live:
+        if (it.get("listing") or {}).get("promote") or it["id"] in promoted_ids:
+            already += 1
+        else:
+            targets.append(it)
+    # Each promotion is its own Marketing API round trip (two when the ad
+    # already exists), run one after another; the run is bounded like the
+    # other bulk passes and the rest is reported for a second one.
+    records, deferred = targets[:BULK_PROMOTE_CAP], targets[BULK_PROMOTE_CAP:]
+    rates = _rates_by_record_id(creds, records)
     promoted = 0
+    failed = 0
     needs_reconnect = False
-    for it in items:
+    for it in records:
         listing = Listing(**(it.get("listing") or {}))
         status = _promote(it["id"], listing, creds, rate=rates.get(it["id"]))
         if status.get("promoted"):
@@ -7177,7 +7240,18 @@ def promote_all(request: Request) -> dict:
         elif status.get("needs_reconnect"):
             needs_reconnect = True
             break
-    return {"promoted": promoted, "total": len(items), "needs_reconnect": needs_reconnect}
+        else:
+            failed += 1
+    # Asked for but not live any more, or not the seller's: reported, not
+    # silently dropped from the totals.
+    skipped = (len(ids) - len(mine) if ids else 0) + (len(mine) - len(live))
+    log.info("promote-all: user=%s asked=%d live=%d already_promoted=%d "
+             "promoted=%d failed=%d skipped=%d deferred=%d", user["id"],
+             len(ids), len(live), already, promoted, failed, skipped,
+             len(deferred))
+    return {"promoted": promoted, "total": len(records),
+            "already_promoted": already, "failed": failed, "skipped": skipped,
+            "deferred": len(deferred), "needs_reconnect": needs_reconnect}
 
 
 # How many listings one bulk price run touches. Each is a serial eBay revise;
@@ -7189,6 +7263,11 @@ BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
 # than refused, and far below anything that makes an `IN (...)` a
 # problem. Same role as the 200 the bulk delete already applies.
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
+# How many listings one promote-all run touches. Cheaper per listing than a
+# revise (one Marketing API call, two for an ad that already exists, and the
+# campaign lookup is cached), but still serial, and the old unbounded pass
+# over a whole store would not have come back inside the gateway's patience.
+BULK_PROMOTE_CAP = int(os.getenv("BULK_PROMOTE_CAP", "40") or "40")
 
 
 @app.post("/api/ebay/lower-prices")
@@ -7294,15 +7373,16 @@ def _bulk_caps() -> dict:
     """How many listings ONE tap on a suggestion group's bulk button reaches,
     keyed by the recommendation type that carries the button.
 
-    Both bulk actions cap a single run and hand the remainder back as
-    `deferred` (see the two constants above). The dashboard had no way to know
+    Every bulk action caps a single run and hands the remainder back as
+    `deferred` (see the constants above). The dashboard had no way to know
     that, so it promised the whole group: a 46-listing "Fill in details" asked
     the seller to confirm 46, quoted the AI cost of 46 — and then ran 25 and
     reported "1 of 25" against a group badge reading 46. The caps ride along
     with the recommendations so the group can say what this pass will actually
     do before the seller agrees to spend anything on it.
     """
-    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP}
+    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP,
+            "promote": BULK_PROMOTE_CAP}
 
 
 # The enrichment runs as a background job, one per account at a time: it
