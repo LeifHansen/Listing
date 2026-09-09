@@ -18,8 +18,7 @@ import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
-  ARCHIVED_STATUSES, endedGraceDays, isDraft, keptWhenEnded, listingsView,
-  orderListings,
+  endedGraceDays, isDraft, keptWhenEnded, listingsView, orderListings,
 } from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
@@ -27,7 +26,7 @@ import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
    drafts have their own strip above it (DraftsStrip), so there is no Drafts
-   tab here (the "All" tab still mirrors every status, drafts included). */
+   tab here (the "All" tab holds every status, drafts and archive included). */
 
 export const TABS = [
   {
@@ -67,9 +66,13 @@ export const TABS = [
     },
   },
   {
-    id: "all", label: "All", statuses: null, hide: ARCHIVED_STATUSES,
-    sub: "A live mirror of your whole eBay store — every status still in play "
-      + "(anything finished is archived under Inactive)",
+    // The whole store, so its count is what the other tabs add up to. It
+    // used to leave the archive out, and the badges said so — "Active 355,
+    // Inactive 11, All 355" was the report. The finished listings sit after
+    // the live ones here (orderListings), not among them.
+    id: "all", label: "All", statuses: null,
+    sub: "Your whole store in one place — everything live, plus drafts, finds "
+      + "and the archive (finished listings sit at the end)",
     empty: {
       illustration: ListingsIllustration, title: "No listings yet",
       message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
@@ -78,15 +81,14 @@ export const TABS = [
   },
 ];
 
-// Which items a tab shows. `statuses` is a whitelist; `hide` subtracts from
-// the everything-tab. Sold items are hidden outside Inactive on purpose — a
-// finished sale is not something the seller can still act on, and leaving it
-// among the live listings is what made a sold item look publishable. The list
-// it subtracts is ARCHIVED_STATUSES, shared with the dashboard's "Recent
-// listings" strip so a sale leaves both screens at once.
+// Which items a tab shows. `statuses` is a whitelist; a tab without one is
+// the whole store. Nothing is subtracted from All any more: Active, Finds and
+// Inactive are each a slice of it, so its count is their sum plus the drafts,
+// and a finished listing is told apart by its card — a "Sold" or "Ended"
+// badge, and "View sale" or "Relist" where a live card offers "Edit live".
 export const inTab = (tab, item) => (tab.statuses
   ? tab.statuses.includes(item.status)
-  : !(tab.hide || []).includes(item.status));
+  : true);
 
 // Tab ids this pipeline used to have, and where each one goes now. The
 // selection is remembered across visits, so a seller who last left the app on
@@ -230,8 +232,9 @@ export function ListingsView({ search = "" }) {
 
   const q = search.trim().toLowerCase();
   // Newest first, except that a listing a buyer has bid or made an offer on
-  // goes to the top: see lib/listingsView.orderListings. The card itself
-  // says why it is there (the green glow and its chip, in ListingCard).
+  // goes to the top and the archive goes to the bottom: see
+  // lib/listingsView.orderListings. The card itself says why it is where it
+  // is (the green glow and its chip, or a Sold / Ended badge, in ListingCard).
   const shown = listingsState.items
     .filter((i) => inTab(tab, i))
     .filter((i) => !q

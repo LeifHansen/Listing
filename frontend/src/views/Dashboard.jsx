@@ -1096,12 +1096,12 @@ export function Dashboard() {
         <SectionHeader
           icon={Tags}
           title="Recent listings"
-          // Where the strip's contents actually live. "All" hides sold, so a
-          // seller whose whole store has sold would otherwise be sent from an
-          // empty strip to an empty tab reading "No listings yet".
+          // Where the strip's contents actually live. All is the whole store,
+          // the archive included, so a seller whose every listing has sold
+          // lands on their sales there rather than on "No listings yet".
           action={items.length > 0 && (
             <Button variant="ghost" size="sm"
-              onClick={() => openListings(recent.length > 0 ? "all" : "inactive")}>
+              onClick={() => openListings("all")}>
               View all <ArrowRight aria-hidden />
             </Button>
           )}

@@ -9,7 +9,8 @@
  * Three things have to be true on this screen, and none was:
  *
  *  1. An ended card is never among the live ones. It belongs in the archive
- *     for as long as it is here at all.
+ *     for as long as it is here at all — and where the whole store is shown
+ *     at once, it comes after the listings still running, not between them.
  *  2. Ending a listing of the seller's OWN moves it there rather than
  *     destroying it — their photos and the AI's copy are in it, and the
  *     server keeps it for a month so they can relist.
@@ -203,12 +204,23 @@ describe("ending a listing from its card", () => {
 
   it("never shows an ended card among the live ones", async () => {
     // The report itself. An ended listing lives in the archive while it is
-    // here at all — never in All, beside the listings still running.
-    const ui = await mount([mine("l1", "Levi's 527 Boot Cut"),
-                            { ...mine("e1", "Ended last week"), status: "ended" }]);
-    await ui.tab("all");
+    // here at all: not on Active, and on All — the whole store, whose count
+    // has to add up to Active plus Inactive — after the listings still
+    // running, never between them. The ended one here was touched LAST, so
+    // plain recency would have put it first.
+    const ui = await mount([
+      { ...mine("l1", "Levi's 527 Boot Cut"), updated_at: "2026-09-01T00:00:00Z" },
+      { ...mine("e1", "Ended last week"), status: "ended",
+        updated_at: "2026-09-02T00:00:00Z" },
+    ]);
+    await ui.tab("active");
     expect(ui.text()).toContain("Levi's 527 Boot Cut");
     expect(ui.text()).not.toContain("Ended last week");
+    await ui.tab("all");
+    const all = ui.text();
+    expect(all).toContain("Ended last week");
+    expect(all.indexOf("Levi's 527 Boot Cut"))
+      .toBeLessThan(all.indexOf("Ended last week"));
     await ui.tab("inactive");
     expect(ui.text()).toContain("Ended last week");
     await act(async () => { ui.root.unmount(); });
