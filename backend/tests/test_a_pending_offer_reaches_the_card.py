@@ -71,6 +71,18 @@ class _Resp:
         self.content = content
 
 
+def _per_listing_lookups(sent: list[dict]) -> list[str]:
+    """The GetBestOffers calls asked about ONE listing.
+
+    The account-wide GetBestOffers is asked once per sweep and carries no
+    ItemID; it is the cheap path, so what these tests guard against is the
+    expensive shape — a Trading call spent per listing. The ItemID is what
+    tells them apart.
+    """
+    return [c["body"] for c in sent
+            if c["call"] == "GetBestOffers" and "<ItemID>" in c["body"]]
+
+
 @pytest.fixture
 def ebay(monkeypatch):
     """Answer each Trading call by name, and record what was asked."""
@@ -181,7 +193,7 @@ def test_a_listing_with_no_offers_is_never_asked_about(ebay):
 
     out = metrics.listing_metrics({"access_token": "tok"}, [ITEM, OTHER], {})
 
-    assert "GetBestOffers" not in [c["call"] for c in ebay["sent"]]
+    assert _per_listing_lookups(ebay["sent"]) == []
     assert out[ITEM]["offers"] == 0 and out[OTHER]["offers"] == 0
 
 
@@ -272,7 +284,7 @@ def test_offers_are_only_read_for_the_listings_asked_about(ebay):
 
     metrics.listing_metrics({"access_token": "tok"}, [ITEM], {})
 
-    assert "GetBestOffers" not in [c["call"] for c in ebay["sent"]]
+    assert _per_listing_lookups(ebay["sent"]) == []
 
 
 # ------------------------------------- and what happens after it is answered

@@ -11,9 +11,11 @@ Views/impressions come from Sell Analytics getTrafficReport (needs the
 sell.analytics.readonly scope), asked for 200 listings at a time because that
 is all eBay's listing_ids filter takes. Watch counts come from the Trading
 API's GetMyeBaySelling, paged over the active list (the Sell APIs don't expose
-watchers) — and that same sweep names which listings have ever had a Best
-Offer, the shortlist GetBestOffers then turns into "how many are waiting on
-you right now".
+watchers). Pending Best Offers come from one unscoped GetBestOffers, which
+answers "who is waiting on you right now" for the whole account in a single
+call; the per-listing form of that question, shortlisted off the sweep's
+BestOfferCount, is kept only as the fallback for when that reply can't be
+read.
 
 Fail-soft is not the same as fail-silent: when the traffic report can't be
 read, `listing_metrics` says so through its `status` out-dict, so the UI can
@@ -232,25 +234,49 @@ def _offers(token: str, counts: dict[str, dict], ids: list[str],
             complete: bool = True) -> tuple[dict[str, dict], set[str]]:
     """({item_id: pending-offer summary}, ids we can honestly report on).
 
-    Two-step, and the second step is the point. eBay's per-listing
-    BestOfferCount (already in hand from the ActiveList sweep) counts offers
-    RECEIVED, settled ones included, so it cannot answer "is a buyer waiting".
-    It answers the cheap half — a listing at zero has never had an offer at
-    all — and GetBestOffers answers the rest exactly, one listing at a time.
+    One unscoped GetBestOffers answers the whole account, and that is the path
+    taken whenever eBay gives a reply this can recognise. Everything below it
+    is the fallback for when eBay doesn't: the per-listing question, gated on
+    a shortlist drawn from the ActiveList sweep's BestOfferCount.
 
     The second return value is which listings the caller may state a number
-    for: a zero the sweep actually reported, or a lookup that came back. A
+    for: a lookup that came back, or a zero the sweep actually reported. A
     listing whose lookup failed is left out entirely rather than reported as
     nought, because "no offer" and "we could not ask" are different things to
     tell a seller about money on the table.
 
-    `complete` is the same distinction one level up. The sweep is bounded, so
-    a big store can run out of pages before it runs out of listings, and a
-    listing past that cap is simply absent from `counts` — indistinguishable,
-    without this, from one the sweep reached and found no offers on. Reading
-    absence as zero is how the page cap would have quietly reported a store's
-    newest listings as offer-free.
+    `complete` is the same distinction one level up, and it applies to the
+    fallback only. The sweep is bounded, so a big store can run out of pages
+    before it runs out of listings, and a listing past that cap is simply
+    absent from `counts` — indistinguishable, without this, from one the sweep
+    reached and found no offers on. Reading absence as zero is how the page
+    cap would have quietly reported a store's newest listings as offer-free.
     """
+    # One unscoped GetBestOffers answers the whole store, so ask that first.
+    # The shortlist below is the fallback, and it is a fallback because its
+    # gate cannot do the job on a store that haggles: `offers_received` counts
+    # offers RECEIVED — a listing whose offers were all declined months ago
+    # keeps counting them forever, and outranks the listing with one offer
+    # waiting right now. Past the lookup cap the budget is spent entirely on
+    # listings whose offers are settled, and the one with money on the table
+    # is never asked about at all. It then says nothing rather than "no
+    # offers", which is honest and still leaves the seller unaware.
+    ost: dict = {}
+    try:
+        everyone = ebay_trading.all_pending_offers(token, status=ost)
+    except Exception as exc:  # noqa: BLE001 - fall back to the shortlist
+        log.info("account-wide offer lookup unavailable: %s", exc)
+        ost = {}
+        everyone = {}
+    if ost.get("answered"):
+        found = {i: everyone[i] for i in ids if i in everyone}
+        # eBay answered for the whole account, so this needs nothing from the
+        # ActiveList sweep — a listing the sweep never reached still gets its
+        # badge, and its nought. Only a walk cut short by the page cap leaves
+        # anything unknown, and then only the listings it never got to.
+        known = set(ids) if ost.get("complete") else set(found)
+        return found, known
+
     reached = {i for i in ids if complete or i in counts}
     known = {i for i in reached
              if not (counts.get(i) or {}).get("offers_received")}

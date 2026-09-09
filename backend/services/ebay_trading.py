@@ -897,27 +897,24 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
 _PENDING = "pending"
 
 
-def pending_offers(token: str, item_id: str) -> dict:
-    """The Best Offers on ONE listing that are still waiting on the seller.
+def _summarize_offers(offers: list[ET.Element]) -> dict:
+    """Fold a listing's BestOffer elements into the one line a card can show.
 
     {"count": n, "top": float|None, "currency": str, "expires_at": str} —
     `top` is the best money on the table right now, `expires_at` the SOONEST
     deadline among the pending offers (the one that runs out first is the one
     worth knowing about). Both are absent when eBay named neither.
 
-    The request asks for Active offers and the reply is filtered on Pending
-    anyway: eBay's request filter and its response status are two different
-    enumerations, and the claim being made downstream — a buyer is waiting —
-    should rest on the field that actually states it.
+    Filtered on Pending regardless of what the request asked for: eBay's
+    request filter and its response status are two different enumerations, and
+    the claim being made downstream — a buyer is waiting — should rest on the
+    field that actually states it.
     """
-    root = _call("GetBestOffers", token,
-                 f"<ItemID>{_esc(item_id)}</ItemID>"
-                 "<BestOfferStatus>Active</BestOfferStatus>")
     count = 0
     top: Optional[float] = None
     currency = ""
     expires = ""
-    for offer in _findall(root, "BestOfferArray/BestOffer"):
+    for offer in offers:
         if _text(offer, "Status").strip().lower() != _PENDING:
             continue
         count += 1
@@ -932,6 +929,86 @@ def pending_offers(token: str, item_id: str) -> dict:
             expires = exp
     return {"count": count, "top": top, "currency": currency,
             "expires_at": expires}
+
+
+def pending_offers(token: str, item_id: str) -> dict:
+    """The Best Offers on ONE listing that are still waiting on the seller.
+
+    The fallback shape of the question — see `all_pending_offers` for the one
+    that answers the whole account in a single call.
+    """
+    root = _call("GetBestOffers", token,
+                 f"<ItemID>{_esc(item_id)}</ItemID>"
+                 "<BestOfferStatus>Active</BestOfferStatus>")
+    return _summarize_offers(_findall(root, "BestOfferArray/BestOffer"))
+
+
+# One unscoped GetBestOffers page. eBay pages this like every other list call;
+# a seller with more than a page of listings-with-offers is rare enough that
+# the cap exists only so a broken PaginationResult can't spin forever.
+_OFFERS_PAGE_SIZE = 100
+_OFFERS_MAX_PAGES = 10
+
+
+def all_pending_offers(token: str, max_pages: int = _OFFERS_MAX_PAGES,
+                       status: Optional[dict] = None) -> dict[str, dict]:
+    """{item_id: pending-offer summary} for EVERY listing on the account.
+
+    GetBestOffers with no ItemID is the whole feature in one call: eBay returns
+    each listing that currently has Best Offers, in an `ItemBestOffersArray`,
+    and answers for the entire store at once. Asked per listing instead, the
+    question needs a shortlist to keep the call count sane, and the only field
+    available to build one from is `BestOfferCount` — which counts offers
+    RECEIVED, settled ones included. Ranking by it puts a listing whose nine
+    offers were all declined months ago ahead of the one with a single offer
+    waiting right now, which is the exact opposite of what the shortlist is
+    for. Asking once, unscoped, removes the shortlist and the ranking with it.
+
+    `status` (out) takes {'answered': bool, 'complete': bool}. `answered` is
+    whether eBay's reply was recognisably a Best Offers response at all — the
+    `ItemBestOffersArray` container is present, empty or not. Only then may a
+    caller read a listing's ABSENCE from the result as "nobody is waiting on
+    it"; a reply we could not parse must not be turned into that claim about
+    every listing in the store. `complete` is whether the walk reached the
+    last page, so listings past a truncated walk stay unknown too.
+    """
+    out: dict[str, dict] = {}
+    answered = False
+    complete = False
+    page = 1
+    while page <= max_pages:
+        root = _call("GetBestOffers", token,
+                     "<BestOfferStatus>Active</BestOfferStatus>"
+                     f"<Pagination><EntriesPerPage>{_OFFERS_PAGE_SIZE}"
+                     f"</EntriesPerPage><PageNumber>{page}</PageNumber>"
+                     "</Pagination>")
+        container = _find(root, "ItemBestOffersArray")
+        if container is None:
+            # Not a shape we recognise — eBay omits the container for an
+            # account with no offers at all, and an unsupported or changed
+            # response looks the same from here. Either way this call has told
+            # us nothing we may state as fact, so it says exactly that.
+            break
+        answered = True
+        groups = _findall(root, "ItemBestOffersArray/ItemBestOffers")
+        for group in groups:
+            iid = _text(group, "Item/ItemID")
+            if not iid:
+                continue
+            summary = _summarize_offers(_findall(group, "BestOfferArray/BestOffer"))
+            if summary["count"]:
+                out[iid] = summary
+        total_pages = _int(root, "PaginationResult/TotalNumberOfPages", 1)
+        if page >= max(1, total_pages) or not groups:
+            complete = True
+            break
+        page += 1
+    if answered and not complete:
+        log.warning("best-offer walk stopped at the %d-page cap; %d listings "
+                    "with offers read", max_pages, len(out))
+    if status is not None:
+        status.update({"answered": answered, "complete": complete})
+    return out
 
 
 def get_listing(token: str, item_id: str) -> dict:

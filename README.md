@@ -1227,14 +1227,31 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
   beside the status badge, filled rather than tinted, naming the money on the
   table (`Offer $45.00`, or `3 offers · $52.50` with the best of them). It is
   read-only: accepting, countering and declining happen in eBay's own flow, and
-  the tooltip says so along with when the first offer runs out. eBay's own
-  `BestOfferCount` is deliberately NOT what draws it — that counts offers
-  *received*, so a listing whose only offer was declined last week still
-  reports 1. It picks the shortlist (a listing at zero has never had one at
-  all) and `GetBestOffers` then answers each candidate exactly, filtered on
-  `Pending`. Same honesty rule as the nought above: a lookup that failed, or
-  one past the per-sweep budget, leaves the count ABSENT and draws no badge
-  rather than telling a seller nobody is waiting.
+  the tooltip says so along with when the first offer runs out. It is drawn
+  from ONE unscoped `GetBestOffers`, which answers "who is waiting on you right
+  now" for the whole account in a single call, filtered on `Pending` — the
+  status field is what states a buyer is waiting, and the request filter is not
+  evidence of it. Asked per listing instead, the question needs a shortlist to
+  keep the call count sane, and the only field available to build one from is
+  eBay's `BestOfferCount` — which counts offers *received*, settled ones
+  included. **That shortlist is what hid a real offer.** A listing whose nine
+  offers were all declined months ago scores 9 forever; the listing with one
+  offer waiting right now scores 1 and sorts last, so on a store that haggles
+  the per-sweep budget was spent entirely on listings whose offers were settled
+  and the one with money on the table was never asked about — reporting
+  nothing, which is honest and still leaves the seller unaware. Asking once,
+  unscoped, removes the shortlist and the ranking with it; the per-listing form
+  survives only as the fallback for a reply that can't be read. Same honesty
+  rule as the nought above, and it decides that fallback: the account-wide
+  answer is trusted to mean "nobody is waiting" only when eBay's reply was
+  recognisably a Best Offers response at all, and a lookup that failed leaves
+  the count ABSENT and draws no badge rather than telling a seller nobody is
+  waiting. Whether the badge can go ON a card at all is this; when it comes
+  back OFF is a separate question, answered by re-reading the overlay on the
+  way back into the app (`METRICS_FRESH_MS` in `frontend/src/store.jsx`, with
+  the deliberate "Sync with eBay" press reading past the server's cache) —
+  answering an offer happens in eBay, so nothing here can learn of it except
+  by asking again.
 - **Every price the app chooses ends in `.99`** (`backend/money.py` →
   `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
   the AI's drafted price, the market number that overrules a draft priced far
