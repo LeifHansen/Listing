@@ -143,7 +143,7 @@ export const pipeline = [
     step: "02",
     title: "Cleaned up for the marketplace",
     blurb:
-      "Turn the item upright — whatever it is, not just clothing — cut the background onto a white canvas with a soft contact shadow, and resize to 1600px with the metadata stripped. The frame you composed is the frame that ships.",
+      "Auto-orient, cut the background onto a white canvas with a soft contact shadow, square-frame the item at the photo's own scale — never a crop-in zoom — resize to 1600px and finish with a sharpen.",
     detail: "Pillow · eBay's own image recommendations",
   },
   {
