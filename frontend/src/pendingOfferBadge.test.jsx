@@ -39,6 +39,9 @@ function json(body) {
   });
 }
 
+// `listings` and `metrics` are read at call time, so a test can change what
+// eBay says between one read and the next — which is the whole subject of the
+// last three tests below.
 function server(listings, metrics) {
   return (url) => {
     const path = String(url);
@@ -46,11 +49,32 @@ function server(listings, metrics) {
       return json({ metrics, traffic_ok: true, needs_reconnect: false });
     }
     if (path.startsWith("/api/listings")) {
-      return json({ authed: true, db: { configured: true, connected: true }, listings });
+      // A fresh array each time, as a real response is: the app holds the
+      // one it was given, and a stub that hands back the same object would
+      // hide a store that changed under it.
+      return json({ authed: true, db: { configured: true, connected: true },
+                    listings: [...listings] });
     }
     const key = Object.keys(BASE).find((k) => path.startsWith(k));
     return key ? json(BASE[key]) : json({});
   };
+}
+
+// How many times the app has asked eBay for the numbers.
+const reads = () => globalThis.fetch.mock.calls
+  .filter(([u]) => String(u).startsWith("/api/ebay/listing-metrics")).length;
+
+// Leaving the app and coming back. `after` is how long the seller was away —
+// moved on the clock rather than waited out, since the refresh is gated on
+// how stale what we hold is, not on a timer.
+async function comeBack({ after = 5 * 60000 } = {}) {
+  clock += after;
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 }
 
 function Probe({ onValue }) {
@@ -94,9 +118,21 @@ const chip = (host) => [...host.querySelectorAll("span")]
   .find((el) => /^(Offer \S+|\d+ offers( · \S+)?|1 offer)$/
     .test(el.textContent.trim()));
 
+// Time as the tests move it: a real clock plus whatever a test has skipped.
+let clock = 0;
+const realNow = Date.now.bind(Date);
+
 describe("the pending-offer badge", () => {
-  beforeEach(() => { localStorage.clear(); });
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+  beforeEach(() => {
+    localStorage.clear();
+    clock = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + clock);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.body.innerHTML = "";
+  });
 
   it("puts the money a buyer offered on the card", async () => {
     // One offer: the AMOUNT is the fact worth reading. "1 offer" of what?
@@ -178,6 +214,71 @@ describe("the pending-offer badge", () => {
     // The sold card renders; the chip is not on it.
     expect(host.textContent).toContain("Item s1");
     expect(chip(host)).toBeUndefined();
+    await act(async () => { root.unmount(); });
+  });
+
+  it("goes away once the seller has answered the offer in eBay", async () => {
+    // The badge exists to send the seller to eBay — its own tooltip says so —
+    // and answering it there is the one thing that makes it wrong. The numbers
+    // were read once per app session and never again, so a declined offer kept
+    // its badge on the card for the rest of the session.
+    const metrics = { l1: { views: 12, watchers: 3, offers: 1, top_offer: 45,
+                            offer_currency: "USD", offer_expires_at: "" } };
+    const { root, host } = await mount([live("l1")], metrics);
+    expect(chip(host).textContent).toContain("Offer $45.00");
+
+    // Declined in eBay: nobody is waiting on this listing any more.
+    metrics.l1 = { views: 12, watchers: 3, offers: 0 };
+    await comeBack();
+
+    expect(chip(host)).toBeUndefined();
+    expect(host.textContent).toContain("Item l1");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("comes back to one read, though the browser announces the return twice", async () => {
+    // visibilitychange and focus both fire on the way back in. A read is a
+    // walk of the seller's whole active list plus a Best Offer lookup for
+    // every listing that has ever had one, against an eBay allowance that is
+    // per-day and shared with publishing — so a return is worth exactly one.
+    const metrics = { l1: { offers: 1, top_offer: 45, offer_currency: "USD",
+                            offer_expires_at: "" } };
+    const { root } = await mount([live("l1")], metrics);
+    const before = reads();
+    await comeBack();
+    expect(reads()).toBe(before + 1);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("does not re-ask eBay every time the seller flicks between tabs", async () => {
+    // Each read is real eBay calls against a daily allowance shared with
+    // publishing, so the refresh is a floor, not a poll: nothing newer can
+    // have been learned inside the window the server itself caches for.
+    const metrics = { l1: { offers: 1, top_offer: 45, offer_currency: "USD",
+                            offer_expires_at: "" } };
+    const { root, host } = await mount([live("l1")], metrics);
+    const before = reads();
+    await comeBack({ after: 5000 });
+    expect(reads()).toBe(before);
+    expect(chip(host).textContent).toContain("Offer $45.00");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("re-reads when the live listings change without changing in number", async () => {
+    // A sale and a publish in the same afternoon leave the count where it was.
+    // Keyed on the count, that store kept the numbers — offers included — that
+    // eBay gave for the store it used to be.
+    const listings = [live("l1"), live("l2")];
+    const metrics = { l1: { offers: 1, top_offer: 45, offer_currency: "USD",
+                            offer_expires_at: "" }, l2: { offers: 0 } };
+    const { root, host } = await mount(listings, metrics);
+    const before = reads();
+    // Under the metrics window, so the return itself asks for nothing; over
+    // the listings one, so the grid re-reads and finds a different store.
+    listings.splice(1, 1, live("l3"));
+    await comeBack({ after: 90000 });
+    expect(reads()).toBeGreaterThan(before);
+    expect(host.textContent).toContain("Item l3");
     await act(async () => { root.unmount(); });
   });
 

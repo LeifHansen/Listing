@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
@@ -574,7 +574,16 @@ export function Dashboard() {
       })
       .catch(() => {});
   }, [user]);
-  useEffect(() => { refreshInsights(); }, [refreshInsights, items.length]);
+  // WHAT the store is, not how big it is. This used to re-read the
+  // suggestions when the item COUNT changed, and a store that changes without
+  // changing size — a live listing sells while a draft is published, an ended
+  // one is relisted — kept the to-do list, group counts and all, that was
+  // built for the store it used to be. Status is in the key because that is
+  // what nearly every suggestion turns on. Same fix, for the same reason, as
+  // the metrics fetch in store.jsx.
+  const storeShape = useMemo(
+    () => items.map((i) => `${i.id}:${i.status}`).join("|"), [items]);
+  useEffect(() => { refreshInsights(); }, [refreshInsights, storeShape]);
 
   // The suggestions this seller has waved away. Read once, from this browser
   // (see lib/dismissedRecs); the API has no idea and rebuilds the full list

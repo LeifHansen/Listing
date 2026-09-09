@@ -272,7 +272,8 @@ def _offers(token: str, counts: dict[str, dict], ids: list[str],
 
 
 def listing_metrics(creds: Optional[dict], listing_ids: list[str],
-                    status: Optional[dict] = None) -> dict[str, dict]:
+                    status: Optional[dict] = None,
+                    fresh: bool = False) -> dict[str, dict]:
     """Combined {listing_id: {views, impressions, watchers}} for the given eBay
     listing ids. Best-effort per source; returns {} if nothing was fetched.
     Cached for a short window keyed by the token + id set.
@@ -280,6 +281,14 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
     Pass a `status` dict to also learn whether the traffic report itself came
     back — it gets {'traffic_ok': bool, 'needs_reconnect': bool}, which is how
     the UI tells "nobody has viewed these yet" apart from "we couldn't ask".
+
+    `fresh` skips the READ of that cache (the answer is still cached for
+    everyone else). It exists for the one call the seller makes on purpose —
+    "Sync with eBay" — where answering from a two-minute-old copy would report
+    the Best Offer they have this minute gone to eBay and declined as still
+    waiting on them. Every other caller takes the cache: the whole point of it
+    is that the dashboard and the grid asking at once cost one set of eBay
+    calls, and those are capped per day for the whole app.
     """
     token = (creds or {}).get("access_token")
     ids = sorted({str(i) for i in listing_ids if i})
@@ -289,7 +298,7 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
         return {}
     cache_key = f"{token[-12:]}:{','.join(ids)}"
     hit = _CACHE.get(cache_key)
-    if hit and time.time() - hit[0] < _TTL:
+    if hit and not fresh and time.time() - hit[0] < _TTL:
         if status is not None:
             status.update(hit[2])
         return hit[1]

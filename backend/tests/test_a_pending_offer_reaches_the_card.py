@@ -273,3 +273,49 @@ def test_offers_are_only_read_for_the_listings_asked_about(ebay):
     metrics.listing_metrics({"access_token": "tok"}, [ITEM], {})
 
     assert "GetBestOffers" not in [c["call"] for c in ebay["sent"]]
+
+
+# ------------------------------------- and what happens after it is answered
+
+def test_an_answered_offer_is_gone_from_the_next_read(ebay):
+    """The report this pair of tests exists for: "when offers are rejected by
+    the user, the badge in our app does not disappear."
+
+    Answering happens in eBay — the app reads offers, it does not answer them
+    — so the badge going away is entirely a question of asking again and
+    getting the new answer. This is the asking-again half, from eBay's side:
+    the same listing, read twice, with a decline in between.
+    """
+    ebay["replies"]["GetMyeBaySelling"] = _active_reply(_item(ITEM, 4, 1))
+    ebay["replies"]["GetBestOffers"] = _offers_reply(
+        _offer("Pending", "45.00", "2026-09-07T10:00:00.000Z"))
+    assert metrics.listing_metrics(
+        {"access_token": "tok"}, [ITEM], {})[ITEM]["offers"] == 1
+
+    # Declined in eBay. BestOfferCount still says the listing has had an
+    # offer, which is why the second call is the one that decides.
+    ebay["replies"]["GetBestOffers"] = _offers_reply(_offer("Declined", "45.00"))
+
+    out = metrics.listing_metrics({"access_token": "tok"}, [ITEM], {},
+                                  fresh=True)
+
+    assert out[ITEM]["offers"] == 0
+    assert "top_offer" not in out[ITEM], "no money is on the table any more"
+
+
+def test_an_ordinary_read_inside_the_window_is_still_the_cached_one(ebay):
+    """The cache is not an oversight, and this pins it: the dashboard and the
+    listing grid ask this question at the same moment, and eBay's Trading
+    allowance is a per-day number shared with publishing. An ordinary read
+    keeps taking the copy — only a deliberate refresh pays for a new one."""
+    ebay["replies"]["GetMyeBaySelling"] = _active_reply(_item(ITEM, 4, 1))
+    ebay["replies"]["GetBestOffers"] = _offers_reply(
+        _offer("Pending", "45.00", "2026-09-07T10:00:00.000Z"))
+    metrics.listing_metrics({"access_token": "tok"}, [ITEM], {})
+    calls = len(ebay["sent"])
+
+    ebay["replies"]["GetBestOffers"] = _offers_reply(_offer("Declined", "45.00"))
+    out = metrics.listing_metrics({"access_token": "tok"}, [ITEM], {})
+
+    assert out[ITEM]["offers"] == 1, "the answer we already had"
+    assert len(ebay["sent"]) == calls, "and not one eBay call to repeat it"
