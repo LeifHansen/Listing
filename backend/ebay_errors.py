@@ -90,6 +90,67 @@ def _looks_like_weight(value: str) -> bool:
             and parts[0].replace(".", "", 1).isdigit())
 
 
+# eBay's own name for a price promotion has changed twice — Markdown Manager,
+# then "Promotional sale", then "Discount" on Seller Hub since 2024 — and the
+# API sentence still uses whichever the seller's account was set up under. All
+# three are the same refusal, so all three are matched here.
+#
+# These four name the item-level feature and nothing else, which is what makes
+# them safe to read on their own (see _SHIPPING_DISCOUNT).
+_ITEM_SALE_WORDS = ("markdown", "promotional sale", "promotional price",
+                    "promotion")
+
+_SALE_WORDS = _ITEM_SALE_WORDS + (
+    "sale event", "part of a sale", "in a sale", "in a discount",
+    "price discount", "item discount", "discounted price", "on sale")
+
+# A shipping discount is a different feature wearing the same words —
+# combined-postage rules and free-shipping promotions, not a markdown on the
+# item — and a refusal about one would otherwise be answered "your item is in
+# a sale", sending the seller to a promotion that isn't there. Cut out of the
+# sentence before anything else is read, longest phrase first so
+# "promotional shipping" goes before the "shipping" and "promotional" inside
+# it, and what's left is judged on its own.
+_SHIPPING_DISCOUNT = tuple(sorted(
+    ("shipping discount", "postage discount", "combined shipping",
+     "combined postage", "shipping promotion", "promotional shipping",
+     "free shipping promotion"), key=len, reverse=True))
+
+# ...and the half that makes it a REFUSAL rather than a mention. eBay says
+# "blocked", "not allowed", "cannot be revised", "remove the item from the
+# sale"; a sentence carrying a sale word without one of these is not this
+# error.
+_SALE_LOCK_WORDS = ("cannot", "can not", "can't", "cannot be revised",
+                    "not allowed", "not permitted", "unable", "blocked",
+                    "block revision", "restricted", "prevented",
+                    "remove the item", "remove it from", "must be removed",
+                    "not be revised", "not be changed")
+
+
+def sale_locked(text: str) -> bool:
+    """Is this eBay refusing an edit because the item is in a SALE?
+
+    eBay lets a seller run a markdown/discount with "Keep items in this sale
+    and block revisions for price increases" ticked. While that is on, the
+    price on a live listing cannot be revised at all — the refusal is about
+    the sale, and there is nothing wrong with the price the seller typed.
+
+    The wording is what's matched, not an error code: eBay returns this under
+    the same 21916xxx "restricted revise" family it uses for pending Best
+    Offers and near-end auctions, so the code alone can't tell them apart —
+    the same reason `ebay_trading.specifics_locked` reads the sentence.
+    """
+    hay = " ".join((text or "").lower().split())
+    for phrase in _SHIPPING_DISCOUNT:
+        hay = hay.replace(phrase, " ")
+    # Both halves, or it isn't this error: a sale NAMED, and a refusal. eBay's
+    # text mentions sales and discounts all over the place without refusing
+    # anything, and "cannot be revised" on its own is the pending-Best-Offer
+    # freeze that the branch below this one answers.
+    return (any(w in hay for w in _SALE_WORDS)
+            and any(w in hay for w in _SALE_LOCK_WORDS))
+
+
 def explain(err: dict) -> dict:
     """Map one eBay error to {title, fix, target, ebay_message, error_id}."""
     error_id = str(err.get("errorId", "") or "")
@@ -168,6 +229,35 @@ def explain(err: dict) -> dict:
                      fix="eBay caps how quickly listings may be added or "
                          "revised. Nothing is wrong with this listing — wait "
                          "a moment and publish again.")
+        return issue
+
+    # A listing in an eBay sale, whose price eBay will not let this app touch.
+    # Checked HERE, ahead of every text branch, because the sentence eBay
+    # sends satisfies two of them and both answer it wrongly: it says "price",
+    # so the price branch below called a $39.99 price "missing or invalid" and
+    # the editor ringed the field red; and it says "cannot be revised", so the
+    # frozen-listing branch blamed a pending Best Offer that did not exist.
+    #
+    # Neither names the sale, which is the only fact the seller can act on —
+    # the price is fine, the listing is fine, and the thing to change is the
+    # discount in Seller Hub. So this is filed under "generic": there is no
+    # field to open, and pointing a "Fix this" button at the price is the same
+    # wrong claim in button form.
+    if sale_locked(f"{message} {long_message} {param_vals}"):
+        said = _clip(long_message or message)
+        issue.update(
+            target="generic",
+            title="eBay won’t change the price while this item is in a sale",
+            fix=((f"eBay's reason: “{said}” " if said else "")
+                 + "Nothing is wrong with your price — this listing is in an "
+                   "eBay sale (Marketing → Promotions, called Discounts or "
+                   "Markdown Manager depending on the account), and that sale "
+                   "is set to block price revisions. Take this item out of the "
+                   "sale, or untick “Keep items in this sale and block "
+                   "revisions for price increases”, then publish again. Your "
+                   "new price is saved here either way. Note that eBay drops "
+                   "an item from a sale as soon as its price is revised, so "
+                   "the discount ends when this goes through."))
         return issue
 
     # "Not entitled" is a PERMISSION on the seller's eBay account, and the word
@@ -376,9 +466,32 @@ def explain(err: dict) -> dict:
                      title="A shipping policy is required",
                      fix="Choose a shipping policy in Listing settings.")
     elif has("price", "pricingsummary", "amount"):
-        issue.update(target="price",
-                     title="The price is missing or invalid",
-                     fix="Set a price greater than $0.")
+        # "The price is missing or invalid" is a CLAIM about what the seller
+        # typed, and this branch used to make it on the strength of the word
+        # "price" appearing anywhere in eBay's sentence. Every refusal that
+        # merely mentions a price — a sale that blocks revisions, a price
+        # eBay finds too high for the category, a currency it won't take —
+        # came back as "missing or invalid" over a filled-in field, with
+        # "Set a price greater than $0" under a price that already was.
+        #
+        # So the claim is made only when eBay actually made it. Otherwise
+        # eBay's own sentence is the most informative thing we hold, and it
+        # goes in the title — the toast and the bulk cards render nothing
+        # else, so a reason left in `fix` is a reason the seller never sees.
+        said = _clip(long_message or message)
+        missing = has("missing", "invalid", "not valid", "required",
+                      "must be greater", "greater than 0", "greater than zero",
+                      "cannot be zero", "is empty", "no price", "blank")
+        issue.update(
+            target="price",
+            title=("The price is missing or invalid" if missing
+                   else (f"eBay wouldn’t accept the price: {said}" if said
+                         else "eBay wouldn’t accept the price")),
+            fix=("Set a price greater than $0." if missing else
+                 ((f"eBay's words: “{said}”. " if said else "")
+                  + "That is eBay objecting to the price it was sent, not a "
+                    "check made here — set the price to what eBay asked for "
+                    "and publish again.")))
     elif has_word("subtitle", "subtitles") or has("sub-title"):
         # "subtitle" contains "title" too, so a rejection over the optional
         # subtitle was answered with the TITLE's 80-character limit — advice

@@ -921,14 +921,35 @@ class EbayProvider:
                     res = listing_sync.push_edit(creds["access_token"], listing,
                                                  image_urls=urls)
             except ValueError as exc:  # TradingError — eBay's own reason
-                log.warning("%s (imported) failed: session=%s: %s",
-                            "relist" if relist else "revise", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status=prev_status, user_id=uid)
                 issues = ebay_account.publish_block_issues(
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
                                                  creds))
+                # Logged AFTER the classification, and carrying both halves of
+                # it. This line used to record eBay's headline alone, which is
+                # the one part of a bad rejection that is never wrong: the
+                # sentence the seller actually reads is written here, by
+                # ebay_errors, and a misfiled one — "The price is missing or
+                # invalid" over a filled-in $39.99, on a listing eBay was
+                # refusing because it is in a sale — left no trace at all.
+                # Support then has eBay's words and the seller's screenshot
+                # and no way to tell which branch produced the mismatch.
+                #
+                # eBay's code and its response-level detail come along for the
+                # same reason: the 21916xxx "restricted revise" family covers
+                # pending Best Offers, near-end auctions and sale price locks
+                # under one code, so the detail is what separates them.
+                log.warning(
+                    "%s (imported) failed: session=%s item=%s code=%s ebay=%s "
+                    "detail=%s -> shown as %s: %s",
+                    "relist" if relist else "revise", session_id,
+                    listing.ebay_listing_id or "?",
+                    getattr(exc, "code", "") or "?", str(exc)[:200],
+                    (getattr(exc, "detail", "") or "")[:200] or "(none)",
+                    (issues[0].get("target") if issues else "?"),
+                    (issues[0].get("title") if issues else "?"))
                 # Refused, or never answered for? ebay_errors already writes
                 # the right sentence from this; the flag is how a CLIENT can
                 # tell without reading it. Both places: the dataclass field
