@@ -2,6 +2,7 @@ import { useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
+  Combine,
 } from "lucide-react";
 import { patchJson, pollJob, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -10,6 +11,7 @@ import { useToast } from "@/components/ui/Toaster";
 import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
+import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { DraftCategoryEdit } from "./CategoryQuickPick";
 import { DraftFormatEdit } from "./FormatQuickPick";
@@ -26,7 +28,7 @@ import {
 import { isDraft } from "@/lib/listingsView";
 
 /* The drafts experience on the merged Sell screen: every draft one click
-   from Publish or Review & List, plus select-mode bulk publish/delete.
+   from Publish or Review & List, plus select-mode bulk publish/merge/delete.
    Renders nothing when there are no (matching) drafts — the upload box
    directly above is the empty-state CTA. */
 
@@ -126,6 +128,15 @@ export function DraftsStrip({ search = "" }) {
   // Bulk publish runs one listing at a time (eBay's API is per-item), which on
   // a big selection is a long wait — so the button counts it off out loud.
   const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
+  // The merge review dialog — the same one the bulk queue opens (see
+  // MergeListingsDialog). Duplicates don't only turn up inside one batch: a
+  // seller who photographed the same vase on two different days has two
+  // drafts sitting here, and until this existed the only Merge button in the
+  // app was on the queue screen, which this view has no way back to. `key`
+  // bumps on every open so the dialog remounts with fresh answers (what
+  // merges in, which draft is master, whose entries win) rather than the
+  // last merge's.
+  const [merge, setMerge] = useState({ open: false, drafts: [], candidates: [], key: 0 });
 
   const q = search.trim().toLowerCase();
   const drafts = listingsState.items
@@ -329,6 +340,60 @@ export function DraftsStrip({ search = "" }) {
     if (await bulkDeleteListings(selectedDrafts.map((d) => d.id))) exitSelect();
   };
 
+  // Merge duplicate drafts of the SAME item into one listing. One tick is
+  // enough to start: which OTHER draft it merges with, which of them is the
+  // master, and whose entry wins where they disagree are all the seller's
+  // calls — the dialog asks them, in that order, before anything is written.
+  // The dialog keys drafts by `session_id` (it grew up in the bulk queue,
+  // whose items carry one); a saved listing's `id` IS its session id — every
+  // card's photo URL is built from it — so each draft goes over under both.
+  const asMergeable = (d) => ({ ...d, session_id: d.id });
+  const mergeSelected = () => {
+    if (!selectedDrafts.length) {
+      toast("Tick the draft you want to merge.", { kind: "warning" });
+      return;
+    }
+    // Every other draft on screen is a candidate to merge it with — on
+    // screen, same as publish and delete, so a search that hides a draft
+    // keeps it out of the merge too. The dialog only asks when the seller
+    // hasn't already ticked a second one.
+    const others = drafts.filter((d) => !sel[d.id]);
+    if (selectedDrafts.length < 2 && !others.length) {
+      toast("There's no other draft to merge with.", { kind: "warning" });
+      return;
+    }
+    setMerge((m) => ({
+      open: true,
+      drafts: selectedDrafts.map(asMergeable),
+      candidates: others.map(asMergeable),
+      key: m.key + 1,
+    }));
+  };
+
+  // The merge went through: the master carries everything now and the
+  // duplicates are deleted server-side. The master's card takes the merged
+  // listing on the spot; the deleted ones leave with the refresh, which is
+  // awaited BEFORE the dialog closes — so the dialog's Merge button keeps
+  // its spinner for the length of the refresh and never hands the seller
+  // back a grid where a draft that no longer exists is still there, still
+  // ticked, one click from a publish that would 404.
+  const onMerged = async (res, { masterId, title }) => {
+    const gone = new Set(res.removed || []);
+    if (res.listing) patchListing(masterId, { listing: res.listing });
+    setSel((s) => {
+      const next = { ...s };
+      gone.forEach((id) => delete next[id]);
+      return next;
+    });
+    await loadListings({ quiet: true });
+    setMerge((m) => ({ ...m, open: false }));
+    const fields = res.applied?.length
+      ? `, ${res.applied.length} field${res.applied.length === 1 ? "" : "s"} carried over`
+      : "";
+    toast(`Merged into "${title}" — ${res.added} photo${res.added === 1 ? "" : "s"} moved over${fields}.`,
+      { kind: "success" });
+  };
+
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     if (await confirm({
@@ -416,6 +481,17 @@ export function DraftsStrip({ search = "" }) {
                 ? `Publishing ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
                 : `Publish selected (${selectedDrafts.length})`}
             </Button>
+            {/* Same item, drafted twice? Between publish and delete because it
+                is the third thing a seller does with a tick: keep it, fold it
+                into another, or bin it. Armed by ONE tick, like the queue's —
+                the dialog asks what it merges with. */}
+            <Button variant="secondary" size="sm" onClick={mergeSelected}
+              disabled={!selectedDrafts.length || !!bulkProgress}
+              title={selectedDrafts.length
+                ? "Same item split into duplicates? Pick what it merges with, which draft is the master, and whose entries win."
+                : "Tick a draft to merge it with another."}>
+              <Combine aria-hidden /> Merge into one
+            </Button>
             <Button variant="danger" size="sm" onClick={deleteSelected}
               disabled={!selectedDrafts.length || !!bulkProgress}>
               <Trash2 aria-hidden /> Delete selected ({selectedDrafts.length})
@@ -425,6 +501,16 @@ export function DraftsStrip({ search = "" }) {
             </Button>
           </div>
         </div>
+      )}
+      {merge.drafts.length > 0 && (
+        <MergeListingsDialog
+          key={merge.key}
+          open={merge.open}
+          drafts={merge.drafts}
+          candidates={merge.candidates}
+          onClose={() => setMerge((m) => ({ ...m, open: false }))}
+          onMerged={onMerged}
+        />
       )}
       <div className={cn(list
         ? "flex flex-col gap-3"
