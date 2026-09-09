@@ -720,6 +720,11 @@ errors on a DB problem. Tables are auto-created on first use.
    reuses every `/api/*` endpoint.
 8. **Item Identifier (mobile-only)** — double-layer identification: Claude's
    vision lens + Google Lens, cross-checked for higher-confidence item IDs.
+9. **Smart List** — *planned.* Finished drafts are posted for the seller at
+   the hours buyers are browsing, spaced out over days instead of all at
+   once, and the app learns which of the seller's own slots drew the most
+   views. The design — data model, scheduler, readiness gate, learning loop,
+   tests — is in [`SMART_LIST.md`](SMART_LIST.md).
 
 ## Project layout
 
