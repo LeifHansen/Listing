@@ -162,10 +162,14 @@ def test_the_metrics_panel_asks_for_live_listings_too(seller, monkeypatch):
 
 
 def test_promote_all_asks_for_live_listings_too(seller, monkeypatch):
-    """And the third: it filters to live-and-unpromoted on the next line."""
+    """And the third: it then asks eBay which of those already carry an ad
+    (test_promote_all_promotes_what_the_group_shows), so that lookup is
+    answered here rather than left to reach the network."""
     client, dbmod, uid = seller
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda request: {"access_token": "t"})
+    monkeypatch.setattr(main.promotions, "active_ads_status",
+                        lambda creds: ({}, True))
     asked: list = []
 
     def _spy(limit=50, user_id=None, statuses=None):

@@ -356,6 +356,8 @@ def active_ads_status(creds: dict | None) -> tuple[dict[str, dict], bool]:
         return hit[1], True
     base = config.EBAY_API_BASE
     out: dict[str, dict] = {}
+    # One entry per campaign read, for the log line below.
+    read: list[str] = []
     try:
         with httpx.Client(timeout=30) as client:
             campaigns = _collect(client, f"{base}{_MARKETING}/ad_campaign",
@@ -370,21 +372,55 @@ def active_ads_status(creds: dict | None) -> tuple[dict[str, dict], bool]:
                 # listing promoted in the unread one was invited to buy a second
                 # ad. _collect raises, and the handler below turns the whole
                 # lookup into "we could not ask".
+                counted = 0
                 for ad in _collect(client, f"{base}{_MARKETING}/ad_campaign/{cid}/ad",
                                    token, "ads"):
                     status = str(ad.get("adStatus") or "").upper()
                     if status in ("ENDED", "ARCHIVED", "PAUSED"):
                         continue
+                    counted += 1
                     entry = {"rate": ad.get("bidPercentage"), "status": status or "RUNNING"}
                     for key in (ad.get("listingId"), ad.get("inventoryReferenceId")):
                         if key:
                             out[str(key)] = entry
+                read.append(_campaign_summary(camp, counted))
     except Exception as exc:  # noqa: BLE001 - reported via the flag, not raised
         # Deliberately NOT cached: an outage must not be remembered as "this
         # seller has no ads" for the whole TTL.
         log.info("active ads unavailable: %s", exc)
         return {}, False
+    # What eBay actually said, campaign by campaign. The map's consumers can
+    # only see "this listing has no ad"; when a seller who promotes every
+    # listing in Seller Hub is still told to promote them, this is the line
+    # that says whether their campaign came back with no ads at all (a shape
+    # of campaign whose listings the ads collection does not enumerate) or
+    # with ads keyed by something our records do not carry.
+    log.info("active ads: %d campaigns, %d read, %d ad keys%s",
+             len(campaigns), len(read), len(out),
+             " -- " + "; ".join(read) if read and len(read) <= 10 else "")
     if len(_ADS_CACHE) > 100:
         _ADS_CACHE.clear()
     _ADS_CACHE[cache_key] = (time.time(), out)
     return out, True
+
+
+def _campaign_summary(camp: dict, ads: int) -> str:
+    """One campaign as the diagnostic log line shows it: which shape it is
+    (funding model, targeting, whether eBay picks its listings by rule) and
+    how many running ads it listed. The shape is the whole point -- a
+    rule-based or smart-targeted campaign is one where eBay decides the
+    membership, and an empty ads collection under one of those is the case
+    the map cannot represent."""
+    funding = str(((camp.get("fundingStrategy") or {}).get("fundingModel")) or "?")
+    parts = [str(camp.get("campaignId") or "?"),
+             str(camp.get("campaignStatus") or "?"), funding]
+    if camp.get("campaignTargetingType"):
+        parts.append(str(camp["campaignTargetingType"]))
+    if camp.get("campaignCriterion"):
+        crit = camp["campaignCriterion"] or {}
+        parts.append("rule" + ("+auto" if crit.get("autoSelectFutureInventory")
+                               else ""))
+    channels = camp.get("channels")
+    if isinstance(channels, list) and channels:
+        parts.append("/".join(str(c) for c in channels))
+    return ":".join(parts) + f" ads={ads}"
