@@ -2,7 +2,7 @@ import { memo, useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, RotateCw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins, Gavel,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import {
@@ -12,7 +12,7 @@ import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { reviewAspectCount } from "@/views/listing/specifics";
 import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
-import { keptWhenEnded } from "@/lib/listingsView";
+import { buyerWaiting, keptWhenEnded } from "@/lib/listingsView";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
 function MetricsRow({ views, watchers, className }) {
@@ -114,6 +114,33 @@ function OfferChip({ count, top, currency, expiresAt, className }) {
         + (soon ? `the first one expires ${soon}.` : "offers expire after 48 hours.")}
     >
       <HandCoins size={11} aria-hidden /> {label}
+    </span>
+  );
+}
+
+// Somebody has bid. The auction's own version of the offer above: the
+// listing has stopped being an item nobody wanted and become a sale in
+// progress, and the card glows green and rises to the top of the grid for
+// it. Unlike an offer a bid needs no answer from the seller, so the tooltip
+// says what happens next rather than sending them anywhere. Drawn filled in
+// the same green as the glow, so the chip is what NAMES the colour — the
+// glow alone reads to nobody who can't see it.
+function BidChip({ count, high, currency, className }) {
+  const money = formatMoney(high, currency || "USD");
+  const label = `${count} ${count === 1 ? "bid" : "bids"}` + (money ? ` · ${money}` : "");
+  const worth = count === 1
+    ? (money ? `A buyer has bid ${money} on this auction.` : "A buyer has bid on this auction.")
+    : (money
+      ? `${count} bids on this auction — the high bid is ${money}.`
+      : `${count} bids on this auction.`);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full bg-green border border-green",
+        "px-2 py-0.5 text-[11px] font-bold text-on-accent tabular-nums", className)}
+      title={`${worth} It sells to the highest bidder when the auction ends.`}
+    >
+      <Gavel size={11} aria-hidden /> {label}
     </span>
   );
 }
@@ -235,7 +262,8 @@ function turnStyle(spin, square) {
 // workflow; when onDelete is provided, a trash button removes it. The delete
 // control is a sibling of the card button (not nested) so it stays valid,
 // focusable HTML — in list layout it sits beside the row instead of over it.
-// `metrics` (optional) shows eBay views/watchers for a live listing.
+// `metrics` (optional) shows eBay views/watchers for a live listing, and
+// lights the card green when it carries a bid or a pending offer.
 // In select mode (`selectable`), clicking toggles `selected` via `onSelect`
 // instead of opening — powers mass actions like delete-selected in Drafts.
 // `onRotate(id, name)` puts a rotate button on the photo: one tap turns the
@@ -276,6 +304,12 @@ export const ListingCard = memo(function ListingCard({
   // is ABSENT, not zero, when eBay couldn't be asked (see services/metrics),
   // so a missing number draws nothing rather than "no offers".
   const offers = isLive && metrics && metrics.offers > 0 ? metrics.offers : 0;
+  // Bids on an auction, on the same terms: live only, and absent-is-unknown.
+  const bids = isLive && metrics && metrics.bids > 0 ? metrics.bids : 0;
+  // Either one lights the card: a buyer has put money on this listing. The
+  // same test decides its place in the grid (lib/listingsView.orderListings),
+  // so the card that glows is always the card that was lifted.
+  const lit = buyerWaiting(item, metrics);
   // Version thumbnails by updated_at so a rotate/clean-up busts the hour-long
   // /media cache the moment the listing is touched — without killing caching.
   const ver = Date.parse(item.updated_at || "") || undefined;
@@ -530,6 +564,15 @@ export const ListingCard = memo(function ListingCard({
     // nothing is lost; the listing needs updating before it can be posted.
     // (cn is tailwind-merge, so this wins over bg-card/border-line above.)
     needsInfo && "bg-warning-soft border-warning/45",
+    // A buyer has acted on this listing — a bid on the auction, or an offer
+    // waiting for an answer. The card is lit from behind in green: a ring
+    // and a soft halo (tokens.css --glow-buyer), which is what makes it the
+    // card the eye lands on in a grid of twenty, on top of the grid lifting
+    // it to the front. The chip on the photo says which and how much; the
+    // colour is never the whole message. Below the amber above on purpose:
+    // a live listing cannot need info, so the two never meet, but if they
+    // ever did the money on the table is the thing to see.
+    lit && "card-buyer-glow border-green/60",
     // A skipped draft stays fully usable — just visibly set aside.
     skipped && !selectable && "opacity-60",
   );
@@ -542,7 +585,17 @@ export const ListingCard = memo(function ListingCard({
     // reader and it isn't there for anyone who can't tell amber from cream.
     // The same fact reaches the accessible name and the hover tooltip.
     title: needsInfo ? (needsInfoWhy || NEEDS_INFO_LABEL) : undefined,
-    whileHover: { y: -2, boxShadow: "var(--shadow-card-hover)" },
+    // The glow lives in box-shadow, and so does the hover lift, so the lit
+    // card has to carry both: the hover swaps the halo for a wider one
+    // rather than replacing it with a plain shadow, and `animate` names the
+    // resting value so the card returns to its glow — or loses it the moment
+    // the bid or the offer is gone from the next read — instead of holding
+    // whatever the last hover left behind.
+    animate: { boxShadow: lit ? "var(--glow-buyer)" : "var(--shadow-card)" },
+    whileHover: {
+      y: -2,
+      boxShadow: lit ? "var(--glow-buyer-hover)" : "var(--shadow-card-hover)",
+    },
     whileTap: { scale: 0.985 },
     transition: { duration: 0.18, ease: "easeOut" },
     className: cardClass,
@@ -573,6 +626,10 @@ export const ListingCard = memo(function ListingCard({
             <OfferChip count={offers} top={metrics.top_offer}
               currency={metrics.offer_currency || l.currency}
               expiresAt={metrics.offer_expires_at} />
+          )}
+          {bids > 0 && (
+            <BidChip count={bids} high={metrics.high_bid}
+              currency={metrics.bid_currency || l.currency} />
           )}
           {showOrigin && <OriginBadge item={item} />}
           {stale && <StaleChip />}
@@ -621,6 +678,10 @@ export const ListingCard = memo(function ListingCard({
             <OfferChip count={offers} top={metrics.top_offer}
               currency={metrics.offer_currency || l.currency}
               expiresAt={metrics.offer_expires_at} className="shadow-card" />
+          )}
+          {bids > 0 && (
+            <BidChip count={bids} high={metrics.high_bid}
+              currency={metrics.bid_currency || l.currency} className="shadow-card" />
           )}
         </div>
         {stale && <StaleChip className="absolute bottom-3 left-3 shadow-card" />}

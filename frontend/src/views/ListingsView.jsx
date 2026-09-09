@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
   ARCHIVED_STATUSES, endedGraceDays, isDraft, keptWhenEnded, listingsView,
+  orderListings,
 } from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
@@ -228,13 +229,16 @@ export function ListingsView({ search = "" }) {
   };
 
   const q = search.trim().toLowerCase();
-  const items = listingsState.items
+  // Newest first, except that a listing a buyer has bid or made an offer on
+  // goes to the top: see lib/listingsView.orderListings. The card itself
+  // says why it is there (the green glow and its chip, in ListingCard).
+  const shown = listingsState.items
     .filter((i) => inTab(tab, i))
     .filter((i) => !q
       || (i.listing?.title || i.title || "").toLowerCase().includes(q)
       || (i.listing?.brand || "").toLowerCase().includes(q)
-      || (i.listing?.description || "").toLowerCase().includes(q))
-    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+      || (i.listing?.description || "").toLowerCase().includes(q));
+  const items = orderListings(shown, metricsById);
 
   // "Create Listing" from an empty tab used to look broken: this list now
   // lives on the Sell screen, so startNew() lands you where you already are

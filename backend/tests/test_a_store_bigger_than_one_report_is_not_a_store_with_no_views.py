@@ -203,8 +203,10 @@ def test_a_sweep_that_reached_the_end_says_that_too(monkeypatch):
                         lambda *_a, **_k: _active_page(["9001", "9002"], total_pages=1))
     status: dict = {}
     assert ebay_trading.active_listing_counts("tok", status=status) == {
-        "9001": {"watchers": 1, "offers_received": 0},
-        "9002": {"watchers": 2, "offers_received": 0}}
+        "9001": {"watchers": 1, "offers_received": 0, "bids": 0,
+                 "high_bid": None, "bid_currency": ""},
+        "9002": {"watchers": 2, "offers_received": 0, "bids": 0,
+                 "high_bid": None, "bid_currency": ""}}
     assert status["complete"] is True
 
 
@@ -225,5 +227,5 @@ def test_listings_past_the_watch_sweep_are_unknown_not_unwatched(monkeypatch):
     # The one it reached keeps both of its answers; the one past the cap gets
     # neither — "not reached" is no more "nobody has offered on it" than it is
     # "nobody is watching it".
-    assert out == {"42": {"watchers": 6, "offers": 0}}
+    assert out == {"42": {"watchers": 6, "offers": 0, "bids": 0}}
     assert "43" not in out, "not reached is not nought"

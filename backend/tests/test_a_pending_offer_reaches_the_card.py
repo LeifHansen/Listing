@@ -130,8 +130,10 @@ def test_one_sweep_carries_both_watchers_and_the_offer_hint(ebay):
 
     counts = ebay_trading.active_listing_counts("tok")
 
-    assert counts == {ITEM: {"watchers": 4, "offers_received": 2},
-                      OTHER: {"watchers": 0, "offers_received": 0}}
+    assert counts == {ITEM: {"watchers": 4, "offers_received": 2, "bids": 0,
+                             "high_bid": None, "bid_currency": ""},
+                      OTHER: {"watchers": 0, "offers_received": 0, "bids": 0,
+                              "high_bid": None, "bid_currency": ""}}
     assert [c["call"] for c in ebay["sent"]] == ["GetMyeBaySelling"]
 
 
@@ -216,7 +218,7 @@ def test_a_pending_offer_arrives_with_its_money_and_its_deadline(ebay):
 
     out = metrics.listing_metrics({"access_token": "tok"}, [ITEM], {})
 
-    assert out[ITEM] == {"views": 0, "watchers": 4, "offers": 1,
+    assert out[ITEM] == {"views": 0, "watchers": 4, "offers": 1, "bids": 0,
                          "top_offer": 45.0, "offer_currency": "USD",
                          "offer_expires_at": "2026-09-07T10:00:00.000Z"}
 
