@@ -28,6 +28,26 @@ const LISTINGS_FRESH_MS = 60000;
 // four. Short enough that a card is corrected before anyone looks away.
 const INVALIDATE_DEBOUNCE_MS = 350;
 
+// The same question for eBay's per-listing numbers — views, watchers, and the
+// pending-offer badge. They used to have no answer at all: they were read once
+// per app session and never again, so a seller who did the one thing the offer
+// badge exists to send them off and do — answer the offer in eBay, which is
+// the only place it can be answered — came back to a card still saying a buyer
+// was waiting, and it stayed there until a reload.
+//
+// Matched to the server's own cache for this call (see
+// backend/services/metrics.py): asking sooner cannot produce a newer answer
+// than the one we hold, and asking later leaves a settled offer on the card
+// for no reason. It is a floor on the passive refreshes, not a poll — each
+// refresh past it is real eBay calls (a walk of the active list plus a Best
+// Offer lookup per listing that has ever had one), and that allowance is
+// per-day and shared with publishing.
+const METRICS_FRESH_MS = 120000;
+
+// The statuses /api/ebay/listing-metrics answers for. Kept in step with the
+// endpoint: it asks eBay about the live listings and nothing else.
+const METRICS_STATUSES = ["published", "live"];
+
 // The rest of "nobody is signed in": the shapes each per-account cache starts
 // at, and the shapes logout() puts them back to. They are the same values, so
 // they are written once — a signed-out app has to look identical whether it
@@ -561,6 +581,55 @@ export function AppProvider({ children }) {
     setMetricsStatus(NO_METRICS_STATUS);
   }
 
+  // When the numbers stop being worth trusting. 0 = stale right now. Same
+  // shape as listingsFreshUntil below, and read by the same kind of passive
+  // refresh: coming back to a tab that has been sitting open.
+  const metricsFreshUntil = useRef(0);
+  // Only the NEWEST request's answer may land. Several things ask — the live
+  // set changing, a store sync, the return to the tab — and an earlier,
+  // slower answer arriving last would put a badge the seller has just dealt
+  // with back on the card. Same guard, for the same reason, as listings.
+  const metricsRequest = useRef(0);
+  // `fresh` is the seller having pressed "Sync with eBay": the server keeps
+  // these numbers for a couple of minutes so the grid and the dashboard cost
+  // one set of eBay calls between them, and that copy is the wrong answer to
+  // give the one person who has just asked, deliberately, for the truth.
+  const loadMetrics = useCallback(async ({ fresh = false } = {}) => {
+    if (!metricsLive) return;
+    const seq = ++metricsRequest.current;
+    // The window is claimed BEFORE the request, not when the answer lands:
+    // coming back to a tab fires visibilitychange and focus together, and a
+    // window opened only on the answer would let both of them spend a sweep
+    // of the seller's eBay account on the same question.
+    metricsFreshUntil.current = Date.now() + METRICS_FRESH_MS;
+    try {
+      const r = await api(
+        `/api/ebay/listing-metrics${fresh ? "?refresh=1" : ""}`);
+      if (seq !== metricsRequest.current) return;
+      setMetricsById(r.metrics || {});
+      setMetricsStatus({
+        trafficOk: !!r.traffic_ok, needsReconnect: !!r.needs_reconnect });
+      metricsFreshUntil.current = Date.now() + METRICS_FRESH_MS;
+    } catch (e) {
+      // Keep what we have: a refresh that failed knows nothing, and blanking
+      // the grid's numbers over it would state something we didn't learn.
+      // It does give the window back, so the next return to the app tries
+      // again rather than sitting on numbers nobody managed to re-read.
+      if (seq === metricsRequest.current) metricsFreshUntil.current = 0;
+    }
+  }, [metricsLive]);
+
+  // WHICH listings the numbers are about, not how many of them there are.
+  // The fetch below used to key off the item count, so a store that changed
+  // without changing size — one listing sells while another goes live, an
+  // ended one is relisted — kept the numbers eBay gave for the store it used
+  // to be, offers included.
+  const liveListingKey = useMemo(
+    () => listingsState.items
+      .filter((i) => METRICS_STATUSES.includes(i.status))
+      .map((i) => i.id).sort().join("|"),
+    [listingsState.items]);
+
   // When the copy we hold stops being worth trusting. 0 = stale right now.
   const listingsFreshUntil = useRef(0);
 
@@ -791,6 +860,11 @@ export function AppProvider({ children }) {
       // the counts already in it is a server that still imports inline.
       const res = started?.job_id ? await watchImport(started.job_id) : started;
       await loadListings({ quiet: true });
+      // "Sync with eBay" means the whole picture the seller is looking at,
+      // and the badge on a card is as much a part of that as the card. Read
+      // past the cache: this press is the seller saying what they hold is out
+      // of date, which is exactly what a cached answer would hand back.
+      loadMetrics({ fresh: force });
       // A pass eBay cut short has NOT rebuilt the mirror, so it must not
       // latch "synced" for the next six hours — that would leave the rest of
       // the store missing until the window expired twice over.
@@ -812,7 +886,7 @@ export function AppProvider({ children }) {
       syncedOnce.current = false;
       return { error: e.message };
     }
-  }, [user, ebay.connected, loadListings, watchImport]);
+  }, [user, ebay.connected, loadListings, loadMetrics, watchImport]);
   // Offer the mirror an automatic rebuild as soon as we have a user and a
   // connected eBay account — syncStore decides whether one is actually DUE,
   // and bails out immediately in every other case (including no user, no
@@ -1369,23 +1443,38 @@ export function AppProvider({ children }) {
     loadMarketplaces();
   }, [user, loadListings, loadMarketplaces]);
 
-  // eBay views/watchers for live listings (best-effort; empty until eBay is
-  // connected and the analytics scope granted). Refreshes as the set changes.
-  // Signed out / disconnected is handled during render above (the state is
-  // cleared there), so this effect only ever fetches.
+  // eBay views/watchers/offers for live listings (best-effort; empty until
+  // eBay is connected and the analytics scope granted). Refreshes as the live
+  // set changes. Signed out / disconnected is handled during render above
+  // (the state is cleared there), so this effect only ever fetches.
+  useEffect(() => { loadMetrics(); }, [loadMetrics, liveListingKey]);
+
+  // The passive half, and the one the pending-offer badge rests on. The app
+  // READS offers; eBay answers them — the badge's own tooltip sends the seller
+  // there to accept, counter or decline — so the moment they come back is the
+  // moment what we hold is most likely to be wrong. Nothing else asks again:
+  // the numbers arrive with the grid and, until this existed, stayed exactly
+  // as they were for the life of the tab, so a declined offer kept its badge
+  // (and a sold-out watcher count its watchers) until a reload.
+  //
+  // Gated on the freshness window, so flicking between two tabs is not an
+  // eBay call each time; hidden tabs don't ask at all. Same shape as the
+  // listings refresh above, which is what makes the two agree about the store
+  // a card is drawn from.
   useEffect(() => {
-    if (!user || !ebay.connected) return undefined;
-    let alive = true;
-    api("/api/ebay/listing-metrics")
-      .then((r) => {
-        if (!alive) return;
-        setMetricsById(r.metrics || {});
-        setMetricsStatus({
-          trafficOk: !!r.traffic_ok, needsReconnect: !!r.needs_reconnect });
-      })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, [user, ebay.connected, listingsState.items.length]);
+    if (!metricsLive) return undefined;
+    const refreshIfStale = () => {
+      if (document.hidden) return;
+      if (Date.now() < metricsFreshUntil.current) return;
+      loadMetrics();
+    };
+    document.addEventListener("visibilitychange", refreshIfStale);
+    window.addEventListener("focus", refreshIfStale);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshIfStale);
+      window.removeEventListener("focus", refreshIfStale);
+    };
+  }, [metricsLive, loadMetrics]);
 
   const value = useMemo(() => ({
     dark, toggleDark,
@@ -1407,7 +1496,7 @@ export function AppProvider({ children }) {
     draftSelection, setDraftSelection,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,
-    metricsById, metricsStatus,
+    metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
     skippedDraftIds, toggleSkipDraft,
@@ -1428,7 +1517,7 @@ export function AppProvider({ children }) {
     shipping, openShipping, closeShipping,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,
-    metricsById, metricsStatus,
+    metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, startNew, openListing,
     deleteListing, bulkDeleteListings, skippedDraftIds, toggleSkipDraft,

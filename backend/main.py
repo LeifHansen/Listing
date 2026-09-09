@@ -6838,16 +6838,19 @@ def _live_ebay_id_map(items: list) -> dict:
 
 
 def _metrics_by_record_id(creds: Optional[dict], items: list,
-                          status: Optional[dict] = None) -> dict:
+                          status: Optional[dict] = None,
+                          fresh: bool = False) -> dict:
     """eBay views/watchers for the user's live listings, keyed by OUR listing
     record id. Best-effort — {} when eBay isn't connected / scope not granted.
     Pass a `status` dict to also learn whether the traffic report was readable
-    ({traffic_ok, needs_reconnect}), so blank numbers can be explained."""
+    ({traffic_ok, needs_reconnect}), so blank numbers can be explained.
+    `fresh` bypasses the short read-cache — see metrics.listing_metrics."""
     id_by_ebay = _live_ebay_id_map(items)
     if not creds or not id_by_ebay:
         return {}
     try:
-        raw = metrics.listing_metrics(creds, list(id_by_ebay), status)
+        raw = metrics.listing_metrics(creds, list(id_by_ebay), status,
+                                      fresh=fresh)
     except Exception as exc:  # noqa: BLE001 - metrics never break a request
         log.info("listing metrics unavailable: %s", exc)
         return {}
@@ -6896,9 +6899,16 @@ def _promoted_record_ids(creds: Optional[dict], items: list) -> tuple[set, bool]
 
 
 @app.get("/api/ebay/listing-metrics")
-def listing_metrics_route(request: Request) -> dict:
-    """eBay views/impressions/watchers for the user's live listings, keyed by
-    our listing record id. Empty when eBay isn't connected."""
+def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
+    """eBay views/impressions/watchers/pending offers for the user's live
+    listings, keyed by our listing record id. Empty when eBay isn't connected.
+
+    `refresh=1` is the seller pressing "Sync with eBay", and it is the one
+    call that must not be answered from the short cache these numbers share:
+    the thing they most plausibly just did — accept, counter or decline a Best
+    Offer, which can only be done in eBay — is exactly what a copy from two
+    minutes ago would still be reporting as waiting on them.
+    """
     user = auth.current_user(request)
     if not user:
         return {"metrics": {}}
@@ -6910,7 +6920,8 @@ def listing_metrics_route(request: Request) -> dict:
     items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"],
                                          statuses=("published", "live"))
     status: dict = {}
-    by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status)
+    by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status,
+                                  fresh=bool(refresh))
     return {"metrics": by_id,
             "traffic_ok": bool(status.get("traffic_ok")),
             "needs_reconnect": bool(status.get("needs_reconnect"))}
