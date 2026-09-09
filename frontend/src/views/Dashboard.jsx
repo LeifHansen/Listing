@@ -531,7 +531,7 @@ function SoldRangePicker({ value, onChange }) {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, metricsById, metricsStatus, ebay, loadEbayStatus, tokens, loadTokens } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, rotateListingPhoto, metricsById, metricsStatus, ebay, loadEbayStatus, tokens, loadTokens } = useApp();
   const { confirm, toast } = useToast();
   const items = listingsState.items;
   const storeView = listingsView({
@@ -1115,7 +1115,10 @@ export function Dashboard() {
             {recent.map((item) => (
               <div key={item.id} className="flex flex-col">
                 <ListingCard className="h-full" item={item} onOpen={openListing} onDelete={askDelete}
-                  metrics={metricsById[item.id]} />
+                  metrics={metricsById[item.id]}
+                  /* Rotate a draft's photo from here too — the same control
+                     the drafts strip and the listings manager carry. */
+                  onRotate={isDraft(item) ? rotateListingPhoto : undefined} />
                 {/* The category, on the face of the card and one tap from
                     being fixed — the same control the drafts strip and the
                     bulk queue carry. A wrong category is the AI misfire that
