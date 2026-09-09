@@ -92,7 +92,11 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="eBay Listing Generator", lifespan=_lifespan)
+# No /docs, /redoc or /openapi.json: the schema enumerates every admin and
+# ops route to anyone who asks, and the SPA mount at the bottom of this file
+# would otherwise serve them under the product's pre-rebrand name.
+app = FastAPI(title="Thryft Shop", lifespan=_lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 # The iOS/Android shell bundles the web build (guideline 4.2 forbids a bare
 # remote-webview app), so its pages live on capacitor://localhost and call
@@ -463,10 +467,25 @@ def _sweep_orphans() -> None:
     ids = db.all_listing_ids()
     if ids is None:  # no DB / read failed — don't risk deleting real images
         return
-    # Compare DIR names, not raw ids: session_dir() strips non-alphanumerics,
-    # so an imported listing "ebay-123" lives in dir "ebay123" — matching raw
-    # ids would sweep every imported listing's photos as orphans.
-    dir_names = {storage.session_dir(i).name for i in ids if i}
+    # Compare DIR names, not raw ids. The two are the same string today
+    # (storage.safe_session_name accepts or rejects, it no longer rewrites),
+    # but the sweep matches directories, so it is asked in those terms.
+    #
+    # An id outside the accepted form -- a row from before the naming rule --
+    # is skipped and logged rather than allowed to raise: safe_session_name
+    # RAISES on one, and this is the first statement of reclaim_space, so a
+    # single such row used to abort every housekeeping pass (originals,
+    # exports, the R2 offload, pending deletions, owed refunds) for as long
+    # as it existed. Its own directory, if it has one, is simply not swept.
+    dir_names: set[str] = set()
+    for i in ids:
+        if not i:
+            continue
+        try:
+            dir_names.add(storage.session_dir(i).name)
+        except ValueError:
+            log.warning("reclaim: listing id %r is not a valid session id; "
+                        "skipping it (its files, if any, are left alone)", i)
     removed = storage.sweep_orphan_sessions(dir_names, max_age_seconds=3 * 3600)
     if not removed:
         return
@@ -845,6 +864,18 @@ def _diagnostics() -> dict:
     }
 
 
+def _token_matches(supplied: str, expected: str) -> bool:
+    """Constant-time equality for a header-borne token.
+
+    On bytes, not str: secrets.compare_digest raises TypeError for a str with
+    a character outside ASCII, and Starlette hands headers over as latin-1
+    text -- so one probe with a byte >= 0x80 in it was a 500 and an
+    error_events row, where a wrong token is a 401.
+    """
+    return secrets.compare_digest(supplied.encode("utf-8", "replace"),
+                                  expected.encode("utf-8", "replace"))
+
+
 def _require_admin(request: Request) -> None:
     """Fail CLOSED: an unset ADMIN_TOKEN denies rather than admits.
 
@@ -854,8 +885,7 @@ def _require_admin(request: Request) -> None:
     """
     expected = (config.ADMIN_TOKEN or "").strip()
     supplied = (request.headers.get("x-admin-token") or "").strip()
-    if not expected or not supplied or not secrets.compare_digest(supplied,
-                                                                 expected):
+    if not expected or not supplied or not _token_matches(supplied, expected):
         raise HTTPException(401, "Not authorised.")
 
 
@@ -1154,8 +1184,7 @@ def _require_error_feed(request: Request) -> None:
     """
     expected = (config.ERROR_FEED_TOKEN or "").strip()
     supplied = (request.headers.get("x-error-feed-token") or "").strip()
-    if not expected or not supplied or not secrets.compare_digest(supplied,
-                                                                 expected):
+    if not expected or not supplied or not _token_matches(supplied, expected):
         raise HTTPException(401, "Not authorised.")
 
 
@@ -1489,6 +1518,18 @@ def _resolve_category(listing: Listing) -> None:
 _STORE_CATS_TTL = int(os.getenv("STORE_CATEGORIES_TTL_HOURS", "6") or "6") * 3600
 _STORE_CATS: dict[str, tuple[float, Optional[list[dict]]]] = {}
 _STORE_CATS_LOCK = threading.Lock()
+
+
+def _forget_store_categories(uid: Optional[str]) -> None:
+    """Drop the cached shelves for `uid`. Called wherever the account behind
+    them changes -- a disconnect, or a connect that turned out to be a
+    different store -- because the cache is keyed on the USER, and a seller
+    who swaps eBay accounts would otherwise spend the next six hours filing
+    drafts onto the previous store's shelves."""
+    if not uid:
+        return
+    with _STORE_CATS_LOCK:
+        _STORE_CATS.pop(uid, None)
 
 
 def _store_categories(uid: str, token: str,
@@ -2703,6 +2744,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
             log.info("ebay connect: account switch for uid=%s (%s -> %s); "
                      "labelled %d existing listing(s)", uid,
                      prev_user or "?", new_user or "?", marked)
+            _forget_store_categories(uid)
             # The old ZIP belonged to the old store; create_on_ebay re-reads it
             # from eBay when it's blank.
             save_kwargs.setdefault("ship_from_postal", "")
@@ -2776,7 +2818,11 @@ def ebay_status(request: Request) -> dict:
     ) if not val]
     return {
         "oauth_ready": config.ebay_oauth_ready(),
-        "oauth_missing": oauth_missing,
+        # Names only, never values -- and only to someone signed in. The
+        # route is anonymous so the connect button can render, but which
+        # variables the operator has not set is operator detail, the same
+        # class /api/health stopped publishing.
+        "oauth_missing": oauth_missing if uid else [],
         "connected": connected,
         "env": config.EBAY_ENV,
         # Buyer messages (Message API) is limited-release too. The inbox icon
@@ -3106,7 +3152,7 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     others = [k for k in targets if k != "ebay"]
     named = [(k, marketplaces.get(k)) for k in others]
     named = [(k, p) for k, p in named if p is not None]
-    uid = _uid(request) if named else None
+    uid = (await run_in_threadpool(_uid, request)) if named else None
     # Every marketplace's checklist is read-only HTTP against that
     # marketplace, so run them concurrently: preflight costs the slowest
     # checklist rather than the sum of all of them.
@@ -4087,6 +4133,7 @@ def ebay_disconnect(request: Request) -> dict:
     # Keep saved policy/location prefs so reconnecting the same account restores
     # them; a different account overwrites them on connect (see the callback).
     ebay_account.forget_verified(uid)
+    _forget_store_categories(uid)
     db.disconnect_ebay_account(uid)
     return {"ok": True}
 
@@ -4289,7 +4336,11 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
     signature = request.headers.get("x-ebay-signature", "")
 
     try:
-        if not ebay_notify.verify(raw, signature):
+        # Off the event loop: verify fetches eBay's public key on a cache
+        # miss and the record below is a Neon round trip, and eBay sends
+        # these one or two a MINUTE. See the Stripe webhook for the same
+        # reasoning.
+        if not await run_in_threadpool(ebay_notify.verify, raw, signature):
             log.warning("ebay: rejected an unsigned/invalid account-deletion "
                         "notice from %s", request.client.host
                         if request.client else "?")
@@ -4315,8 +4366,9 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
         return Response(status_code=400)
 
     try:
-        seen = db.record_deletion_notice(
-            notif_id, subject, ebay_deletion.payload_digest(raw))
+        seen = await run_in_threadpool(
+            db.record_deletion_notice, notif_id, subject,
+            ebay_deletion.payload_digest(raw))
     except db.StorageUnavailable as exc:
         log.warning("ebay: could not record deletion notice %s: %s",
                     notif_id, exc)
@@ -4430,7 +4482,7 @@ async def upload(
         # progress. The identify charge is taken up front like
         # /api/identify-async does, so a broke caller 402s here (with the
         # bg-removal charge given back) instead of after the photo work.
-        uid = _uid(request)
+        uid = await run_in_threadpool(_uid, request)
         try:
             identify_spent = await run_in_threadpool(_charge_ai, request, "identify")
         except HTTPException:
@@ -4547,7 +4599,7 @@ async def upload_more(
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
-    uid = _uid(request)
+    uid = await run_in_threadpool(_uid, request)
     job_id = storage.new_session_id()
     # The background-removal charge is deliberately NOT written to the job
     # mirror: it can be refunded in PART (one photo's worth per failed
@@ -4693,7 +4745,7 @@ async def edit_image(
             raise HTTPException(
                 502, "Saved locally, but couldn’t update the stored copy eBay "
                      "uses. Try saving again in a moment.")
-    db.touch_listing(session_id)  # bump updated_at so list thumbnails refetch
+    await run_in_threadpool(db.touch_listing, session_id)  # bump updated_at so list thumbnails refetch
     log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 
@@ -4767,7 +4819,7 @@ async def image_restore_original(
             raise HTTPException(
                 502, "Restored locally, but couldn't update the stored copy "
                      "eBay uses. Try again in a moment.")
-    db.touch_listing(session_id)
+    await run_in_threadpool(db.touch_listing, session_id)
     log.info("restore-original: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 
@@ -6324,7 +6376,7 @@ async def bulk_upload(
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # The worker thread can't return a 401, so the login requirement (billing
     # is per-account) is enforced before the upload is accepted.
-    if tokens.enabled() and _uid(request) is None:
+    if tokens.enabled() and await run_in_threadpool(_uid, request) is None:
         raise HTTPException(
             401, "Log in to use AI features — your token balance is per account.")
     if not files:
@@ -6369,7 +6421,7 @@ async def bulk_upload(
                  "minute, or delete a few old listings to free some up.") from exc
 
     # Capture per-request context now — the worker thread has no Request.
-    uid = _uid(request)
+    uid = await run_in_threadpool(_uid, request)
     job_id = storage.new_session_id()
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     await run_in_threadpool(_register_bulk_job, job_id, {
@@ -6828,7 +6880,12 @@ def listings(request: Request, limit: int = LIST_CAP,
             log.info("listings: couldn't count the store for user=%s: %s",
                      user["id"], exc)
     return {"listings": [_projected_for_list(r) for r in items],
-            "db": db.db_status(), "authed": bool(user),
+            # configured/connected only. The probe's `error` is the raw
+            # driver text (the Neon host and role on an auth failure), which
+            # /api/health stopped publishing for that reason; it belongs on
+            # /api/admin/diagnostics, behind the token.
+            "db": {k: v for k, v in db.db_status().items() if k != "error"},
+            "authed": bool(user),
             "truncated": truncated, "total": total,
             # Only when there IS a next page. A cursor on the last page is how
             # a client loops for ever.
@@ -7506,6 +7563,11 @@ def enrich_listings(payload: dict, request: Request) -> dict:
             400, f"That's too many listings for one go — pick up to "
                  f"{BULK_SELECT_CAP} and run it again for the rest.")
     uid = user["id"]
+    # Check AND reserve in one critical section, the way the import route
+    # does. Releasing the lock between the two let a double tap pass the
+    # check twice -- both saw no job, both went off to read the listings,
+    # both registered -- and the seller paid for the same blanks twice.
+    job_id = storage.new_session_id()
     with _ENRICH_LOCK:
         running = _ENRICH_JOBS.get(uid)
         if running:
@@ -7515,18 +7577,24 @@ def enrich_listings(payload: dict, request: Request) -> dict:
                 # rather than paying a second time to fill the same blanks.
                 return {"job_id": running, "running": True, "total": 0,
                         "deferred": 0}
-            _ENRICH_JOBS.pop(uid, None)
-    # Ownership is enforced inside the read, and an id the seller doesn't own
-    # is simply absent from the answer (see db.get_listings).
-    mine = db.get_listings(ids, uid)
-    records, deferred = mine[:BULK_ENRICH_CAP], mine[BULK_ENRICH_CAP:]
-    if not records:
-        raise HTTPException(404, "None of those listings are here anymore.")
-    creds = _ebay_creds_for(request)
-    base_url = _base_url(request)
-    job_id = storage.new_session_id()
-    with _ENRICH_LOCK:
         _ENRICH_JOBS[uid] = job_id
+    try:
+        # Ownership is enforced inside the read, and an id the seller doesn't
+        # own is simply absent from the answer (see db.get_listings).
+        mine = db.get_listings(ids, uid)
+        records, deferred = mine[:BULK_ENRICH_CAP], mine[BULK_ENRICH_CAP:]
+        if not records:
+            raise HTTPException(404, "None of those listings are here anymore.")
+        creds = _ebay_creds_for(request)
+        base_url = _base_url(request)
+    except BaseException:
+        # The reservation stands for a job that will never start; without
+        # this the next press is told "already running" until the snapshot
+        # is looked up and found missing.
+        with _ENRICH_LOCK:
+            if _ENRICH_JOBS.get(uid) == job_id:
+                _ENRICH_JOBS.pop(uid, None)
+        raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "enrich", "phase": "enriching", "done": False,
         "error": None, "current": 0, "total_items": len(records),

@@ -21,3 +21,35 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: ci
+  # The application's own dependencies. requirements.txt pins most versions
+  # exactly and the deploy builds with --no-cache, so without this the pins
+  # only ever go stale; the two lockfiles are what the frontend and the
+  # marketing site actually install from. Monthly and grouped, like the
+  # actions above: one pull request per ecosystem, gated by the same CI.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      python:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: monthly
+    groups:
+      frontend:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps
+  - package-ecosystem: npm
+    directory: /marketing
+    schedule:
+      interval: monthly
+    groups:
+      marketing:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps

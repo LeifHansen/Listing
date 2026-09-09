@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 # Seen this many times, or carrying a traceback. A single sentence logged once
@@ -39,6 +40,18 @@ EXTERNAL = frozenset((
     "PoolTimeout", "RemoteProtocolError", "ReadError", "TimeoutException",
     "SSLError", "ProxyError", "StorageUnavailable",
 ))
+
+# A publish or revise eBay refused over a FIELD — a missing Inseam, a Size
+# not on eBay's list, a title it would not take. The app classified it (the
+# token after "refused over" is where the seller was pointed: see
+# ebay_provider.refusal_key) and showed the seller the box to open, so the
+# row is a fact about that seller's listing, not about this tree. The ones
+# that ARE this tree's stay: "generic" is a sentence the classifier did not
+# recognise, "unexplained" a 240 with no diagnosis, "account" a block the app
+# could only relay, and "unclassified" a refusal with no issues at all.
+SELLER_SIDE = re.compile(
+    r"\brefused over (?:specifics|title|description|price|photos|policies"
+    r"|location|category|condition|weight)\b")
 
 # How many fixes to propose in one run. Not a judgement about how many bugs
 # exist — a bound on how much review one morning can create. The rest keep
@@ -118,6 +131,9 @@ def why_not(row: dict, known: dict, repo_root: str) -> str | None:
         return f"already has a fix ({row.get('fix_pr') or 'unnamed'})"
     if row.get("exc_type") in EXTERNAL:
         return f"{row.get('exc_type')} is a third party being unreachable"
+    if SELLER_SIDE.search(str(row.get("message") or "")):
+        return ("eBay refused over a field the seller was pointed at - "
+                "their listing's gap, not this tree's bug")
     if row.get("severity") == "low":
         return "graded low - no traceback and nothing that reads as a failure"
     if not row.get("traceback") and (row.get("count") or 0) < MIN_COUNT:

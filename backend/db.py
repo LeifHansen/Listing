@@ -2196,6 +2196,12 @@ def token_refund(user_id: str, entry_id: str, units: Optional[int] = None) -> bo
             # A bulk batch does exactly that: it refunds the failed cutouts
             # mid-run and the unused remainder in its finally, and when those
             # two are equal the seller silently lost the second refund.
+            # Under the account's row lock, so two partial refunds of one
+            # spend cannot both read the same `already` and together hand
+            # back more than was ever charged. The lock is taken here rather
+            # than below, where the balance is written, because it is THIS
+            # read that the clamp depends on.
+            acct = _token_account(s, user_id)
             already = int(s.execute(
                 select(func.coalesce(func.sum(TokenLedger.tokens), 0))
                 .where(TokenLedger.kind == "refund",
@@ -2209,7 +2215,6 @@ def token_refund(user_id: str, entry_id: str, units: Optional[int] = None) -> bo
                 return False
             paid_back = min(amount, max(0, entry.paid_part - already))
             free_back = amount - paid_back
-            acct = _token_account(s, user_id)
             acct.purchased += paid_back
             if free_back and acct.free_period == entry.period:
                 acct.free_used = max(0, acct.free_used - free_back)
@@ -2256,9 +2261,14 @@ def token_credit(user_id: str, tokens: int, ref: Optional[str], kind: str = "pur
                               created_at=_now()))
             try:
                 s.commit()
-            except Exception:  # noqa: BLE001 - lost the idempotency race
+            except IntegrityError:  # lost the idempotency race on `ref`
                 s.rollback()
                 return {"ok": True, "already": True}
+            # Any OTHER commit failure -- a dropped connection, a timeout --
+            # falls to the handler below and answers None. It used to answer
+            # {"already": True}, which the Stripe webhook acknowledged with a
+            # 200: Stripe stopped retrying, no ledger row existed, and the
+            # seller had paid for tokens they never received.
             return {"ok": True, "already": False, "purchased": acct.purchased}
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: token_credit failed: {exc}")
@@ -2306,9 +2316,12 @@ def token_reverse_purchase(ref: str, reason: str = "") -> Optional[dict]:
                 note=(reason or "purchase reversed")[:255], created_at=_now()))
             try:
                 s.commit()
-            except Exception:  # noqa: BLE001 - lost the idempotency race
+            except IntegrityError:  # lost the idempotency race on `rev_ref`
                 s.rollback()
                 return {"ok": True, "already": True, "user_id": purchase.user_id}
+            # Same rule as token_credit: a commit that failed for any other
+            # reason is None, so Stripe redelivers instead of the clawback
+            # being acknowledged and never applied.
             return {"ok": True, "already": False, "reversed": taken,
                     "shortfall": amount - taken, "user_id": purchase.user_id}
     except Exception as exc:  # noqa: BLE001

@@ -81,11 +81,6 @@ export function isAuctionFormat(value) {
   return fmt === AUCTION || fmt === AUCTION_BIN;
 }
 
-export function formatLabel(value) {
-  const fmt = normalizeFormat(value);
-  return (LISTING_FORMATS.find(([v]) => v === fmt) || LISTING_FORMATS[0])[1];
-}
-
 /** The name to use where the format is reported on its own, not offered
  *  beside the other two. */
 export function formatChipLabel(value) {

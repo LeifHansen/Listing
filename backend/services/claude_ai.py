@@ -224,11 +224,22 @@ extract_json = _extract_json
 # these to missing_info because a listing does carry them, but asking the
 # seller to type their own city on every item is noise — the app already has
 # it from Settings and sends it at publish time.
+#
+# Matched as whole words or phrases, never as substrings: "zip" inside
+# "zipper" and "location" inside "location of the signature" are things the
+# seller genuinely has to look at, and a substring match threw both away.
+# "location" on its own is therefore not on the list -- the shipping sense
+# always arrives with a qualifier ("item location", "ship-from location").
 _ACCOUNT_LEVEL_FIELDS = (
-    "location", "ship from", "ship-from", "shipping origin", "zip", "postal",
-    "handling time", "dispatch time", "return policy", "payment policy",
-    "shipping policy", "seller name", "store name",
+    "item location", "ship from", "ship-from", "ships from", "shipping origin",
+    "shipping location", "seller location", "your location", "zip code",
+    "zip/postal", "zip or postal", "postal code", "postcode", "handling time",
+    "dispatch time", "return policy", "payment policy", "shipping policy",
+    "seller name", "store name",
 )
+_ACCOUNT_LEVEL_RE = re.compile(
+    r"(?<![a-z0-9])(?:" + "|".join(re.escape(t) for t in _ACCOUNT_LEVEL_FIELDS)
+    + r")(?![a-z0-9])", re.IGNORECASE)
 
 
 def _drop_account_level(entries: list) -> list[str]:
@@ -238,7 +249,7 @@ def _drop_account_level(entries: list) -> list[str]:
         text = str(raw).strip()
         if not text:
             continue
-        if any(term in text.lower() for term in _ACCOUNT_LEVEL_FIELDS):
+        if _ACCOUNT_LEVEL_RE.search(text):
             continue
         out.append(text)
     return out

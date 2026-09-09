@@ -205,8 +205,8 @@ function SoldLines({ listing: l, soldFor, knownSale, discount, className }) {
         <p className="text-[12px] font-semibold"
           title={`Sold ${knownSale ? "" : "~"}${formatMoney(soldFor, l.currency)} − paid ${formatMoney(paid, l.currency)}, before fees & shipping`}>
           <span className={soldFor - Number(paid) >= 0 ? "text-success" : "text-warning"}>
-            {soldFor - Number(paid) >= 0 ? "+" : "−"}$
-            {Math.abs(soldFor - Number(paid)).toFixed(2)} profit
+            {soldFor - Number(paid) >= 0 ? "+" : "−"}
+            {formatMoney(Math.abs(soldFor - Number(paid)), l.currency)} profit
           </span>
         </p>
       )}

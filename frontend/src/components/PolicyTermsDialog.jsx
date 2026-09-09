@@ -47,13 +47,13 @@ export function PolicyTermsDialog({ open, onClose, onConfirm, options = {}, busy
 
   return (
     <Dialog open={open} onClose={onClose} wide title="What these policies will say">
-      <p className="text-sm text-ink-soft">
+      <p className="text-sm text-ink-secondary">
         eBay shows these terms to buyers on every listing that uses the policy, and
         holds you to them. You can change any of it later in Seller Hub.
       </p>
 
       {state.status === "loading" && (
-        <p className="flex items-center gap-2 text-sm text-ink-soft mt-5">
+        <p className="flex items-center gap-2 text-sm text-ink-secondary mt-5">
           <Loader2 size={15} className="animate-spin" aria-hidden />
           Loading the terms…
         </p>
@@ -71,16 +71,16 @@ export function PolicyTermsDialog({ open, onClose, onConfirm, options = {}, busy
           {kinds.map(([key, kind]) => (
             <section key={key}>
               <h3 className="font-bold text-ink text-sm">{kind.title}</h3>
-              <p className="text-xs text-ink-soft mb-2">Named “{kind.name}” on eBay</p>
+              <p className="text-xs text-ink-secondary mb-2">Named “{kind.name}” on eBay</p>
               <dl className="rounded-tile border border-line divide-y divide-line">
                 {kind.terms.map((t) => (
                   <div key={t.label} className="p-3">
                     <div className="flex flex-wrap gap-x-2 text-sm">
-                      <dt className="text-ink-soft">{t.label}:</dt>
+                      <dt className="text-ink-secondary">{t.label}:</dt>
                       <dd className="font-semibold text-ink">{t.value}</dd>
                     </div>
                     {t.detail && (
-                      <p className="text-xs text-ink-soft mt-1">{t.detail}</p>
+                      <p className="text-xs text-ink-secondary mt-1">{t.detail}</p>
                     )}
                   </div>
                 ))}

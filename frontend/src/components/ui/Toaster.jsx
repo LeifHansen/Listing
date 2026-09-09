@@ -38,6 +38,10 @@ export function ToastProvider({ children }) {
   // await confirm({ title, message, confirmLabel, danger }) → boolean
   const confirm = useCallback((opts) => {
     return new Promise((resolve) => {
+      // A confirm opened over an unanswered confirm answers the first one
+      // "no": overwriting its resolver left that caller awaiting forever,
+      // with whatever it was about to do silently never happening.
+      if (resolver.current) resolver.current(false);
       resolver.current = resolve;
       setConfirmState(opts);
     });

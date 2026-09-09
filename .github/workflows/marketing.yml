@@ -18,6 +18,12 @@ on:
       - '.github/workflows/marketing.yml'
   workflow_dispatch:
 
+
+# The default GITHUB_TOKEN is read-only on this repository's contents and
+# nothing here needs more (the deploys authenticate to Fly with their own
+# token). Written down so a future job that DOES need more has to say so.
+permissions:
+  contents: read
 jobs:
   build:
     name: Build + link check

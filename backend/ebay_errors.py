@@ -83,6 +83,24 @@ def _aspect_from_text(text: str) -> str:
     return ""
 
 
+# eBay's wording for a fixed-choice aspect refusing a value: the value in
+# straight quotes, then the aspect's name up to the full stop. Both halves are
+# captured so the seller can be told which box to open and what was in it.
+_NOT_AN_OPTION_RE = re.compile(
+    r'["“]([^"”]{1,80})["”]\s+is not a valid value for\s+([^.\n]{1,40}?)\s*(?:\.|$)',
+    re.IGNORECASE)
+
+
+def _not_an_option(text: str) -> Optional[tuple[str, str]]:
+    """(value, aspect) when `text` is eBay refusing a value that is not on its
+    list for an aspect, else None."""
+    m = _NOT_AN_OPTION_RE.search(text or "")
+    if not m:
+        return None
+    value, aspect = m.group(1).strip(), m.group(2).strip()
+    return (value, aspect) if value and aspect else None
+
+
 def _looks_like_weight(value: str) -> bool:
     """True for values like '3 oz', '1.5 lb', '70 lbs'."""
     parts = value.strip().lower().split()
@@ -408,6 +426,22 @@ def explain(err: dict) -> dict:
                     "This part of a listing can't be changed once it is live. "
                     "The edit is saved here; end the listing and relist it if "
                     "it has to reach eBay.")))
+    elif _not_an_option(f"{message} {long_message}"):
+        # '"W" is not a valid value for Size. Select a value from the
+        # available options.' — eBay refusing a value that is not on its list
+        # for a fixed-choice aspect. The sentence names neither "item
+        # specific" nor "aspect", so it fell through to the generic branch:
+        # the seller was told "eBay rejected the listing" over eBay's raw
+        # words, with no field to open and nothing to pick from. It IS an
+        # item-specifics refusal, and the aspect is right there in the text.
+        value, aspect = _not_an_option(f"{message} {long_message}")
+        issue.update(
+            target="specifics",
+            fields=[aspect],
+            title=f"“{value}” isn’t one of eBay’s options for {aspect}",
+            fix=(f"Pick {aspect} from eBay’s list under Item specifics — "
+                 f"for this one eBay only accepts a value from its own list, "
+                 f"so “{value}” has to become the closest option on it."))
     elif has("item specific", "aspect", "required attribute", "missing value"):
         # The aspect name rides along in the parameters next to full-sentence
         # copies of the message ("The item specific Item Height is missing.").

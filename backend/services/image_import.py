@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from .. import storage
+from .. import config, objstore, storage
 from ..config import log
 
 # Only eBay's image CDN. Suffix-matched against the URL host, so i.ebayimg.com
@@ -47,6 +47,56 @@ _MANIFEST = "ebay_images.json"
 def _host_allowed(host: str) -> bool:
     host = (host or "").lower().rstrip(".")
     return host in _ALLOWED_HOSTS or host.endswith(_ALLOWED_HOST_SUFFIXES)
+
+
+def own_media_ref(url: str) -> Optional[tuple[str, str]]:
+    """(session id, file name) when `url` is one of this app's own
+    /media/<session>/optimized/<name> URLs, on an origin it is served from;
+    else None.
+
+    eBay does not always copy a picture onto its CDN: a listing this app
+    published carries the /media URL it was given, and a store sync reads
+    that URL straight back into the mirror's `image_urls`. Adopting the
+    mirror then asked the CDN allowlist to fetch app.thryftshop.com and was
+    refused -- "host not allowed", twelve times in a day, for photos that
+    were on this very disk. Recognising the shape is what lets those be
+    copied from where they are instead of fetched over the network.
+
+    Only the origins in APP_ORIGINS (or localhost, for a developer) count, so
+    a hostile URL cannot name a path into another seller's session by
+    looking like ours; the session id is validated by storage on use.
+    """
+    parts = urlparse(url or "")
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    origin = f"{parts.scheme}://{parts.netloc}".lower()
+    local_dev = parts.hostname in ("localhost", "127.0.0.1")
+    if not (origin in {o.lower() for o in config.APP_ORIGINS} or local_dev):
+        return None
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if (len(segments) != 4 or segments[0] != "media"
+            or segments[2] != "optimized"):
+        return None
+    session_id, name = segments[1], segments[3]
+    if not name or "/" in name or name.startswith("."):
+        return None
+    return session_id, name
+
+
+def _read_own_media(session_id: str, name: str) -> bytes:
+    """The bytes behind one of this app's own /media URLs: the file on the
+    volume, or the R2 object the offload sweep moved it to. Raises ValueError
+    when neither holds it -- the same contract as fetch_ebay_image."""
+    path = storage.optimized_path(session_id) / name  # validates the id
+    if path.is_file():
+        return path.read_bytes()
+    if objstore.enabled():
+        try:
+            return objstore.get_bytes(objstore.key_for(session_id, name))
+        except Exception as exc:  # noqa: BLE001 - reported as one missing photo
+            raise ValueError(f"own photo {session_id}/{name} not in object "
+                             f"storage: {type(exc).__name__}") from exc
+    raise ValueError(f"own photo {session_id}/{name} is no longer on the server")
 
 
 def fetch_ebay_image(url: str) -> bytes:
@@ -124,7 +174,8 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
     def _one(job: tuple[int, str]) -> Optional[tuple[int, str, str, str]]:
         i, url = job
         try:
-            data = fetch_ebay_image(url)
+            own = own_media_ref(url)
+            data = _read_own_media(*own) if own else fetch_ebay_image(url)
             img = Image.open(BytesIO(data))
             img.load()
             img = ImageOps.exif_transpose(img).convert("RGB")

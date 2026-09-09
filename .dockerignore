@@ -21,3 +21,14 @@ fly.toml
 # cost on every deploy — and node_modules/ and dist/ in there would make that
 # cost large.
 marketing
+
+# Never part of the image. The Dockerfile runs `npm ci` and THEN copies
+# frontend/, so a developer's node_modules or a stale dist in the build
+# context (a hand `./deploy.sh` uploads the local tree) would overwrite the
+# clean install; the native projects are generated on a Mac and huge; the
+# tests are run from a checkout, never from the container.
+frontend/node_modules
+frontend/dist
+frontend/ios
+frontend/android
+backend/tests

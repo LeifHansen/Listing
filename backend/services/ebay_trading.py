@@ -1713,6 +1713,25 @@ _SPECIFICS_LOCKED = (
 SPECIFICS_LOCKED_FIELDS = frozenset({"item_specifics", "brand"})
 
 
+# eBay refusing a revise because the category now REQUIRES an aspect the
+# listing does not carry -- "The item specific Inseam is missing. Add Inseam
+# to this listing, enter a valid value, and then try again." A revise that
+# touches <ItemSpecifics> replaces the whole set, so eBay re-validates it
+# against today's rules, and a jeans listing made before Inseam became
+# required is refused however small the edit. The refusal names the aspect.
+_MISSING_REQUIRED_RE = re.compile(
+    r"item specific\s+(?P<name>[A-Za-z][^.\n]{0,40}?)\s+is missing", re.IGNORECASE)
+
+
+def missing_required_specific(exc: Exception) -> str:
+    """The aspect eBay says this listing must carry before it will take a
+    change to its specifics, or "" when that is not what it said."""
+    hay = f"{exc} {getattr(exc, 'detail', '') or ''} " \
+          f"{getattr(exc, 'said', '') or ''}"
+    m = _MISSING_REQUIRED_RE.search(hay)
+    return m.group("name").strip(" '\u2019\"\u201d") if m else ""
+
+
 def specifics_locked(exc: Exception) -> bool:
     """Is this eBay saying the listing's specifics can't be changed yet?"""
     hay = f"{exc} {getattr(exc, 'detail', '') or ''} " \
@@ -1739,11 +1758,23 @@ def revise_listing(token: str, item_id: str, listing: Listing,
     """
     call, body = build_revise_item(listing, item_id, image_urls)
     deferred: list[str] = []
+    deferred_why, deferred_aspect = "", ""
     try:
         root = _call(call, token, body)
     except TradingError as exc:
         held = sorted(set(listing.dirty_fields or ()) & SPECIFICS_LOCKED_FIELDS)
-        if not specifics_locked(exc) or not held:
+        # Two refusals eBay makes about the specifics alone, and the rest of
+        # the edit can go without them either way: a freeze (Best Offer
+        # pending, auction bid on), or an aspect the category now requires
+        # and this listing has never carried. The second used to fail the
+        # whole revise -- and because a refused revise keeps its dirty marks,
+        # every LATER revise of that listing (a price drop, a title fix)
+        # rebuilt the same <ItemSpecifics> and failed the same way. The
+        # seller's price change never landed, for as long as Inseam was
+        # blank, and the error feed recorded the same refusal 26 times.
+        aspect = missing_required_specific(exc)
+        why = "locked" if specifics_locked(exc) else ("missing" if aspect else "")
+        if not why or not held:
             raise
         remaining = (set(listing.dirty_fields) - SPECIFICS_LOCKED_FIELDS
                      ) & REVISABLE_FIELDS
@@ -1756,10 +1787,10 @@ def revise_listing(token: str, item_id: str, listing: Listing,
             raise
         call, body = build_revise_item(listing, item_id, image_urls,
                                        without=SPECIFICS_LOCKED_FIELDS)
-        log.warning("trading: eBay won't take item specifics on %s yet (%s) — "
-                    "sending the rest of the edit without them", item_id, exc)
+        log.info("trading: eBay won't take item specifics on %s (%s: %s) — "
+                 "sending the rest of the edit without them", item_id, why, exc)
         root = _call(call, token, body)
-        deferred = held
+        deferred, deferred_why, deferred_aspect = held, why, aspect
     returned = _text(root, "ItemID") or item_id
     log.info("trading: %s ok item=%s", call, returned)
     out = {"ok": True, "listing_id": returned}
@@ -1787,6 +1818,11 @@ def revise_listing(token: str, item_id: str, listing: Listing,
         out["unsent"] = unsent
     if deferred:
         out["deferred"] = deferred
+        # WHY they were held, so the seller is told the true reason: a freeze
+        # lifts by itself, a missing required aspect does not.
+        out["deferred_why"] = deferred_why
+        if deferred_aspect:
+            out["deferred_aspect"] = deferred_aspect
     return out
 
 

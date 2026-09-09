@@ -30,7 +30,7 @@ and TestFlight upload must run on a Mac with Xcode.**
 - macOS with **Xcode** (from the App Store) + Command Line Tools:
   `xcode-select --install`
 - **CocoaPods**: `sudo gem install cocoapods` (or `brew install cocoapods`)
-- **Node 18+** (`node -v`)
+- **Node 22** (`node -v`; what the Dockerfile and CI build with)
 - Your **Apple Developer account** ($99/yr, which you have)
 - Register an **App ID** in the Apple Developer portal (Certificates, IDs &
   Profiles → Identifiers) with bundle id **`com.thryftshop.app`** — or pick your

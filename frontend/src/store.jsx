@@ -409,7 +409,6 @@ export function AppProvider({ children }) {
     // one synchronous write is the signed-out branch above, which clears the
     // bell exactly once per logout and cannot cascade (it depends only on
     // `user`, which it does not change).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadNotifications();
     if (!user) return undefined;
     const t = setInterval(loadNotifications, 60000);
@@ -462,7 +461,6 @@ export function AppProvider({ children }) {
     // it skips while the tab is hidden and catches up on return. Without that
     // every open tab would poll a marketplace API forever in the background,
     // and that quota is shared with publishing.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadMessages();
     if (!messagingOn) return undefined;
     const tick = () => { if (!document.hidden) loadMessages(); };
@@ -810,8 +808,20 @@ export function AppProvider({ children }) {
   const watchImport = useCallback(async (jobId) => {
     let fails = 0;
     let missing = 0;
+    // An overall deadline as well as the per-poll rules below. A job that
+    // keeps answering "not done" — a worker that died without marking its
+    // job, say — would otherwise keep the spinner up and the Sync button
+    // disabled for as long as the tab stayed open. Forty minutes is past
+    // the biggest store's real sync time, so it is a floor under the
+    // pathological case, not a cap on the ordinary one.
+    const deadline = Date.now() + 40 * 60 * 1000;
     for (;;) {
       await new Promise((r) => setTimeout(r, 2000));
+      if (Date.now() > deadline) {
+        throw new Error("The sync is taking longer than expected. Anything "
+                        + "imported already is in Listings — check back in a "
+                        + "few minutes, or press Sync with eBay again.");
+      }
       let job;
       try {
         job = await api(`/api/ebay/import-status/${jobId}`);
@@ -917,7 +927,6 @@ export function AppProvider({ children }) {
   // connection, and already run this session). The listings already on screen
   // come from the database either way, so skipping the rebuild costs the
   // seller nothing except freshness they can restore with one press.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { syncStore(); }, [syncStore]);
 
   // The mirror import runs once per app session — but a tab (or the native
@@ -1345,8 +1354,11 @@ export function AppProvider({ children }) {
 
   const logout = useCallback(async () => {
     // Best effort, and first: the cookie is the server's to clear, and once
-    // the state below is gone there is nothing left to send it with.
-    try { await api("/api/auth/logout", { method: "POST" }); } catch (e) {}
+    // the state below is gone there is nothing left to send it with. Bounded
+    // tightly, though — under the default 90 s deadline a dead connection
+    // left "Log out" doing nothing visible while the old account stayed on
+    // screen; a sign-out has to feel immediate whatever the network is doing.
+    try { await api("/api/auth/logout", { method: "POST", timeoutMs: 5000 }); } catch (e) {}
     clearSignedInState();
   }, [clearSignedInState]);
 
@@ -1401,7 +1413,6 @@ export function AppProvider({ children }) {
       // Re-read the roster so the new connection shows in Settings. Nothing is
       // written synchronously: loadMarketplaces only calls setState after its
       // fetch resolves, and this effect reads the URL once on mount.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMarketplaces();
     } else if (pending) {
       // Not "try again" — trying again cannot work until they clear the shop.
@@ -1453,7 +1464,6 @@ export function AppProvider({ children }) {
   // Balance changes with login state; it also refreshes when the dialog opens.
   // loadTokens writes state only after its fetch resolves, so there is no
   // synchronous cascade here — just a fetch tied to who is signed in.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadTokens(); }, [user, loadTokens]);
 
   // Refresh the balance when the app regains focus. In the native shell a
@@ -1473,7 +1483,6 @@ export function AppProvider({ children }) {
   // exception — a failed /api/auth/me sets the user to null, i.e. treats an
   // unreadable session as signed out, which is the safe direction.)
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadHealth();
     loadAuth();
     loadEbayStatus();
@@ -1488,7 +1497,6 @@ export function AppProvider({ children }) {
   // `user`, which it never writes, so there is no cascade: one render to show
   // the skeletons, one when the data lands.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadListings({ quiet: true });
     loadMarketplaces();
   }, [user, loadListings, loadMarketplaces]);
@@ -1532,6 +1540,7 @@ export function AppProvider({ children }) {
     listingsLayout, setListingsLayout,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
+    clearSignedInState,
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
     easypost, loadEasypostStatus,
@@ -1558,7 +1567,7 @@ export function AppProvider({ children }) {
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
     isSuperadmin,
     listingsLayout, setListingsLayout,
-    loadAuth, logout, ebay, loadEbayStatus, canPublishLive, policiesData,
+    loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     easypost, loadEasypostStatus,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,

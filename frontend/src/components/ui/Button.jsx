@@ -54,5 +54,3 @@ export const Button = forwardRef(function Button(
     </motion.button>
   );
 });
-
-export { buttonVariants };

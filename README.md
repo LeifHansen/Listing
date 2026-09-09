@@ -8,9 +8,12 @@ Etsy, and Depop, individually or all at once.
 Upload one or more images → the app **optimizes** them for eBay, uses Claude's
 vision **"lens"** to identify the item, **generates** a full listing (title,
 description, item specifics, suggested price/category), shows an **editable
-preview** where you can tweak fields manually or with a prompt, then **pushes**
-the result to eBay as a draft or live listing (or generates the exact API
-payload when you don't have eBay credentials yet).
+preview** where you can tweak fields manually or with a prompt, then
+**publishes** it live on eBay (and Etsy / Depop) through the seller's own
+connected account. Drafts stay in the app until you publish them; with no
+marketplace connected the app writes the exact API payload it would have sent.
+
+Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 
 ## Pipeline
 
@@ -266,18 +269,12 @@ curl -s -H "x-admin-token: $ADMIN_TOKEN" \
   Renaming a live secret restarts the machine, and with
   `min_machines_running = 1` that means restarting it under whatever batch is
   in flight — not a trade worth making to satisfy a spelling.
-- **`bg_engines`** is the list that will actually run, in order. `["local"]`
-  next to `"photoroom_configured": true` is not a contradiction — auto mode
-  never spends money on its own (see the photo-pipeline section) — but it does
-  mean every cutout is costing the ~107s an `isnet` inference takes on
-  `shared-cpu-2x`, with a paid engine sitting configured and unused.
-  [Pixian.ai](https://pixian.ai) is a pay-per-image background-removal API at
-  roughly a tenth of Photoroom's price; setting `PIXIAN_API_ID` +
-  `PIXIAN_API_SECRET` moves auto mode onto it with **no code change** and
-  keeps the local model as its in-chain fallback. `BG_ENGINE=photoroom` opts
-  into the key already there instead. Either turns ~107s per photo into a
-  couple of seconds; both cost money per image, which is exactly why neither
-  switches itself on.
+- **`image_engine`** on `/api/ready` is the on-server background-removal
+  model (`isnet-general-use`, baked into the image), whether it has loaded,
+  and how long the last inference took. There is no paid remote engine any
+  more — the Pixian / Photoroom / Adobe integrations were removed in #246 —
+  so a `PHOTOROOM_API_KEY` or `LIGHTROOM_API_KEY` still set on the app is a
+  dead credential and can be unset.
 - **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
   cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
   on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
@@ -310,7 +307,9 @@ That is the only place it belongs.
 > running container no capability at all, while handing anything that can read
 > the process environment full control of the Fly account: every other secret
 > here (`NEON_PRODUCTION_DATABASE_URL`, `ANTHROPIC_API_KEY`, `R2_*`,
-> `SENDGRID_API_KEY`), plus the ability to destroy or redeploy any app on it.
+> `STRIPE_*`), plus the ability to destroy or redeploy any app on it.
+> The deploy workflow now prints a warning when it finds `FLY_API_TOKEN` or
+> `FLY_ACCESS_TOKEN` among the app's secrets.
 > The container also has Fly's own API proxy mounted at `/.fly/api`. If it is
 > ever set, take it back off — nothing depends on it:
 >
@@ -752,10 +751,12 @@ errors on a DB problem. Tables are auto-created on first use.
    `/api/admin/diagnostics` shows `objstore_missing` when partially
    configured, and `/api/ready` says `object_storage.configured` without a
    token.
-7. **Mobile** — the app is API-first; a React Native / Expo client (or a PWA)
-   reuses every `/api/*` endpoint.
-8. **Item Identifier (mobile-only)** — double-layer identification: Claude's
-   vision lens + Google Lens, cross-checked for higher-confidence item IDs.
+7. **Mobile** ✅ — the web build wrapped in Capacitor for iOS (see
+   [`MOBILE.md`](MOBILE.md) and the TestFlight checklist), talking to the
+   same `/api/*` endpoints with a bearer token.
+8. **Item Identifier** — reverse image search (Google Lens via SerpApi)
+   confirms art prints and maker marks; a full cross-checked identify pass
+   for every item is still ahead.
 9. **Smart List** — *planned.* Finished drafts are posted for the seller at
    the hours buyers are browsing, spaced out over days instead of all at
    once, and the app learns which of the seller's own slots drew the most
@@ -768,19 +769,33 @@ errors on a DB problem. Tables are auto-created on first use.
 backend/
   main.py            FastAPI app + routes
   config.py          env / settings
+  db.py              SQLAlchemy models + every database read and write
   models.py          Pydantic models (Listing, etc.)
-  storage.py         per-session filesystem store
+  storage.py         per-session filesystem store (the /data volume)
+  objstore.py        Cloudflare R2: photo offload, restore, presigned URLs
+  auth.py            sessions, bearer tokens, password hashing
+  ebay_auth.py       eBay OAuth + business policies / inventory location
+  ebay_errors.py     one taxonomy for eBay's refusals, in seller language
+  marketplaces/      one provider per marketplace (eBay, Etsy, Depop) behind
+                     a shared publish contract, plus the shared state model
   services/
-    images.py        photo pipeline (Pixian/Photoroom/Adobe/local + Pillow finishing)
-    adobe.py         Lightroom studio preset + Photoshop Remove Background APIs
-    ebay_trading.py  Trading API (XML) client — sees listings we didn't create
+    images.py        photo pipeline (EXIF, upright, local cutout, resize)
+    orient.py        the vision pass that turns an item upright
+    claude_ai.py     vision identify, refine, specifics fill, maker lookup
+    listing_prompt.py the prompts, kept testable without the SDK
+    ebay_trading.py  Trading API (XML): publish, revise, end, read the store
     listing_sync.py  bi-directional sync: import the store, push edits back
-    claude_ai.py     vision identify + prompt refine
-    ebay_messages.py buyer messages (Message API), P2P only
-    messages.py      the unified inbox: fan out + merge across marketplaces
-    taxonomy.py      Taxonomy API -> numeric category IDs
-    ebay.py          photo URLs for eBay + the legacy ad SKU
-    ebay_trading.py  Trading API: publish, revise, end, read
+    sync_merge.py    the three-way merge behind the sync
+    taxonomy.py      Taxonomy API -> categories, aspects, the Size rules
+    metrics.py       views / watchers / offers / bids per listing
+    promotions.py    Promoted Listings
+    ebay_orders.py, easypost.py   sold notifications and shipping labels
+    ebay_messages.py, messages.py buyer messages and the unified inbox
+    errorlog.py      the production error feed (Admin -> Errors, /api/ops)
+    tokens.py        the AI-token ledger and Stripe checkout
+    jobstore.py      durable job status for long photo/import work
+alembic/             schema revisions (shipped; the cutover is a checklist item)
+scripts/             one-shot operator tools (see each file's docstring)
 frontend/            React + Vite + Tailwind app (built to frontend/dist)
   src/
     styles/tokens.css  design tokens (colors, radii, shadows, dark mode)

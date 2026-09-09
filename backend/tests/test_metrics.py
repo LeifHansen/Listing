@@ -18,9 +18,17 @@ from backend.services import metrics
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    metrics._CACHE.clear()
+    _reset()
     yield
+    _reset()
+
+
+def _reset():
+    """Both caches and the spent-allowance latch, so no test inherits the
+    report — or the refusal — another one earned."""
     metrics._CACHE.clear()
+    metrics._TRAFFIC_CACHE.clear()
+    metrics._traffic_quota_spent_until = 0.0
 
 
 def _record(listing_id: str, *values):
