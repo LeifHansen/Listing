@@ -15,7 +15,7 @@ import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
-import { cn } from "@/lib/utils";
+import { cn, formatMoney } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
   endedGraceDays, isDraft, keptWhenEnded, listingsView, orderListings,
@@ -447,7 +447,7 @@ export function ListingsView({ search = "" }) {
         return (
           <p className="text-[13px] text-ink-secondary -mt-1 flex items-center gap-1.5">
             <strong className={profit >= 0 ? "text-success" : "text-warning"}>
-              {profit >= 0 ? "+" : "−"}${Math.abs(profit).toFixed(2)} profit
+              {profit >= 0 ? "+" : "−"}{formatMoney(Math.abs(profit), withCost[0].listing?.currency)} profit
             </strong>
             <span>· {withCost.length} item{withCost.length === 1 ? "" : "s"}</span>
             {approx > 0 && (

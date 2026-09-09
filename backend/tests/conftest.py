@@ -105,6 +105,24 @@ def dbmod(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_traffic_report():
+    """The eBay traffic report's hour-long cache and its spent-allowance
+    latch are process state that must outlive a request in production and
+    must NOT outlive a test: one test's report (or its 429) would otherwise
+    be the next test's answer. Every test starts with neither."""
+    try:
+        from backend.services import metrics
+    except Exception:  # noqa: BLE001 - the light job lacks its deps
+        yield
+        return
+    metrics._TRAFFIC_CACHE.clear()
+    metrics._traffic_quota_spent_until = 0.0
+    yield
+    metrics._TRAFFIC_CACHE.clear()
+    metrics._traffic_quota_spent_until = 0.0
+
+
+@pytest.fixture(autouse=True)
 def _drain_error_queue():
     """Start every test with an empty error queue.
 

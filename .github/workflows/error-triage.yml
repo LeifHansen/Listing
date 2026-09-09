@@ -155,7 +155,7 @@ jobs:
           name: error-triage
           path: /tmp/triage
 
-      - uses: anthropics/claude-code-action@c73e4281c8f9b470e3245b29bb2243b0af9cd84c # v1.0.212
+      - uses: anthropics/claude-code-action@781d62e9d5fbd78b24dcdfd42858332d485fe462 # v1.0.212
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |

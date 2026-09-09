@@ -27,6 +27,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -37,6 +38,29 @@ log = logging.getLogger("thryft.metrics")
 
 _CACHE: dict[str, tuple[float, dict, dict]] = {}
 _TTL = 120  # seconds — enough to dedupe the insights + grid fetches
+
+# The traffic report gets its own, much longer cache. eBay's Sell Analytics
+# report is a DAILY figure — it holds data through yesterday, and the request
+# below asks for exactly that — so a fresh read every two minutes learns
+# nothing new and spends the one allowance that is capped for the whole app.
+# Production hit that cap: 28 `traffic_report 429` refusals in 36 hours, every
+# dashboard load after the allowance was spent, from ONE store asking 2 pages
+# on every open. An hour is still generous against a number that changes once
+# a day; watchers, bids and pending offers keep the short cache above, because
+# a buyer can act on a listing in the next minute.
+#
+# Keyed like _CACHE (token + the id set): {key: (fetched_at, report, asked)}.
+_TRAFFIC_CACHE: dict[str, tuple[float, dict, set]] = {}
+_TRAFFIC_TTL = 60 * 60
+
+# When eBay answers the report with 429 the app's daily allowance for the
+# Analytics API is spent — an APPLICATION limit, shared by every seller, that
+# resets at midnight Pacific. Asking again before then is a guaranteed refusal
+# and a WARNING row in the error feed each time, so the refusal is remembered
+# here and the report is skipped, quietly, until the reset. A stale report is
+# served meanwhile where one is held: yesterday's traffic figures are still
+# yesterday's traffic figures.
+_traffic_quota_spent_until = 0.0
 
 # How far back the report reaches. eBay answers up to 90 days in one request,
 # and Seller Hub's own "views" column counts a listing's whole life — so a
@@ -68,11 +92,36 @@ class TrafficUnavailable(RuntimeError):
     """getTrafficReport couldn't be read. `needs_reconnect` flags the one cause
     the seller can fix: a token granted before sell.analytics.readonly was
     requested (refreshes keep the originally approved scopes, so only
-    reconnecting adds it)."""
+    reconnecting adds it).
 
-    def __init__(self, message: str, needs_reconnect: bool = False):
+    `quota` flags the one cause NOBODY can fix right now: eBay's daily
+    allowance for the report is spent (HTTP 429). It is not a fault in the
+    app or the account, so callers log it as information rather than as a
+    failure. `skipped` says the report was not even asked for, because that
+    refusal is still being remembered (see _traffic_quota_spent_until)."""
+
+    def __init__(self, message: str, needs_reconnect: bool = False,
+                 quota: bool = False, skipped: bool = False):
         super().__init__(message)
         self.needs_reconnect = needs_reconnect
+        self.quota = quota
+        self.skipped = skipped
+
+
+def _quota_reset_time(now: Optional[datetime] = None) -> float:
+    """When eBay's daily API allowance comes back, as a POSIX timestamp: the
+    next midnight in Pacific time, which is when eBay resets application call
+    limits. Without zoneinfo data on the box the reset is approximated in
+    PDT, at worst an hour early for half the year — a spare 429 then, not a
+    latch that never lifts."""
+    try:
+        tz = ZoneInfo("America/Los_Angeles")
+    except ZoneInfoNotFoundError:
+        tz = timezone(timedelta(hours=-7))
+    now = (now or datetime.now(timezone.utc)).astimezone(tz)
+    reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0,
+                                                microsecond=0)
+    return reset.timestamp()
 
 
 def _is_scope_error(resp: httpx.Response) -> bool:
@@ -132,7 +181,8 @@ def _traffic_page(token: str, listing_ids: list[str], start, end) -> dict[str, d
     )
     if r.status_code != 200:
         raise TrafficUnavailable(f"traffic_report {r.status_code}: {r.text[:160]}",
-                                 needs_reconnect=_is_scope_error(r))
+                                 needs_reconnect=_is_scope_error(r),
+                                 quota=r.status_code == 429)
     data = r.json()
     keys = _metric_keys(data)
     out: dict[str, dict] = {}
@@ -170,6 +220,7 @@ def _traffic(token: str, listing_ids: list[str],
     nothing is known about. Keeping the two apart is the whole point of
     reporting it rather than inferring it from the ids we sent.
     """
+    global _traffic_quota_spent_until
     if not listing_ids:
         return {}
     # Yesterday, not today. eBay rejects the whole report — "Neither the start
@@ -194,6 +245,19 @@ def _traffic(token: str, listing_ids: list[str],
             if exc.needs_reconnect:
                 raise
             failure = exc
+            if exc.quota:
+                # So will a spent allowance, and every call until midnight
+                # Pacific besides. Remember it, and stop asking.
+                _traffic_quota_spent_until = _quota_reset_time()
+                # WARNING once, here, when the latch is set: one row a day
+                # in the error feed is the right amount of noise for a fact
+                # the operator should see (the allowance is too small for
+                # the stores on it). Every skip after it is information.
+                log.warning("traffic report: eBay's daily allowance is spent; "
+                            "not asking again until %s",
+                            datetime.fromtimestamp(_traffic_quota_spent_until,
+                                                   timezone.utc).isoformat())
+                break
             log.info("traffic report pass failed (%d ids): %s", len(chunk), exc)
             continue
         asked.update(chunk)
@@ -204,6 +268,44 @@ def _traffic(token: str, listing_ids: list[str],
     if covered is not None:
         covered.update(asked)
     return out
+
+
+def _traffic_report(token: str, ids: list[str], covered: set) -> dict[str, dict]:
+    """`_traffic`, behind the hour-long cache and the spent-allowance latch.
+
+    Served in this order: a report younger than _TRAFFIC_TTL; while the
+    allowance is spent, whatever report is held however old (and, holding
+    none, a `skipped` TrafficUnavailable rather than a request eBay will
+    refuse); otherwise a live read, whose answer — and which ids it actually
+    covered — is kept for the next hour."""
+    key = f"{token[-12:]}:{','.join(ids)}"
+    now = time.time()
+    hit = _TRAFFIC_CACHE.get(key)
+    if hit and now - hit[0] < _TRAFFIC_TTL:
+        covered.update(hit[2])
+        return hit[1]
+    if now < _traffic_quota_spent_until:
+        if hit:
+            covered.update(hit[2])
+            return hit[1]
+        raise TrafficUnavailable(
+            "traffic report not asked for: eBay's daily allowance is spent "
+            "until midnight Pacific", quota=True, skipped=True)
+    asked: set[str] = set()
+    try:
+        report = _traffic(token, ids, asked)
+    except TrafficUnavailable as exc:
+        if exc.quota and hit:
+            # The allowance ran out on this very read. Yesterday's figures
+            # are still yesterday's figures, so the stale report stands in.
+            covered.update(hit[2])
+            return hit[1]
+        raise
+    if len(_TRAFFIC_CACHE) > 200:
+        _TRAFFIC_CACHE.clear()
+    _TRAFFIC_CACHE[key] = (now, report, set(asked))
+    covered.update(asked)
+    return report
 
 
 def _active_counts(token: str, status: Optional[dict] = None) -> dict[str, dict]:
@@ -341,13 +443,20 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
     # leaves its listings unknown rather than idle.
     covered: set[str] = set()
     try:
-        for lid, m in _traffic(token, ids, covered).items():
+        for lid, m in _traffic_report(token, ids, covered).items():
             out.setdefault(lid, {}).update(m)
     except Exception as exc:  # noqa: BLE001 - missing scope / API blip
         st = {"traffic_ok": False,
               "needs_reconnect": bool(getattr(exc, "needs_reconnect", False))}
         covered = set()
-        log.warning("traffic metrics unavailable: %s", exc)
+        if getattr(exc, "quota", False):
+            # Not a fault: eBay's daily allowance for the report is spent.
+            # The refusal that set the latch was logged once, in _traffic;
+            # every load after it is skipped by design, and a WARNING per
+            # skip is what filled the error feed with 28 rows of one fact.
+            log.info("traffic metrics skipped: %s", exc)
+        else:
+            log.warning("traffic metrics unavailable: %s", exc)
     watchers_ok = True
     offers_known: set = set()
     wst: dict = {}

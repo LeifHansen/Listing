@@ -15,17 +15,3 @@ export function ListingCardSkeleton() {
     </div>
   );
 }
-
-export function WorkflowSkeleton() {
-  return (
-    <div className="space-y-4" aria-hidden>
-      {[0, 1, 2].map((i) => (
-        <div key={i} className="bg-card rounded-card border border-line shadow-card p-6 space-y-3">
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-11 w-full" />
-          <Skeleton className="h-11 w-2/3" />
-        </div>
-      ))}
-    </div>
-  );
-}

@@ -1005,7 +1005,7 @@ function EtsyDefaults() {
 // published stays live on the seller's own eBay account — we can delete our
 // copy, not their listings).
 function DeleteAccountCard() {
-  const { user, setUser, loadEbayStatus, setPoliciesData } = useApp();
+  const { user, clearSignedInState } = useApp();
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [summary, setSummary] = useState(null);
@@ -1038,11 +1038,10 @@ function DeleteAccountCard() {
       const res = await postJson("/api/account/delete", { password });
       setOpen(false);
       // Clear every trace of the account from the running app, not just the
-      // user: the top bar reads the eBay connection and would keep showing
-      // the deleted account's username until a reload.
-      setUser(null);
-      setPoliciesData(null);
-      loadEbayStatus();
+      // user — the same teardown a sign-out does, so the native shell's
+      // stored token, the listings, the inbox and the eBay connection all
+      // go with it rather than lingering until their next fetch 401s.
+      clearSignedInState();
       toast(
         `Your account is deleted${res.deleted_listings
           ? ` — ${res.deleted_listings} listing${res.deleted_listings === 1 ? "" : "s"} and ${res.deleted_listings === 1 ? "its" : "their"} photos are gone`

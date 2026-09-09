@@ -14,6 +14,12 @@ on:
       - main
   workflow_dispatch:
 
+
+# The default GITHUB_TOKEN is read-only on this repository's contents and
+# nothing here needs more (the deploys authenticate to Fly with their own
+# token). Written down so a future job that DOES need more has to say so.
+permissions:
+  contents: read
 # Never run two deploys at once; a newer push supersedes an in-progress one.
 concurrency:
   group: fly-deploy
@@ -42,11 +48,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Pinned, not @master: this step runs in the job holding
-      # FLY_API_TOKEN, so following a moving branch means whatever
-      # superfly pushed most recently gets that token. v1.5 is the
-      # current release tag; a commit sha would be stronger still and is
-      # tracked in REMEDIATION_STATUS.md with the other actions.
+      # Pinned to a commit, not @master: this step runs in the job holding
+      # FLY_API_TOKEN, so following a moving branch means whatever superfly
+      # pushed most recently gets that token. Dependabot refreshes the pin.
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       # --no-cache and an immediate replace, because a deploy that reports
       # success while production keeps serving the previous image is the
@@ -91,6 +95,28 @@ jobs:
                     "owed-refunds counters cannot be read until it is.")
           else:
               print("OK: ADMIN_TOKEN is set")
+          # Every seller's marketplace refresh token is encrypted under
+          # TOKEN_ENCRYPTION_KEY, or under SECRET_KEY when that is unset. With
+          # NEITHER set the app mints a key into /data/.secret_key -- a file
+          # on the one un-backed-up volume -- and losing it disconnects every
+          # seller at once. A warning, not a failure: this cannot be fixed
+          # from a workflow, and blocking every release over it would only
+          # hide the message.
+          if not ({"TOKEN_ENCRYPTION_KEY", "SECRET_KEY"} & names):
+              print("::warning::Neither TOKEN_ENCRYPTION_KEY nor SECRET_KEY is a "
+                    "Fly secret, so the token-encryption key lives only in "
+                    "/data/.secret_key on the volume. Set one (and keep it in "
+                    "a password manager) before launch -- see LAUNCH_CHECKLIST.md.")
+          else:
+              print("OK: a token-encryption key is a Fly secret")
+          # The opposite check. Nothing in the app reads a Fly token, so one
+          # set on the app buys the container nothing and hands anything
+          # that can read its environment the whole Fly account (README,
+          # "the one that must NOT be on the app").
+          for stray in sorted({"FLY_API_TOKEN", "FLY_ACCESS_TOKEN"} & names):
+              print(f"::warning::{stray} is set as an APP secret. The app never "
+                    "reads it; it belongs in GitHub Actions only. Remove it: "
+                    f"flyctl secrets unset {stray} --stage")
           CHECK
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

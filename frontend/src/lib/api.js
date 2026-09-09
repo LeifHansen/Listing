@@ -63,19 +63,6 @@ export const UPLOAD_TIMEOUT_MS = 300000;
 // mid-run, so the client has to outlast it.
 export const MODEL_TIMEOUT_MS = 240000;
 
-// A deadline for a request that runs the cutout model over SEVERAL photos in
-// one go. Inference is single-flight on the server, so N photos cost roughly N
-// inferences end to end — a flat UPLOAD_TIMEOUT_MS meant "Add photos" with
-// background removal on gave up part-way through work the server was still
-// doing, every time, for anything past two photos. The cap keeps a genuinely
-// stuck request from hanging the UI forever.
-const BATCH_MODEL_CAP_MS = 900000;   // 15 min
-export function batchModelTimeoutMs(count, removeBg) {
-  if (!removeBg) return UPLOAD_TIMEOUT_MS;
-  return Math.min(BATCH_MODEL_CAP_MS,
-                  UPLOAD_TIMEOUT_MS + Math.max(0, count) * MODEL_TIMEOUT_MS);
-}
-
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.
 // Methods that are safe to repeat. A timeout on one of these tells the seller

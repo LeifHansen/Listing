@@ -91,12 +91,13 @@ def _env(*names: str) -> str:
 # the app reports the canonical name as missing while the operator is looking
 # at a dashboard showing a secret they are certain they set.
 #
-# Production is in exactly that state right now. STRIPE_API_SECRET_KEY and
-# STRIPE_API_KEY are both deployed; the code reads STRIPE_SECRET_KEY. So
-# /api/health has been reporting `tokens_missing: ["STRIPE_SECRET_KEY"]` --
-# accurate, and useless, because the answer looks like "add a Stripe key" when
-# the real answer is "rename the one already there". The entire paid tier is
-# off, and every surface that could have said so said the opposite.
+# Production was in exactly that state once. STRIPE_API_SECRET_KEY and
+# STRIPE_API_KEY were both deployed while the code read STRIPE_SECRET_KEY, so
+# /api/health reported `tokens_missing: ["STRIPE_SECRET_KEY"]` -- accurate,
+# and useless, because the answer looked like "add a Stripe key" when the
+# real answer was "rename the one already there". STRIPE_SECRET_KEY now
+# accepts STRIPE_API_SECRET_KEY as an alias (below, beside the definition);
+# the near-miss list here is for the names that are still NOT read.
 #
 # This deliberately does NOT alias the near-miss name into use. Adopting it
 # would take money-handling configuration from a variable whose contents this

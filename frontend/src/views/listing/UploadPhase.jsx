@@ -16,6 +16,7 @@ import { Card } from "@/components/ui/Card";
 import { BrandPulse } from "@/components/ui/AIStatus";
 import { PhotoUploadIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
+import { MAX_PHOTOS } from "./blockers";
 
 // When background removal can't run (out of credits, bad key, rate limit) the
 // server KEEPS the original photo — the right call, but silent: the photos just
@@ -33,11 +34,13 @@ function bgFailureMessage(results, total) {
   return `${scope} — ${reason}. Your photos were saved unchanged.`;
 }
 
-// Server-side caps (backend/main.py): one listing takes up to 40 photos; a
-// bulk batch (many items) takes up to 250. Past 40 the pile can only be a
-// bulk batch, so the toggle locks on rather than letting the upload bounce
-// off the server with an error.
-const MAX_SINGLE_FILES = 40;
+// One listing holds MAX_PHOTOS (eBay's own ceiling of 24 — the publish
+// blocker list refuses more, so a bigger pile could only ever have been a
+// draft the seller then had to thin out one confirm at a time); a bulk batch
+// (many items) takes up to 250, the server's cap. Past MAX_PHOTOS the pile
+// can only be a bulk batch, so the toggle locks on rather than letting the
+// upload bounce off the server with an error.
+const MAX_SINGLE_FILES = MAX_PHOTOS;
 const MAX_BATCH_FILES = 250;
 
 // Mirrors listing_prompt.SELLER_NOTES_MAX_CHARS. Enforced here as well as on

@@ -603,9 +603,30 @@ def _label_list(names) -> str:
     return out[0] if len(out) == 1 else ", ".join(out[:-1]) + " and " + out[-1]
 
 
+def refusal_key(issues: Optional[list]) -> str:
+    """Where eBay's refusal points, as one stable token for a log TEMPLATE:
+    the first issue's target, plus the aspect names it carries — "specifics",
+    "specifics[Inseam]", "title", "account". A 240 eBay declined to explain
+    is "unexplained" rather than "account", because that placeholder is not a
+    diagnosis (see ebay_errors.explain). No issues at all is "unclassified".
+
+    Stable by construction: nothing per-occurrence (the value refused, the
+    item id, the seller's words) goes in, so one kind of refusal is one row
+    in the error feed however many listings it happens to."""
+    if not issues:
+        return "unclassified"
+    first = issues[0] or {}
+    target = str(first.get("target") or "generic")
+    if first.get("placeholder"):
+        target = "unexplained"
+    fields = [str(f).strip() for f in (first.get("fields") or []) if str(f).strip()]
+    return target + (f"[{','.join(fields)}]" if fields else "")
+
+
 def revise_message(conflicts: Optional[dict], relist: bool,
                    remapped: str = "", unsent: Optional[list] = None,
-                   deferred: Optional[list] = None) -> str:
+                   deferred: Optional[list] = None,
+                   deferred_why: str = "", deferred_aspect: str = "") -> str:
     """What to tell the seller after eBay accepted the change.
 
     A revise deliberately omits every field the seller and eBay have BOTH
@@ -643,7 +664,17 @@ def revise_message(conflicts: Optional[dict], relist: bool,
     # or an auction is bid on or nearly over. Telling this seller to go and
     # redo it in Seller Hub would be wrong twice: Seller Hub refuses it too,
     # and the edit is already saved and queued here.
-    if deferred:
+    if deferred and deferred_why == "missing":
+        # Not a freeze: eBay now requires an aspect this listing never had,
+        # and it will not take ANY change to the specifics until it is
+        # filled. Nothing clears by itself here, so the seller is told what
+        # to fill rather than to wait.
+        want = f"“{deferred_aspect}”" if deferred_aspect else "a new item specific"
+        stayed += (f" The {_label_list(deferred)} couldn't go over yet — eBay "
+                   f"now requires {want} on this listing before it will "
+                   "accept any change to the item specifics. Fill it in under "
+                   "Item specifics and save again; the rest is saved here.")
+    elif deferred:
         stayed += (f" The {_label_list(deferred)} couldn't go over yet — eBay "
                    "freezes those while a Best Offer is pending, or an auction "
                    "has a bid or ends within 12 hours. It's saved here and "
@@ -941,15 +972,23 @@ class EbayProvider:
                 # same reason: the 21916xxx "restricted revise" family covers
                 # pending Best Offers, near-end auctions and sale price locks
                 # under one code, so the detail is what separates them.
+                #
+                # WHERE the refusal points is in the template, not the
+                # arguments: the error feed fingerprints a %-style line on its
+                # template, so with the classification in the arguments every
+                # refusal of every kind — a missing Inseam, an unknown Size, a
+                # frozen Best Offer — was one row, "x26", whose message was
+                # whichever had happened last. Now a row is one kind of
+                # refusal over one aspect, and the triage job can tell the
+                # seller's data gap from the app's bug by reading it.
                 log.warning(
-                    "%s (imported) failed: session=%s item=%s code=%s ebay=%s "
-                    "detail=%s -> shown as %s: %s",
-                    "relist" if relist else "revise", session_id,
+                    f"{'relist' if relist else 'revise'} (imported) refused "
+                    f"over {refusal_key(issues)}: %s | session=%s item=%s "
+                    "code=%s ebay=%s detail=%s",
+                    (issues[0].get("title") if issues else "?"), session_id,
                     listing.ebay_listing_id or "?",
                     getattr(exc, "code", "") or "?", str(exc)[:200],
-                    (getattr(exc, "detail", "") or "")[:200] or "(none)",
-                    (issues[0].get("target") if issues else "?"),
-                    (issues[0].get("title") if issues else "?"))
+                    (getattr(exc, "detail", "") or "")[:200] or "(none)")
                 # Refused, or never answered for? ebay_errors already writes
                 # the right sentence from this; the flag is how a CLIENT can
                 # tell without reading it. Both places: the dataclass field
@@ -1031,8 +1070,11 @@ class EbayProvider:
                      session_id, res.get("listing_id"),
                      "local-updated" if pushed_local else "unchanged")
             listing_id = str(res.get("listing_id") or "")
-            message = revise_message(listing.conflicts, relist, remapped,
-                                     unsent=unsent, deferred=deferred)
+            message = revise_message(
+                listing.conflicts, relist, remapped, unsent=unsent,
+                deferred=deferred,
+                deferred_why=str(res.get("deferred_why") or ""),
+                deferred_aspect=str(res.get("deferred_aspect") or ""))
             return PublishOutcome(
                 ok=True, listing_id=listing_id, status="published",
                 url=_view_url(listing, listing_id),
@@ -1139,13 +1181,22 @@ class EbayProvider:
                     creds["access_token"], listing, urls, creds=creds,
                     idempotency_key=publish_guard.idempotency_key(session_id))
             except ValueError as exc:  # TradingError — eBay's own reason
-                log.warning("trading publish failed: session=%s: %s", session_id, exc)
                 db.upsert_listing(session_id, listing.model_dump(),
                                   status="draft", user_id=ctx.uid)
                 issues = ebay_account.publish_block_issues(
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
                                                  creds))
+                # Logged after the classification, and with where it points
+                # in the template — see the imported revise's log line above
+                # for why. "trading publish failed: %s" was ONE fingerprint
+                # for every refusal eBay ever made, x19 in a day, and the
+                # feed could not say what any of them were.
+                log.warning(
+                    f"trading publish refused over {refusal_key(issues)}: %s "
+                    "| session=%s ebay=%s",
+                    (issues[0].get("title") if issues else "?"), session_id,
+                    str(exc)[:200])
                 # The create is the call where this matters most: an
                 # unanswered AddFixedPriceItem may have minted a live listing
                 # the record cannot point at, and the record above stays a

@@ -515,7 +515,8 @@ export function PublishBar({ w }) {
                   riskiest action in the app, and hiding it below the sm
                   breakpoint left mobile sellers — most of them — with no way
                   to check a listing before it goes live. */}
-              <Button variant="ghost" size="md" onClick={w.runPreflight}>
+              <Button variant="ghost" size="md" onClick={w.runPreflight}
+                aria-label="Check this listing before publishing">
                 <ListChecks aria-hidden /> <span className="hidden sm:inline">Check</span>
               </Button>
               <Button variant="secondary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("draft")}>

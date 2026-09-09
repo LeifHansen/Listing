@@ -25,7 +25,7 @@ import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
 import { StoreCategorySelect } from "./StoreCategorySelect";
-import { TITLE_MAX } from "./blockers";
+import { TITLE_MAX, MAX_PHOTOS } from "./blockers";
 import { issuesFor } from "./publishShared";
 import { riskyWords, riskyWordSummary } from "@/lib/riskyWords";
 
@@ -138,7 +138,17 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       toast(`${names}${more} ${rejected.length === 1 ? "isn't" : "aren't"} a photo `
         + "we can use — pick JPEG, PNG, HEIC or WebP images.", { kind: "warning" });
     }
-    if (usable.length) w.addImages(usable);
+    // The same ceiling the publish check enforces, applied where the photos
+    // come in: eBay takes MAX_PHOTOS, and adding past it only produced a
+    // listing that was blocked the moment it was saved.
+    const room = Math.max(0, MAX_PHOTOS - formImages.length);
+    if (usable.length > room) {
+      toast(room
+        ? `eBay allows ${MAX_PHOTOS} photos on a listing, so only the first ${room} of those were added.`
+        : `This listing already has eBay's maximum of ${MAX_PHOTOS} photos.`,
+        { kind: "warning" });
+    }
+    if (room && usable.length) w.addImages(usable.slice(0, room));
   };
 
   const ebayUrls = w.form.image_urls || [];

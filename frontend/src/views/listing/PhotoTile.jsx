@@ -119,8 +119,13 @@ export function PhotoTile({
         </span>
       )}
       <div
+        // pointer-coarse: a finger has no hover, so on a phone the Edit
+        // button is simply there. Without it the overlay was invisible AND
+        // still on top of the tile, so a tap on the photo's centre opened
+        // the studio from a control nobody could see.
         className="ph-ov absolute inset-0 bg-ink/0 group-hover:bg-ink/25 transition-colors duration-200
-          flex items-center justify-center p-2.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+          flex items-center justify-center p-2.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100
+          pointer-coarse:opacity-100"
       >
         <button
           type="button"

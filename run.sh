@@ -28,7 +28,7 @@ if command -v npm >/dev/null 2>&1; then
   (cd frontend && npm install --no-audit --no-fund && npm run build)
 elif [ ! -d "frontend/dist" ]; then
   echo "ERROR: Node.js/npm is required to build the frontend (frontend/dist is missing)."
-  echo "Install Node 20+ and re-run, or copy a prebuilt frontend/dist here."
+  echo "Install Node 22 (what CI and the Dockerfile use) and re-run, or copy a prebuilt frontend/dist here."
   exit 1
 fi
 
