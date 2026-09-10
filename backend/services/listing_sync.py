@@ -1254,15 +1254,46 @@ def offers_enabled(uid: Optional[str]) -> bool:
     flipping it must not go back through a live store silently opening
     hundreds of existing listings to negotiation.
     """
+    return _switch_on(uid, "allow_offers", "offers")
+
+
+def _switch_on(uid: Optional[str], key: str, what: str) -> bool:
+    """A saved on/off preference, read fail-closed.
+
+    Shared by every switch that changes what a NEW listing is. The rule is
+    the same for all of them: nobody is a no, an absent preference is a no,
+    and an unreadable one is a no with a log line -- db.get_prefs RAISES on a
+    read failure, and a database blip must never turn a feature on for every
+    listing published during it.
+    """
     if not uid:
         return False
     try:
-        value = db.get_prefs(uid).get("allow_offers")
+        value = db.get_prefs(uid).get(key)
     except Exception as exc:  # noqa: BLE001 - an outage is not a choice
-        log.warning("offers: couldn't read the allow-offers preference for "
-                    "%s, treating as off: %s", uid, exc)
+        log.warning("%s: couldn't read the %s preference for %s, treating as "
+                    "off: %s", what, key.replace("_", "-"), uid, exc)
         return False
     return bool(value)
+
+
+def international_shipping_enabled(uid: Optional[str]) -> bool:
+    """Has this seller switched eBay International Shipping on for new
+    listings?
+
+    Same contract as offers_enabled, for the same reason: the switch changes
+    who a listing is sold to. With it on, eBay shows the listing to buyers
+    abroad and the seller posts the sale to eBay's US hub; eBay carries it
+    from there. That is a commitment the seller makes, so silence and an
+    unreadable preference are both a no.
+
+    A REVISE never carries it. The switch says "new listings", and flipping
+    it must not walk back through a live store opting hundreds of listings in
+    (or, worse, sending an explicit opt-OUT for the ones eBay had enrolled on
+    its own).
+    """
+    return _switch_on(uid, "ebay_international_shipping",
+                      "international shipping")
 
 
 def publish_best_offer(creds: Optional[dict]) -> bool:
@@ -1273,6 +1304,13 @@ def publish_best_offer(creds: Optional[dict]) -> bool:
     disagree about what the real publish sends.
     """
     return offers_enabled(str((creds or {}).get("_uid") or ""))
+
+
+def publish_international_shipping(creds: Optional[dict]) -> bool:
+    """Whether a publish made with `creds` opts the listing into eBay
+    International Shipping. Same shape as publish_best_offer, same reason."""
+    return international_shipping_enabled(
+        str((creds or {}).get("_uid") or ""))
 
 
 def verifier(token: str, image_urls: list[str],
@@ -1293,6 +1331,7 @@ def verifier(token: str, image_urls: list[str],
     # to narrow a rejection down, and each probe must describe the same
     # publish — including whether it carries Best Offer.
     best_offer = publish_best_offer(c)
+    international_shipping = publish_international_shipping(c)
 
     def verify(candidate: Listing, *, with_policies: bool = True,
                with_photos: bool = True) -> None:
@@ -1309,7 +1348,8 @@ def verifier(token: str, image_urls: list[str],
             token, candidate,
             image_urls if with_photos else [],
             policies=publish_policies(candidate, c) if with_policies else None,
-            postal_code=postal, best_offer=best_offer)
+            postal_code=postal, best_offer=best_offer,
+            international_shipping=international_shipping)
     return verify
 
 
@@ -1356,7 +1396,8 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
             token, listing, image_urls,
             policies=publish_policies(listing, c),
             postal_code=postal, idempotency_key=idempotency_key,
-            best_offer=publish_best_offer(c))
+            best_offer=publish_best_offer(c),
+            international_shipping=publish_international_shipping(c))
     except AlreadyListedError as exc:
         # This publish already produced a listing — a retry, or a second
         # request that raced this one. Adopt what's there instead of creating a

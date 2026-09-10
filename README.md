@@ -425,6 +425,41 @@ with no Store. `Storefront.StoreCategoryID` rides the publish and the revise
 > publishing, deploy the app on a public host (or swap in an image CDN) so eBay
 > can fetch the optimized photos.
 
+### Selling abroad without posting abroad (eBay International Shipping)
+
+eBay International Shipping is eBay's own export programme for US sellers:
+the seller posts every sale to eBay's US shipping hub with an ordinary
+domestic label, and eBay carries it the rest of the way — the international
+leg, customs, and any return from overseas are eBay's, and the buyer pays for
+that leg. Turning it on changes who a listing is sold to, so it is a switch
+the seller flips once, under Settings → *International shipping*, and it is
+**off** until they do.
+
+The switch reaches the two places eBay reads it:
+
+- **The shipping policy the app creates.** "Create my policies" sends
+  `globalShipping: true` on the fulfillment policy — the flag eBay kept from
+  the Global Shipping Program when eIS replaced it — and the terms dialog says
+  so first (*Where you post to: The United States, and worldwide through eBay
+  International Shipping*), because a policy is a promise the seller reads
+  before it is made. A domestic policy the seller already has is not reused
+  for it: eBay refuses a second policy under a name in use, so the worldwide
+  one gets its own (`USPS Ground Advantage + eBay Intl Shipping (Thryft
+  Shop)`), and the policy picker labels which of two otherwise identical
+  policies ships abroad.
+- **Every new listing.** The publish carries
+  `ShippingDetails.GlobalShipping=true`, the Trading API's per-listing opt-in,
+  so a listing under a policy the seller made elsewhere says so too. The
+  dry-run payload shows it.
+
+Same rules as "Allow offers", because it is the same kind of switch: an absent
+or unreadable preference is a no; a revise never carries it (the switch says
+*new* listings, and flipping it must not walk back through a live store); and
+**off sends nothing rather than an opt-out** — a seller eBay enrolled on its
+own had listings going abroad before this switch existed, and must not lose
+that to a toggle they never touched. eBay applies the programme only to
+sellers enrolled in it, and enrolling is done on eBay, not here.
+
 ### Filling eBay's item specifics — and going back for the blanks
 
 Item specifics are the fields buyers filter by, so an empty one is a search

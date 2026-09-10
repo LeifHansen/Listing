@@ -2985,11 +2985,27 @@ def _accepted(payload: Optional[dict]) -> bool:
     return (payload or {}).get("accept_terms") is True
 
 
+def _international(payload: Optional[dict]) -> bool:
+    """Did the seller ask for eBay International Shipping on this policy?
+
+    Read from the request rather than the saved switch: the terms dialog
+    echoes back the options it DESCRIBED, and the policy created has to be
+    the policy shown -- not the preference as it stands a moment later.
+    Accepts the JSON boolean the dialog sends and the "1"/"true" a form or a
+    query string would, and nothing else counts as yes.
+    """
+    value = (payload or {}).get("international_shipping")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.get("/api/ebay/policy-preview")
 def ebay_policy_preview(service_code: str = "",
                         return_days: Optional[int] = None,
                         return_payer: str = "",
-                        immediate_pay: bool = True) -> dict:
+                        immediate_pay: bool = True,
+                        international_shipping: bool = False) -> dict:
     """Exactly what "Create my policies" would commit the seller to.
 
     A business policy is a public promise -- dispatch time, return window, who
@@ -3005,7 +3021,8 @@ def ebay_policy_preview(service_code: str = "",
     """
     return ebay_policy_terms.describe(
         service_code=service_code, return_days=return_days,
-        return_payer=return_payer, immediate_pay=bool(immediate_pay))
+        return_payer=return_payer, immediate_pay=bool(immediate_pay),
+        international_shipping=bool(international_shipping))
 
 
 @app.post("/api/ebay/ensure-policy")
@@ -3024,7 +3041,9 @@ def ensure_policy(request: Request, payload: dict) -> dict:
     if not _accepted(payload):
         raise HTTPException(400, _UNREVIEWED)
     try:
-        pol = ebay_auth.ensure_service_policy(creds["access_token"], svc)
+        pol = ebay_auth.ensure_service_policy(
+            creds["access_token"], svc,
+            international_shipping=_international(payload))
     except ebay_auth.PolicyLookupUnavailable as exc:
         # eBay could not be asked what the account already has. 503 and not
         # 502: nothing is wrong with the request, and the seller should retry
@@ -3073,7 +3092,8 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
            or ebay_auth.service_by_code("USPSGroundAdvantage"))
     steps = {
-        "fulfillment": lambda: ebay_auth.ensure_service_policy(token, svc),
+        "fulfillment": lambda: ebay_auth.ensure_service_policy(
+            token, svc, international_shipping=_international(opts)),
         "payment": lambda: ebay_auth.ensure_payment_policy(token),
         "return": lambda: ebay_auth.ensure_return_policy(
             token,
@@ -3439,6 +3459,13 @@ _PREF_FIELDS = {
     # is actually made, and which also explains why it never touches a listing
     # that is already live.
     "allow_offers": (int, 0, 1),
+    # Opt every new listing into eBay International Shipping: the seller
+    # posts to eBay's US hub with a domestic label and eBay carries the sale
+    # abroad. OFF unless explicitly saved on, and off means the listing says
+    # nothing about it -- eBay and the seller's own policies decide, exactly
+    # as before the switch existed. See listing_sync.international_shipping_
+    # enabled for the decision, and why a live listing is never touched.
+    "ebay_international_shipping": (int, 0, 1),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 

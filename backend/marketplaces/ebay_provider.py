@@ -1322,7 +1322,11 @@ class EbayProvider:
             # The seller's "Allow offers" switch reaches the preview too. A
             # dry run whose whole job is to show the request a publish would
             # make cannot leave out a field the real publish sends.
-            best_offer=listing_sync.offers_enabled(ctx.uid))
+            best_offer=listing_sync.offers_enabled(ctx.uid),
+            # And the "Use eBay International Shipping" switch, for the same
+            # reason: it is a field of the request being previewed.
+            international_shipping=listing_sync.international_shipping_enabled(
+                ctx.uid))
         # No postal code: a dry run has no connected account to read a
         # ship-from ZIP from, and build_add_item omits the element rather than
         # inventing one. create_listing is what refuses a real publish without

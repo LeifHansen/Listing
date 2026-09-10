@@ -3,7 +3,7 @@ import {
   Link2, Unlink, Wallet, ExternalLink, CheckCircle2, AlertTriangle,
   MapPin, Settings as SettingsIcon, LogIn, UserRound, RefreshCw,
   PackageOpen, TrendingUp, Megaphone, Store, BadgeCheck, Handshake,
-  Trash2, Clock, LogOut, Truck,
+  Trash2, Clock, LogOut, Truck, Globe,
 } from "lucide-react";
 import { api, postJson, startConnect } from "@/lib/api";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
@@ -436,6 +436,41 @@ export function SettingsView() {
           )}
         </div>
 
+        {/* ── eBay International Shipping ── */}
+        <div className="mt-7 pt-7 border-t border-line">
+          <SectionHeader
+            icon={Globe}
+            title="International shipping"
+            /* What the seller is signing up for is said where they decide
+               it. eBay International Shipping is not "you post abroad": the
+               seller posts every sale to eBay's US hub with an ordinary
+               domestic label, and eBay carries it from there — the
+               international leg, customs and any return from overseas are
+               eBay's, and the buyer pays for that leg. The two caveats are
+               not padding either: the switch does nothing for a seller eBay
+               has not enrolled, and it never reaches a listing already
+               live, so neither can read as a bug later. */
+            hint="Sell to buyers abroad without posting abroad. With eBay International Shipping you send every sale to eBay’s US shipping hub with an ordinary domestic label; eBay carries it the rest of the way, clears customs and handles any return from overseas, and the buyer pays for that leg. You need to be enrolled in the program on eBay for it to apply. Listings that are already live are left as they are."
+          />
+          {prefsError ? (
+            <PanelUnavailable
+              message="We couldn’t load your saved defaults just now, so nothing is shown here — this isn’t what you have saved. Try again in a moment."
+              onRetry={loadPrefs}
+            />
+          ) : prefs === null ? (
+            <div className="ai-shimmer h-10 rounded-tile" aria-hidden />
+          ) : (
+            <div className="max-w-lg">
+              <Toggle
+                checked={Boolean(prefs.ebay_international_shipping)}
+                onChange={(on) => setPref("ebay_international_shipping", on ? 1 : 0)}
+                label="Use eBay International Shipping on new listings"
+                help="Applies when a listing is published, and to any shipping policy you create from this screen. Turning it off later leaves listings already on eBay as they are — edit those on eBay if you want them changed."
+              />
+            </div>
+          )}
+        </div>
+
         {/* ── Auto-promote on publish ── */}
         <div className="mt-7 pt-7 border-t border-line">
           <SectionHeader
@@ -641,9 +676,18 @@ export function SettingsView() {
                       Manage them on eBay <ExternalLink size={13} aria-hidden />
                     </a>
                   </div>
+                  {/* The International shipping switch above reaches the
+                      policy too: the terms describe a policy that ships
+                      worldwide through eBay when it is on, and the create
+                      echoes those terms back. The switch as it stands on
+                      screen, saved or not — that is the one the seller is
+                      looking at while they read the terms. */}
                   <PolicyTermsDialog
                     open={reviewingTerms}
                     busy={creatingPolicies}
+                    options={{
+                      international_shipping: Boolean(prefs?.ebay_international_shipping),
+                    }}
                     onClose={() => setReviewingTerms(false)}
                     onConfirm={createPolicies}
                   />
