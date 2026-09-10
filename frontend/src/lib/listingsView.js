@@ -109,6 +109,24 @@ export const isDraft = (item) => item?.status === "draft"
   || item?.status === "dry_run";
 
 
+/* Why this draft's last publish attempt was refused, or "" if it was not.
+
+   Two sources, and the order matters. `local` is the verdict this page
+   got back from a publish it just ran; `item.listing.publish_error` is the
+   one the SERVER recorded, and it is the only one that survives a reload.
+   Without the second, a refused draft came back from a refresh looking
+   exactly like one nobody had ever tried to publish -- which is what a
+   seller means by "I published it and it will not clear from Drafts".
+
+   Nothing is shown while a retry is IN FLIGHT: the last attempt's answer
+   is not this attempt's, and leaving it up beside a spinner reads as the
+   new verdict arriving early. */
+export function lastRefusal(item, { local = "", inFlight = false } = {}) {
+  if (inFlight) return "";
+  return local || item?.listing?.publish_error || "";
+}
+
+
 /* The statuses that have left the pipeline. A sale is finished business, and
    so is an ending: the listings manager files both under Inactive, the
    dashboard's "Recent listings" strip leaves them out, and the All tab shows

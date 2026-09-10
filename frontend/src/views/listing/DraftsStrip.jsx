@@ -25,7 +25,7 @@ import {
   liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
   withCelebrating,
 } from "./publishCelebration";
-import { isDraft } from "@/lib/listingsView";
+import { isDraft, lastRefusal } from "@/lib/listingsView";
 
 /* The drafts experience on the merged Sell screen: every draft one click
    from Publish or Review & List, plus select-mode bulk publish/merge/delete.
@@ -522,7 +522,10 @@ export function DraftsStrip({ search = "" }) {
           // refuse it over, and a publish eBay actually turned down. The
           // second is the one the seller could previously miss entirely —
           // the toast said it once and the card went on looking publishable.
-          const refusal = refused[item.id];
+          // This page's own verdict from a publish it just ran, else the one
+          // the server recorded -- see lastRefusal for why both are read.
+          const refusal = lastRefusal(item, {
+            local: refused[item.id], inFlight: !!publishing[item.id] });
           const needsInfo = blockers.length > 0 || !!refusal;
           // Worded as a verdict on the LAST ATTEMPT, not on the draft as it
           // stands: the flag is cleared by the next publish, not by an edit,
