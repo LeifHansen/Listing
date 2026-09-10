@@ -22,10 +22,13 @@ from .. import config
 from ..config import log
 from . import barcodes, taxonomy
 from .listing_prompt import (
+    DENIM_TAG_SCAN_RULE,
+    DENIM_TRANSCRIBE_LINES,
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
     STICKER_AND_BARCODE_RULE,
+    VINTAGE_DENIM_RULE,
     expected_item_count,
     group_notes_block,
     identify_notes_block,
@@ -1124,7 +1127,7 @@ _TAG_SCAN_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "tags": [ {"photo": <1-based photo number>,
              "box": [x0, y0, x1, y1],
-             "kind": "size|care|brand|model|barcode|sticker|price|other"} ] }
+             "kind": "size|care|brand|model|barcode|sticker|price|patch|tab|selvedge|button|other"} ] }
 Rules:
 - Find every TAG, LABEL, STICKER, STAMP, or PRINTED MARKING that could carry
   item facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
@@ -1145,7 +1148,7 @@ Rules:
   cut off.
 - At most 6 entries, best candidates first — a barcode outranks a care label
   when you have to choose. No tags at all -> {"tags": []}.
-"""
+""" + DENIM_TAG_SCAN_RULE
 
 
 def _pil_block(img) -> dict:
@@ -1195,8 +1198,9 @@ def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
 
 
 # What the zoomed crops are actually asked for. Hoisted out of the function so
-# the multi-language and barcode rules are the SAME text the identify pass
-# gets (STICKER_AND_BARCODE_RULE), not a paraphrase of it that drifts.
+# the multi-language, barcode and vintage-denim rules are the SAME text the
+# identify pass gets (STICKER_AND_BARCODE_RULE, VINTAGE_DENIM_RULE), not a
+# paraphrase of them that drifts.
 _TAG_TRANSCRIBE_ASK = (
     "These are zoomed-in crops of the tags, labels, stickers and barcodes on "
     "that same item. Transcribe ALL text you can read on them, exactly as "
@@ -1220,9 +1224,10 @@ _TAG_TRANSCRIBE_ASK = (
     "position it is. The server checks every code's check digit, so a "
     "half-read code costs nothing and an invented one puts another company's "
     "product on this listing.\n\n"
+    + DENIM_TRANSCRIBE_LINES +
     "If a crop is unreadable, say so — never fill in what you can't see. "
     "Plain text only.\n\nThe rules these crops are read under:\n"
-    + STICKER_AND_BARCODE_RULE)
+    + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE)
 
 
 def read_tag_text(image_paths: list[Path]) -> str:
@@ -1299,6 +1304,18 @@ Rules:
   item: it answers Year Manufactured / Era / Time Period Manufactured, and
   names the Character or Franchise, at confidence "high" for the year printed
   and "medium" for the era it puts the item in.
+- JEANS AND DENIM answer their aspects from hardware and tags, read under
+  the vintage-denim rule below: the LOT on the patch or care tag is Model /
+  Product Line ("501"); a button fly is Closure "Button"; a selvedge edge
+  answers Fabric Type / Features / Denim Type with the eBay value that says
+  selvedge ("Selvedge Denim", "Selvedge") wherever the list offers one; the
+  four-digit finish code after the lot is the Wash (0000 rigid, 0115
+  stonewash, 0660 black), never the Size; "MADE IN U.S.A." is
+  Country/Region of Manufacture "United States"; and the red tab (Big E =
+  before 1971), the patch, the rivets and the care-tag production code date
+  the pair for Era / Decade / Vintage. Size is the TAG size from the patch
+  or care tag (Waist Size "32", Inseam "34") at "high"; the measured size is
+  a different fact and is never written as the tag size.
 - Clothing/shoe SIZE comes from the size tag, not from guessing: neck label,
   waistband tag, shoe tongue/heel label, or the care tag (the size often
   follows "SIZE" there). Report the marking in the aspect's expected form
@@ -1375,7 +1392,7 @@ Rules:
 _ASPECTS_SYSTEM = (
     "You are cataloguing an item for eBay. Using the product photos and the "
     "context provided, fill in the given eBay item specifics as accurately as "
-    "possible.\n\n" + _ASPECTS_FILL_SCHEMA)
+    "possible.\n\n" + _ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE)
 
 
 # How many of a fixed-choice aspect's allowed values to show the model. The old
@@ -1646,7 +1663,12 @@ def fill_aspects_combined(
             "Greek, Arabic, Hebrew, Thai, accented Latin) and answer the "
             "aspects with the English value eBay expects. Read the digits "
             "under every barcode exactly as printed, and never complete or "
-            "correct one you cannot fully see.")})
+            "correct one you cannot fully see. A crop of a red tab, a "
+            "waistband patch, a care-tag number row, the back of a button "
+            "or a fabric edge at a hem is denim's answer to Model, Era, "
+            "Closure, Fabric Type and Country — read it under the "
+            "vintage-denim rule, and claim selvedge or Big E only from "
+            "what the crop shows.")})
         content.extend(tag_crop_blocks)
     tail = "CONTEXT:\n" + _listing_context(listing)
     if want_maker:
