@@ -32,6 +32,17 @@ primary_region = 'sjc'
   # the same commit that gives it a certificate.
   APP_ORIGINS = 'https://app.thryftshop.com,https://listing-lfwjrg.fly.dev'
   DATA_DIR = '/data'
+  # WHICH MARKETPLACES THIS DEPLOY OFFERS. eBay launches to the mobile app on
+  # its own; Etsy and Depop are built and stay in the tree, withheld from
+  # every seller-facing surface until we revisit them. Withheld is also the
+  # code's default, so this line is the honest, reviewable statement of a
+  # launch decision rather than the thing that causes it — deleting it does
+  # not bring Etsy back. Add them here when we do: 'ebay,etsy' or 'all'.
+  #
+  # The ETSY_* settings below still describe a working, Etsy-approved
+  # integration. They are what comes back when this line grows, and none of
+  # them offers Etsy on their own.
+  MARKETPLACES_ENABLED = 'ebay'
   # Etsy approved this app on 2026-08-31 — at the PERSONAL tier, which seats a
   # handful of shops (Etsy documents 4), not the unlimited Commercial Access
   # above it. Not a secret, so it lives here rather than in `fly secrets`:

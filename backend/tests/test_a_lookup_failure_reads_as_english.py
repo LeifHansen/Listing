@@ -146,7 +146,8 @@ def test_autofill_uses_the_same_answer_as_the_lookup_beside_it(client,
     assert re.search(r"[0-9a-f]{8}", shown)
 
 
-def test_the_etsy_lookups_keep_the_shop_id_out_of_the_message(client, monkeypatch):
+def test_the_etsy_lookups_keep_the_shop_id_out_of_the_message(
+        client, monkeypatch, every_marketplace):
     """Etsy's own httpx error carries the API base, the path AND the seller's
     shop_id — the id is in the URL of every shop-scoped call."""
     main, api = client

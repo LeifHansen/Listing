@@ -125,6 +125,11 @@ SERVER_OWNED_FIELDS = (
     # The flag that stops this app rewriting a listing whose shape it cannot
     # represent.
     "has_variations",
+    # Why the last live publish was refused. The server writes it from
+    # what the marketplace actually said; a client only ever echoes it
+    # back, and an echo that invented one would put a refusal nobody
+    # gave on the card.
+    "publish_error",
     # eBay's own numbers. Two of them add up to the Sold total the seller
     # reads as fact, and none of them is something a client observes.
     # `sold_at` is the third part of the same observation: eBay's transaction

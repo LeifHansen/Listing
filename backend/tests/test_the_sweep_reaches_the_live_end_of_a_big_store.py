@@ -1,9 +1,8 @@
 """Reads that only ever want live listings ask for live listings.
 
-Three routes read the seller's newest `LIST_CAP` records and immediately throw
-away everything that is not live: the store sweep, the duplicate advisory and
-the promote-all pass. On a store bigger than that page the arithmetic is
-unkind. A seller with 10,000 records whose newest 3,000 happen to be mostly
+Two routes read the seller's newest `LIST_CAP` records and immediately throw
+away everything that is not live: the store sweep and the duplicate advisory.
+On a store bigger than that page the arithmetic is unkind. A seller with 10,000 records whose newest 3,000 happen to be mostly
 drafts has their OLDER live listings fall off the end -- and they are the ones
 a sweep is for. Those listings are never checked, so a sale or an ending on
 eBay is never noticed here, for as long as the store stays that shape.
@@ -158,24 +157,4 @@ def test_the_metrics_panel_asks_for_live_listings_too(seller, monkeypatch):
 
     monkeypatch.setattr(dbmod, "list_listings_best_effort", _spy)
     assert client.get("/api/ebay/listing-metrics").status_code == 200
-    assert asked == [("published", "live")]
-
-
-def test_promote_all_asks_for_live_listings_too(seller, monkeypatch):
-    """And the third: it then asks eBay which of those already carry an ad
-    (test_promote_all_promotes_what_the_group_shows), so that lookup is
-    answered here rather than left to reach the network."""
-    client, dbmod, uid = seller
-    monkeypatch.setattr(main, "_ebay_creds_for",
-                        lambda request: {"access_token": "t"})
-    monkeypatch.setattr(main.promotions, "active_ads_status",
-                        lambda creds: ({}, True))
-    asked: list = []
-
-    def _spy(limit=50, user_id=None, statuses=None):
-        asked.append(statuses)
-        return []
-
-    monkeypatch.setattr(dbmod, "list_listings", _spy)
-    assert client.post("/api/ebay/promote-all", json={}).status_code == 200
     assert asked == [("published", "live")]

@@ -53,7 +53,7 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        ebay_trading, image_import, images, imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
-                       owed_refunds, preflight, pricing, promotions,
+                       owed_refunds, preflight, pricing,
                        recommender, store_category, sync_guard, sync_merge,
                        taxonomy, tokens)
 from .services import etsy as etsy_service
@@ -3539,9 +3539,8 @@ def save_prefs(request: Request, payload: dict) -> dict:
 
 
 # Moved to marketplaces/ebay_provider.py with the publish pipeline; the local
-# names keep the sync/promotion routes below unchanged.
+# name keeps the sync routes below unchanged.
 _auto_promote_enabled = ebay_provider.auto_promote_enabled
-_promote = ebay_provider.promote
 
 
 def _load_prefs(uid: Optional[str]) -> dict:
@@ -6132,15 +6131,40 @@ def _bulk_items_from_disk(done: list[dict]) -> list[dict]:
 
     Ordered by group, not by the order the drafts happened to land: the queue
     is the seller's pile in shooting order, and items finishing out of order
-    is now the ordinary case rather than an impossible one."""
+    is now the ordinary case rather than an impossible one.
+
+    The database row is read where the disk copy is gone, in that order and
+    for the reason _listing_image_order gives: a database is OPTIONAL, so
+    disk is the only copy on a machine without one -- and where there is one,
+    the row outlives a volume that did not come back.
+
+    An item neither of them can produce is not a draft, and must not be sent
+    as one. It was: `listing` went out as null with the status left at
+    "draft", and the queue screen reads every draft's blockers straight off
+    its listing -- so ONE item whose listing.json died with the process took
+    the whole batch screen down to the error boundary, hiding the drafts that
+    had survived beside it. It goes out as the failure it is instead, which
+    the card already knows how to render and the seller can act on.
+    """
     items: list[dict] = []
     for rec in sorted(done, key=lambda r: r.get("gi") or 0):
         sid = str(rec.get("session_id") or "")
         listing = storage.load_listing(sid) if sid else None
+        if listing is None and sid:
+            # Best-effort: an unreadable store answers None here, exactly like
+            # a missing row, and both land on the same honest outcome below.
+            listing = (db.get_listing_best_effort(sid) or {}).get("listing")
         photos = (listing or {}).get("images") or []
+        lost = listing is None
+        if lost:
+            log.warning("bulk resume: no listing survived for item %s", sid)
         items.append({
             "session_id": sid, "name": rec.get("name") or "",
-            "status": rec.get("status") or "draft", "error": rec.get("error"),
+            "status": "error" if lost else (rec.get("status") or "draft"),
+            "error": rec.get("error") or (
+                "This draft couldn't be recovered after the server restarted. "
+                "The rest of the batch is unaffected — re-upload this item's "
+                "photos to draft it again." if lost else None),
             "listing_id": None,
             "thumb": f"/media/{sid}/optimized/{photos[0]}" if photos else "",
             "listing": listing,
@@ -7293,8 +7317,8 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
 
 
 # One cap for "the whole store, mirrored": every consumer of the list (the
-# grid, sync reconciliation, insights, promote-all) has to see at least what
-# the import brought in, or it silently hides part of the store.
+# grid, sync reconciliation, insights) has to see at least what the import
+# brought in, or it silently hides part of the store.
 #
 # It has to stay ahead of the import, not match it: at 600 — with the active
 # import capped at 300 + 100 sold + 100 ended — a seller with 616 active
@@ -7482,56 +7506,6 @@ def _metrics_by_record_id(creds: Optional[dict], items: list,
     return {id_by_ebay[eid]: m for eid, m in raw.items() if eid in id_by_ebay}
 
 
-def _rates_by_record_id(creds: Optional[dict], items: list) -> dict:
-    """eBay's recommended ad rate for the user's live listings, keyed by OUR
-    record id. Best-effort — {} when unavailable."""
-    id_by_ebay = _live_ebay_id_map(items)
-    if not creds or not id_by_ebay:
-        return {}
-    try:
-        raw = promotions.suggested_ad_rates(creds, list(id_by_ebay))
-    except Exception as exc:  # noqa: BLE001 - recommendations are optional
-        log.info("ad-rate recommendations unavailable: %s", exc)
-        return {}
-    return {id_by_ebay[eid]: r for eid, r in raw.items() if eid in id_by_ebay}
-
-
-def _promoted_record_ids(creds: Optional[dict], items: list) -> tuple[set, bool]:
-    """(record ids with an ACTIVE eBay ad, did eBay actually answer).
-
-    Ours OR ads created directly in Seller Hub, so we never suggest promoting
-    an item that is already promoted. The flag matters because promoting costs
-    the seller a percentage of the sale: an empty set from a failed lookup is
-    not evidence that nothing is promoted, and recommending a purchase on that
-    basis is how a seller who promotes in Seller Hub gets invited to pay for a
-    second ad during an eBay outage.
-    """
-    if not creds:
-        return set(), False
-    ads, known = promotions.active_ads_status(creds)
-    promoted = set()
-    live = 0
-    for it in items:
-        if it.get("status") not in ("published", "live"):
-            continue
-        live += 1
-        listing = it.get("listing") or {}
-        eid = str(listing.get("ebay_listing_id") or "")
-        sku = ebay.sku_for(it["id"])
-        if (eid and eid in ads) or (sku and sku in ads):
-            promoted.add(it["id"])
-    # The one line that says why the "Promote listings" group holds what it
-    # holds. A seller whose whole store is promoted in Seller Hub and who is
-    # still shown fifty listings to promote is either looking at ads eBay
-    # did not list (matched=0 against ad_keys=0 -- see the campaign summary
-    # active_ads_status logs) or at ads keyed by something other than the
-    # item id our records carry (ad_keys>0, matched=0); nothing else on the
-    # screen can tell those apart.
-    log.info("active ads: known=%s ad_keys=%d live=%d matched=%d",
-             known, len(ads), live, len(promoted))
-    return promoted, known
-
-
 @app.get("/api/ebay/listing-metrics")
 def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
     """eBay views/impressions/watchers/pending offers for the user's live
@@ -7661,9 +7635,8 @@ def _blank_specifics_by_id(items: list[dict]) -> dict:
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, promote/reprice stale live ones. Folds in
-    eBay views/watchers and recommended ad rates when available. Returns an empty
-    list for logged-out users. Never raises."""
+    finish drafts, reprice stale live ones. Folds in eBay views/watchers when
+    available. Returns an empty list for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
         return {"recommendations": [], "bulk_caps": _bulk_caps()}
@@ -7671,13 +7644,10 @@ def insights(request: Request) -> dict:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
-        rates_by_id = _rates_by_record_id(creds, items)
-        promoted_ids, promotion_known = _promoted_record_ids(creds, items)
         # limit=50: the dashboard groups these by category now, so each group
         # should show its full membership — the old flat list capped at 8.
         return {"recommendations": recommender.recommendations(
-            items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
-            promoted_ids=promoted_ids, promotion_known=promotion_known,
+            items, metrics_by_id=metrics_by_id,
             limit=50, blanks_by_id=_blank_specifics_by_id(items)),
             # What one tap on a group can actually reach in a single run — the
             # group renders its button, so it has to know. See _bulk_caps.
@@ -7685,131 +7655,6 @@ def insights(request: Request) -> dict:
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": [], "bulk_caps": _bulk_caps()}
-
-
-@app.post("/api/ebay/promote")
-def promote_one(payload: dict, request: Request) -> dict:
-    """One-click promote a single LIVE listing via Promoted Listings Standard,
-    using the given ad rate, else eBay's recommended rate, else the default."""
-    user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
-    if not user or not creds:
-        raise HTTPException(400, "Connect eBay first.")
-    lid = str(payload.get("listing_id") or "").strip()
-    rec = db.get_listing(lid)
-    if not rec or (rec.get("user_id") and rec["user_id"] != user["id"]):
-        raise HTTPException(404, "Listing not found")
-    if rec.get("status") not in ("published", "live"):
-        raise HTTPException(400, "Only live listings can be promoted.")
-    listing = Listing(**(rec.get("listing") or {}))
-    try:
-        rate = float(payload.get("ad_rate_percent") or 0)
-    except (TypeError, ValueError):
-        rate = 0.0
-    if rate <= 0:
-        rate = _rates_by_record_id(creds, [rec]).get(lid) or 0
-    status = _promote(lid, listing, creds, rate=rate)
-    if status.get("promoted"):
-        storage.save_listing(lid, listing)
-        db.upsert_listing(lid, listing.model_dump(), status=rec.get("status"),
-                          user_id=user["id"])
-    return {"ok": bool(status.get("promoted")), "ad_rate": listing.ad_rate_percent,
-            "needs_reconnect": bool(status.get("needs_reconnect")),
-            "message": status.get("message")}
-
-
-@app.post("/api/ebay/promote-all")
-def promote_all(request: Request, payload: Optional[dict] = None) -> dict:
-    """Promote the listings the Dashboard's "Promote listings" group names, at
-    eBay's recommended rate (falling back to the default). Best-effort per
-    item; stops early and asks the user to reconnect if the token lacks ad
-    permissions.
-
-    "Already promoted" means here exactly what it means to the suggestion
-    this button sits on. The group is built from two signals -- this app's
-    own Promote flag and eBay's live ad list, which is what catches an ad the
-    seller created in Seller Hub -- and this route used to read only the
-    first. So it disagreed with the group it belonged to: it promoted every
-    live listing without our flag, Seller-Hub-promoted ones included, and it
-    did so during an ads outage too, when the group had (rightly) gone quiet.
-    Promoting costs a percentage of the sale, and the whole point of reading
-    eBay's list is to not pay for it twice; the route reads it now and
-    refuses to spend on an unanswered question, the same rule the recommender
-    already keeps.
-
-    The caller names the listings, like the other bulk verbs, so the button
-    promotes the group the seller confirmed rather than the seller's whole
-    store: the suggestions panel is capped, so a badge reading 50 could sit
-    over a store with 900 unpromoted listings, and "Promote 50 listings?"
-    was then a promise about 900. No ids keeps the old whole-store reach for
-    anything that still calls it that way, with the same ad check.
-    """
-    user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
-    if not user or not creds:
-        raise HTTPException(400, "Connect eBay first.")
-    ids = [str(i).strip() for i in ((payload or {}).get("listing_ids") or [])
-           if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    # Bounded for the same reason lower-prices is: the lookup is BY id, and
-    # an unbounded body is an unbounded `IN (...)`.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
-    if ids:
-        # Ownership is enforced inside the read; an id that does not come
-        # back is not the seller's, or is gone.
-        mine = db.get_listings(ids, user["id"])
-    else:
-        mine = db.list_listings(limit=LIST_CAP, user_id=user["id"],
-                                statuses=("published", "live"))
-    live = [i for i in mine if i.get("status") in ("published", "live")]
-    promoted_ids, known = _promoted_record_ids(creds, live)
-    if not known:
-        # No fee on the strength of a question nobody managed to ask -- see
-        # _promoted_record_ids. Not a 4xx: the seller did nothing wrong.
-        raise HTTPException(
-            503, "We couldn't read your eBay ads just now, so nothing was "
-                 "promoted. Try again in a moment.")
-    targets: list[dict] = []
-    already = 0
-    for it in live:
-        if (it.get("listing") or {}).get("promote") or it["id"] in promoted_ids:
-            already += 1
-        else:
-            targets.append(it)
-    # Each promotion is its own Marketing API round trip (two when the ad
-    # already exists), run one after another; the run is bounded like the
-    # other bulk passes and the rest is reported for a second one.
-    records, deferred = targets[:BULK_PROMOTE_CAP], targets[BULK_PROMOTE_CAP:]
-    rates = _rates_by_record_id(creds, records)
-    promoted = 0
-    failed = 0
-    needs_reconnect = False
-    for it in records:
-        listing = Listing(**(it.get("listing") or {}))
-        status = _promote(it["id"], listing, creds, rate=rates.get(it["id"]))
-        if status.get("promoted"):
-            storage.save_listing(it["id"], listing)
-            db.upsert_listing(it["id"], listing.model_dump(), status=it.get("status"),
-                              user_id=user["id"])
-            promoted += 1
-        elif status.get("needs_reconnect"):
-            needs_reconnect = True
-            break
-        else:
-            failed += 1
-    # Asked for but not live any more, or not the seller's: reported, not
-    # silently dropped from the totals.
-    skipped = (len(ids) - len(mine) if ids else 0) + (len(mine) - len(live))
-    log.info("promote-all: user=%s asked=%d live=%d already_promoted=%d "
-             "promoted=%d failed=%d skipped=%d deferred=%d", user["id"],
-             len(ids), len(live), already, promoted, failed, skipped,
-             len(deferred))
-    return {"promoted": promoted, "total": len(records),
-            "already_promoted": already, "failed": failed, "skipped": skipped,
-            "deferred": len(deferred), "needs_reconnect": needs_reconnect}
 
 
 # How many listings one bulk price run touches. Each is a serial eBay revise;
@@ -7821,11 +7666,6 @@ BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
 # than refused, and far below anything that makes an `IN (...)` a
 # problem. Same role as the 200 the bulk delete already applies.
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
-# How many listings one promote-all run touches. Cheaper per listing than a
-# revise (one Marketing API call, two for an ad that already exists, and the
-# campaign lookup is cached), but still serial, and the old unbounded pass
-# over a whole store would not have come back inside the gateway's patience.
-BULK_PROMOTE_CAP = int(os.getenv("BULK_PROMOTE_CAP", "40") or "40")
 
 
 @app.post("/api/ebay/lower-prices")
@@ -7939,8 +7779,7 @@ def _bulk_caps() -> dict:
     with the recommendations so the group can say what this pass will actually
     do before the seller agrees to spend anything on it.
     """
-    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP,
-            "promote": BULK_PROMOTE_CAP}
+    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP}
 
 
 # The enrichment runs as a background job, one per account at a time: it
@@ -8682,6 +8521,76 @@ def merge_listings(payload: dict, request: Request) -> dict:
             "applied": applied, "listing": listing.model_dump()}
 
 
+# --- why a publish did not go live, on the record ----------------------------
+#
+# A refused publish is the seller's to fix, and until now the app said so
+# exactly twice: in a toast that is gone in seconds, and in a React state map
+# that is gone on reload. What survived was a card sitting in Drafts looking
+# like a draft nobody had ever tried to publish. The seller knows they pressed
+# Publish, so the app reads as broken -- "I published it and it will not clear
+# from Drafts" -- when what actually happened is that eBay said no and nothing
+# kept the sentence.
+#
+# So the reason goes on the record, and the card reads it back.
+
+
+def _refusal_sentence(outcome) -> str:
+    """The one sentence a refused publish should leave behind.
+
+    The same pick the browser makes (publishShared.blockedReason): an issue
+    the app worked out beats the marketplace's own message, because eBay's
+    catch-all for an account-level hold blames the title -- and a placeholder
+    ("the publish stopped and nobody said why") goes last, so it can never
+    hide a diagnosis standing beside it.
+    """
+    errors = [i for i in (outcome.issues or [])
+              if isinstance(i, dict) and i.get("level") != "warn" and i.get("title")]
+    named = [i for i in errors if not i.get("placeholder")]
+    best = (next((i for i in named
+                  if i.get("target") and i.get("target") != "generic"), None)
+            or (named[0] if named else None)
+            or (errors[0] if errors else None))
+    return str((best or {}).get("title") or outcome.message or "").strip()
+
+
+def _record_publish_verdict(session_id: str, uid: Optional[str],
+                            outcomes: list, mode: str) -> None:
+    """Persist (or clear) why the last LIVE publish did not land.
+
+    Cleared the moment anything goes live -- including a fan-out where one
+    marketplace refused and another did not, because the listing is live and
+    the refusal it still carries is per-marketplace state, not this.
+
+    Left ALONE for the two outcomes that are not refusals: an answer that
+    never came back (the listing may be live, and calling that a refusal is
+    what sends someone to list it twice) and a dry run. A draft save is not a
+    publish attempt at all.
+
+    Never raises: this is bookkeeping about a publish, and a publish that
+    already happened must not be reported as failed because of it.
+    """
+    if mode != "live" or not outcomes:
+        return
+    try:
+        if any(o.ok and o.status == "published" for o in outcomes):
+            reason = ""
+        elif any(o.outcome_unknown for o in outcomes) or all(o.dry_run for o in outcomes):
+            return
+        else:
+            reason = "; ".join(
+                dict.fromkeys(filter(None, (_refusal_sentence(o) for o in outcomes))))[:300]
+            if not reason:
+                return
+
+        def _set(data: dict) -> dict:
+            data["publish_error"] = reason
+            return data
+
+        db.mutate_listing_data(session_id, _set, user_id=uid)
+    except Exception as exc:  # noqa: BLE001 - never fail a publish over this
+        log.warning("publish verdict not recorded for %s: %s", session_id, exc)
+
+
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     """Publish orchestrator.
@@ -8741,6 +8650,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         # upsert here.
         provider = marketplaces.get("ebay")
         outcome = provider.publish(_ctx(), provider.creds_for(uid))
+        _record_publish_verdict(req.session_id, uid, [outcome], req.mode)
         return JSONResponse(outcome.raw)
 
     def _publish_one(key: str) -> PublishOutcome:
@@ -8785,6 +8695,9 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         # No row yet (or no DB): fall back to creating one from the request.
         data = _fold(req.listing.model_dump())
         db.upsert_listing(req.session_id, data, status=top, user_id=uid)
+
+    _record_publish_verdict(req.session_id, uid, list(outcomes.values()),
+                            req.mode)
 
     live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
     failed = [k for k, o in outcomes.items() if not o.ok]
@@ -9940,7 +9853,7 @@ def marketplace_roster(request: Request) -> dict:
 # suggestion. Literal paths, so they must sit above the {marketplace} routes.
 @app.get("/api/etsy/settings-options")
 def etsy_settings_options(request: Request) -> dict:
-    provider = marketplaces.get("etsy")
+    provider = _marketplace_or_404("etsy")
     creds = provider.creds_for(_uid(request))
     if not creds:
         raise HTTPException(400, "Connect Etsy first.")
@@ -9967,6 +9880,7 @@ def etsy_settings_options(request: Request) -> dict:
 
 @app.post("/api/etsy/settings-options")
 def save_etsy_settings_options(request: Request, payload: dict) -> dict:
+    _marketplace_or_404("etsy")
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
@@ -9991,7 +9905,12 @@ def save_etsy_settings_options(request: Request, payload: dict) -> dict:
 def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> dict:
     """Best Etsy category for this listing: cheap keyword shortlist over the
     cached seller taxonomy, then one small Claude pick."""
-    if not config.etsy_oauth_ready():
+    # 400, not the 404 the other Etsy routes give: this path carries a
+    # session_id, and a 404 on a listing-scoped route reads as "your listing
+    # is gone" (test_a_listing_we_cannot_read_is_not_missing enforces that).
+    # Withheld and unconfigured are one sentence to a seller — this server
+    # does not do Etsy — and neither of them is news about their listing.
+    if marketplaces.get("etsy") is None or not config.etsy_oauth_ready():
         raise HTTPException(400, "Etsy isn't configured on the server.")
     _assert_session_owner(session_id, request)
     listing = Listing(**(payload.get("listing") or {}))
@@ -10007,6 +9926,12 @@ def _flow_cookie(marketplace: str) -> str:
 
 
 def _marketplace_or_404(marketplace: str):
+    """The provider, or 404 — for an unknown key and equally for one this
+    deployment withholds (config.MARKETPLACES_ENABLED). A withheld
+    marketplace is absent from the roster the UI is built from, so the only
+    way to reach these routes for one is by hand; "unknown" is the right
+    amount to tell that caller, and it keeps every marketplace route on one
+    failure mode instead of two."""
     provider = marketplaces.get(marketplace)
     if provider is None:
         raise HTTPException(404, "Unknown marketplace")
