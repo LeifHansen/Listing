@@ -22,6 +22,9 @@ from .. import config
 from ..config import log
 from . import barcodes, taxonomy
 from .listing_prompt import (
+    ART_RULE,
+    ART_TAG_SCAN_RULE,
+    ART_TRANSCRIBE_LINES,
     DENIM_TAG_SCAN_RULE,
     DENIM_TRANSCRIBE_LINES,
     EBAY_CONDITIONS,
@@ -1127,7 +1130,7 @@ _TAG_SCAN_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
 { "tags": [ {"photo": <1-based photo number>,
              "box": [x0, y0, x1, y1],
-             "kind": "size|care|brand|model|barcode|sticker|price|patch|tab|selvedge|button|other"} ] }
+             "kind": "size|care|brand|model|barcode|signature|edition|stamp|caption|label|sticker|price|patch|tab|selvedge|button|other"} ] }
 Rules:
 - Find every TAG, LABEL, STICKER, STAMP, or PRINTED MARKING that could carry
   item facts: neck labels, waistband tags, care tags, shoe tongue/heel labels,
@@ -1148,7 +1151,7 @@ Rules:
   cut off.
 - At most 6 entries, best candidates first — a barcode outranks a care label
   when you have to choose. No tags at all -> {"tags": []}.
-""" + DENIM_TAG_SCAN_RULE
+""" + DENIM_TAG_SCAN_RULE + ART_TAG_SCAN_RULE
 
 
 def _pil_block(img) -> dict:
@@ -1198,9 +1201,9 @@ def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
 
 
 # What the zoomed crops are actually asked for. Hoisted out of the function so
-# the multi-language, barcode and vintage-denim rules are the SAME text the
-# identify pass gets (STICKER_AND_BARCODE_RULE, VINTAGE_DENIM_RULE), not a
-# paraphrase of them that drifts.
+# the multi-language, barcode, vintage-denim and art rules are the SAME text
+# the identify pass gets (STICKER_AND_BARCODE_RULE, VINTAGE_DENIM_RULE,
+# ART_RULE), not a paraphrase of them that drifts.
 _TAG_TRANSCRIBE_ASK = (
     "These are zoomed-in crops of the tags, labels, stickers and barcodes on "
     "that same item. Transcribe ALL text you can read on them, exactly as "
@@ -1224,10 +1227,10 @@ _TAG_TRANSCRIBE_ASK = (
     "position it is. The server checks every code's check digit, so a "
     "half-read code costs nothing and an invented one puts another company's "
     "product on this listing.\n\n"
-    + DENIM_TRANSCRIBE_LINES +
+    + DENIM_TRANSCRIBE_LINES + ART_TRANSCRIBE_LINES +
     "If a crop is unreadable, say so — never fill in what you can't see. "
     "Plain text only.\n\nThe rules these crops are read under:\n"
-    + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE)
+    + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE)
 
 
 def read_tag_text(image_paths: list[Path]) -> str:
@@ -1392,7 +1395,7 @@ Rules:
 _ASPECTS_SYSTEM = (
     "You are cataloguing an item for eBay. Using the product photos and the "
     "context provided, fill in the given eBay item specifics as accurately as "
-    "possible.\n\n" + _ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE)
+    "possible.\n\n" + _ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE + ART_RULE)
 
 
 # How many of a fixed-choice aspect's allowed values to show the model. The old
@@ -1633,8 +1636,12 @@ top-level "maker" key to the SAME JSON object:
           "evidence": "<concise: what in the photos supports this>",
           "confidence": "low|medium|high"}
 Name the MOST SPECIFIC maker the evidence supports (e.g. "Fenton" not "a
-glass maker"). If the photos genuinely show no identifiable maker, return ""
-— a wrong maker is worse than a blank one.
+glass maker"). For a work of ART the maker is the ARTIST, read off the
+signature in the margin, a lower corner or the back (letter by letter --
+never completed into a name the letters do not spell), never the
+publisher, gallery or framer named on a label. If the photos genuinely
+show no identifiable maker, return "" — a wrong maker is worse than a
+blank one.
 """
 
 
@@ -1668,7 +1675,13 @@ def fill_aspects_combined(
             "or a fabric edge at a hem is denim's answer to Model, Era, "
             "Closure, Fabric Type and Country — read it under the "
             "vintage-denim rule, and claim selvedge or Big E only from "
-            "what the crop shows.")})
+            "what the crop shows. A crop of a print's margin, a pencil "
+            "signature, an edition fraction, a chop or a label on the "
+            "back is art's answer to Artist, Signed, Signed By, Edition "
+            "Type, Edition Size, Print Type and Original/Licensed "
+            "Reprint — read it under the art rule: transcribe the "
+            "signature letter by letter, and claim Signed or a numbered "
+            "edition only from what the crop shows.")})
         content.extend(tag_crop_blocks)
     tail = "CONTEXT:\n" + _listing_context(listing)
     if want_maker:
@@ -1756,6 +1769,12 @@ Rules:
   * Original/Reproduction, Signed, Handmade, Antique — answer these from the
     evidence you can see, and never downgrade the item to be safe: an unmarked
     piece is not a "Reproduction", it is an item whose aspect stays blank.
+    On art, Signed means a HAND signature you can see; a signature printed
+    as part of the image is not one, and a margin or a back you cannot see
+    is a blank, never "No". Edition Type takes "Limited Edition" only from
+    an edition fraction or a proof mark (A/P, H/C) you can read, and "Open
+    Edition" only from a printed credit line with no number — never as the
+    default for a print whose margin is out of frame.
 - FIXED-CHOICE aspects: the value MUST be copied VERBATIM from that aspect's
   allowed list, exactly as spelled there — a near miss is dropped and the box
   stays empty. When the list holds nothing that is true of this item, leave the
@@ -2001,17 +2020,27 @@ Return ONLY a JSON object (no markdown fences):
   "artist": "the artist's name as catalogued, or \"\" if not established",
   "work": "the title of this specific work, or \"\" if not established",
   "kind": "original | hand-signed limited edition print | open edition print | poster or reproduction -- or \"\" if the photos cannot say",
+  "signature": "how THIS piece is signed, from the photos: \"hand signed in pencil, lower right margin\", \"signed in the plate only\", \"signed in paint, lower left\", \"not visible in these photos\" -- or \"\"",
+  "signature_reads": "the signature's letters exactly as they read, or \"\"",
+  "edition": "the edition fraction or annotation EXACTLY as written on the piece -- 84/250, A/P, H/C 5/20 -- or \"not visible in these photos\", or \"\"",
   "year": "the year or period of the work or of this edition, or \"\"",
   "publisher": "the publisher, printer or gallery named on the print, or \"\"",
   "read_from_print": "the text you could actually read ON the print -- signature, printed title, edition number, publisher or copyright line -- or \"\"",
   "evidence": "one or two sentences: what settled the artist and the work (text on the print, a reverse-image match, a composition you recognised) and which source confirmed it",
-  "title": "an eBay title <= 80 chars that LEADS with the artist's name, then the work's title, then what kind of print it is -- or \"\" if unresolved",
+  "title": "an eBay title <= 80 chars that LEADS with the artist's name, then the work's title, then the medium (lithograph, serigraph, etching, oil on canvas), then the words the photos earn -- \"Hand Signed\", \"Signed & Numbered 84/250\", \"Artist Proof\", \"Original\" -- then Framed -- or \"\" if unresolved",
   "verify": ["what the SELLER must physically check: an edition number, a pencil signature, a blind stamp, a plate mark, a watermark, the paper"],
   "sources": ["urls you actually used"],
   "confidence": "low|medium|high"
 }
 Rules:
-- READ THE PRINT FIRST. A signature, a printed title or caption, a publisher
+- READ THE PIECE FIRST -- the margin and the back before the picture. A
+  signature is transcribed LETTER BY LETTER and never completed into a name
+  the letters do not spell; a signature that is part of the printed image
+  ("in the plate") is not a hand signature, and a pencil fraction beside a
+  pencil signature is what makes a print a hand-signed limited edition.
+  Fill "signature", "signature_reads" and "edition" from the photos alone,
+  exactly as read, and never write "unsigned" or "open edition" about a
+  margin or a back you cannot see. A signature, a printed title or caption, a publisher
   or gallery line, an edition number, a copyright notice: transcribe what is
   there before anything else. When the print names its artist and its work,
   that is the answer -- confirm it with one search and stop.
@@ -2031,7 +2060,8 @@ Rules:
 - If nothing settled the artist, leave artist and work "" and say so with
   confidence "low". A guessed attribution is worse than a blank.
 - Cite what you used in sources. A name with no source is a guess.
-"""
+The art rule every pass in this app reads the piece under:
+""" + ART_RULE
 
 
 def _lead_text(value, limit: int = 200) -> str:
@@ -2047,10 +2077,16 @@ def _lead_text(value, limit: int = 200) -> str:
 
 def identify_artwork(image_paths: list[Path], listing: Listing,
                      leads: Optional[list[dict]] = None,
-                     observations: str = "") -> Optional[dict]:
+                     observations: str = "",
+                     crops: Optional[list[dict]] = None) -> Optional[dict]:
     """Name the artist and the work behind a print, with web search and any
     reverse-image leads the caller found. Returns the parsed dict, or None
     when the pass did not run or produced nothing usable.
+
+    `crops` are zoomed image blocks of the boxes the identify pass drew
+    (tag_crops): the signature, the edition number, a chop, the labels on
+    the back. They go in after the whole frames, because that is where
+    the pencil is legible.
 
     Best-effort by contract, like research_item: every caller treats a
     failure as "no answer". Raises nothing.
@@ -2060,6 +2096,21 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
     try:
         client = _client()
         imgs = [_image_block(p) for p in image_paths[:4]]
+        if crops:
+            imgs.append({"type": "text", "text": (
+                "Zoomed-in crops of this piece's margin, signature, edition "
+                "number, stamps and labels follow. Read them under the art "
+                "rule and fill signature, signature_reads and edition from "
+                "them: a pencil signature that is a scrawl in the frames "
+                "above is legible here.")})
+            imgs.extend(crops[:6])
+        # The specifics the zoom pass filled off the margin -- Artist,
+        # Signed By, Edition Size -- are the best evidence this pass has
+        # after the photos themselves, and they were read at a resolution
+        # the four frames here are not.
+        specifics = "; ".join(
+            f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:16]
+            if (s.value or "").strip())
         lead_lines = "\n".join(
             f"  - {_lead_text(lead.get('title'))}"
             + (f" ({_lead_text(lead.get('source'), 80)})" if lead.get("source") else "")
@@ -2067,11 +2118,13 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
             for lead in (leads or [])[:12] if lead.get("title"))
         context = (
             "A first-pass AI drafted this listing FROM THE PHOTOS ALONE and "
-            "could not name the artist or the work. Establish both.\n\n"
+            "its title does not yet name the artist and the work. Establish "
+            "both, and how this piece is signed and numbered.\n\n"
             f"Drafted title: {listing.title}\n"
             f"Drafted artist/brand: {listing.brand or '(none)'}\n"
             f"Category: {listing.category_suggestion or '(unknown)'}\n"
-            f"What the first pass saw: {(observations or '')[:600]}\n"
+            f"Specifics so far: {specifics or '(none)'}\n"
+            f"What the first pass saw: {(observations or '')[:1200]}\n"
             # Fenced, and said to be what it is. These are page titles from
             # whatever sites the image search matched, going into a prompt
             # that can run web searches: data to weigh against the photos,
