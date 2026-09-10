@@ -1,15 +1,14 @@
 """Seller action recommendations — the app's 'what should I do next' engine.
 
 Rules over the signals we already have (listing status, age, price, photos,
-promotion, missing details) turn a pile of listings into a short, ranked list
-of concrete next actions: finish a draft, promote a live one, drop a stale
-price, add photos, fill in missing details.
+missing details) turn a pile of listings into a short, ranked list of concrete
+next actions: finish a draft, drop a stale price, add photos, fill in missing
+details.
 
 eBay traffic (views/watchers), when available, sharpens these: a listing with
-lots of views but no watchers is priced too high; one with watchers but no sale
-wants a nudge (offer/sale); one with almost no views wants promotion. Pass a
-per-listing metrics dict ({views, watchers}) to fold those in — without it, the
-age heuristics still produce useful advice.
+lots of views but no watchers is priced too high. Pass a per-listing metrics
+dict ({views, watchers}) to fold those in — without it, the age heuristics
+still produce useful advice.
 """
 from __future__ import annotations
 
@@ -102,21 +101,10 @@ def filled_specifics(listing: dict) -> int:
 
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
-                  rate: Optional[float] = None, promoted: bool = False,
-                  promotion_known: bool = True,
                   blank_specifics: Optional[int] = None) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
-    {listing_id, listing_title, type, label, reason, action, priority, rate}.
-    `rate` is eBay's recommended Promoted Listings ad rate (%) for this listing,
-    carried on promote recs so the UI can one-click promote at that rate.
+    {listing_id, listing_title, type, label, reason, action, priority}.
     Higher priority = surface sooner.
-
-    `promotion_known` is whether eBay actually answered when asked which
-    listings already have ads. When it did not, no promote recommendation is
-    made at all: promoting costs the seller a percentage of the sale, and
-    `promoted=False` from an unanswered lookup is not evidence that a listing
-    is unpromoted — it is the absence of evidence either way. Defaults True so
-    a caller that does not pass it keeps its recommendations.
 
     `blank_specifics` is how many of eBay's item specifics for this listing's
     category it currently holds no value for, counted against eBay's own
@@ -131,10 +119,10 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     recs: list[dict] = []
 
     def add(type_: str, label: str, reason: str, priority: int,
-            action: str = "open", rate_: Optional[float] = None):
+            action: str = "open"):
         recs.append({"listing_id": lid, "listing_title": title, "type": type_,
                      "label": label, "reason": reason, "action": action,
-                     "priority": priority, "rate": rate_})
+                     "priority": priority})
 
     if status == "unlisted":
         add("finish", "Finish & list",
@@ -154,26 +142,14 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     watchers = m.get("watchers")
     age = _age_days(item.get("created_at"))
     images = listing.get("images") or listing.get("image_urls") or []
-    # Promoted if our own flag says so OR eBay reports a live ad (covers ads
-    # created straight in Seller Hub) — so we never nag an already-promoted item.
-    promoted = bool(listing.get("promote")) or promoted
 
     # Data-driven (real eBay traffic) beats the age heuristics below.
     # (No "Add a sale" nudge — removed on request: it read as noise.)
     if views is not None and views >= 30 and not watchers:
         add("lower_price", "Lower the price",
             f"{views} views but no watchers — buyers are looking; the price may be high.", 92)
-    if (promotion_known and views is not None and views < 5
-            and age and age >= 7):
-        add("promote", "Promote",
-            f"Only {views} views in {age} days — promote it to reach more buyers.", 90,
-            rate_=rate)
 
     # Heuristics that need no eBay metrics.
-    if promotion_known and not promoted:
-        add("promote", "Promote",
-            "Not promoted yet — promoted listings show up far more often.", 70,
-            rate_=rate)
     if age is not None and age >= STALE_DAYS:
         add("lower_price", "Lower the price",
             f"Live {age} days — a price drop can restart interest.", 68)
@@ -241,16 +217,12 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
 
 
 def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
-                    rates_by_id: Optional[dict] = None,
-                    promoted_ids: Optional[set] = None,
-                    promotion_known: bool = True, limit: int = 8,
+                    limit: int = 8,
                     blanks_by_id: Optional[dict] = None) -> list[dict]:
     """Ranked recommendations across many listing records (best first). Keeps
     the single strongest action per listing so the list spans the whole
     portfolio instead of piling onto one item."""
     metrics_by_id = metrics_by_id or {}
-    rates_by_id = rates_by_id or {}
-    promoted_ids = promoted_ids or set()
     blanks_by_id = blanks_by_id or {}
     # Keep the strongest action per listing as they are generated, rather than
     # collecting every rec across the whole store and sorting the lot to throw
@@ -264,9 +236,6 @@ def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
     for it in items:
         for r in recommend_for(
                 it, metrics=metrics_by_id.get(it.get("id")),
-                rate=rates_by_id.get(it.get("id")),
-                promoted=it.get("id") in promoted_ids,
-                promotion_known=promotion_known,
                 blank_specifics=blanks_by_id.get(it.get("id"))):
             held = best.get(r["listing_id"])
             if held is None or r["priority"] > held["priority"]:
