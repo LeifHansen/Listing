@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageChops, ImageFile, ImageFilter, ImageOps
+from PIL import Image, ImageFile, ImageFilter, ImageOps, ImageStat
 
 from ..config import log
 from ..storage import natural_key
@@ -165,17 +165,32 @@ _SHAPE_SIDE = int(os.getenv("REMBG_SHAPE_SIDE", "160") or 160)
 # fringes are not. A ghost answers below 0.15, because its middle is the
 # part that is see-through.
 #
+# A HOLE is not a hedge, and the difference is the whole measure. A pixel the
+# matte set to zero — the weave of a basket, the gap under a shoe's laces, the
+# space inside a mug's handle — is not part of the interior at all and is not
+# counted. A pixel it set to 110 is: the model was unsure, that pixel ships at
+# half strength over white, and enough of them is an item rubbed out. Openwork
+# items are ordinary here (wicker, mesh, crochet, cane, wire) and they are not
+# ghosts.
+#
 # The exception this knowingly refuses is genuinely sheer fabric — tulle,
 # organza, a chiffon scarf — which mattes half-opaque all over and is
 # indistinguishable from a model that never committed. Nothing here can tell
 # those apart, and the same error-direction argument decides it: a sheer
 # skirt kept as shot is a photo, and a sheer skirt composited on white is a
 # rumour of one.
+#
+# One caution for anyone changing this: unlike _shape_stats, which thresholds
+# its downscaled copy LOW on purpose so a merged cell errs toward connected,
+# this one asks a HIGH question — and a high threshold applied after averaging
+# errs toward REFUSING, which is the direction that silently costs the seller
+# the feature. So the opacity question is asked per pixel, before anything is
+# merged. See _interior_solidity.
 _MIN_INTERIOR_SOLIDITY = float(
     os.getenv("REMBG_MIN_SOLIDITY", "0.4") or 0.4)
-# What counts as opaque. _harden already snaps everything from _ALPHA_HIGH up
-# to a flat 255, so an interior cell is exactly 255 or it is a pixel the model
-# hedged on; the slack is for cells that straddle a fold the matte dipped in.
+# What counts as opaque, asked of a PIXEL. _harden already snaps everything
+# from _ALPHA_HIGH up to a flat 255, so a pixel is either 255 or one the model
+# hedged on; the slack is for the rounding a resize leaves behind.
 _SOLID_ALPHA = 250
 # How far in from the background the interior starts, in cells of the
 # _SHAPE_SIDE copy. Two is about 1% of the frame — enough to clear the soft
@@ -399,31 +414,47 @@ def _interior_solidity(alpha: Image.Image) -> float:
     near 1.0 once the boundary is taken off, while a matte the model hedged
     across the whole item is see-through in the middle and scores near 0.
 
-    Measured on the same _SHAPE_SIDE copy as _shape_stats, and unlike it this
-    is all C — an erosion and two histograms, no per-pixel Python.
+    The share is of PIXELS, and it has to be, which is the one subtle thing
+    here. Shape is a low-frequency question so the interior is found on a
+    _SHAPE_SIDE copy, but "is this opaque" is asked of each full-resolution
+    pixel BEFORE anything is merged. Judged the other way round — threshold
+    the averaged copy — a cell of a 3000px photo is a mean of some 350 pixels
+    and comes out "solid" only if very nearly all of them are, so any real
+    internal detail (a seam, a fold, hardware, an openwork weave, a busy
+    print) drags it under. That is not a measure of opacity, it is a measure
+    of uniformity, and it got stricter the bigger the seller's camera was:
+    the same matte scored 0.33 at 640px, 0.06 at 1600 and 0.00 at 3000, so a
+    newer phone had its cutouts refused where an older one passed. Binarising
+    first makes the answer the same at every size.
+
+    All C — two point operations, two resizes and an erosion.
 
     1.0 when erosion leaves nothing, which is a chain or a filigree earring
     rather than a ghost: there is no interior, so this measure has nothing to
     say and must not be what refuses the photo.
     """
     w, h = alpha.size
+    solid = alpha.point(lambda a: 255 if a >= _SOLID_ALPHA else 0)
+    visible = alpha.point(lambda a: 255 if a else 0)
     scale = _SHAPE_SIDE / max(w, h)
     if scale < 1:
-        # BOX averages rather than sampling, so a cell is solid only if what
-        # it merged was solid — a rim cell that is half 255 and half 0 lands
-        # in the middle and is not counted as opaque. It is also eroded away
-        # below, which is the point: rims are not what this is measuring.
-        alpha = alpha.resize((max(1, round(w * scale)), max(1, round(h * scale))),
-                             Image.BOX)
-    visible = alpha.point(lambda a: 255 if a else 0)
-    solid = alpha.point(lambda a: 255 if a >= _SOLID_ALPHA else 0)
-    inner = visible
+        # BOX averages rather than samples, so each cell now carries the SHARE
+        # of its pixels that were solid (or visible) rather than a verdict on
+        # their mean alpha.
+        size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        solid = solid.resize(size, Image.BOX)
+        visible = visible.resize(size, Image.BOX)
+    # Interior: cells that were wholly inside the item, then eroded back from
+    # the boundary. A cell the rim only clips is not fully visible and is not
+    # interior — rims are exactly what this must not measure.
+    inner = visible.point(lambda v: 255 if v >= 255 else 0)
     for _ in range(_INTERIOR_ERODE):
         inner = inner.filter(ImageFilter.MinFilter(3))
-    interior = inner.histogram()[255]
-    if not interior:
+    if not inner.histogram()[255]:
         return 1.0
-    return ImageChops.darker(inner, solid).histogram()[255] / interior
+    # The mean solid-share over the interior cells: every cell covers the same
+    # number of pixels, so this is the share of interior PIXELS kept opaque.
+    return ImageStat.Stat(solid, inner).mean[0] / 255
 
 
 def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:

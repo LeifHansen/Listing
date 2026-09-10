@@ -144,10 +144,30 @@ def _never_committed(d, size):
     d.ellipse([w * .25, h * .22, w * .75, h * .78], fill=150)
 
 
+def _woven_basket(d, size):
+    """A wicker basket, a mesh panel, a string bag, a crocheted jumper: a
+    solid body with the weave's own holes matted straight through it.
+
+    Every other soft fixture here is soft at its BOUNDARY, and that shared
+    blind spot is how the resolution bug got in. This one is interrupted in
+    its middle by pixels that are honestly zero — not hedged — which is what
+    a downscale-then-threshold measure cannot tell apart from a ghost.
+    """
+    w, h = size
+    d.rounded_rectangle([w * .22, h * .25, w * .78, h * .80],
+                        radius=int(w * .05), fill=255)
+    step = max(4, int(w * .022))
+    r = max(1, int(step * .30))
+    for y in range(int(h * .28), int(h * .78), step):
+        for x in range(int(w * .25), int(w * .76), step):
+            d.ellipse([x - r, y - r, x + r, y + r], fill=0)
+
+
 SOFT = [("a shirt with a soft rim", _shirt, 3),
         ("a fur collar", _fur_collar, 5),
         ("a wig", _wig, 4),
-        ("a lace panel", _lace_panel, 2)]
+        ("a lace panel", _lace_panel, 2),
+        ("a woven basket", _woven_basket, 2)]
 GHOSTS = [("a white oxford on white", _white_oxford, 0),
           ("a cream fleece", _cream_fleece, 3),
           ("a matte that never committed", _never_committed, 0)]
@@ -200,15 +220,63 @@ def test_an_item_too_thin_to_have_an_interior_is_not_called_a_ghost():
 
 
 def test_the_measure_does_not_depend_on_the_photo_being_large():
-    """It is read off a downscaled copy, so a 4000px photo and a 400px one
-    must reach the same verdict about the same matte."""
-    for size in ((400, 300), (1200, 900), (4000, 3000)):
-        assert images._interior_solidity(
-            images._harden(_blurred(_shirt, 3, size))
-        ) >= images._MIN_INTERIOR_SOLIDITY, size
-        assert images._interior_solidity(
-            images._harden(_blurred(_white_oxford, 0, size))
-        ) < images._MIN_INTERIOR_SOLIDITY, size
+    """A 4000px photo and a 400px one must reach the same verdict about the
+    same matte — a seller's newer phone must not cost them the feature.
+
+    This test existed before and passed while the measure did NOT have that
+    property, because both mattes it used were uniform: a plain solid body
+    and a plain hedged one average to the same thing however many pixels are
+    merged into a cell. The woven basket is here because it is the shape that
+    breaks: judged by thresholding the AVERAGED copy it scored 0.41 at 400px,
+    0.37 at 1200 and 0.26 at 4000 against a floor of 0.40 — squeaking through
+    on the smallest photo and refused on the two a real camera produces, which
+    is an ordinary basket silently kept as shot. Judged per pixel it is 1.00
+    at all three.
+    """
+    for draw, blur, solid in ((_shirt, 3, True), (_woven_basket, 2, True),
+                              (_lace_panel, 2, True), (_white_oxford, 0, False),
+                              (_cream_fleece, 3, False)):
+        seen = []
+        for size in ((400, 300), (1200, 900), (4000, 3000)):
+            # The rim scales with the photo, because a real one does: a matte's
+            # softness is a proportion of the item, not a fixed number of
+            # pixels. Blurring every size by the same 2px would make the 400px
+            # matte five times as soft as the 4000px one and measure the
+            # fixture rather than the code.
+            value = images._interior_solidity(images._harden(
+                _blurred(draw, blur * size[0] / SIZE[0], size)))
+            assert (value >= images._MIN_INTERIOR_SOLIDITY) is solid, \
+                f"{draw.__name__} at {size}: {value:.2f}"
+            seen.append(value)
+        assert max(seen) - min(seen) < 0.25, (
+            f"{draw.__name__} drifts with the photo's size: "
+            + ", ".join(f"{v:.2f}" for v in seen))
+
+
+def test_a_hole_is_not_the_same_as_a_hedge():
+    """The distinction the whole measure turns on. A pixel the matte set to
+    zero is a HOLE — the weave of a basket, the gap under a shoe's laces —
+    and is not part of the interior at all. A pixel it set to 110 is a
+    HEDGE: the model was unsure, that pixel ships at half strength over
+    white, and enough of them is an item rubbed out.
+
+    Same body, same share of it not solid; opposite answers."""
+    def holes(d, size):
+        w, h = size
+        d.rectangle([w * .25, h * .25, w * .75, h * .75], fill=255)
+        step = max(4, int(w * .02))
+        for y in range(int(h * .27), int(h * .74), step):
+            for x in range(int(w * .27), int(w * .74), step):
+                d.rectangle([x, y, x + step // 3, y + step // 3], fill=0)
+
+    def hedged(d, size):
+        w, h = size
+        d.rectangle([w * .25, h * .25, w * .75, h * .75], fill=110)
+
+    assert images._interior_solidity(
+        images._harden(_matte(holes, SIZE))) >= images._MIN_INTERIOR_SOLIDITY
+    assert images._interior_solidity(
+        images._harden(_matte(hedged, SIZE))) < images._MIN_INTERIOR_SOLIDITY
 
 
 # --- and what cutout() does with it -----------------------------------------
