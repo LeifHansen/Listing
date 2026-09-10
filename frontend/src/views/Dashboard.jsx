@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Coins, Lightbulb, Megaphone, TrendingDown,
+  Tags, Coins, Lightbulb, TrendingDown,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
   ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2, ClipboardCheck,
 } from "lucide-react";
@@ -52,12 +52,12 @@ const runCount = (n, total, noun) =>
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
-  promote: Megaphone, lower_price: TrendingDown,
+  lower_price: TrendingDown,
   finish: PlusCircle, photos: Camera, specifics: ListChecks,
   verify: ClipboardCheck,
 };
 const REC_TONE = {
-  promote: "bg-blue-soft text-blue", lower_price: "bg-yellow-soft text-warning",
+  lower_price: "bg-yellow-soft text-warning",
   finish: "bg-blue-soft text-blue",
   photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
@@ -66,7 +66,6 @@ const REC_TONE = {
 // Category headings for the grouped view — the per-rec `label` is an
 // imperative for one listing ("Lower the price"); groups need the noun form.
 const REC_GROUP_LABEL = {
-  promote: "Promote listings",
   lower_price: "Lower prices",
   finish: "Finish & list",
   photos: "Add more photos",
@@ -83,9 +82,8 @@ const REC_GROUP_LABEL = {
 // not shrink stops being read. See lib/dismissedRecs — and the "Restore
 // dismissed" control on the section header, which is what keeps a mis-tapped
 // X from being a one-way door.
-function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
+function RecRow({ rec, openListing, onDismiss }) {
   const Icon = REC_ICON[rec.type] || Lightbulb;
-  const isPromote = rec.type === "promote";
   return (
     <div className="flex items-center gap-3.5 p-4">
       <span className={cn(
@@ -98,18 +96,10 @@ function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
         <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
         <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
       </div>
-      {isPromote ? (
-        <Button variant="soft" size="sm" className="shrink-0"
-          loading={promoting === rec.listing_id} disabled={!!promoting}
-          onClick={() => promoteOne(rec)}>
-          {rec.rate ? `Promote ${rec.rate}%` : "Promote"}
-        </Button>
-      ) : (
-        <Button variant="soft" size="sm" className="shrink-0"
-          onClick={() => openListing(rec.listing_id)}>
-          {rec.label} <ArrowRight aria-hidden />
-        </Button>
-      )}
+      <Button variant="soft" size="sm" className="shrink-0"
+        onClick={() => openListing(rec.listing_id)}>
+        {rec.label} <ArrowRight aria-hidden />
+      </Button>
       <Button variant="ghost" size="iconSm" className="shrink-0 -mr-1"
         aria-label={`Dismiss: ${rec.label} — ${rec.listing_title}`}
         title="Dismiss this suggestion"
@@ -123,20 +113,12 @@ function RecRow({ rec, promoting, promoteOne, openListing, onDismiss }) {
 // The group-level verbs. A suggestion category earns an entry here when the
 // same edit makes sense across every listing in it — repeating one edit a dozen
 // times by hand is the whole problem. `amount` marks the ones that need a
-// number first (lower prices by HOW much); the rest fire on click. `shared`
-// marks the one whose spinner is the per-listing `promoting` latch, because
-// its rows fire the very same action.
+// number first (lower prices by HOW much); the rest fire on click.
 //
 // Photos and finish are deliberately absent: photos need a human holding the
 // item, and finishing a draft creates a listing, which is not something to hand
 // a single button.
 const BULK_ACTIONS = {
-  promote: {
-    verb: "Promote all",
-    icon: Megaphone,
-    shared: true,
-    run: (ctx) => ctx.promoteAll(ctx.group, ctx.cap),
-  },
   // "Fill in details" used to be a prompt to go and do it: open each listing,
   // wait for the AI to read its photos, save, repeat. It is the same edit
   // every time and the AI already knows how to make it, so it is a button —
@@ -262,18 +244,12 @@ function GroupHead({ group, Icon }) {
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
-                    lowerAll, enrichAll, onDismiss, busy, progress }) {
+function RecGroup({ group, cap, openListing, lowerAll, enrichAll, onDismiss,
+                    busy, progress }) {
   const [open, setOpen] = useState(false);
   const [amountOpen, setAmountOpen] = useState(false);
   const Icon = REC_ICON[group.type] || Lightbulb;
   const action = BULK_ACTIONS[group.type];
-  // Promote's spinner is the shared `promoting` latch, because its rows fire
-  // the same action; every other group gets its own. Keyed off the action
-  // rather than off "does it take an amount" — that read left a group whose
-  // action needs no number spinning on the promote latch, so "Enrich all"
-  // would have gone busy because a promote was running elsewhere.
-  const actionBusy = action?.shared ? !!promoting : busy;
   const ActionIcon = action?.icon;
   const solo = !!action?.soloButton;
   // What one tap on this group's button reaches. The badge above it is the
@@ -309,11 +285,11 @@ function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
         {/* Sibling of the toggle, never nested inside it (invalid HTML). */}
         {action && (
           <Button variant="soft" size="sm" className="shrink-0"
-            loading={actionBusy} disabled={actionBusy}
+            loading={busy} disabled={busy}
             aria-expanded={action.amount ? amountOpen : undefined}
             onClick={() => (action.amount
               ? setAmountOpen((o) => !o)
-              : action.run({ group, cap, promoteAll, lowerAll, enrichAll }))}>
+              : action.run({ group, cap, lowerAll, enrichAll }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
@@ -344,7 +320,7 @@ function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
             onCancel={() => setAmountOpen(false)}
             onSubmit={(value) => {
               setAmountOpen(false);
-              action.run({ group, cap, promoteAll, lowerAll, enrichAll }, value);
+              action.run({ group, cap, lowerAll, enrichAll }, value);
             }} />
         )}
       </AnimatePresence>
@@ -360,7 +336,6 @@ function RecGroup({ group, cap, promoting, promoteAll, promoteOne, openListing,
             <div className="divide-y divide-line border-t border-line">
               {group.recs.map((rec) => (
                 <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
-                  promoting={promoting} promoteOne={promoteOne}
                   openListing={openListing} onDismiss={onDismiss} />
               ))}
             </div>
@@ -544,7 +519,6 @@ export function Dashboard() {
   // from the server that enforces it — the dashboard cannot guess it, and
   // guessing wrong is how the group came to promise 46 and deliver 25.
   const [bulkCaps, setBulkCaps] = useState(NO_CAPS);
-  const [promoting, setPromoting] = useState(null); // listing id, or "all"
   // Signing out throws the suggestions away — they are one account's to-do
   // list, and eBay actions fire straight off them. That reset used to sit at
   // the top of `refreshInsights`, which made it a setState inside the effect
@@ -561,7 +535,7 @@ export function Dashboard() {
   // lose that. The `/api/insights` fetch has no abort — a response sent for
   // the old session can resolve after the logout render and repopulate the
   // list, and past that edge nothing would ever clear it again, leaving one
-  // account's listings (with live Promote / Lower-price buttons) on a
+  // account's listings (with live Lower-price / Enrich buttons) on a
   // signed-out dashboard. Level-triggering costs an identity check and
   // converges: once `insights` is the shared empty, the write is skipped.
   if (!user && insights !== NO_INSIGHTS) setInsights(NO_INSIGHTS);
@@ -593,70 +567,6 @@ export function Dashboard() {
   const hiddenCount = insights.length - visibleInsights.length;
   const dismissOne = (rec) => setDismissed((d) => dismissRec(d, rec));
   const restoreDismissed = () => setDismissed(restoreAll());
-
-  const afterPromote = (res) => {
-    if (res.needs_reconnect) {
-      toast("Reconnect eBay in Settings to grant ad permissions, then try again.", { kind: "warning" });
-    }
-    refreshInsights();
-    loadListings({ quiet: true });
-  };
-  const promoteOne = async (rec) => {
-    setPromoting(rec.listing_id);
-    try {
-      const res = await postJson("/api/ebay/promote",
-        { listing_id: rec.listing_id, ad_rate_percent: rec.rate || 0 });
-      if (res.ok) toast(`Promoting at ${res.ad_rate}% — you only pay if it sells through the ad.`, { kind: "success" });
-      else if (!res.needs_reconnect) toast(res.message || "Couldn't start the promotion.", { kind: "error" });
-      afterPromote(res);
-    } catch (e) {
-      toast(`Couldn't promote: ${e.message}`, { kind: "error" });
-    } finally { setPromoting(null); }
-  };
-  const promoteAll = async (group, cap) => {
-    // Promoting costs money on every sale it touches, so the button says what
-    // it will do first — and does exactly that. It sends the group's own
-    // listings, like the other bulk verbs: the suggestions list is capped, so
-    // a badge reading 50 can sit over a store with far more unpromoted
-    // listings, and the old body ({}) had the server promote the WHOLE store
-    // right after a dialog that had named 50. The server keeps its own cap
-    // per run and reports the rest as deferred, which the dialog says too.
-    const ids = (group?.recs || []).map((r) => r.listing_id);
-    const total = ids.length;
-    const run = runSize(total, cap);
-    if (!(await confirm({
-      title: total ? `Promote ${runCount(run, total, "listing")}?`
-        : "Promote every live listing?",
-      message: "Each gets eBay's recommended ad rate. Promoted Listings is "
-        + "pay-per-sale — you're charged that percentage only when a listing "
-        + "sells through its ad, but it applies to every listing this touches."
-        + (run < total
-          ? ` One run covers ${run} of them — the other ${total - run} stay on the list for a second run.`
-          : ""),
-      confirmLabel: "Promote them",
-    }))) return;
-    setPromoting("all");
-    try {
-      const res = await postJson("/api/ebay/promote-all", { listing_ids: ids });
-      const parts = [];
-      if (res.promoted) parts.push(`Promoting ${res.promoted} listing${res.promoted === 1 ? "" : "s"} at eBay's recommended rate`);
-      // The server checks eBay's own ad list before spending — the same list
-      // the group was built from — so a listing promoted in Seller Hub since
-      // the group was computed is reported, not promoted twice.
-      if (res.already_promoted) parts.push(`${res.already_promoted} already promoted on eBay`);
-      if (res.failed) parts.push(`${res.failed} failed`);
-      if (res.skipped) parts.push(`${res.skipped} no longer live`);
-      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
-      if (!res.needs_reconnect) {
-        toast(parts.join(" · ") || "No live listings to promote.", {
-          kind: res.promoted ? "success" : res.failed ? "error" : "info",
-        });
-      }
-      afterPromote(res);
-    } catch (e) {
-      toast(`Couldn't promote all: ${e.message}`, { kind: "error" });
-    } finally { setPromoting(null); }
-  };
 
   // Bulk price drop across one suggestion group. Reports per-listing outcomes
   // rather than a bare success: over a dozen listings some will have sold or
@@ -733,7 +643,7 @@ export function Dashboard() {
     let left = total - run;
     // Every listing this touches spends AI credits, and this button reaches a
     // whole group from one tap. Say what it will do — and what it will cost —
-    // before it does it, the same way promoting the store does.
+    // before it does it, the same way the bulk price drop does.
     const cost = tokens.enabled && tokens.costs?.specifics
       ? ` It uses ${tokens.costs.specifics * run} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
       : "";
@@ -1102,8 +1012,6 @@ export function Dashboard() {
               }
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
-                  promoting={promoting}
-                  promoteAll={promoteAll} promoteOne={promoteOne}
                   openListing={openListing} lowerAll={lowerAll}
                   enrichAll={enrichAll} onDismiss={dismissOne}
                   busy={bulkBusy === g.type}

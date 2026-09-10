@@ -66,8 +66,7 @@ def _filled(n: int = 4) -> list[dict]:
 def _recs(listing: dict, status: str = "published") -> dict:
     """type -> rec, for one published listing with no eBay metrics."""
     out = recommender.recommend_for(
-        {"id": "x", "status": status, "listing": listing, "created_at": None},
-        promotion_known=False)
+        {"id": "x", "status": status, "listing": listing, "created_at": None})
     return {r["type"]: r for r in out}
 
 

@@ -766,7 +766,6 @@ is *no verdict*, not "medium".
 | `POST` | `/api/easypost/label` | Buy the chosen rate, record it, post the tracking to eBay. Never buys twice for one order; settles a lost answer against EasyPost first |
 | `POST` | `/api/easypost/label/{shipment_id}/refund` | Void an unused label (scoped to the seller's own record of it) |
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
-| `POST` | `/api/ebay/promote-all` | Promote every live, unpromoted listing (a suggestion group's bulk action) |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/enrich/{session_id}` | Fill ONE listing's blanks from its own photos — category if missing, the category's item specifics, the maker. The last step of the editor before Publish; fills blanks only, never overwrites |
@@ -1128,11 +1127,11 @@ one listing, behind a confirm, through the usual `/api/ebay/end-listing`.
 ## Suggested actions (and applying them in bulk)
 
 The Dashboard's **Suggested actions** card is `services/recommender.py` over the
-signals the app already has — listing status, age, price, photo count, promotion
-state, plus eBay views/watchers when the scope is granted. Rules turn a store
-into a short ranked list: finish a draft, promote a live one, drop a stale
-price, add photos, fill in specifics. An ended listing earns nothing: relisting
-is done by hand, and the ended bucket picks up sold items. Suggestions are grouped
+signals the app already has — listing status, age, price, photo count, plus eBay
+views/watchers when the scope is granted. Rules turn a store into a short ranked
+list: finish a draft, drop a stale price, add photos, fill in specifics. An
+ended listing earns nothing: relisting is done by hand, and the ended bucket
+picks up sold items. Suggestions are grouped
 by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
 listing so the list spans the portfolio instead of piling onto one item.
 
@@ -1143,8 +1142,6 @@ problem:
 - **Lower prices → "Lower all…"** opens an amount field (*lower every price in
   this group by X %*) with its own submit. Each listing is repriced and pushed to
   eBay through the same revise path a single edit uses.
-- **Promote listings → "Promote all"** promotes every live, unpromoted listing at
-  eBay's recommended ad rate.
 - **Fill in details → "Enrich all"** fills every listing in the group in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft
