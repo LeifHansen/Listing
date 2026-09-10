@@ -20,7 +20,14 @@ from __future__ import annotations
 
 import pytest
 
+# backend.main pulls in the whole stack -- claude_ai imports anthropic, images
+# imports PIL -- and the fast `checks` job installs neither, so all three have
+# to be named here or the module blows up at COLLECTION there instead of
+# skipping. The `smoke` job has every one of them and fails on a skip, which
+# is what keeps this from quietly opting out of the only job that runs it.
 pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
 
 from backend import main, storage  # noqa: E402
 from backend.models import Listing  # noqa: E402
