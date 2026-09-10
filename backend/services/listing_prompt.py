@@ -116,6 +116,183 @@ STICKER_AND_BARCODE_RULE = """
   every code's check digit and asks the seller about the ones that fail.
 """
 
+# --- vintage denim: the selvedge edge, the red tab, the patch, the lot code --
+#
+# A pair of Levi's 501s is a $30 listing or a $3,000 one, and the same handful
+# of details decides which: the lettering on the red tab, the edge of the
+# fabric along the outseam, the wording on the patch, the row of numbers on
+# the care tag, the stamp on the back of the top button, the rivets inside the
+# back pockets. Every one of them is in frame in a normal set of photos, and
+# every one is searched for BY NAME by the buyers who pay the premium — "Big
+# E", "redline selvedge", "501XX", "hidden rivets", "single stitch". A draft
+# that says "Vintage Levi's 501 jeans" about a Big E redline pair has left
+# most of its price in the pocket.
+#
+# The sticker rule above already says "read every tag". What it could not say
+# is what to do with a fabric edge, which is not a tag and is not text: a
+# selvedge outseam is a woven detail visible only where a hem is turned up,
+# and a model that has not been told to look there reports the hem as a hem.
+# So this rule names each place to look, what each one looks like, and the
+# year each one supports — the facts are the ones every collector's guide
+# prints, and they are stated with the ranges those guides agree on rather
+# than to the year, because a rule that dates a pair too tightly is a false
+# claim in the listing.
+#
+# Two things ride along with it, for the same reason the sticker rule carries
+# its own:
+#
+#   * every marker is a PRICE claim, so a marker that is not in the photos is
+#     never written. "Selvedge" on a pair whose hem was never turned up is not
+#     a guess a buyer forgives on arrival; it is a return and a defect.
+#   * the size on the patch is not the size of the pair. Shrink-to-Fit denim
+#     has shrunk, and the tag size sold as the real one comes back too.
+VINTAGE_DENIM_RULE = """
+- JEANS AND DENIM JACKETS — LEVI'S ABOVE ALL — ARE DATED BY THEIR HARDWARE AND
+  TAGS, AND THE DATE IS MOST OF THE PRICE. A pair of Levi's 501s is a $30
+  listing or a $3,000 one, and the same handful of details decides which.
+  Collectors search for those details BY NAME ("Big E", "redline selvedge",
+  "501XX", "hidden rivets", "single stitch"), so every one you can see
+  belongs in the title or the description, and every one you cannot see must
+  NOT be claimed. Check each of the following and say what you found:
+  * THE SELVEDGE EDGE. Go to the OUTSEAM (the outer leg seam). At a cuffed or
+    turned-up hem, or wherever the inside of the leg shows, look at the edge
+    of the fabric along that seam. SELVEDGE is a clean, self-finished edge: a
+    narrow woven band, usually white, that needs no overlock stitch, often
+    with a coloured thread running along it. On Levi's that thread is red —
+    "REDLINE". NON-selvedge is a raw edge sealed with a zigzag overlock
+    (serged) stitch and loose threads. Levi's made 501s on Cone Mills redline
+    selvedge until it was phased out in the early-to-mid 1980s, so a redline
+    outseam on a US-made pair says "before about 1986" and is worth several
+    times a non-selvedge pair. Also check the coin pocket edge and the inside
+    of the fly: on some selvedge-era pairs those show a selvedge edge too.
+    Selvedge is NOT Levi's-only and NOT vintage-only: Levi's Vintage Clothing
+    reproductions (1990s onward), Japanese makers (Evisu, Sugar Cane, Full
+    Count, Iron Heart, Momotaro), and Lee and Wrangler reissues all use it,
+    and it is a high-value word for all of them — so name the brand from the
+    patch and tab, never from the selvedge. Say "selvedge" ONLY when the edge
+    is in frame. A hem that is not turned up shows nothing; "selvedge" is
+    then a missing_info item ("turn up the hem and photograph the outseam
+    edge"), not a claim.
+  * THE RED TAB on the right back pocket. Read the lettering exactly.
+    "LEVI'S" in ALL CAPITALS — the "BIG E" — was used until 1971; "Levi's"
+    with a lowercase e is 1971 onward and still current. Big E is the most
+    searched vintage Levi's term and carries a large premium: write it in the
+    title when you can read a capital E, and never when you cannot.
+    Lettering on BOTH faces of the tab is older than lettering on one face
+    (roughly before the mid-1950s). Transcribe any ® or © on the tab. A tab
+    with no lettering at all is a modern trademark-only tab. An ORANGE tab is
+    Levi's 1960s-1990s fashion line (bell bottoms, flares and boot cuts such
+    as the 646 and 517): a different line from red tab, not a lesser one, and
+    searched by name. A white, silver or black tab is a later line; read the
+    patch for the lot.
+  * THE PATCH on the back waistband. Transcribe every word and number on it
+    VERBATIM. Real LEATHER (creased, cracked, hair side) was used until the
+    mid-1950s; after that the patch is "leather-look" card, which is what
+    most vintage pairs have. The LOT number is on the patch: "501", "501XX",
+    "505", "517", "550", "646", "LOT 501". "XX" after the lot means the
+    1966-68 pairs or earlier and is a very valuable mark (Levi's Vintage
+    Clothing put it back on reproductions from 1987 on, and those carry a
+    modern inside label saying so). Older patches say "Every Garment
+    Guaranteed"; later ones drop it. The W and L on the patch are the TAG
+    size, never the actual size (see sizing below).
+  * THE INSIDE CARE TAG, sewn into the waistband or a back pocket seam. NO
+    care tag at all means before about 1971-73, when they were introduced
+    (or a removed one — say which you see). When there is one, transcribe
+    the whole number row on it exactly as printed, then read it as:
+    - the LOT-AND-FINISH code, "501-0115" style: the number before the dash
+      is the lot (the fit); the four digits after it are the fabric FINISH
+      or wash, NOT a size and NOT a date. 0000 is rigid Shrink-to-Fit indigo,
+      0115 the pre-shrunk indigo stonewash, 0660 black. Give the code as
+      printed and name the finish only when you know it.
+    - the SIZE: "W32 L34" or "32 34" — the tag size.
+    - "WPL 423": Levi Strauss & Co.'s registered wool-products label number,
+      on every genuine US-made care tag.
+    - the PRODUCTION CODE. 1970s and 1980s tags carry a month digit and a
+      year digit (3 and 7 read as March 1977 or March 1987 — the decade is
+      settled by the other markers, never by the tag alone); from about 1993
+      the date is a four-digit MMYY code (0496 = April 1996). A separate
+      three-digit FACTORY number, often on the back of the tag, should match
+      the stamp on the back of the top button. Give the reading WITH the
+      digits it came from ("care tag row 0496, read as April 1996") so the
+      seller can check it, and never read a date into digits you cannot see.
+    - "MADE IN U.S.A." Levi's closed its last US plants in 2002-2003: a
+      US-made pair is 2003 or earlier, and a US-made NON-selvedge 501 is
+      roughly mid-1980s to 2003.
+  * THE BACK OF THE TOP BUTTON. A number is stamped on the reverse of the
+    waist button: the FACTORY code. 555 is the Valencia Street plant, San
+    Francisco (also on 1990s-2002 LVC reproductions); 524 El Paso, Texas;
+    554 San Antonio, Texas; 553 North Carolina. Single- and two-digit stamps
+    are older US plants. Transcribe the stamp exactly and treat it as
+    confirmation of the care-tag factory number, never as a build year on
+    its own. The button face reads "LEVI STRAUSS & CO. S.F. CAL." on vintage
+    pairs and the rivets are stamped "L.S.&CO. S.F." — read both.
+  * THE BACK POCKETS. Turn one inside out: copper HIDDEN RIVETS at the pocket
+    corners, covered by the fabric, were used from 1937 until about 1966,
+    when bar tacks replaced them; exposed back-pocket rivets are before 1937.
+    The ARCUATE (the double-arc stitch across the pocket) is SINGLE-NEEDLE —
+    one row of thread meeting in a point at the centre — before about 1947
+    and double-needle after; a painted-on arcuate is a WWII pair (1942-47).
+    Look inside the pocket bag for a stamped or printed lot number too.
+  * THE FLY. 501 is a BUTTON fly; a zip fly is a different lot (505, from
+    1967, or 502/501Z) — read the patch, do not assume. A V-shaped stitch
+    beside the top button is an older mark (roughly before 1970). Read the
+    zipper pull's brand: Talon, Scovill and Gripper date a pair; YKK is
+    later.
+  REPORTING. In raw_observations, list each marker you checked and what it
+  showed, INCLUDING the ones you could not see ("hem not turned up — selvedge
+  unknown"). In the description's Key Details, write the markers by their
+  collector names with the year each supports. In the title, after the brand
+  and lot ("Levi's 501XX"), put the markers that identify THIS pair in the
+  order buyers search them — "Big E", "Selvedge" or "Redline Selvedge",
+  "Hidden Rivets", "Single Stitch" — then the tag size, then "USA" and the
+  era. In item_specifics, answer Model or Product Line with the lot ("501"),
+  Closure ("Button"), Fabric Type / Features / Wash with the eBay value that
+  says selvedge or names the finish you saw, Country/Region of Manufacture,
+  and Era / Decade / Vintage from the dating above. Date the pair to the era
+  the markers support and no tighter; when markers disagree (a Big E tab on
+  a pair with a 1990s care tag is a reproduction or a swapped tab), say so
+  and put the era in missing_info. Never write "Big E", "selvedge", "XX",
+  "hidden rivets" or "single stitch" about a detail that is not in the
+  photos: each is a price claim a buyer will check on arrival.
+  SIZING. Vintage Levi's were Shrink-to-Fit and have shrunk: the W/L on the
+  patch is the TAG size, and the pair now measures one to three inches
+  smaller. Always give the tag size as "Tag size W32 L34", and the actual
+  size ONLY from a tape measure in the photos (waist flat x2, inseam, rise,
+  leg opening); otherwise put "measured waist, inseam and rise" in
+  missing_info. Collectors buy on measurements, and a tag size sold as the
+  real one comes back.
+"""
+
+# What the tag LOCATOR is told, separately: it draws boxes, it does not read,
+# and the thing it has to be told is that on jeans the facts are on hardware
+# and on a fabric edge, neither of which looks like a tag.
+DENIM_TAG_SCAN_RULE = """
+- JEANS AND DENIM JACKETS (Levi's, Lee, Wrangler and the rest) carry their
+  facts on HARDWARE as much as on tags, and each of these is worth a box: the
+  RED TAB on the back pocket (its lettering decides the decade); the PATCH on
+  the waistband; the INSIDE CARE TAG and its row of numbers; the BACK of the
+  top button (a factory number is stamped there); the rivets; the coin pocket
+  edge; and the OUTSEAM EDGE wherever a hem is turned up or a leg is turned
+  out — a selvedge edge there is the most valuable detail on the pair, and it
+  is only ever visible at that spot. Box it as "selvedge" even when it is a
+  sliver of the photo, and box the tab and the patch as "tab" and "patch".
+"""
+
+# What the zoom-and-transcribe pass writes for denim, one marker per line, so
+# the specifics fill can quote the tab, the lot and the button stamp as
+# ground truth the way it quotes a barcode.
+DENIM_TRANSCRIBE_LINES = (
+    "For JEANS AND DENIM, add one line per marker you can see, exactly as "
+    "read: 'RED TAB: <the lettering as printed, and whether the E is a "
+    "capital (Big E) or lowercase>', 'PATCH: <every word and number>', "
+    "'LOT: <the lot-finish code as printed>', 'CARE TAG ROW: <the digits as "
+    "printed>, read as <month / year / factory>', 'BUTTON BACK: <stamp>', "
+    "'RIVETS: <stamp>', 'SELVEDGE: <redline, plain selvedge or overlocked, "
+    "and where you saw it>', 'ARCUATE: <single or double needle>'. A marker "
+    "you looked for and could not see is a line too ('SELVEDGE: not visible, "
+    "hem not turned up').\n\n"
+)
+
 LISTING_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this exact shape:
 {
@@ -138,7 +315,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "confidence": "low|medium|high",
   "raw_observations": "brief notes on what you actually see in the photos",
   "identifiers": [{"type": "UPC|EAN|ISBN|MPN|Model|Style|Serial|other", "value": "the code EXACTLY as printed, digit for digit — never completed or corrected", "source": "where you read it (e.g. 'barcode on the box end', 'plate under the base')", "legible": true|false}],
-  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|sticker|price|other"} ]
+  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|sticker|price|patch|tab|selvedge|button|other"} ]
 }
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
@@ -337,17 +514,21 @@ Rules:
   tags, shoe tongue/heel labels, hang tags, box text, model plates, importer
   and licence stickers, foil/hologram seals, price stickers, and BARCODES —
   a barcode is worth a box of its own even when there is no other label near
-  it, and so is any marking in a script you cannot read at this size.
+  it, and so is any marking in a script you cannot read at this size. On
+  jeans and denim jackets, box the red tab ("tab"), the waistband patch
+  ("patch"), the back of the top button ("button") and the fabric edge at a
+  turned-up hem or turned-out outseam ("selvedge") — the last is the most
+  valuable detail on the pair and is only visible there.
   box is the tag's bounding region as FRACTIONS of that photo's width/height
   (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is cut
   off. Include a tag even when you can't read it at this size — it will be
   zoomed in on later. At most 6 entries, best candidates first; no tags at
   all -> [].
-""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE
-# Appended rather than interpolated so the rule text is one string with one
-# home: the tag-scan and tag-transcribe passes in claude_ai read the same
-# constant, and a rule that exists twice is a rule that agrees with itself
-# only until someone edits one copy.
+""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE
+# Appended rather than interpolated so each rule's text is one string with one
+# home: the tag-scan, tag-transcribe and specifics passes in claude_ai read the
+# same constants, and a rule that exists twice is a rule that agrees with
+# itself only until someone edits one copy.
 
 
 # The title/description ordering has to survive a refine too: a rewrite there

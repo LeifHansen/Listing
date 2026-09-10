@@ -541,6 +541,59 @@ item's price. An EAN or ISBN searches as digits instead (Browse documents
 `gtin` as taking a UPC), with an ISBN-10 converted to its ISBN-13 form first,
 because everything printed since 2007 carries the 13-digit one.
 
+### Vintage denim: the selvedge edge, the red tab, the patch and the lot code
+
+A pair of Levi's 501s is a $30 listing or a $3,000 one, and the same handful
+of details decides which — the lettering on the red tab, the edge of the
+fabric along the outseam, the wording on the patch, the row of numbers on the
+care tag, the stamp on the back of the top button, the rivets inside the back
+pockets. Every one is in frame in an ordinary set of photos, and every one is
+searched for **by name** by the buyers who pay the premium: "Big E", "redline
+selvedge", "501XX", "hidden rivets", "single stitch". A draft that says
+"Vintage Levi's 501 jeans" about a Big E redline pair has left most of its
+price in the pocket.
+
+The sticker rule says "read every tag". What it could not say is what to do
+with a fabric edge, which is not a tag and is not text: a selvedge outseam is
+a woven detail visible only where a hem is turned up, and a model not told to
+look there reports the hem as a hem. `listing_prompt.VINTAGE_DENIM_RULE` names
+each place to look, what each looks like, and the era each supports — the
+facts every collector's guide prints, stated with the ranges those guides agree
+on rather than to the year:
+
+| Marker | Where | What it says |
+|--------|-------|--------------|
+| Selvedge edge | The outseam, at a turned-up hem or turned-out leg (also the coin pocket edge) | A clean self-finished band, red thread on Levi's ("redline"), against an overlocked non-selvedge edge. Phased out on 501s in the early-to-mid 1980s, so redline + USA = before about 1986. Not Levi's-only and not vintage-only: LVC reproductions and Japanese makers use it, so the brand still comes off the patch |
+| Red tab | Right back pocket | `LEVI'S` in capitals ("Big E") until 1971; `Levi's` with a lowercase e since. Both faces lettered = older than one. Orange tab = the 1960s–90s fashion line (646, 517), a different line, not a lesser one |
+| Patch | Back waistband | Real leather until the mid-1950s, leather-look card after. The lot: `501`, `501XX`, `505`, `517`, `646`. `XX` = the 1966–68 pairs or earlier (LVC put it back on reproductions from 1987). W/L here is the **tag** size |
+| Care tag | Inside waistband or pocket seam | None = before about 1971–73. The row is four facts: the lot-and-finish code (`501-0115` — the four digits after the dash are the finish: `0000` rigid Shrink-to-Fit, `0115` stonewash, `0660` black — never a size or a date), the tag size, `WPL 423`, and the production code (a month and year digit in the 70s–80s, a four-digit MMYY from about 1993: `0496` = April 1996). `MADE IN U.S.A.` = 2003 or earlier |
+| Button back | Reverse of the top button | A factory stamp that should match the care tag's: 555 Valencia Street SF (also 1990s–2002 LVC), 524 El Paso, 554 San Antonio, 553 North Carolina. Confirmation of the rest, never a build year alone |
+| Back pockets | Inside out | Hidden rivets 1937 to about 1966, then bar tacks; exposed rivets before 1937. Single-needle arcuate before about 1947; painted arcuate = WWII (1942–47) |
+| Fly | Top button and zip pull | 501 is button fly; a zip is a different lot (505, from 1967). A V-stitch beside the top button is roughly pre-1970. Talon, Scovill and Gripper pulls date a pair |
+
+The rule rides with the identify pass (appended to `LISTING_SCHEMA` after the
+sticker rule), the tag locator (`DENIM_TAG_SCAN_RULE`, which adds `tab`,
+`patch`, `button` and `selvedge` box kinds so the edge at a hem gets a crop of
+its own), the zoom-and-transcribe pass (`DENIM_TRANSCRIBE_LINES`: one `RED
+TAB:` / `LOT:` / `CARE TAG ROW:` / `BUTTON BACK:` / `SELVEDGE:` line per marker,
+so the specifics fill quotes them the way it quotes a barcode) and the
+specifics fill itself, which maps them onto eBay's aspects — Model / Product
+Line from the lot, Closure, Fabric Type or Features with the value that says
+selvedge, Country/Region, Era. One text, one home, so the passes cannot drift.
+
+Two things the rule forbids matter as much as what it asks for:
+
+* **A marker not in the photos is never written.** Each is a price claim a
+  buyer checks on arrival: "selvedge" on a pair whose hem was never turned up
+  is a return, not a guess. A hem not turned up makes "turn up the hem and
+  photograph the outseam edge" a `missing_info` item; markers that disagree
+  (a Big E tab beside a 1990s care tag is a reproduction or a swapped tab) are
+  said so and put the era in `missing_info` rather than resolved.
+* **The tag size is not the size.** Shrink-to-Fit denim has shrunk one to
+  three inches. The draft gives "Tag size W32 L34", and the measured size only
+  from a tape in the photos — otherwise "measured waist, inseam and rise" is a
+  `missing_info` item. Collectors buy on measurements.
+
 ### How sure the AI was, on the card
 
 The identify pass grades its own draft — `low`, `medium` or `high` — and that
