@@ -174,8 +174,7 @@ def test_the_count_reaches_the_listing_it_was_measured_for():
               {"name": "Color", "value": "Gold"}]
     items = [_fresh(id="A", missing_info=[], item_specifics=filled),
              _fresh(id="B", missing_info=[], item_specifics=filled)]
-    recs = recommender.recommendations(items, blanks_by_id={"A": 14},
-                                       promotion_known=False)
+    recs = recommender.recommendations(items, blanks_by_id={"A": 14})
     by_id = {r["listing_id"]: r["type"] for r in recs}
     assert by_id["A"] == "specifics"
     assert by_id.get("B") != "specifics"

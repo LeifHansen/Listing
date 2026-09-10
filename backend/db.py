@@ -737,7 +737,7 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
 
     `statuses` narrows the read in SQL. Several callers throw away everything
     that is not live the moment the rows arrive -- the store sweep, the
-    duplicate advisory, the promote-all pass -- and on a store bigger than
+    duplicate advisory -- and on a store bigger than
     `limit` that page is the wrong rows: a seller whose newest records are
     mostly drafts has their OLDER live listings fall off the end, and those
     are exactly the ones a sweep is for. Filtering here moves the boundary

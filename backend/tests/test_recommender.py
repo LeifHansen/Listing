@@ -4,8 +4,8 @@ from backend.services import recommender
 
 
 def _published(i: int) -> dict:
-    # No metrics, not promoted -> each yields at least the priority-70
-    # "Promote" rec (and "Add more photos" at 50, which the dedupe drops).
+    # No metrics, no photos -> each yields at least the priority-50 "Add more
+    # photos" rec (and "Fill in details" at 45, which the dedupe drops).
     return {"id": f"rec{i}", "status": "published", "title": f"Item {i}",
             "listing": {"title": f"Item {i}", "images": []}}
 
@@ -26,8 +26,8 @@ def test_one_rec_per_listing_keeps_strongest():
     recs = recommender.recommendations(items, limit=50)
     ids = [r["listing_id"] for r in recs]
     assert len(ids) == len(set(ids))
-    # Every item's photos rec (priority 50) lost to its promote rec (70).
-    assert all(r["type"] == "promote" for r in recs)
+    # Every item's specifics rec (priority 45) lost to its photos rec (50).
+    assert all(r["type"] == "photos" for r in recs)
 
 
 def test_sorted_by_priority_desc():
@@ -77,8 +77,7 @@ def _live(**listing) -> dict:
 
 
 def _types(item: dict) -> set[str]:
-    return {r["type"] for r in
-            recommender.recommend_for(item, promotion_known=False)}
+    return {r["type"] for r in recommender.recommend_for(item)}
 
 
 def test_a_fill_that_just_ran_does_not_come_straight_back_as_a_chore():

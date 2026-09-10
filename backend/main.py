@@ -52,7 +52,7 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        ebay_trading, image_import, images, imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
-                       owed_refunds, preflight, pricing, promotions,
+                       owed_refunds, preflight, pricing,
                        recommender, store_category, sync_guard, sync_merge,
                        taxonomy, tokens)
 from .services import etsy as etsy_service
@@ -3538,9 +3538,8 @@ def save_prefs(request: Request, payload: dict) -> dict:
 
 
 # Moved to marketplaces/ebay_provider.py with the publish pipeline; the local
-# names keep the sync/promotion routes below unchanged.
+# name keeps the sync routes below unchanged.
 _auto_promote_enabled = ebay_provider.auto_promote_enabled
-_promote = ebay_provider.promote
 
 
 def _load_prefs(uid: Optional[str]) -> dict:
@@ -7051,8 +7050,8 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
 
 
 # One cap for "the whole store, mirrored": every consumer of the list (the
-# grid, sync reconciliation, insights, promote-all) has to see at least what
-# the import brought in, or it silently hides part of the store.
+# grid, sync reconciliation, insights) has to see at least what the import
+# brought in, or it silently hides part of the store.
 #
 # It has to stay ahead of the import, not match it: at 600 — with the active
 # import capped at 300 + 100 sold + 100 ended — a seller with 616 active
@@ -7240,56 +7239,6 @@ def _metrics_by_record_id(creds: Optional[dict], items: list,
     return {id_by_ebay[eid]: m for eid, m in raw.items() if eid in id_by_ebay}
 
 
-def _rates_by_record_id(creds: Optional[dict], items: list) -> dict:
-    """eBay's recommended ad rate for the user's live listings, keyed by OUR
-    record id. Best-effort — {} when unavailable."""
-    id_by_ebay = _live_ebay_id_map(items)
-    if not creds or not id_by_ebay:
-        return {}
-    try:
-        raw = promotions.suggested_ad_rates(creds, list(id_by_ebay))
-    except Exception as exc:  # noqa: BLE001 - recommendations are optional
-        log.info("ad-rate recommendations unavailable: %s", exc)
-        return {}
-    return {id_by_ebay[eid]: r for eid, r in raw.items() if eid in id_by_ebay}
-
-
-def _promoted_record_ids(creds: Optional[dict], items: list) -> tuple[set, bool]:
-    """(record ids with an ACTIVE eBay ad, did eBay actually answer).
-
-    Ours OR ads created directly in Seller Hub, so we never suggest promoting
-    an item that is already promoted. The flag matters because promoting costs
-    the seller a percentage of the sale: an empty set from a failed lookup is
-    not evidence that nothing is promoted, and recommending a purchase on that
-    basis is how a seller who promotes in Seller Hub gets invited to pay for a
-    second ad during an eBay outage.
-    """
-    if not creds:
-        return set(), False
-    ads, known = promotions.active_ads_status(creds)
-    promoted = set()
-    live = 0
-    for it in items:
-        if it.get("status") not in ("published", "live"):
-            continue
-        live += 1
-        listing = it.get("listing") or {}
-        eid = str(listing.get("ebay_listing_id") or "")
-        sku = ebay.sku_for(it["id"])
-        if (eid and eid in ads) or (sku and sku in ads):
-            promoted.add(it["id"])
-    # The one line that says why the "Promote listings" group holds what it
-    # holds. A seller whose whole store is promoted in Seller Hub and who is
-    # still shown fifty listings to promote is either looking at ads eBay
-    # did not list (matched=0 against ad_keys=0 -- see the campaign summary
-    # active_ads_status logs) or at ads keyed by something other than the
-    # item id our records carry (ad_keys>0, matched=0); nothing else on the
-    # screen can tell those apart.
-    log.info("active ads: known=%s ad_keys=%d live=%d matched=%d",
-             known, len(ads), live, len(promoted))
-    return promoted, known
-
-
 @app.get("/api/ebay/listing-metrics")
 def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
     """eBay views/impressions/watchers/pending offers for the user's live
@@ -7419,9 +7368,8 @@ def _blank_specifics_by_id(items: list[dict]) -> dict:
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, promote/reprice stale live ones. Folds in
-    eBay views/watchers and recommended ad rates when available. Returns an empty
-    list for logged-out users. Never raises."""
+    finish drafts, reprice stale live ones. Folds in eBay views/watchers when
+    available. Returns an empty list for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
         return {"recommendations": [], "bulk_caps": _bulk_caps()}
@@ -7429,13 +7377,10 @@ def insights(request: Request) -> dict:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
-        rates_by_id = _rates_by_record_id(creds, items)
-        promoted_ids, promotion_known = _promoted_record_ids(creds, items)
         # limit=50: the dashboard groups these by category now, so each group
         # should show its full membership — the old flat list capped at 8.
         return {"recommendations": recommender.recommendations(
-            items, metrics_by_id=metrics_by_id, rates_by_id=rates_by_id,
-            promoted_ids=promoted_ids, promotion_known=promotion_known,
+            items, metrics_by_id=metrics_by_id,
             limit=50, blanks_by_id=_blank_specifics_by_id(items)),
             # What one tap on a group can actually reach in a single run — the
             # group renders its button, so it has to know. See _bulk_caps.
@@ -7443,131 +7388,6 @@ def insights(request: Request) -> dict:
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": [], "bulk_caps": _bulk_caps()}
-
-
-@app.post("/api/ebay/promote")
-def promote_one(payload: dict, request: Request) -> dict:
-    """One-click promote a single LIVE listing via Promoted Listings Standard,
-    using the given ad rate, else eBay's recommended rate, else the default."""
-    user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
-    if not user or not creds:
-        raise HTTPException(400, "Connect eBay first.")
-    lid = str(payload.get("listing_id") or "").strip()
-    rec = db.get_listing(lid)
-    if not rec or (rec.get("user_id") and rec["user_id"] != user["id"]):
-        raise HTTPException(404, "Listing not found")
-    if rec.get("status") not in ("published", "live"):
-        raise HTTPException(400, "Only live listings can be promoted.")
-    listing = Listing(**(rec.get("listing") or {}))
-    try:
-        rate = float(payload.get("ad_rate_percent") or 0)
-    except (TypeError, ValueError):
-        rate = 0.0
-    if rate <= 0:
-        rate = _rates_by_record_id(creds, [rec]).get(lid) or 0
-    status = _promote(lid, listing, creds, rate=rate)
-    if status.get("promoted"):
-        storage.save_listing(lid, listing)
-        db.upsert_listing(lid, listing.model_dump(), status=rec.get("status"),
-                          user_id=user["id"])
-    return {"ok": bool(status.get("promoted")), "ad_rate": listing.ad_rate_percent,
-            "needs_reconnect": bool(status.get("needs_reconnect")),
-            "message": status.get("message")}
-
-
-@app.post("/api/ebay/promote-all")
-def promote_all(request: Request, payload: Optional[dict] = None) -> dict:
-    """Promote the listings the Dashboard's "Promote listings" group names, at
-    eBay's recommended rate (falling back to the default). Best-effort per
-    item; stops early and asks the user to reconnect if the token lacks ad
-    permissions.
-
-    "Already promoted" means here exactly what it means to the suggestion
-    this button sits on. The group is built from two signals -- this app's
-    own Promote flag and eBay's live ad list, which is what catches an ad the
-    seller created in Seller Hub -- and this route used to read only the
-    first. So it disagreed with the group it belonged to: it promoted every
-    live listing without our flag, Seller-Hub-promoted ones included, and it
-    did so during an ads outage too, when the group had (rightly) gone quiet.
-    Promoting costs a percentage of the sale, and the whole point of reading
-    eBay's list is to not pay for it twice; the route reads it now and
-    refuses to spend on an unanswered question, the same rule the recommender
-    already keeps.
-
-    The caller names the listings, like the other bulk verbs, so the button
-    promotes the group the seller confirmed rather than the seller's whole
-    store: the suggestions panel is capped, so a badge reading 50 could sit
-    over a store with 900 unpromoted listings, and "Promote 50 listings?"
-    was then a promise about 900. No ids keeps the old whole-store reach for
-    anything that still calls it that way, with the same ad check.
-    """
-    user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
-    if not user or not creds:
-        raise HTTPException(400, "Connect eBay first.")
-    ids = [str(i).strip() for i in ((payload or {}).get("listing_ids") or [])
-           if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    # Bounded for the same reason lower-prices is: the lookup is BY id, and
-    # an unbounded body is an unbounded `IN (...)`.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
-    if ids:
-        # Ownership is enforced inside the read; an id that does not come
-        # back is not the seller's, or is gone.
-        mine = db.get_listings(ids, user["id"])
-    else:
-        mine = db.list_listings(limit=LIST_CAP, user_id=user["id"],
-                                statuses=("published", "live"))
-    live = [i for i in mine if i.get("status") in ("published", "live")]
-    promoted_ids, known = _promoted_record_ids(creds, live)
-    if not known:
-        # No fee on the strength of a question nobody managed to ask -- see
-        # _promoted_record_ids. Not a 4xx: the seller did nothing wrong.
-        raise HTTPException(
-            503, "We couldn't read your eBay ads just now, so nothing was "
-                 "promoted. Try again in a moment.")
-    targets: list[dict] = []
-    already = 0
-    for it in live:
-        if (it.get("listing") or {}).get("promote") or it["id"] in promoted_ids:
-            already += 1
-        else:
-            targets.append(it)
-    # Each promotion is its own Marketing API round trip (two when the ad
-    # already exists), run one after another; the run is bounded like the
-    # other bulk passes and the rest is reported for a second one.
-    records, deferred = targets[:BULK_PROMOTE_CAP], targets[BULK_PROMOTE_CAP:]
-    rates = _rates_by_record_id(creds, records)
-    promoted = 0
-    failed = 0
-    needs_reconnect = False
-    for it in records:
-        listing = Listing(**(it.get("listing") or {}))
-        status = _promote(it["id"], listing, creds, rate=rates.get(it["id"]))
-        if status.get("promoted"):
-            storage.save_listing(it["id"], listing)
-            db.upsert_listing(it["id"], listing.model_dump(), status=it.get("status"),
-                              user_id=user["id"])
-            promoted += 1
-        elif status.get("needs_reconnect"):
-            needs_reconnect = True
-            break
-        else:
-            failed += 1
-    # Asked for but not live any more, or not the seller's: reported, not
-    # silently dropped from the totals.
-    skipped = (len(ids) - len(mine) if ids else 0) + (len(mine) - len(live))
-    log.info("promote-all: user=%s asked=%d live=%d already_promoted=%d "
-             "promoted=%d failed=%d skipped=%d deferred=%d", user["id"],
-             len(ids), len(live), already, promoted, failed, skipped,
-             len(deferred))
-    return {"promoted": promoted, "total": len(records),
-            "already_promoted": already, "failed": failed, "skipped": skipped,
-            "deferred": len(deferred), "needs_reconnect": needs_reconnect}
 
 
 # How many listings one bulk price run touches. Each is a serial eBay revise;
@@ -7579,11 +7399,6 @@ BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
 # than refused, and far below anything that makes an `IN (...)` a
 # problem. Same role as the 200 the bulk delete already applies.
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
-# How many listings one promote-all run touches. Cheaper per listing than a
-# revise (one Marketing API call, two for an ad that already exists, and the
-# campaign lookup is cached), but still serial, and the old unbounded pass
-# over a whole store would not have come back inside the gateway's patience.
-BULK_PROMOTE_CAP = int(os.getenv("BULK_PROMOTE_CAP", "40") or "40")
 
 
 @app.post("/api/ebay/lower-prices")
@@ -7697,8 +7512,7 @@ def _bulk_caps() -> dict:
     with the recommendations so the group can say what this pass will actually
     do before the seller agrees to spend anything on it.
     """
-    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP,
-            "promote": BULK_PROMOTE_CAP}
+    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP}
 
 
 # The enrichment runs as a background job, one per account at a time: it

@@ -425,8 +425,6 @@ def test_the_dashboard_is_told_what_one_run_holds(seller, monkeypatch):
     monkeypatch.setattr(main, "BULK_ENRICH_CAP", 2)
     # The suggestion engine's own eBay lookups are not what this is about.
     monkeypatch.setattr(main, "_metrics_by_record_id", lambda creds, items: {})
-    monkeypatch.setattr(main, "_rates_by_record_id", lambda creds, items: {})
-    monkeypatch.setattr(main, "_promoted_record_ids", lambda creds, items: (set(), True))
     ids = []
     for i in range(5):
         rid = f"capped-{i}"
