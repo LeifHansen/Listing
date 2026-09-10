@@ -131,6 +131,43 @@ _MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
 # comment is about.
 _MIN_LARGEST_REGION = float(os.getenv("REMBG_MIN_LARGEST_REGION", "0.6") or 0.6)
 _MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
+
+# --- ...but one PRODUCT is not always one object ----------------------------
+#
+# The rule above says "one product is one object, and a matte of it is one
+# solid blob". That is false for a great deal of what resells, and the way it
+# is false is silent: a seller photographs a PAIR of shoes, two paintings,
+# earrings, a two-piece, a cup and its saucer, an item beside its box — and
+# the largest region is half of what was kept, so the cutout is refused and
+# the photo comes back untouched.
+#
+# Reported as "background removal is not working": two canvases lying on
+# grass. Run through the real isnet model, that photo mattes PERFECTLY — the
+# model keeps both canvases as two clean rectangles and is not fooled by the
+# figures painted on them — and scores coverage 0.47, solidity 1.00, box fill
+# 0.87. It was thrown away on largest-region 0.51 against a floor of 0.60,
+# for no reason except that the seller was selling two things.
+#
+# So it is only the LARGEST-REGION half that gets a second question. The box
+# fill stays a precondition for everything, and it is the clause that keeps
+# #255 intact, exactly as its own comment says: a tree at one edge and a boat
+# at the other span nearly the whole photo while covering little of it, where
+# two canvases side by side fill the box they share. Measured on this file's
+# own fixtures — the traps 0.10, 0.17 and 0.22, a pair of shoes 0.60, the
+# reported canvases 0.87. Nothing about that changes here.
+#
+# What changes is that failing the one-blob test is no longer the end of it.
+# When the box is filled, ask instead: is this A FEW COMPACT OBJECTS?
+#
+#   * the substantial regions must be nearly ALL of what was kept, so a long
+#     tail of confetti disqualifies;
+#   * there must be few of them, because a seller sells a pair or a set, not
+#     a dozen scattered fragments;
+#   * and each must fill its OWN box too, so a pair of ragged pieces cannot
+#     ride in on a tidy arrangement.
+_COMPANION_SHARE = float(os.getenv("REMBG_COMPANION_SHARE", "0.25") or 0.25)
+_MAX_OBJECTS = int(os.getenv("REMBG_MAX_OBJECTS", "4") or 4)
+_OBJECTS_COVER = float(os.getenv("REMBG_OBJECTS_COVER", "0.85") or 0.85)
 # The mask is judged at this size. Shape is a low-frequency question, and the
 # region labelling below is pure Python — at 160px it is a few thousand cells
 # and about a millisecond, against millions of pixels and a visible stall.
@@ -359,17 +396,42 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
     return shifted
 
 
-def _shape_stats(kept: Image.Image) -> tuple[float, float]:
-    """(the largest connected region's share of the kept area, the kept area's
-    share of its own bounding box) for a binary mask.
+def _kept_is_the_product(total: int, regions: list, box_fill: float) -> bool:
+    """Whether what the matte kept looks like the thing being sold.
 
-    Both answer "is this one object?" — the first against a matte broken into
-    pieces, the second against one spread thinly across the frame. Measured on
-    a copy no bigger than _SHAPE_SIDE: shape survives the downscale, and the
-    labelling below is pure Python.
+    One solid blob filling its own box is the common case and answers yes
+    immediately. Otherwise the pair-or-set question above — a few compact
+    objects, together accounting for nearly everything kept.
+    """
+    if not total or not regions:
+        return False
+    # Whatever it is, it has to fill the box it sits in. See above: this is
+    # the clause that refuses a matte spread thinly across the frame, and it
+    # is unchanged.
+    if box_fill < _MIN_BBOX_FILL:
+        return False
+    if regions[0][0] / total >= _MIN_LARGEST_REGION:
+        return True
+    objects = [r for r in regions if r[0] >= regions[0][0] * _COMPANION_SHARE]
+    return (len(objects) <= _MAX_OBJECTS
+            and sum(r[0] for r in objects) / total >= _OBJECTS_COVER
+            and all(fill >= _MIN_BBOX_FILL for _cells, fill in objects))
 
-    (0.0, 0.0) for an empty mask, so a caller that reaches here without
-    checking coverage still refuses rather than dividing by zero.
+
+def _kept_shape(kept: Image.Image) -> tuple[int, list[tuple[int, float]], float]:
+    """What a binary mask is made of: (total cells kept, one entry per
+    connected region as (cells, how well it fills ITS OWN bounding box),
+    largest region first, how well the whole lot fills the ONE box around it).
+
+    Every shape question in this file is answered from here, so the labelling
+    below — the only pure-Python loop on the photo path — runs once per photo.
+
+    Per-region box fill is what tells a pair of products from the fragments of
+    one. Two shoes, two canvases, a cup and its saucer are each compact and
+    each fill their own box; a tree and a boat the model found inside a
+    painting do not fill theirs, however tidily they sit in the frame
+    together. Reported rather than reduced to one number, because which
+    question matters depends on how many regions there turn out to be.
     """
     w, h = kept.size
     scale = _SHAPE_SIDE / max(w, h)
@@ -388,33 +450,53 @@ def _shape_stats(kept: Image.Image) -> tuple[float, float]:
             if px[x, y]:
                 total += 1
     if not total:
-        return 0.0, 0.0
+        return 0, [], 0.0
 
     # Flood fill each unvisited region, 4-connected, with an explicit stack:
     # a recursive fill blows Python's stack on a mask that is mostly one blob,
     # which is precisely the healthy case.
     seen = bytearray(w * h)
-    largest = 0
+    regions: list[tuple[int, float]] = []
     for sy in range(h):
         for sx in range(w):
             if seen[sy * w + sx] or not px[sx, sy]:
                 continue
             size = 0
+            lo_x = hi_x = sx
+            lo_y = hi_y = sy
             stack = [(sx, sy)]
             seen[sy * w + sx] = 1
             while stack:
                 x, y = stack.pop()
                 size += 1
+                lo_x, hi_x = min(lo_x, x), max(hi_x, x)
+                lo_y, hi_y = min(lo_y, y), max(hi_y, y)
                 for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
                     if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] \
                             and px[nx, ny]:
                         seen[ny * w + nx] = 1
                         stack.append((nx, ny))
-            largest = max(largest, size)
+            own_box = (hi_x - lo_x + 1) * (hi_y - lo_y + 1)
+            regions.append((size, size / own_box if own_box else 0.0))
+    regions.sort(reverse=True)
 
     box = kept.getbbox()
     box_area = (box[2] - box[0]) * (box[3] - box[1]) if box else 0
-    return largest / total, (total / box_area if box_area else 0.0)
+    return total, regions, (total / box_area if box_area else 0.0)
+
+
+def _shape_stats(kept: Image.Image) -> tuple[float, float]:
+    """(the largest connected region's share of the kept area, the kept area's
+    share of its own bounding box) — the two summary numbers, for callers and
+    tests that want the shape as a pair rather than as its parts.
+
+    (0.0, 0.0) for an empty mask, so a caller that reaches here without
+    checking coverage still refuses rather than dividing by zero.
+    """
+    total, regions, box_fill = _kept_shape(kept)
+    if not total:
+        return 0.0, 0.0
+    return regions[0][0] / total, box_fill
 
 
 def _fill_interior(alpha: Image.Image) -> Image.Image:
@@ -565,13 +647,15 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
                  "item's interior is opaque (coverage %.3f); keeping the "
                  "photo as shot", solidity, coverage)
         return None
-    # And is it one object? See _MIN_LARGEST_REGION.
-    largest, box_fill = _shape_stats(kept)
-    if largest < _MIN_LARGEST_REGION or box_fill < _MIN_BBOX_FILL:
-        log.info("bg-removal: the matte is not one object — largest region "
-                 "%.2f of what it kept, filling %.2f of its own box "
-                 "(coverage %.3f); keeping the photo as shot",
-                 largest, box_fill, coverage)
+    # And is it the product? One object, or a few — see _COMPANION_SHARE.
+    total, regions, box_fill = _kept_shape(kept)
+    if not _kept_is_the_product(total, regions, box_fill):
+        log.info("bg-removal: what the matte kept is not the product — %d "
+                 "region(s), largest %.2f of what it kept and filling %.2f of "
+                 "its own box, the lot filling %.2f of theirs (coverage "
+                 "%.3f); keeping the photo as shot",
+                 len(regions), (regions[0][0] / total) if total else 0.0,
+                 regions[0][1] if regions else 0.0, box_fill, coverage)
         return None
     canvas = Image.new("RGB", rgb.size, WHITE)
     canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),

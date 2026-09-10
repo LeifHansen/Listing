@@ -976,6 +976,19 @@ seller's home never rides along to a listing. The frame the seller composed is
 the frame that ships; cropping and fixing a cutout the model got wrong are the
 seller's, in the photo studio.
 
+**A photo may hold more than one thing.** The cutout asks whether what the
+matte kept is the PRODUCT, and for a long time that meant one solid blob --
+which is false for a great deal of what resells. A seller photographing a pair
+of shoes, two paintings, earrings, or an item beside its box got a perfect
+matte thrown away for having two pieces in it, and the photo came back
+untouched with no explanation that fitted. A few compact objects now count as
+the product, provided they are few, are nearly all of what was kept, and each
+fills its own bounding box. What still refuses is the case the guard was built
+for: a photo OF a picture, where the model finds the tree or the boat the
+picture depicts and deletes the artwork around it. Those pieces sit in
+opposite corners and fill the box between them at 0.10-0.22, where two
+canvases side by side fill it at 0.87.
+
 **A hedged matte is repaired, not refused.** The model is confident where
 there is contrast and unsure where there is not, so a pale item on a pale
 backdrop -- a white shirt on white foamboard, which is what sellers are told
