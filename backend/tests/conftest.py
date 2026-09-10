@@ -55,6 +55,11 @@ _SCRUBBED = (
     # for reasons unrelated to the code.
     "ETSY_COMMERCIAL_ACCESS", "ETSY_ACCESS_TIER", "ETSY_APP_SEATS",
     "ETSY_OWNER_EMAILS",
+    # The launch gate: which marketplaces the app offers at all. Inherited
+    # from a developer's shell it would add or remove whole marketplaces from
+    # the roster, so the gate's own tests would pass for reasons unrelated to
+    # the code.
+    "MARKETPLACES_ENABLED",
 )
 
 
@@ -86,6 +91,27 @@ def _reset_objstore() -> None:
     objstore._client = None
     objstore._error = None
     objstore._error_at = 0.0
+
+
+@pytest.fixture
+def every_marketplace(monkeypatch):
+    """Offer every built marketplace to the app under test.
+
+    Etsy and Depop are withheld from sellers by default — eBay launches on
+    its own (config.MARKETPLACES_ENABLED) — but their integrations are still
+    in the tree and still have to be tested, which is the whole reason the
+    switch is an env var and not a pair of commented-out imports. A test that
+    drives one of them THROUGH THE APP (a route, the roster, the inbox
+    fan-out) asks for this; one that instantiates EtsyProvider() directly
+    never went past the gate and does not need it.
+
+    Patches the function rather than the environment because the variable is
+    read once at import: config would have to be reloaded, which would take
+    the app's own module graph with it.
+    """
+    monkeypatch.setattr(config, "marketplaces_enabled",
+                        lambda: config.MARKETPLACE_KEYS)
+    return config.MARKETPLACE_KEYS
 
 
 @pytest.fixture

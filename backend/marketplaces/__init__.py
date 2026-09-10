@@ -5,15 +5,21 @@ credential-gated-provider idea as config.bg_engine_chain, but for whole
 marketplaces). The registry module itself stays import-light so tests can
 import it under CI's minimal install — the heavy provider modules (httpx,
 sqlalchemy via db) are only pulled in by _ensure_loaded(), which runs at
-request time from main.py, never from tests.
+request time from main.py, never from tests. (config is the one import here
+that does anything at import time, and every test already has it: conftest
+imports it first, under a scratch DATA_DIR, for exactly that reason.)
 
-Adding marketplace N+1 = one provider module + one import line in
-_ensure_loaded().
+Adding marketplace N+1 = one provider module, one import line in
+_ensure_loaded(), and its key in config.MARKETPLACE_KEYS — the roster the
+launch gate is drawn from. A provider missing from that tuple registers fine
+and is then invisible, which is a silent way to ship nothing; the registry
+test asserts the two agree so the omission fails CI instead.
 """
 from __future__ import annotations
 
 from typing import Optional
 
+from .. import config
 from .base import MarketplaceProvider
 
 _REGISTRY: dict[str, MarketplaceProvider] = {}
@@ -41,11 +47,39 @@ def _ensure_loaded() -> None:
 
 
 def get(key: str) -> Optional[MarketplaceProvider]:
+    """The provider for `key`, or None — including None for a marketplace this
+    deployment doesn't offer (config.marketplace_enabled).
+
+    Withheld and unknown deliberately answer the same way. Every caller
+    already handles None as "no such marketplace": the {marketplace} routes
+    404, the publish fan-out returns "Unknown marketplace 'etsy'", and the
+    inbox drops the source. Giving a switched-off marketplace its own answer
+    would mean teaching each of those a second failure mode, for a state no
+    seller can reach through a UI built from the roster below.
+    """
     _ensure_loaded()
+    if not config.marketplace_enabled(key):
+        return None
     return _REGISTRY.get(key)
 
 
 def all_providers() -> list[MarketplaceProvider]:
+    """Every provider this deployment offers, in registration order.
+
+    The gate lives here rather than in _ensure_loaded() so a withheld
+    marketplace stays imported and constructible: its module still
+    self-registers, every_provider() can still see it, and its tests still
+    run against the real class. Switching it on is an env var, not a deploy
+    of un-commented code.
+    """
+    _ensure_loaded()
+    return [_REGISTRY[k] for k in _ORDER if config.marketplace_enabled(k)]
+
+
+def every_provider() -> list[MarketplaceProvider]:
+    """Every REGISTERED provider, launch gate ignored — for diagnostics and
+    for the test that keeps config.MARKETPLACE_KEYS honest. Not for anything
+    seller-facing: that is all_providers()."""
     _ensure_loaded()
     return [_REGISTRY[k] for k in _ORDER]
 

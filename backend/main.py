@@ -9772,7 +9772,7 @@ def marketplace_roster(request: Request) -> dict:
 # suggestion. Literal paths, so they must sit above the {marketplace} routes.
 @app.get("/api/etsy/settings-options")
 def etsy_settings_options(request: Request) -> dict:
-    provider = marketplaces.get("etsy")
+    provider = _marketplace_or_404("etsy")
     creds = provider.creds_for(_uid(request))
     if not creds:
         raise HTTPException(400, "Connect Etsy first.")
@@ -9799,6 +9799,7 @@ def etsy_settings_options(request: Request) -> dict:
 
 @app.post("/api/etsy/settings-options")
 def save_etsy_settings_options(request: Request, payload: dict) -> dict:
+    _marketplace_or_404("etsy")
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
@@ -9823,7 +9824,12 @@ def save_etsy_settings_options(request: Request, payload: dict) -> dict:
 def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> dict:
     """Best Etsy category for this listing: cheap keyword shortlist over the
     cached seller taxonomy, then one small Claude pick."""
-    if not config.etsy_oauth_ready():
+    # 400, not the 404 the other Etsy routes give: this path carries a
+    # session_id, and a 404 on a listing-scoped route reads as "your listing
+    # is gone" (test_a_listing_we_cannot_read_is_not_missing enforces that).
+    # Withheld and unconfigured are one sentence to a seller — this server
+    # does not do Etsy — and neither of them is news about their listing.
+    if marketplaces.get("etsy") is None or not config.etsy_oauth_ready():
         raise HTTPException(400, "Etsy isn't configured on the server.")
     _assert_session_owner(session_id, request)
     listing = Listing(**(payload.get("listing") or {}))
@@ -9839,6 +9845,12 @@ def _flow_cookie(marketplace: str) -> str:
 
 
 def _marketplace_or_404(marketplace: str):
+    """The provider, or 404 — for an unknown key and equally for one this
+    deployment withholds (config.MARKETPLACES_ENABLED). A withheld
+    marketplace is absent from the roster the UI is built from, so the only
+    way to reach these routes for one is by hand; "unknown" is the right
+    amount to tell that caller, and it keeps every marketplace route on one
+    failure mode instead of two."""
     provider = marketplaces.get(marketplace)
     if provider is None:
         raise HTTPException(404, "Unknown marketplace")

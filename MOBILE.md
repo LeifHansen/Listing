@@ -12,8 +12,10 @@ already in the codebase:
   (the web deploy builds without it and keeps relative URLs).
 - Auth uses a **Bearer token** in the shell (cookies never cross origins);
   the backend allows the `capacitor://localhost` origin via CORS.
-- OAuth connects (eBay/Etsy) mint a 60-second ticket for the navigation and
-  finish on an interstitial that steers the webview back into the app.
+- OAuth connects mint a 60-second ticket for the navigation and finish on
+  an interstitial that steers the webview back into the app. eBay is the
+  only marketplace the app offers at launch (`MARKETPLACES_ENABLED`); the
+  flow is generic, so Etsy and Depop need no mobile work when they land.
 - Token purchases open **in the system browser** (App Store guideline 3.1.1
   forbids completing a non-Apple checkout inside the app; a link out is
   allowed on the US storefront). The webhook credits the purchase, so set

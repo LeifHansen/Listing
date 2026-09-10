@@ -676,6 +676,101 @@ def depop_oauth_ready() -> bool:
                 and DEPOP_AUTH_URL and DEPOP_TOKEN_URL and DEPOP_REDIRECT_URI)
 
 
+# --- Which marketplaces this deployment offers -----------------------------
+# The launch switch. eBay ships to the mobile app on its own; Etsy and Depop
+# are built and stay in the tree — providers registered, mappings intact,
+# tests running — but withheld from every seller-facing surface until we come
+# back to them.
+#
+# Withheld is the DEFAULT, not a deployment setting. An unset variable offers
+# eBay alone, so a laptop, a CI run, the Fly app and the mobile build all
+# agree without anyone remembering to set anything — which is the property
+# that commenting the providers out would have given us, without the dead
+# code or the seven test files that exist only for these two marketplaces
+# and would have had to come out with them.
+# Switching one back on is this one variable, no deploy of un-commented code:
+#
+#   MARKETPLACES_ENABLED=ebay,etsy      # Etsy back, Depop still held
+#   MARKETPLACES_ENABLED=all            # everything registered
+#
+# eBay is not in this gate's gift. The publish and revise paths reach for it
+# by name (marketplaces.get("ebay")), so a list that omitted it would not
+# launch a leaner app — it would 500 the publish button. It is therefore
+# always enabled, and a list that leaves it out is reported rather than
+# obeyed: a typo in one env var must not be able to take the product down.
+MARKETPLACE_KEYS = ("ebay", "etsy", "depop")
+_ALWAYS_ENABLED = ("ebay",)
+_MARKETPLACES_ENABLED = os.getenv("MARKETPLACES_ENABLED", "").strip()
+_ENABLE_ALL = ("all", "*")
+
+
+def _named_marketplaces() -> list[str]:
+    """The keys the operator actually typed, deduped, lowercased, in order.
+    Unknown ones included — config_warnings() is what names them."""
+    return list(dict.fromkeys(
+        k.strip().lower() for k in _MARKETPLACES_ENABLED.split(",")
+        if k.strip()))
+
+
+def marketplaces_enabled() -> tuple[str, ...]:
+    """The marketplace keys this deployment offers, in MARKETPLACE_KEYS order.
+
+    Blank reads as unset, like every other variable in this file, so a
+    secret cleared to "" gets the launch default rather than an empty roster.
+    """
+    if not _MARKETPLACES_ENABLED:
+        return _ALWAYS_ENABLED
+    if _MARKETPLACES_ENABLED.lower() in _ENABLE_ALL:
+        return MARKETPLACE_KEYS
+    named = set(_named_marketplaces()) | set(_ALWAYS_ENABLED)
+    return tuple(k for k in MARKETPLACE_KEYS if k in named)
+
+
+def marketplace_enabled(key: str) -> bool:
+    """Whether this deployment offers `key`. The registry asks this before
+    handing a provider to anything seller-facing.
+
+    Only the marketplaces this app ships (MARKETPLACE_KEYS) can be withheld.
+    A key outside that tuple is one the registry knows about and this file
+    does not — a provider added without listing it here — and the honest
+    answer for it is "enabled": showing up in the roster with its credentials
+    missing is a visible bug, whereas vanishing from every surface is a
+    silent one. The registry test fails on that mismatch either way.
+    """
+    key = (key or "").strip().lower()
+    if key not in MARKETPLACE_KEYS:
+        return True
+    return key in marketplaces_enabled()
+
+
+def _marketplace_warnings() -> list[str]:
+    """Two ways this variable disappoints an operator silently."""
+    if not _MARKETPLACES_ENABLED or _MARKETPLACES_ENABLED.lower() in _ENABLE_ALL:
+        return []
+    warnings = []
+    named = _named_marketplaces()
+    # A misspelled key is the quiet one: the marketplace the operator meant to
+    # switch back on stays hidden, and the roster looks exactly as it does
+    # when nobody has touched the variable at all.
+    unknown = [k for k in named if k not in MARKETPLACE_KEYS]
+    if unknown:
+        warnings.append(
+            f"MARKETPLACES_ENABLED names {', '.join(repr(k) for k in unknown)}, "
+            f"which is not one of {'/'.join(MARKETPLACE_KEYS)} — those entries "
+            f"are ignored, so a marketplace you meant to switch on is still "
+            f"hidden. Enabled: {', '.join(marketplaces_enabled())}.")
+    # The other one reads as obedience. eBay is forced on regardless, so an
+    # operator who left it out believes they turned it off and every publish
+    # still goes to eBay — better to say so than to let the list lie.
+    omitted = [k for k in _ALWAYS_ENABLED if k not in named]
+    if omitted:
+        warnings.append(
+            f"MARKETPLACES_ENABLED does not name {', '.join(omitted)}, which "
+            f"is always enabled anyway — core publish routes reach for it by "
+            f"name. Remove it from the list only by removing those routes.")
+    return warnings
+
+
 # --- Config warnings -------------------------------------------------------
 # The credentials an operator types by hand into `fly secrets`. Each is paired
 # with the value this module actually resolved, so a name that has a working
@@ -774,6 +869,7 @@ def config_warnings() -> list[str]:
             "it isn't a secret key — checkout will fail even though every "
             "readiness check passes. (A publishable pk_... key belongs in "
             "STRIPE_PUBLISHABLE_KEY.)")
+    warnings += _marketplace_warnings()
     return warnings
 
 
