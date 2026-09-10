@@ -132,6 +132,48 @@ Docs and repo hygiene:
       `node_modules`, `dist`, the native projects and the tests out of the
       image; stale Adobe docstrings and the dead `presigned_put` gone.
 
+From the "do before launch" list, on 2026-09-10 (every gate re-run green:
+ruff, the whole backend suite with no skips, the frontend lint, unit tests and
+build, the smoke walk and the reach check):
+
+- [x] **"Restore original" never worked on an imported photo.** The import
+      named its working copies `img_NN.jpg` and `source_for` reads back only
+      the `img_NNN.jpg` the photo pass writes, so every restore answered
+      "nothing to restore" for an original that was on the volume. Three
+      digits now. `backend/services/image_import.py`;
+      `tests/test_a_photo_ebay_echoed_back_from_our_own_host_is_adopted.py`.
+- [x] **"Restore original" on a photo added later restored somebody else's.**
+      "Add photos" keeps its originals as `add_NNN` beside the upload's
+      `src_NNN`, `add_` sorts before `src_`, and the lookup counted along the
+      directory by position. It reads the index off the filename first now.
+      `backend/services/images.py`; `tests/test_a_photo_can_go_back_to_what_was_shot.py`.
+- [x] **Login during a database outage read as "wrong password"** until the
+      status cache noticed, and a wrong password after the outage read as
+      "the database is down" until it noticed again. `get_user_by_email`
+      raises `StorageUnavailable` like `get_user_by_id` already did, and the
+      route no longer consults the cache. `backend/db.py`, `auth.py`, `main.py`;
+      `tests/test_login_during_an_outage_is_not_a_wrong_password.py`.
+- [x] **A failed boot-time ALTER was `pass`**, identical to the sixteen
+      expected "already exists" answers. Those are told apart and anything
+      else is logged with its statement. `backend/db.py`;
+      `tests/test_a_failed_boot_migration_is_logged.py`.
+- [x] **Raw exception text reached the client** at the edit, rotate, restore
+      and delete photo routes, the field PATCH, the shelf scan, the ship-from
+      catch-all and the three background jobs' status. Each says what could
+      not be done and quotes the support reference; validation keeps the
+      field and the rule and drops pydantic's report; the shelf scan uses the
+      AI error wording; eBay's own postal-code refusal stays in eBay's words.
+      `backend/main.py`; `tests/test_a_failure_the_seller_cannot_act_on_is_a_sentence.py`.
+- [x] **Model output was trusted for shape.** A bare value that parsed
+      crashed identify on `.get`; a title that came back as a list crashed
+      it on `.strip`; a `refusal` stop was "try again". Not-an-object is now
+      an unreadable answer, a field that is not text is an empty field, a
+      refusal is said as one (422, with what would change it) in identify,
+      refine and on the bulk card. The refine instruction is capped and the
+      reverse-image leads are fenced as evidence, one bounded line each.
+      `backend/services/claude_ai.py`; `tests/test_the_models_answer_is_checked_for_shape.py`,
+      `tests/test_what_the_seller_types_and_what_the_web_says_are_bounded.py`.
+
 ## Do before launch (code, scoped)
 
 Ordered by what it costs a seller.
@@ -178,27 +220,10 @@ Ordered by what it costs a seller.
       spend. Require login on the bulk upload unconditionally, add a per-IP
       limit and a per-request byte cap on `/api/upload`, and charge or gate
       the Etsy suggestion. `backend/main.py`, `backend/ratelimit.py`.
-- [ ] **Raw exception text still reaches the client** at nine sites
-      (`main.py` ~4685, 4759, 4871, 5714, 6253, 6655, 8591, 8624, 8653)
-      against the app's own rule in `_lookup_failed`.
-- [ ] **Model output is trusted for shape.** `_extract_json` returns whatever
-      parses; a scalar or a non-string title crashes identify; a `refusal`
-      stop reason is reported as "try again". Coerce in `_to_listing`, handle
-      `refusal`. Fence the reverse-image leads (third-party page titles go
-      into a web-search-enabled prompt unfenced) and cap `refine.prompt`.
-      `backend/services/claude_ai.py`, `models.py`.
-- [ ] **Imported photos are named `img_NN.jpg`; the pipeline expects
-      `img_NNN.jpg`**, so "Restore original" always fails for an imported
-      photo. `backend/services/image_import.py:134` vs `images.py:585,624`.
 - [ ] **R2 client init holds a lock across un-timed network calls** and
       `objstore.probe()` has no caller; give boto3 a `Config` with timeouts
       and probe from the startup thread. No `statement_timeout` /
       `lock_timeout` toward Neon either. `backend/objstore.py`, `db.py`.
-- [ ] **`create_all` + sixteen every-boot ALTERs, errors swallowed.** Log a
-      failed ALTER instead of `pass` so a real failure is visible; the
-      alembic cutover itself is an owner step below. `backend/db.py` (~583–591).
-- [ ] **Login during a database outage reads as "wrong password"** for the
-      first 30 s (the status cache). `backend/auth.py:239`, `main.py` (~2210).
 - [ ] Smaller, each a few lines: `ImageEditor` Escape/backdrop bypass the
       AI-busy lock and its layer canvases are never released; object URLs leak
       when the uploader unmounts; `Field` wraps the selling-format buttons in

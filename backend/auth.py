@@ -230,6 +230,12 @@ def signup(email: str, password: str):
 def login(email: str, password: str) -> Optional[dict]:
     """Verify credentials; returns the user dict (no hash) or None.
 
+    None means the credentials were refused (no such account, wrong password,
+    or a disabled account -- deliberately indistinguishable). A lookup that
+    could not run is NOT None: db.get_user_by_email raises StorageUnavailable,
+    and it passes through here so the route answers 503 rather than "wrong
+    password".
+
     The comparison runs whether or not the account exists -- see
     _ABSENT_PASSWORD_HASH. Deliberately not short-circuited on `rec`: doing so
     answers "is there an account for this address?" in the time it takes to

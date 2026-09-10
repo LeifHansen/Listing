@@ -181,8 +181,12 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
             img = ImageOps.exif_transpose(img).convert("RGB")
             if max(img.size) > _MAX_SIDE:
                 img.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.LANCZOS)
-            (orig / f"src_{i:02d}.jpg").write_bytes(data)
-            name = f"img_{i:02d}.jpg"
+            # Three digits, the shape optimize_all writes and the ONLY shape
+            # images.source_for reads back. These were img_NN, so "Restore
+            # original" on an imported photo always answered "nothing to
+            # restore" for an original that was sitting right here.
+            (orig / f"src_{i:03d}.jpg").write_bytes(data)
+            name = f"img_{i:03d}.jpg"
             img.save(opt / name, "JPEG", quality=88, optimize=True)
             return i, name, file_sha(opt / name), url
         except Exception as exc:  # noqa: BLE001 - skip one bad photo

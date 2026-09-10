@@ -627,6 +627,18 @@ def source_for(src_dir: Path, name: str) -> Optional[Path]:
     sources = [p for p in sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name))
                if p.suffix.lower() in _EXTS]
     i = int(m.group(1))
+    # By NAME before by position. Every writer of an original stamps it with
+    # the index its working copy will carry -- src_NNN from an upload or an
+    # import, add_NNN from "Add photos" -- and reading the directory by
+    # position gets the "Add photos" case wrong: add_003.jpg sorts before
+    # src_000.jpg, so on a listing with three uploads and two added photos,
+    # img_003 counted along the list to src_001 and put somebody else's
+    # photo where the seller asked for their own. A file that says which
+    # index it is for is believed. The positional read stays for originals
+    # that carry the camera's own names.
+    named = [p for p in sources if re.fullmatch(rf"(?:src|add)_{i:03d}", p.stem)]
+    if len(named) == 1:
+        return named[0]
     return sources[i] if 0 <= i < len(sources) else None
 
 

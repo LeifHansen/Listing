@@ -2248,12 +2248,14 @@ def auth_login(request: Request, response: Response, payload: dict) -> dict:
     password = str(payload.get("password", ""))
     if not db.enabled():
         raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
+    # A database that cannot be reached raises StorageUnavailable out of
+    # auth.login, and the central handler answers 503. That used to be read
+    # off the status CACHE here instead, which is refreshed every ten
+    # seconds: for the gap after an outage began a right password was
+    # "wrong", and for the gap after it ended a wrong one was "the database
+    # is down". None from auth.login now means exactly refused.
     user = auth.login(email, password)
     if not user:
-        if not db.db_status().get("connected"):
-            raise HTTPException(
-                503, "Account service is temporarily unavailable (database "
-                     "error). Please try again shortly.")
         raise HTTPException(401, "Invalid email or password")
     auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
     return {"user": user, "token": auth.make_token(user["id"])}
@@ -3383,9 +3385,15 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
             # base, the path and a status line) goes to the log instead.
             raise _lookup_failed("save your ship-from ZIP with eBay",
                                  exc, status=503) from exc
-        except Exception as exc:  # noqa: BLE001 - eBay's own refusal
+        except ebay_auth.AccountApiError as exc:
+            # eBay's own refusal, in eBay's words -- the one answer here the
+            # seller CAN act on, so it stays a 400 about the ZIP.
             raise HTTPException(
-                400, f"eBay rejected that ship-from location: {exc}") from exc
+                400, "eBay rejected that ship-from location: "
+                     f"{exc.description or exc}") from exc
+        except Exception as exc:  # noqa: BLE001 - neither the transport nor eBay: a fault, not the ZIP
+            raise _lookup_failed("save your ship-from ZIP with eBay",
+                                 exc, status=503) from exc
         fields["merchant_location_key"] = key
         fields["ship_from_postal"] = postal
     if not fields:
@@ -4212,11 +4220,45 @@ def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPExcepti
     """
     reference = _support_reference()
     log.warning("lookup failed (%s) [%s]: %s", doing, reference, exc)
+    return HTTPException(status, _try_again(doing, reference))
+
+
+def _try_again(doing: str, reference: str) -> str:
+    """The sentence a failure the seller cannot act on gets, everywhere.
+
+    The alternative was `f"Couldn't rotate that photo: {exc}"` -- Pillow's
+    "cannot identify image file <_io.BytesIO object at 0x7f...>", an OSError
+    with the volume's path in it, pydantic's URL -- at nine sites, against
+    the rule _lookup_failed above already states. The detail goes to the log
+    beside the reference; the reference comes back in the sentence.
+    """
     # The reference rides IN the sentence: lib/api.js reads `detail` as a
     # string, so a structured body renders as "[object Object]".
-    return HTTPException(status, (
-        f"We couldn't {doing} just now. Try again in a moment — if it keeps "
-        f"happening, quote {reference} to support."))
+    return (f"We couldn't {doing} just now. Try again in a moment — if it keeps "
+            f"happening, quote {reference} to support.")
+
+
+def _validation_summary(exc: Exception) -> str:
+    """Pydantic's complaint, reduced to the field and the rule.
+
+    The whole thing is "1 validation error for Listing\nprice\n  Input should
+    be a valid number [type=float_parsing, input_value='abc', input_type=str]
+    \n    For further information visit https://errors.pydantic.dev/...": the
+    field and the rule are the part a seller can act on, and they are kept.
+    """
+    errors_of = getattr(exc, "errors", None)
+    try:
+        items = errors_of() if callable(errors_of) else None
+    except Exception:  # noqa: BLE001 - a summary must not fail harder than the error
+        items = None
+    if not items:
+        return "check it and try again."
+    parts = []
+    for item in items[:3]:
+        loc = ".".join(str(x) for x in (item.get("loc") or ()))
+        msg = str(item.get("msg") or "not accepted")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) + "."
 
 
 @app.get("/api/ebay/payments-status")
@@ -4673,9 +4715,11 @@ def _run_upload_more_job(job_id: str, session_id: str,
         return
     except Exception as exc:  # noqa: BLE001 - the job must always answer
         tokens.refund(spent)
-        log.warning("upload-more %s: optimize failed: %s", job_id, exc)
+        reference = _support_reference()
+        log.warning("upload-more %s: optimize failed [%s]: %s",
+                    job_id, reference, exc)
         _bulk_set(job_id, done=True, phase="failed",
-                  error=f"Photo processing failed: {exc}")
+                  error=_try_again("process those photos", reference))
         return
     new_names: list[str] = []
     # Photos whose cutout failed (the model found no item, or fell over) kept their
@@ -4760,8 +4804,11 @@ async def edit_image(
     try:
         await run_in_threadpool(_save)
     except Exception as exc:  # noqa: BLE001
-        log.warning("edit-image: could not process (session=%s name=%s): %s", session_id, name, exc)
-        raise HTTPException(400, f"Could not process the edited image: {exc}") from exc
+        reference = _support_reference()
+        log.warning("edit-image: could not process (session=%s name=%s) [%s]: %s",
+                    session_id, name, reference, exc)
+        raise HTTPException(
+            400, _try_again("save that edited photo", reference)) from exc
     # When R2 is the source eBay fetches from, a failed re-push means the live
     # listing would keep the OLD photo — surface it instead of reporting success.
     if objstore.enabled():
@@ -4832,10 +4879,11 @@ async def image_restore_original(
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        log.warning("restore-original failed (session=%s name=%s): %s",
-                    session_id, name, exc)
+        reference = _support_reference()
+        log.warning("restore-original failed (session=%s name=%s) [%s]: %s",
+                    session_id, name, reference, exc)
         raise HTTPException(
-            400, f"Couldn't restore that photo: {exc}") from exc
+            400, _try_again("restore that photo", reference)) from exc
 
     if objstore.enabled():
         url = await run_in_threadpool(
@@ -4947,7 +4995,11 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     try:
         await run_in_threadpool(_rotate)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(400, f"Couldn't rotate that photo: {exc}") from exc
+        reference = _support_reference()
+        log.warning("rotate failed (session=%s name=%s) [%s]: %s",
+                    session_id, name, reference, exc)
+        raise HTTPException(
+            400, _try_again("rotate that photo", reference)) from exc
     # The R2 push is AWAITED, unlike the bookkeeping below it. This used to be
     # fire-and-forget on a daemon thread with failures only logged, and that is
     # what made manual rotation look unreliable: the local file was rotated and
@@ -5581,7 +5633,8 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     try:
         listing = Listing(**merged)
     except Exception as exc:  # noqa: BLE001 - a bad value is the caller's
-        raise HTTPException(400, f"That value isn't valid: {exc}") from exc
+        raise HTTPException(
+            400, "That value isn't valid: " + _validation_summary(exc)) from exc
     # Marked so the next revise actually carries it: a live listing's shipping
     # policy changed from a card has to reach eBay, and a revise only sends
     # fields the seller is known to have edited.
@@ -5790,7 +5843,11 @@ def delete_image(payload: dict, request: Request) -> dict:
         try:
             path.unlink()
         except OSError as exc:
-            raise HTTPException(500, f"Couldn't delete the image: {exc}") from exc
+            reference = _support_reference()
+            log.warning("delete-image failed (session=%s name=%s) [%s]: %s",
+                        session_id, name, reference, exc)
+            raise HTTPException(
+                500, _try_again("delete that photo", reference)) from exc
     # R2 mirror delete is a network round-trip the user shouldn't wait on —
     # the local file (which /media serves first) is already gone.
     if objstore.enabled():
@@ -6325,10 +6382,11 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
                 item["status"] = "error"
                 # The card shows this. A decoder's complaint about the
-                # model's JSON is not something a seller can act on; the
-                # sentence ai_error_message gives it is.
+                # model's JSON, a rate limit, a refusal -- none of them is
+                # something a seller can act on as the SDK words it; the
+                # sentence ai_error_message gives each of them is.
                 item["error"] = (claude_ai.ai_error_message(exc)[1]
-                                 if isinstance(exc, json.JSONDecodeError)
+                                 if claude_ai.is_ai_error(exc)
                                  else str(exc))
                 item["listing"] = None
                 item["title"] = group["name"]
@@ -6363,11 +6421,15 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 "The server ran out of photo storage mid-batch. Space has been "
                 "reclaimed automatically — please run this batch again."))
         else:
-            log.warning("bulk %s failed: %s", job_id, exc)
-            _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
+            reference = _support_reference()
+            log.warning("bulk %s failed [%s]: %s", job_id, reference, exc)
+            _bulk_set(job_id, done=True,
+                      error=_try_again("process this batch", reference))
     except Exception as exc:  # noqa: BLE001 - job-level failure
-        log.warning("bulk %s failed: %s", job_id, exc)
-        _bulk_set(job_id, done=True, error=f"Bulk processing failed: {exc}")
+        reference = _support_reference()
+        log.warning("bulk %s failed [%s]: %s", job_id, reference, exc)
+        _bulk_set(job_id, done=True,
+                  error=_try_again("process this batch", reference))
     finally:
         # Give back whatever the batch charged for and never delivered. On an
         # abort that is the whole un-refunded remainder; on a completed batch
@@ -6675,8 +6737,11 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
     except Exception as exc:  # noqa: BLE001 - job-level failure must surface
         tokens.refund(bg_spent)
         tokens.refund(identify_spent)
-        log.warning("pipeline %s: optimize failed: %s", job_id, exc)
-        _bulk_set(job_id, done=True, error=f"Photo processing failed: {exc}")
+        reference = _support_reference()
+        log.warning("pipeline %s: optimize failed [%s]: %s",
+                    job_id, reference, exc)
+        _bulk_set(job_id, done=True,
+                  error=_try_again("process those photos", reference))
         return
     # Photos are ready — hand off to the identify chain (it owns the
     # identify-charge refund on failure, stub-draft rescue, and done/result).
@@ -6731,7 +6796,9 @@ async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> d
         result = await run_in_threadpool(claude_ai.scan_shelf, frames)
     except Exception as exc:  # noqa: BLE001
         await run_in_threadpool(tokens.refund, spent)
-        raise HTTPException(502, f"Shelf scan failed: {exc}") from exc
+        code, message = claude_ai.ai_error_message(exc)
+        log.warning("shelf scan failed: %s", exc)
+        raise HTTPException(code, message) from exc
     log.info("shelf scan: %d frames -> %d candidates", len(frames),
              len(result.get("items", [])))
     return result

@@ -586,10 +586,37 @@ def _get_engine():
                 try:
                     with _engine.begin() as conn:
                         conn.execute(text(stmt))
-                except Exception:  # noqa: BLE001 - column already exists
-                    pass
+                except Exception as exc:  # noqa: BLE001 - see below
+                    if _migration_already_applied(stmt, exc):
+                        continue
+                    # Anything else is a real failure -- a lock that timed
+                    # out, a permission the role lost, a type the server
+                    # refused -- and it used to be `pass`, identical to the
+                    # sixteen expected "already exists" answers above. The
+                    # column is then missing, and the first thing to notice
+                    # is a query somewhere else failing on it. Logged, not
+                    # raised: boot must still complete on a database that
+                    # answers the reads, and the next boot tries again.
+                    log.warning("db: migration failed (will retry next boot): "
+                                "%s -- %s", stmt, exc)
             _initialized = True
     return _engine
+
+
+def _migration_already_applied(stmt: str, exc: Exception) -> bool:
+    """True when a boot-time statement failed only because it had already run.
+
+    The list in _MIGRATIONS is re-applied on every boot, so on any database
+    past its first the ADD COLUMNs answer "duplicate column" (SQLite) or
+    "already exists" (Postgres). SQLite also has no ALTER COLUMN at all, and
+    the two TYPE widenings are a no-op there anyway (it ignores VARCHAR
+    lengths), so its syntax error on those is the expected answer on the one
+    database where it is one.
+    """
+    msg = str(exc).lower()
+    if "duplicate column" in msg or "already exists" in msg:
+        return True
+    return "syntax error" in msg and "alter column" in stmt.lower()
 
 
 def _record_to_dict(rec: ListingRecord) -> dict:
@@ -1093,9 +1120,16 @@ def get_user_by_email(email: str) -> Optional[dict]:
             d = _user_to_dict(u)
             d["password_hash"] = u.password_hash
             return d
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        # Not None. None is "no account with that address", and the login
+        # route says "Invalid email or password" to that -- so for the
+        # thirty seconds the status cache took to notice an outage, a seller
+        # typing the right password was told it was wrong. A lookup that
+        # could not run is not an account that does not exist.
         log.warning(f"db: get_user_by_email failed: {exc}")
-        return None
+        raise StorageUnavailable(
+            "Account service is temporarily unavailable (database error). "
+            "Please try again shortly.") from exc
 
 
 def get_user_by_id(user_id: str) -> Optional[dict]:

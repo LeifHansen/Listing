@@ -130,3 +130,23 @@ def test_the_outgoing_copy_is_kept_so_restore_is_undoable(tmp_path, monkeypatch)
     storage.snapshot_image(sid, "img_000.jpg")
     history = list(storage.history_dir(sid).rglob("*"))
     assert [p for p in history if p.is_file()], "nothing was snapshot"
+
+
+def test_a_photo_added_later_goes_back_to_its_own_original(tmp_path, monkeypatch):
+    """"Add photos" keeps its originals as add_NNN beside the upload's
+    src_NNN, and add_ sorts before src_. Read by position, img_002 on a
+    listing of two uploads and one added photo landed on src_001 -- and
+    "Restore original" put a different photo where the seller asked for
+    theirs. The file says which index it is for, and that is what is read."""
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path, raising=False)
+    sid = "sess2"
+    orig = storage.original_dir(sid)
+    shots = {"src_000.jpg": (200, 0, 0), "src_001.jpg": (0, 200, 0),
+             "add_002.jpg": (0, 0, 200)}
+    for name, colour in shots.items():
+        Image.new("RGB", (64, 48), colour).save(orig / name, "JPEG")
+
+    assert images.source_for(orig, "img_002.jpg").name == "add_002.jpg"
+    assert images.source_for(orig, "img_000.jpg").name == "src_000.jpg"
+    assert images.source_for(orig, "img_001.jpg").name == "src_001.jpg"
+    assert images.source_for(orig, "img_003.jpg") is None
