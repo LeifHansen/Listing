@@ -6117,15 +6117,40 @@ def _compact_item(item: dict) -> dict:
 def _bulk_items_from_disk(done: list[dict]) -> list[dict]:
     """The queue rows for items finished before a restart, rebuilt from their
     saved listings. The same shape _run_bulk_job produces, so the poller
-    cannot tell a resumed batch from one that never stopped."""
+    cannot tell a resumed batch from one that never stopped.
+
+    The database row is read where the disk copy is gone, in that order and
+    for the reason _listing_image_order gives: a database is OPTIONAL, so
+    disk is the only copy on a machine without one -- and where there is one,
+    the row outlives a volume that did not come back.
+
+    An item neither of them can produce is not a draft, and must not be sent
+    as one. It was: `listing` went out as null with the status left at
+    "draft", and the queue screen reads every draft's blockers straight off
+    its listing -- so ONE item whose listing.json died with the process took
+    the whole batch screen down to the error boundary, hiding the drafts that
+    had survived beside it. It goes out as the failure it is instead, which
+    the card already knows how to render and the seller can act on.
+    """
     items: list[dict] = []
     for rec in done:
         sid = str(rec.get("session_id") or "")
         listing = storage.load_listing(sid) if sid else None
+        if listing is None and sid:
+            # Best-effort: an unreadable store answers None here, exactly like
+            # a missing row, and both land on the same honest outcome below.
+            listing = (db.get_listing_best_effort(sid) or {}).get("listing")
         photos = (listing or {}).get("images") or []
+        lost = listing is None
+        if lost:
+            log.warning("bulk resume: no listing survived for item %s", sid)
         items.append({
             "session_id": sid, "name": rec.get("name") or "",
-            "status": rec.get("status") or "draft", "error": rec.get("error"),
+            "status": "error" if lost else (rec.get("status") or "draft"),
+            "error": rec.get("error") or (
+                "This draft couldn't be recovered after the server restarted. "
+                "The rest of the batch is unaffected — re-upload this item's "
+                "photos to draft it again." if lost else None),
             "listing_id": None,
             "thumb": f"/media/{sid}/optimized/{photos[0]}" if photos else "",
             "listing": listing,

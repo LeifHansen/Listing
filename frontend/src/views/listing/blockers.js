@@ -91,8 +91,16 @@ function aspectValue(l, name) {
               eBay itself. Demanding them here blocked sellers out of editing
               listings that were live and selling, which is the whole reason
               the server draws this line. Keep the two in step. */
-export function ebayBlockers(l = {},
+export function ebayBlockers(listing = {},
   { targets = null, aspects = null, conditions = null, mode = "live" } = {}) {
+  // A parameter default fires on `undefined` and NEVER on `null`, and a null
+  // listing is a shape this app really produces: a bulk item whose draft did
+  // not survive a restart used to carry one. Three of the four call sites
+  // wrote `x.listing || {}` to cope with that; the fourth forgot, and a
+  // single null took the whole bulk queue down to the error boundary --
+  // every surviving draft in the batch with it. Normalizing here is what
+  // makes remembering unnecessary.
+  const l = listing || {};
   const revising = mode === "revise";
   const out = [];
   const add = (key, target, label, why) => out.push({ key, target, label, why });
