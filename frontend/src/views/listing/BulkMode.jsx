@@ -930,8 +930,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // (a published or failed item is neither), every ticked item for delete.
   const selectedDrafts = drafts.filter((d) => checked[d.session_id]).length;
   const selectedCount = items.filter((it) => checked[it.session_id]).length;
+  // `it.listing || {}` like every other call site: an item can reach the queue
+  // with no listing at all (a draft that did not survive a restart), and this
+  // one runs in the QUEUE's render, not a card's — so a throw here takes the
+  // whole batch screen down rather than one card.
   const blocked = drafts.filter(
-    (it) => ebayBlockers(it.listing, { targets: effectiveTargets }).length > 0);
+    (it) => ebayBlockers(it.listing || {}, { targets: effectiveTargets }).length > 0);
   // Memoized: the queue re-renders on every status poll and on every keystroke
   // in a card, and the pairwise scan is quadratic in the size of the batch.
   // Keyed on everything the scan reads — ids, titles, and the brand and
