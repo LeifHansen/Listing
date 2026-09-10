@@ -38,7 +38,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageFile, ImageFilter, ImageOps, ImageStat
+from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
+                 ImageStat)
 
 from ..config import log
 from ..storage import natural_key
@@ -173,12 +174,23 @@ _SHAPE_SIDE = int(os.getenv("REMBG_SHAPE_SIDE", "160") or 160)
 # items are ordinary here (wicker, mesh, crochet, cane, wire) and they are not
 # ghosts.
 #
-# The exception this knowingly refuses is genuinely sheer fabric — tulle,
-# organza, a chiffon scarf — which mattes half-opaque all over and is
-# indistinguishable from a model that never committed. Nothing here can tell
-# those apart, and the same error-direction argument decides it: a sheer
-# skirt kept as shot is a photo, and a sheer skirt composited on white is a
-# rumour of one.
+# WHAT THIS MEASURES NOW. _fill_interior runs first and makes the interior
+# opaque, so on a hedged matte this reads 1.00 where it used to read 0.10 —
+# the ghost is repaired rather than caught. That is the point: refusing was
+# only ever the best answer available while the alternative was shipping the
+# item at a third of its opacity, and it left the middle case (hedged enough
+# to look wrong, not enough to be refused) shipping damaged with nothing
+# said. This stays as the backstop for a matte the repair could not save —
+# one with no interior to promote — and as the thing that fails loudly if
+# _fill_interior is ever broken or removed.
+#
+# The one case that changed hands rather than being fixed is genuinely sheer
+# fabric — tulle, organza, a chiffon scarf — which mattes half-opaque all
+# over and is indistinguishable from a model that never committed. It used to
+# be kept as shot; it now ships opaque, which is wrong for it. Restore
+# original recovers the photo. The trade is deliberate: pale garments on
+# plain backdrops are what the app tells sellers to shoot, and sheer items
+# are rare.
 #
 # One caution for anyone changing this: unlike _shape_stats, which thresholds
 # its downscaled copy LOW on purpose so a merged cell errs toward connected,
@@ -405,6 +417,77 @@ def _shape_stats(kept: Image.Image) -> tuple[float, float]:
     return largest / total, (total / box_area if box_area else 0.0)
 
 
+def _fill_interior(alpha: Image.Image) -> Image.Image:
+    """The matte with the item's INTERIOR made opaque.
+
+    This is the repair for the failure _interior_solidity was written to
+    detect. The model is confident where there is contrast and unsure where
+    there is not, so a pale item on a pale backdrop — a white shirt on white
+    foamboard, which is exactly what sellers are told to shoot on — comes back
+    with its collar label and its placket at 255 and the fabric between them
+    somewhere in the middle. _harden ships that middle as PARTIAL ALPHA, and a
+    pixel the model half believed in is composited at half strength over
+    white. An item's worth of those is the item rubbed out: the seller gets a
+    crisp logo floating on a ghost of a shirt.
+
+    Detecting that and refusing the cutout (which is what the solidity floor
+    does) leaves two outcomes and no good one — badly hedged means the photo
+    is kept as shot, moderately hedged means it ships damaged. So: repair it.
+    A pixel inside the item is part of the item whatever the model's
+    confidence, because there is nothing else it could be.
+
+    "Inside" is the same interior _interior_solidity measures, and reusing
+    that definition is what keeps a soft edge soft: cells WHOLLY covered by
+    the item, eroded back from the boundary. A rim cell is only partly
+    covered, so it is not interior and is left exactly as the model drew it.
+    The same is true of the gaps between a fur collar's tufts or a wig's
+    flyaway strands — though a fringe dense enough to cover its cells
+    completely does count as interior and will harden, which is the one place
+    this trades a little softness for a great deal of fabric.
+
+    Only where the model saw the item at all — above _ALPHA_LOW, the same
+    line _harden draws between "background" and "an edge". Below it the model
+    was confident there is nothing, so the hole through a ring, the gap under
+    a mug's handle and the backdrop between a pair of boots all stay holes.
+    Gating on any non-zero alpha instead would promote the faintest haze the
+    model left on the backdrop, which is the very thing _harden exists to
+    delete.
+
+    All C — two point operations, a resize, an erosion and two composites.
+    About ten milliseconds on a 12MP photo, and no extra inference.
+    """
+    w, h = alpha.size
+    # The hole gate, read at FULL resolution: a hole is a few pixels wide at
+    # the scale the seller sees, and asking a downscaled copy would round the
+    # gap under a ring's band away and paint it in.
+    seen = alpha.point(lambda a: 255 if a > _ALPHA_LOW else 0)
+    # The interior, read at _SHAPE_SIDE, because "how far in from the edge is
+    # this" is a low-frequency question — the same copy and the same erosion
+    # _interior_solidity uses to answer it.
+    scale = _SHAPE_SIDE / max(w, h)
+    inner = (seen.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                         Image.BOX) if scale < 1 else seen)
+    inner = inner.point(lambda v: 255 if v >= 255 else 0)
+    for _ in range(_INTERIOR_ERODE):
+        inner = inner.filter(ImageFilter.MinFilter(3))
+    # Back to full size as a SOFT mask, blurred by about one cell of the copy
+    # it was found on, and deliberately never re-thresholded.
+    #
+    # This is the difference between measuring a matte and painting one. Where
+    # the promoted interior hands back to the ramp left alone, a hard mask
+    # makes that hand-off a single step — and because the step follows the
+    # 160px working grid, it shows up in the finished photo as a stepped
+    # contour running down the inside of the sleeve. Blurred, it is a
+    # gradient. (Finding the interior on a finer grid would smooth it too,
+    # but a finer grid also starts reading the gaps between a fur collar's
+    # tufts as interior and hardens the fringe. The blur costs nothing and
+    # keeps the fringe.)
+    if inner.size != alpha.size:
+        inner = inner.resize(alpha.size, Image.BILINEAR).filter(
+            ImageFilter.GaussianBlur(max(w, h) / _SHAPE_SIDE))
+    return ImageChops.lighter(alpha, ImageChops.multiply(inner, seen))
+
+
 def _interior_solidity(alpha: Image.Image) -> float:
     """The share of the item's interior that the matte keeps fully opaque.
 
@@ -463,7 +546,10 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
 
     Raises CutoutBusy when the inference slot is taken for longer than
     `wait`; any other failure raises as itself so a caller can say why."""
-    alpha = _harden(_mask(rgb, wait=wait))
+    # Repaired BEFORE it is hardened, and hardened exactly once. _harden maps
+    # the band between LOW and HIGH onto a ramp, so running it over its own
+    # output re-ramps every mid value toward zero and quietly eats the matte.
+    alpha = _harden(_fill_interior(_mask(rgb, wait=wait)))
     kept = alpha.point(lambda a: 255 if a >= 128 else 0)
     coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
     if coverage < _MIN_FG_COVERAGE:
@@ -758,9 +844,10 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     if out is None:
         raise ValueError(
             "Couldn't separate this photo from its background — it's likely "
-            "a close-up, a dark shot, or a pale item on a pale backdrop. Try "
-            "cropping in tighter, shooting against a contrasting surface, or "
-            "painting the background out with the white brush.")
+            "a close-up, a dark item on a dark surface, or a photo OF a "
+            "picture rather than of an object. Try cropping in tighter, "
+            "shooting against a contrasting surface, or painting the "
+            "background out with the white brush.")
     return out, "local"
 
 

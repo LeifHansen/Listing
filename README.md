@@ -977,6 +977,20 @@ seller's home never rides along to a listing. The frame the seller composed is
 the frame that ships; cropping and fixing a cutout the model got wrong are the
 seller's, in the photo studio.
 
+**A hedged matte is repaired, not refused.** The model is confident where
+there is contrast and unsure where there is not, so a pale item on a pale
+backdrop -- a white shirt on white foamboard, which is what sellers are told
+to shoot on -- comes back with its collar label at full strength and the
+fabric between somewhere in the middle. Shipped as alpha that is a shirt
+composited at a third of its opacity, i.e. a ghost. The pass now makes the
+item's INTERIOR opaque before hardening: a pixel inside the item is the item,
+whatever the model's confidence, because there is nothing else it could be.
+Interior means cells wholly covered by the item, eroded back from the edge,
+so a soft boundary stays soft; and it is gated at the same threshold that
+separates background from an edge, so the hole through a ring, the gap under
+a mug's handle and the backdrop between a pair of boots all stay holes. A
+cutout is refused now only when there is no item in the frame to separate.
+
 The item's orientation is the one thing EXIF cannot tell, so a vision model is
 asked (`backend/services/orient.py`). The first version of that pass was
 written around a shirt laid flat and was wrong about most other things; the

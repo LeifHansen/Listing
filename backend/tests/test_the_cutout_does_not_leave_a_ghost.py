@@ -190,8 +190,19 @@ def test_soft_at_the_edge_reads_as_solid(name, draw, blur):
 
 @pytest.mark.parametrize("name,draw,blur", GHOSTS, ids=[n for n, _, _ in GHOSTS])
 def test_see_through_in_the_middle_does_not(name, draw, blur):
+    """Measured on the RAW matte — what the model handed over, before
+    _fill_interior repairs it. This is still the diagnosis; it is no longer
+    the verdict."""
     solidity = images._interior_solidity(images._harden(_blurred(draw, blur)))
     assert solidity < images._MIN_INTERIOR_SOLIDITY, f"{name}: {solidity:.2f}"
+
+
+@pytest.mark.parametrize("name,draw,blur", GHOSTS, ids=[n for n, _, _ in GHOSTS])
+def test_the_repair_makes_the_same_matte_solid(name, draw, blur):
+    """...and the other half of that: repaired, every one of them is solid."""
+    raw = _blurred(draw, blur)
+    solidity = images._interior_solidity(images._harden(images._fill_interior(raw)))
+    assert solidity >= images._MIN_INTERIOR_SOLIDITY, f"{name}: {solidity:.2f}"
 
 
 def test_the_guards_already_there_would_have_passed_every_ghost():
@@ -309,9 +320,23 @@ def test_a_real_item_is_still_cut_out(model, name, draw, blur):
 
 
 @pytest.mark.parametrize("name,draw,blur", GHOSTS, ids=[n for n, _, _ in GHOSTS])
-def test_the_photo_is_kept_as_shot_instead_of_erased(model, name, draw, blur):
+def test_a_ghost_is_repaired_rather_than_refused(model, name, draw, blur):
+    """These three used to be REFUSED — the photo kept as shot, and the
+    seller told to shoot against something contrasting. That was the best
+    answer available while the only alternative was shipping the item at a
+    third of its opacity.
+
+    _fill_interior is the third answer: a pixel inside the item is the item,
+    whatever the model's confidence. So the cutout happens, and what ships is
+    the garment at full strength rather than a ghost of it.
+    """
     model.says(draw, blur)
-    assert images.cutout(_photo()) is None, name
+    photo = Image.new("RGB", SIZE, (120, 40, 60))   # so a blend is visible
+    out = images.cutout(photo)
+    assert out is not None, f"{name}: refused a matte it could have repaired"
+    assert out.getpixel((SIZE[0] // 2, SIZE[1] // 2)) == (120, 40, 60), (
+        f"{name}: the middle of the item shipped blended with the white "
+        "it was pasted onto")
 
 
 def test_what_ships_is_the_item_at_full_strength(model):
@@ -325,18 +350,30 @@ def test_what_ships_is_the_item_at_full_strength(model):
     assert out.getpixel((SIZE[0] // 2, SIZE[1] // 2)) == (120, 40, 60)
 
 
-def test_the_studio_says_why_rather_than_silently_wrecking_the_photo(model):
-    model.says(_white_oxford)
-    with pytest.raises(ValueError, match="pale item on a pale backdrop"):
+def _found_almost_nothing(d, size):
+    """The model kept a speck. A close-up of fabric, a dark item on a dark
+    table: there is no item in the frame to separate, and no repair can
+    invent one. This is what a refusal is FOR, now that a hedged matte is
+    repaired rather than refused."""
+    w, h = size
+    d.ellipse([w * .49, h * .49, w * .51, h * .51], fill=255)
+
+
+def test_the_studio_still_says_why_when_there_is_nothing_to_cut_out(model):
+    """A refusal is rarer than it was — a pale garment is repaired now — but
+    it still has to be a sentence rather than a photo silently unchanged."""
+    model.says(_found_almost_nothing)
+    with pytest.raises(ValueError, match="Couldn't separate this photo"):
         images.remove_background_white(_photo())
 
 
 def test_the_batch_keeps_the_photo_and_reports_it(model, tmp_path):
-    """optimize() must still write the photo — as shot — and say the cutout
-    did not happen, so the caller can hand the charge back."""
+    """When a cutout IS refused, optimize() must still write the photo — as
+    shot — and say the cutout did not happen, so the caller can hand the
+    charge back."""
     src = tmp_path / "src.jpg"
     _photo().save(src, "JPEG", quality=92)
-    model.says(_cream_fleece, 3)
+    model.says(_found_almost_nothing)
 
     out = images.optimize(src, tmp_path / "out.jpg", remove_bg=True)
 
@@ -350,3 +387,73 @@ def test_a_guard_that_refuses_everything_would_be_caught_here(model):
     fails if someone raises the floor until nothing is ever cut out."""
     model.says(_shirt, 3)
     assert images.cutout(_photo()) is not None
+
+
+# --- what the repair must NOT do --------------------------------------------
+
+def test_a_hole_through_the_item_is_not_painted_in():
+    """A ring, a mug's handle, the aperture of a picture frame. The model was
+    CONFIDENT there is nothing there, and filling it would paste a disc of the
+    old backdrop into the middle of the item.
+
+    This is why the repair is gated at _ALPHA_LOW rather than at zero: the
+    line _harden already draws between "background" and "an edge" is the same
+    line that separates a hole from a hedge.
+    """
+    def ring(d, size):
+        w, h = size
+        d.ellipse([w * .34, h * .22, w * .66, h * .78], fill=255)
+        d.ellipse([w * .43, h * .40, w * .57, h * .62], fill=0)
+
+    raw = _blurred(ring, 2)
+    before = images._harden(raw).histogram()[0]
+    after = images._harden(images._fill_interior(raw)).histogram()[0]
+    assert after >= before * 0.98, (
+        f"the hole was painted in: {before} transparent px -> {after}")
+
+
+def test_background_between_two_objects_survives():
+    """A pair of boots, a knife and fork, a phone beside its box. The gap is
+    real background and reaches the frame edge; it is not interior and must
+    not be filled."""
+    def two_boots(d, size):
+        w, h = size
+        d.rectangle([w * .12, h * .30, w * .44, h * .72], fill=255)
+        d.rectangle([w * .56, h * .30, w * .88, h * .72], fill=255)
+
+    raw = _blurred(two_boots, 2)
+    gap = (SIZE[0] // 2, SIZE[1] // 2)
+    assert images._harden(images._fill_interior(raw)).getpixel(gap) == 0, (
+        "the backdrop between the two objects was filled in")
+
+
+@pytest.mark.parametrize("name,draw,blur", SOFT, ids=[n for n, _, _ in SOFT])
+def test_a_soft_edge_still_reads_as_soft(name, draw, blur):
+    """The repair works on the INTERIOR, so a boundary the model was right to
+    leave soft has to survive it.
+
+    Three of these — a plain shirt, a lace panel, a woven basket — come
+    through byte-identical, because their interiors were already opaque and
+    there was nothing to repair. A fur collar and a wig do lose some of their
+    fringe: tufts packed densely enough to cover a whole cell read as interior
+    and harden. That is the one place this trades softness for fabric, and the
+    floor below is what stops a future change trading away the rest.
+    """
+    raw = _blurred(draw, blur)
+    def faint(a):
+        return sum(a.histogram()[1:255]) / (SIZE[0] * SIZE[1])
+    before, after = faint(images._harden(raw)), faint(
+        images._harden(images._fill_interior(raw)))
+    if before < 0.01:
+        return                      # nothing soft to lose in the first place
+    assert after >= before * 0.30, (
+        f"{name}: the soft edge was hardened away — {before:.1%} of the frame "
+        f"was a soft edge, {after:.1%} is left")
+
+
+def test_the_repair_leaves_an_already_solid_matte_alone():
+    """The common case, and the reason this is safe to run on every photo: a
+    matte with an opaque interior comes out of the repair unchanged."""
+    raw = _blurred(_shirt, 3)
+    assert list(images._harden(images._fill_interior(raw)).histogram()) == \
+        list(images._harden(raw).histogram())
