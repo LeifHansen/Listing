@@ -33,7 +33,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 
 @pytest.fixture()
-def app(monkeypatch):
+def app(monkeypatch, every_marketplace):
     from backend import main
 
     monkeypatch.setattr(main, "_uid", lambda _r: "u1")

@@ -309,7 +309,10 @@ Ordered by what it costs a seller.
 - `JSON` → `JSONB` on `listings.data` with a GIN index; `admin_platform_kpis`
   and `count_foreign_listings` scan every row today.
 - Etsy and Depop revises send the whole payload (no shadow, no dirty
-  tracking per marketplace) — the eBay three-way merge does not exist there.
+  tracking per marketplace) — the eBay three-way merge does not exist
+  there. Not a launch gap while both are withheld
+  (`MARKETPLACES_ENABLED`); it becomes one again the day either is
+  switched back on.
 - Trading-side call budgeting: the watchers/offers walks (GetMyeBaySelling
   up to 25 pages, GetBestOffers up to 10) run on every 2-minute cache miss;
   caches keyed on `token[-12:]` churn on each refresh; `RateLimited.retry_after`
