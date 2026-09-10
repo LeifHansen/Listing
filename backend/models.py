@@ -38,6 +38,9 @@ DESCRIPTION_MAX_CHARS = 500_000
 TEXT_FIELD_MAX_CHARS = 4_000
 # eBay tops out around 30 aspects on a listing; an import can carry more.
 MAX_ITEM_SPECIFICS = 500
+# eBay defines three condition descriptors for a graded card and one for an
+# ungraded one; the bound exists so the list is finite, not to model eBay.
+MAX_CONDITION_DESCRIPTORS = 20
 
 # How a listing sells. FIXED_PRICE is Buy It Now (the default and the great
 # majority); AUCTION takes bids only; AUCTION_BIN is an auction that also
@@ -58,6 +61,51 @@ class ItemSpecific(BaseModel):
     # it's unambiguous from the photos; "medium" = a reasonable inference the
     # seller should glance over; "" = entered or confirmed by the seller.
     confidence: str = ""
+
+
+class ConditionDescriptor(BaseModel):
+    """One of eBay's condition DESCRIPTORS -- the second step of the condition
+    on a trading card, where "Graded" or "Ungraded" is only half the answer.
+
+    In the three single-card categories (Sports 261328, CCG 183454, Non-Sport
+    183050) eBay stopped taking "Used" in 2023. A card is Graded (2750) or
+    Ungraded (4000), and each of those REQUIRES descriptors: a graded card
+    names its grading service (27501) and grade (27502), optionally its
+    certification number (27503, free text); an ungraded one names its card
+    condition (40001: Near Mint or Better / Excellent / Very Good / Poor, or
+    the CCG played-ness ladder). A listing in those categories without them
+    is refused outright, which is why the editor asks in two steps.
+
+    Every id here is eBay's, read from the Sell Metadata API for the
+    category (taxonomy.item_conditions) -- nothing in this app invents one.
+    The labels ride along so a card, a merge dialog or a sold archive can
+    say "PSA 10" without a round trip to eBay for the table."""
+
+    id: str = ""                      # eBay's descriptor id: "27501", "40001", ...
+    values: list[str] = Field(default_factory=list)   # eBay's value ids: ["275010"]
+    text: str = ""                    # free text where the descriptor takes it (cert no.)
+    label: str = ""                   # eBay's wording for the descriptor ("Grade")
+    value_labels: list[str] = Field(default_factory=list)  # eBay's wording per value ("10")
+
+    @field_validator("id", "text", "label", mode="before")
+    @classmethod
+    def _text_fields(cls, value):
+        if value is None:
+            return ""
+        return str(value).strip()[:TEXT_FIELD_MAX_CHARS]
+
+    @field_validator("values", "value_labels", mode="before")
+    @classmethod
+    def _list_fields(cls, value):
+        """A single value arrives as a string as often as a one-item list --
+        the Trading API's <Value> is repeatable but a card has one grade."""
+        if value is None or value == "":
+            return []
+        if isinstance(value, (str, int, float)):
+            return [str(value).strip()]
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if v is not None and str(v).strip()]
+        return []
 
 
 class MarketplaceState(BaseModel):
@@ -115,6 +163,10 @@ class Listing(BaseModel):
     brand: str = ""
     condition: str = "USED_EXCELLENT"  # eBay condition enum
     condition_description: str = ""
+    # The second half of the condition where eBay wants one: a trading card's
+    # grading service + grade (+ certification number) or its card condition.
+    # Empty everywhere else. See ConditionDescriptor.
+    condition_descriptors: list[ConditionDescriptor] = Field(default_factory=list)
     category_suggestion: str = ""
     category_id: str = ""
     # The seller's OWN storefront category — the left-hand nav of their eBay
@@ -392,6 +444,26 @@ class Listing(BaseModel):
         if not isinstance(value, list):
             return value
         return value[:MAX_ITEM_SPECIFICS]
+
+    @field_validator("condition_descriptors", mode="before")
+    @classmethod
+    def _cap_descriptors(cls, value):
+        """eBay defines a handful of descriptors per condition (three for a
+        graded card). A record written before the field existed holds None.
+        Entries with no descriptor id are noise -- an empty row the editor
+        left behind -- and are dropped rather than sent."""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+        kept = []
+        for entry in value[:MAX_CONDITION_DESCRIPTORS]:
+            if isinstance(entry, ConditionDescriptor):
+                if entry.id:
+                    kept.append(entry)
+            elif isinstance(entry, dict) and str(entry.get("id") or "").strip():
+                kept.append(entry)
+        return kept
 
 
 class IdentifyResult(BaseModel):

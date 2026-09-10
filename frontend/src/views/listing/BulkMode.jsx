@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
-  CONDITIONS, conditionLabel, conditionsFor, nearestCondition,
+  conditionsFor, descriptorsFor, fitDescriptors, nearestCondition, sameDescriptors,
 } from "@/lib/conditions";
 import { api, postJson } from "@/lib/api";
 import { apiUrl } from "@/lib/platform";
@@ -23,6 +23,7 @@ import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
 import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { CategoryQuickPick } from "./CategoryQuickPick";
+import { ConditionPicker } from "./ConditionPicker";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
@@ -78,20 +79,6 @@ function useCategoryConditions(categoryId) {
   return got.cid === cid ? got.list : null;
 }
 
-/* The dropdown's options: what the category offers once we know, the full
-   list until then — plus whatever the listing is currently set to, always. A
-   controlled <select> whose value isn't among its options renders BLANK, and
-   a condition that looks unset is how a seller "fixes" a field that was
-   already right. */
-function conditionOptions(conditions, current) {
-  const options = (conditions && conditions.length)
-    ? conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
-    : CONDITIONS.map((c) => ({ value: c, label: conditionLabel(c) }));
-  return options.some((o) => o.value === current) || !current
-    ? options
-    : [{ value: current, label: conditionLabel(current) }, ...options];
-}
-
 function BulkItemCard({
   item, checked, onCheck, onChange, onOpen, onPublish, publishing,
   onDelete, deleting, onDeletePhoto, targets, leaving,
@@ -114,10 +101,21 @@ function BulkItemCard({
   // where the seller can see it happen, rather than letting them press
   // Publish into a refusal. nearestCondition never crosses the new/used line;
   // where nothing fits it returns null and the blocker below stands.
+  //
+  // The second step follows the first: a trading card's grade is kept only
+  // in the shape eBay lists for the condition the card now has, so a draft
+  // switched to Ungraded sheds its PSA 10, and an imported card's bare ids
+  // pick up eBay's wording for the pill.
   useEffect(() => {
     if (!editable || !conditions || !conditions.length || !l.condition) return;
     const fitted = nearestCondition(l.condition, conditions.map((c) => c.enum));
-    if (fitted && fitted !== l.condition) onChange({ ...l, condition: fitted });
+    const condition = fitted || l.condition;
+    const descriptors = fitDescriptors(
+      l.condition_descriptors, descriptorsFor(conditions, condition));
+    if (condition !== l.condition
+        || !sameDescriptors(descriptors, l.condition_descriptors, { labels: true })) {
+      onChange({ ...l, condition, condition_descriptors: descriptors });
+    }
     // `l` is rebuilt on every change; the condition and the list are what
     // this actually watches.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -265,15 +263,20 @@ function BulkItemCard({
               value={l.price != null ? l.price : ""}
               onChange={(e) => onChange({ ...l, price: e.target.value === "" ? null : parseFloat(e.target.value) })}
             />
-            <Select
-              aria-label="Condition"
-              value={l.condition || ""}
-              onChange={(e) => onChange({ ...l, condition: e.target.value })}
-            >
-              {conditionOptions(conditions, l.condition).map((c) => (
-                <option key={c.value} value={c.value}>{c.label}</option>
-              ))}
-            </Select>
+            {/* One cell here — or, on a trading card, this cell for Graded /
+                Ungraded and a second row for the grading service, grade and
+                certification number (or the card condition). The queue
+                publishes without ever opening the editor, so eBay's second
+                question has to be answerable from the card too. */}
+            <ConditionPicker
+              labels={false}
+              conditions={conditions}
+              condition={l.condition || ""}
+              descriptors={l.condition_descriptors}
+              fixLevel={blockers.some((b) => b.target === "condition") ? "warn" : undefined}
+              onChange={({ condition, condition_descriptors }) =>
+                onChange({ ...l, condition, condition_descriptors })}
+            />
           </div>
 
           {/* Selling format, and the fields each one needs. Defaults come from

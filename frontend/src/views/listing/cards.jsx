@@ -6,7 +6,6 @@ import {
   Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
-import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { api, postJson, isPhotoFile, PHOTO_ACCEPT } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
@@ -25,6 +24,7 @@ import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
 import { StoreCategorySelect } from "./StoreCategorySelect";
+import { ConditionPicker } from "./ConditionPicker";
 import { TITLE_MAX, MAX_PHOTOS } from "./blockers";
 import { issuesFor } from "./publishShared";
 import { riskyWords, riskyWordSummary } from "@/lib/riskyWords";
@@ -1111,17 +1111,6 @@ export function SpecificsCard({ w }) {
 }
 
 export function PricingCard({ w }) {
-  const conditions = w.categoryMeta.conditions?.length
-    ? w.categoryMeta.conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
-    : CONDITIONS.map((c) => ({ value: c, label: conditionLabel(c) }));
-  // A controlled <select> whose value isn't among its options renders BLANK —
-  // which happens when a saved listing's condition isn't in the category's
-  // allowed list (or the list is still loading). Always include the current
-  // value so the Condition field can never look empty/missing.
-  const curCondition = w.form.condition;
-  if (curCondition && !conditions.some((c) => c.value === curCondition)) {
-    conditions.unshift({ value: curCondition, label: conditionLabel(curCondition) });
-  }
   const p = w.priceData;
   // Taking a number off the market makes it THIS listing's price, so it lands
   // on a .99 like every other price the app chooses (lib/charmPrice, mirroring
@@ -1270,24 +1259,33 @@ export function PricingCard({ w }) {
         )}
 
         {/* Condition gets its own labeled row (not the last cell of the price
-            grid, where it was easy to miss) paired with its description. */}
-        <div className="grid sm:grid-cols-[minmax(200px,260px)_1fr] gap-4 pt-1 border-t border-line">
-          <Field
-            label="Condition"
-            /* When the lookup could not run, the list below is the generic
-               one, not eBay's for this category — so a pick that looks fine
-               here can still come back as error 25021 at publish. Saying so
-               beats letting the seller find out then. */
-            help={w.categoryMeta.conditionsChecked === false
-              ? "We couldn’t check which conditions eBay allows in this "
-                + "category, so these are the general ones."
-              : undefined}
-          >
-            <Select value={w.form.condition} needsFix={w.fixLevel("condition")}
-              onChange={(e) => w.set("condition", e.target.value)}>
-              {conditions.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-            </Select>
-          </Field>
+            grid, where it was easy to miss) paired with its description.
+
+            Asked the way eBay asks it: one dropdown almost everywhere, and on
+            a trading card two steps — Graded or Ungraded, then the grading
+            service + grade (+ certification number) or the card condition on
+            eBay's ladder. ConditionPicker draws the second step from eBay's
+            own answer for the category, so the fields, their wording and the
+            ids behind them are eBay's (lib/conditions). The picker renders
+            one cell per answer into this grid. */}
+        <div className="flex flex-col gap-4 pt-1 border-t border-line">
+          <div className="grid sm:grid-cols-3 gap-4">
+            <ConditionPicker
+              conditions={w.categoryMeta.conditions}
+              /* When the lookup could not run, the list is the generic one,
+                 not eBay's for this category — so a pick that looks fine
+                 here can still come back as error 25021 at publish. The
+                 picker says so beside the field. */
+              checked={w.categoryMeta.conditionsChecked !== false}
+              condition={w.form.condition}
+              descriptors={w.form.condition_descriptors}
+              fixLevel={w.fixLevel("condition")}
+              onChange={({ condition, condition_descriptors }) => {
+                w.set("condition", condition);
+                w.set("condition_descriptors", condition_descriptors);
+              }}
+            />
+          </div>
           <Field label="Condition description" hint="(what a buyer should know)">
             <Textarea
               rows={2}

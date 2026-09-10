@@ -267,13 +267,200 @@ def nearest_allowed_condition(current: str, allowed) -> Optional[str]:
                                     CONDITION_QUALITY[c]))
 
 
+# --- condition descriptors ---------------------------------------------------
+# The second step of a trading card's condition. In the single-card categories
+# (Sports 261328, CCG 183454, Non-Sport 183050) eBay's ladder is two rungs --
+# 2750 "Graded" and 4000 "Ungraded" -- and each rung REQUIRES descriptors:
+#
+#   Graded    27501 Professional Grader   (pick one: PSA, BGS, CGC, SGC, ...)
+#             27502 Grade                 (pick one: 10, 9.5, 9, ... Authentic)
+#             27503 Certification Number  (free text, optional)
+#   Ungraded  40001 Card Condition        (pick one: Near Mint or Better,
+#                                          Excellent, Very Good, Poor -- or
+#                                          the CCG played-ness wording)
+#
+# The ids, the wording and the ladders are eBay's, read from the same Sell
+# Metadata answer the condition list comes from. This module never hardcodes
+# a value id: eBay adds graders and moves ladders, and a stale id is a refused
+# publish naming a number the seller cannot act on.
+
+# The two condition ids that carry descriptors today. Only used to say WHICH
+# step of the two-step picker a condition is, never to decide whether a
+# category takes descriptors -- eBay's answer decides that.
+GRADED_CONDITION_ID = "2750"
+UNGRADED_CONDITION_ID = "4000"
+
+
+def _int_or_none(value) -> Optional[int]:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_condition_descriptors(raw) -> list[dict]:
+    """eBay's `conditionDescriptors` for one condition, in the shape the
+    editor draws and the checklist reads:
+
+        [{id, name, mode, usage, cardinality, max_length, required, free_text,
+          values: [{id, name}]}]
+
+    `required` and `free_text` are the two facts every caller wants and are
+    derived once here: a descriptor with a value list is a pick-one (or
+    pick-many) and required unless eBay says otherwise; one without values is
+    free text (the certification number) and optional unless eBay says
+    otherwise. eBay's own `usage`/`mode` win whenever they are present.
+    """
+    out = []
+    for d in raw or []:
+        if not isinstance(d, dict):
+            continue
+        did = str(d.get("conditionDescriptorId") or "").strip()
+        if not did:
+            continue
+        constraint = d.get("conditionDescriptorConstraint") or {}
+        if not isinstance(constraint, dict):
+            constraint = {}
+        values = []
+        seen = set()
+        for v in d.get("conditionDescriptorValues") or []:
+            if not isinstance(v, dict):
+                continue
+            vid = str(v.get("conditionDescriptorValueId") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            values.append({
+                "id": vid,
+                "name": str(v.get("conditionDescriptorValueName") or "").strip() or vid,
+            })
+        mode = str(constraint.get("mode") or "").strip().upper()
+        usage = str(constraint.get("usage") or "").strip().upper()
+        free_text = mode == "FREE_TEXT" or (not values and mode != "SELECTION_ONLY")
+        required = usage == "REQUIRED" if usage else not free_text
+        out.append({
+            "id": did,
+            "name": str(d.get("conditionDescriptorName") or "").strip() or did,
+            "mode": mode or ("FREE_TEXT" if free_text else "SELECTION_ONLY"),
+            "usage": usage or ("REQUIRED" if required else "OPTIONAL"),
+            "cardinality": str(constraint.get("cardinality") or "SINGLE").strip().upper(),
+            "max_length": _int_or_none(constraint.get("maxLength")),
+            "required": required,
+            "free_text": free_text,
+            "values": values,
+        })
+    return out
+
+
+def condition_descriptor_meta(allowed_conditions, condition: str) -> list[dict]:
+    """The descriptors eBay defines for `condition` (an enum) in this
+    category, from an `item_conditions` answer. Empty when the condition is
+    not in the list or carries none -- which is every category that is not
+    trading cards."""
+    cond = (condition or "").strip().upper()
+    for c in allowed_conditions or []:
+        if not isinstance(c, dict):
+            continue
+        if (c.get("enum") or "").upper() == cond:
+            return [d for d in (c.get("descriptors") or []) if isinstance(d, dict)]
+    return []
+
+
+def _descriptor_dict(entry) -> dict:
+    if hasattr(entry, "model_dump"):
+        entry = entry.model_dump()
+    return entry if isinstance(entry, dict) else {}
+
+
+def fit_condition_descriptors(descriptors, meta) -> list[dict]:
+    """The listing's descriptors, kept to what the condition offers.
+
+    A descriptor the condition doesn't define is dropped (a grade left over
+    from before the seller switched the card to Ungraded), a value id the
+    descriptor doesn't list is dropped (eBay retired it, or it belongs to a
+    different category's ladder), free text is clipped to eBay's length, and
+    every label is refreshed to eBay's current wording so nothing on a card
+    reads differently from eBay. Order follows eBay's, so the XML does too.
+
+    Returns plain dicts in ConditionDescriptor's shape. `meta` empty means
+    the condition takes no descriptors, and the answer is none.
+    """
+    by_id = {}
+    for entry in descriptors or []:
+        d = _descriptor_dict(entry)
+        did = str(d.get("id") or "").strip()
+        if did and did not in by_id:
+            by_id[did] = d
+    out = []
+    for m in meta or []:
+        d = by_id.get(m["id"])
+        if not d:
+            continue
+        if m.get("free_text"):
+            text = str(d.get("text") or "").strip()
+            if m.get("max_length"):
+                text = text[:m["max_length"]]
+            if not text:
+                continue
+            out.append({"id": m["id"], "values": [], "text": text,
+                        "label": m["name"], "value_labels": []})
+            continue
+        names = {v["id"]: v["name"] for v in m.get("values") or []}
+        raw_values = d.get("values") or []
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        kept = [str(v).strip() for v in raw_values if str(v).strip() in names]
+        if m.get("cardinality", "SINGLE") != "MULTI":
+            kept = kept[:1]
+        if not kept:
+            continue
+        out.append({"id": m["id"], "values": kept, "text": "",
+                    "label": m["name"], "value_labels": [names[v] for v in kept]})
+    return out
+
+
+def condition_descriptor_problems(descriptors, meta) -> list[dict]:
+    """What eBay would refuse about a listing's descriptors, as
+    [{descriptor, problem}] with problem one of "missing" (a required
+    descriptor has no answer) or "not_offered" (an answer eBay doesn't list).
+    Empty when the condition takes no descriptors, or every one is in order.
+    """
+    by_id = {}
+    for entry in descriptors or []:
+        d = _descriptor_dict(entry)
+        did = str(d.get("id") or "").strip()
+        if did and did not in by_id:
+            by_id[did] = d
+    problems = []
+    for m in meta or []:
+        d = by_id.get(m["id"])
+        if m.get("free_text"):
+            if m.get("required") and not str((d or {}).get("text") or "").strip():
+                problems.append({"descriptor": m, "problem": "missing"})
+            continue
+        offered = {v["id"] for v in m.get("values") or []}
+        raw_values = (d or {}).get("values") or []
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        chosen = [str(v).strip() for v in raw_values if str(v).strip()]
+        if not chosen:
+            if m.get("required"):
+                problems.append({"descriptor": m, "problem": "missing"})
+        elif any(v not in offered for v in chosen):
+            problems.append({"descriptor": m, "problem": "not_offered"})
+    return problems
+
+
 def item_conditions(category_id: str, access_token: Optional[str] = None,
                     marketplace_id: Optional[str] = None) -> dict:
     """The item conditions eBay allows for a category, so the UI can offer only
     valid choices (eBay rejects an out-of-category condition with error 25021).
 
     Uses the Sell Metadata API. Prefers the connected seller's token; falls back
-    to the application token. Returns {"conditions": [{enum, id, label}]}.
+    to the application token. Returns {"conditions": [{enum, id, label,
+    descriptors}]} -- `descriptors` is eBay's second step for that condition
+    (parse_condition_descriptors), empty for every condition but a trading
+    card's Graded/Ungraded.
     """
     if not category_id:
         return {"conditions": []}
@@ -318,6 +505,8 @@ def item_conditions(category_id: str, access_token: Optional[str] = None,
                 "enum": enum,
                 "id": cid,
                 "label": c.get("conditionDescription", "") or enum.replace("_", " ").title(),
+                "descriptors": parse_condition_descriptors(
+                    c.get("conditionDescriptors")),
             })
     if unknown:
         log.info("item-conditions(cat=%s): eBay offers condition id(s) %s "

@@ -29,6 +29,10 @@ SELLER_FIELDS = {
     # what they write
     "title", "subtitle", "description", "brand", "condition",
     "condition_description", "category_suggestion", "category_id",
+    # A trading card's grading service / grade / certification number (or
+    # card condition): eBay's ids, but the seller's answers, picked in the
+    # editor and pruned to eBay's list on the way out (ebay_provider).
+    "condition_descriptors",
     # Their own store's shelf: matched from the draft as a starting point,
     # then theirs to change in the editor — the same standing category_id and
     # its label have.

@@ -23,7 +23,9 @@
    The publish/preflight response carries those, and the fix-it panel renders
    them from the same {field, title, fix} shape used here. */
 
-import { conditionLabel } from "@/lib/conditions";
+import {
+  conditionLabel, descriptorProblems, descriptorsFor,
+} from "@/lib/conditions";
 import { specificValue } from "./specifics";
 
 // eBay's own ceilings. Mirrors TITLE_MAX_CHARS / MAX_PHOTOS / EBAY_MIN_PRICE
@@ -139,6 +141,27 @@ export function ebayBlockers(l = {},
       `eBay doesn't offer “${conditionLabel(l.condition)}” in this category — `
       + `pick one it does (${conditions.slice(0, 3)
         .map((c) => c.label || conditionLabel(c.enum)).join(", ")}…).`);
+  } else if (conditions && conditions.length) {
+    // The second half of a trading card's condition. "Graded" needs a
+    // grading service and a grade, "Ungraded" a card condition, and eBay
+    // refuses a card that stops at the first answer. Which conditions carry
+    // a second step, and what it offers, is eBay's answer for the category
+    // (`descriptors` on each entry); a list without any checks nothing.
+    // Mirrors preflight._check_condition_descriptors.
+    const problems = descriptorProblems(
+      l.condition_descriptors, descriptorsFor(conditions, l.condition));
+    if (problems.length) {
+      const { descriptor: d, problem } = problems[0];
+      const cond = conditions.find((c) => c.enum === l.condition);
+      const condLabel = (cond && cond.label) || conditionLabel(l.condition);
+      const offered = (d.values || []).slice(0, 4).map((v) => v.name).join(", ");
+      add("condition_descriptors", "condition", d.name,
+        problem === "missing"
+          ? `A ${condLabel} card needs its ${d.name}`
+            + (offered ? ` (${offered}…).` : ".")
+          : `eBay doesn't offer that ${d.name} here — pick one from its list`
+            + (offered ? ` (${offered}…).` : "."));
+    }
   }
 
   const fmt = String(l.listing_format || "FIXED_PRICE").toUpperCase();

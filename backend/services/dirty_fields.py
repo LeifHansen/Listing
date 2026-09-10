@@ -29,7 +29,8 @@ from ..models import Listing
 # marketplace's to report, not ours to push back.
 TRACKED = (
     "title", "subtitle", "description", "brand", "condition",
-    "condition_description", "category_id", "store_category_id",
+    "condition_description", "condition_descriptors", "category_id",
+    "store_category_id",
     "price", "quantity", "currency",
     "listing_format", "auction_start_price", "auction_duration",
     "package_weight_lb", "package_weight_oz", "package_length_in",
@@ -54,6 +55,30 @@ def _comparable(value: Any) -> Any:
         # save of an untouched listing.
         return int(value)
     return value
+
+
+def comparable_field(name: str, value: Any) -> Any:
+    """`_comparable`, with the one field whose stored form carries more than
+    its meaning. A condition descriptor is eBay's ids (which descriptor,
+    which value, what free text); the labels beside them are eBay's wording
+    at the time, kept for display. An import has no labels and the editor
+    fills them in, and that must not read as the seller re-grading the card
+    -- it would put the condition into every revise and into every sync
+    conflict. So descriptors compare on ids and text alone."""
+    if name == "condition_descriptors":
+        out = []
+        for entry in (value or []):
+            d = entry.model_dump() if hasattr(entry, "model_dump") else entry
+            if not isinstance(d, dict):
+                continue
+            values = d.get("values") or []
+            if isinstance(values, str):
+                values = [values]
+            out.append({"id": str(d.get("id") or "").strip(),
+                        "values": [str(v).strip() for v in values if str(v).strip()],
+                        "text": str(d.get("text") or "").strip()})
+        return [d for d in out if d["id"] and (d["values"] or d["text"])]
+    return _comparable(value)
 
 
 def changed_fields(incoming: Listing, stored: Optional[dict]) -> list[str]:
@@ -83,8 +108,8 @@ def changed_fields(incoming: Listing, stored: Optional[dict]) -> list[str]:
         log.warning("dirty: stored listing did not parse; no edits inferred")
         return []
     return [name for name in TRACKED
-            if _comparable(getattr(incoming, name, None))
-            != _comparable(getattr(before, name, None))]
+            if comparable_field(name, getattr(incoming, name, None))
+            != comparable_field(name, getattr(before, name, None))]
 
 
 def accumulate(incoming: Listing, stored: Optional[dict]) -> Listing:

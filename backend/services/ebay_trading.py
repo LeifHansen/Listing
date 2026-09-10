@@ -577,6 +577,56 @@ _CONDITION_TO_ID = {
 }
 
 
+# --- condition descriptors ---------------------------------------------------
+# The second half of a trading card's condition (models.ConditionDescriptor).
+# On the wire it is
+#
+#   <ConditionDescriptors>
+#     <ConditionDescriptor><Name>27501</Name><Value>275010</Value></ConditionDescriptor>
+#     <ConditionDescriptor><Name>27502</Name><Value>275020</Value></ConditionDescriptor>
+#     <ConditionDescriptor><Name>27503</Name><AdditionalInfo>12345678</AdditionalInfo></ConditionDescriptor>
+#   </ConditionDescriptors>
+#
+# Name is eBay's descriptor id, Value its value id (repeatable), and free text
+# -- the certification number -- goes in AdditionalInfo, which is where the
+# Inventory API's `additionalInfo` lands too. GetItem hands the same shape
+# back, so the two functions below are each other's inverse.
+
+def _condition_descriptors_xml(descriptors) -> str:
+    parts = []
+    for d in descriptors or []:
+        did = (d.id or "").strip()
+        if not did:
+            continue
+        inner = "".join(f"<Value>{_esc(v)}</Value>" for v in d.values if str(v).strip())
+        if d.text and d.text.strip():
+            inner += f"<AdditionalInfo>{_esc(d.text.strip())}</AdditionalInfo>"
+        if not inner:
+            # A descriptor with nothing in it is not "no grade", it is a
+            # malformed request. Left out; the checklist has already said
+            # the grade is missing.
+            continue
+        parts.append(f"<ConditionDescriptor><Name>{_esc(did)}</Name>{inner}"
+                     "</ConditionDescriptor>")
+    return f"<ConditionDescriptors>{''.join(parts)}</ConditionDescriptors>" if parts else ""
+
+
+def _condition_descriptors_from(item: ET.Element) -> list[dict]:
+    """GetItem's <ConditionDescriptors>, as ConditionDescriptor dicts. Labels
+    are left empty -- the response carries ids only -- and the editor fills
+    them in from eBay's table for the category when it opens the listing."""
+    out = []
+    for cd in _findall(item, "ConditionDescriptors/ConditionDescriptor"):
+        did = _text(cd, "Name")
+        if not did:
+            continue
+        values = [(v.text or "").strip() for v in cd
+                  if _name(v) == "Value" and v.text and v.text.strip()]
+        out.append({"id": did, "values": values,
+                    "text": _text(cd, "AdditionalInfo")})
+    return out
+
+
 def _listing_format(listing_type: str, has_bin: bool) -> str:
     lt = (listing_type or "").lower()
     if lt.startswith("chinese") or lt == "auction":
@@ -628,6 +678,7 @@ def _item_to_listing(item: ET.Element) -> dict:
                        if s["name"].strip().lower() == "brand"), ""),
         "condition": _CONDITION_BY_ID.get(_text(item, "ConditionID"), "USED_EXCELLENT"),
         "condition_description": _text(item, "ConditionDescription"),
+        "condition_descriptors": _condition_descriptors_from(item),
         "category_id": _text(item, "PrimaryCategory/CategoryID"),
         "category_suggestion": _text(item, "PrimaryCategory/CategoryName"),
         # The store shelf, as eBay has it. "0" is eBay's way of writing "no
@@ -1185,8 +1236,18 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
         parts.append("<Storefront><StoreCategoryID>"
                      f"{_esc(listing.store_category_id)}</StoreCategoryID></Storefront>")
     cond_id = _CONDITION_TO_ID.get((listing.condition or "").upper())
-    if cond_id and wanted("condition"):
+    # The descriptors are the other half of the condition -- eBay checks a
+    # grade against the ConditionID in the SAME request -- so an edit to
+    # either sends both. A revise carrying a new grade without its condition
+    # is a request eBay can refuse, and one carrying a new condition without
+    # its descriptors is one it will.
+    sending_condition = wanted("condition") or wanted("condition_descriptors")
+    if cond_id and sending_condition:
         parts.append(f"<ConditionID>{cond_id}</ConditionID>")
+    if listing.condition_descriptors and sending_condition:
+        descriptors = _condition_descriptors_xml(listing.condition_descriptors)
+        if descriptors:
+            parts.append(descriptors)
     if listing.condition_description and wanted("condition_description"):
         parts.append("<ConditionDescription>"
                      f"{_esc(listing.condition_description[:1000])}</ConditionDescription>")
@@ -1625,7 +1686,8 @@ def _revise_call_name(listing: Listing) -> str:
 # instead, which is what it does everywhere else it cannot be sure.
 REVISABLE_FIELDS = frozenset({
     "title", "subtitle", "description", "brand", "category_id", "condition",
-    "condition_description", "item_specifics", "images", "image_urls",
+    "condition_description", "condition_descriptors", "item_specifics",
+    "images", "image_urls",
     "price", "quantity", "fulfillment_policy_id",
 })
 

@@ -377,6 +377,12 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         brand=_text(data.get("brand")),
         condition=cond,
         condition_description=_text(data.get("condition_description")),
+        # A refine echoes the whole draft back, this included. The model is
+        # never asked to fill it in -- the ids are eBay's and come from the
+        # editor -- so anything but a list is treated as "none".
+        condition_descriptors=(data.get("condition_descriptors")
+                               if isinstance(data.get("condition_descriptors"), list)
+                               else []),
         category_suggestion=_text(data.get("category_suggestion")),
         description=_text(data.get("description")),
         price=price,
@@ -1108,6 +1114,14 @@ def refine(listing: Listing, prompt: str) -> Listing:
     # instruction actually moved is the AI's and keeps its .99.
     if listing.price is not None and _same_money(data.get("price"), listing.price):
         updated.price = listing.price
+    # A trading card's grade is eBay's ids, picked in the editor; the model
+    # can only echo them, and an echo it garbles would be a refused publish.
+    # While the condition itself stands, the descriptors the seller chose
+    # stand with it. A refine that changed the condition (Graded -> Ungraded)
+    # leaves whatever came back, and the editor prunes it against eBay's
+    # list when it reopens the draft.
+    if updated.condition == listing.condition:
+        updated.condition_descriptors = list(listing.condition_descriptors)
     return updated
 
 

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Camera, Video, Plus, RotateCcw, MapPin, Eye } from "lucide-react";
+import { conditionSummary } from "@/lib/conditions";
 import { once, mediaUrl } from "@/lib/utils";
 import { priceView } from "@/lib/priceLookup";
 import {
@@ -189,7 +190,7 @@ export function ShopMode() {
                 {l.title || "(couldn't identify — try another angle)"}
               </h2>
               <div className="flex flex-wrap items-center gap-2">
-                {l.condition && <TagPill>{l.condition.replaceAll("_", " ")}</TagPill>}
+                {l.condition && <TagPill>{conditionSummary(l)}</TagPill>}
                 <ConfidenceBadge level={result.confidence} />
               </div>
               {result.price ? (
