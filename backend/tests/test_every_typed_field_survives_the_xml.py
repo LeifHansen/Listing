@@ -150,6 +150,11 @@ def test_the_scan_covers_every_free_text_field_on_the_model():
         # anything else coerced to "" by the model's validator. Read by the
         # draft cards, never sent to eBay.
         "ai_confidence",
+        # Why eBay refused the last publish, in eBay's own words or the
+        # app's. It travels the other way: written by the server FROM a
+        # marketplace's answer and read by the drafts card, never put into
+        # a payload going out.
+        "publish_error",
     }
     covered = {"title", "subtitle", "description", "condition_description",
                "brand"}

@@ -254,6 +254,27 @@ class Listing(BaseModel):
     # on has nothing more to gain from running it again, and this is how the
     # suggestion knows to stop asking.
     enriched_at: str = ""
+    # Why the LAST live publish attempt did not put this listing on the
+    # marketplace, in the sentence the seller should read -- "" when the
+    # last attempt went live, or when there has never been one.
+    #
+    # A refusal used to live only in a toast and in one React state map
+    # keyed by listing id. Both are gone the moment the page reloads, and
+    # what was left behind was a card sitting in Drafts looking exactly
+    # like a draft nobody had ever tried to publish -- for a seller who
+    # knows perfectly well they pressed Publish. "It says it published and
+    # it will not clear from Drafts" is that gap, reported.
+    #
+    # Only a REFUSAL is recorded. A publish whose answer never came back
+    # is not one (the listing may well be live, and painting it refused
+    # sends the seller to list it twice), and neither is a dry run or a
+    # draft save. Cleared by the publish that succeeds, never by an edit:
+    # the card words it as a verdict on the last attempt for exactly that
+    # reason.
+    #
+    # Server-owned (state.SERVER_OWNED_FIELDS): it is the server's record
+    # of what a marketplace said, and a client echo must not forge it.
+    publish_error: str = ""
     # Set once the listing goes live: eBay's item id (the /itm/ number).
     # Powers "View on eBay" links and survives every save/publish round-trip.
     ebay_listing_id: str = ""

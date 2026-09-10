@@ -8440,6 +8440,76 @@ def merge_listings(payload: dict, request: Request) -> dict:
             "applied": applied, "listing": listing.model_dump()}
 
 
+# --- why a publish did not go live, on the record ----------------------------
+#
+# A refused publish is the seller's to fix, and until now the app said so
+# exactly twice: in a toast that is gone in seconds, and in a React state map
+# that is gone on reload. What survived was a card sitting in Drafts looking
+# like a draft nobody had ever tried to publish. The seller knows they pressed
+# Publish, so the app reads as broken -- "I published it and it will not clear
+# from Drafts" -- when what actually happened is that eBay said no and nothing
+# kept the sentence.
+#
+# So the reason goes on the record, and the card reads it back.
+
+
+def _refusal_sentence(outcome) -> str:
+    """The one sentence a refused publish should leave behind.
+
+    The same pick the browser makes (publishShared.blockedReason): an issue
+    the app worked out beats the marketplace's own message, because eBay's
+    catch-all for an account-level hold blames the title -- and a placeholder
+    ("the publish stopped and nobody said why") goes last, so it can never
+    hide a diagnosis standing beside it.
+    """
+    errors = [i for i in (outcome.issues or [])
+              if isinstance(i, dict) and i.get("level") != "warn" and i.get("title")]
+    named = [i for i in errors if not i.get("placeholder")]
+    best = (next((i for i in named
+                  if i.get("target") and i.get("target") != "generic"), None)
+            or (named[0] if named else None)
+            or (errors[0] if errors else None))
+    return str((best or {}).get("title") or outcome.message or "").strip()
+
+
+def _record_publish_verdict(session_id: str, uid: Optional[str],
+                            outcomes: list, mode: str) -> None:
+    """Persist (or clear) why the last LIVE publish did not land.
+
+    Cleared the moment anything goes live -- including a fan-out where one
+    marketplace refused and another did not, because the listing is live and
+    the refusal it still carries is per-marketplace state, not this.
+
+    Left ALONE for the two outcomes that are not refusals: an answer that
+    never came back (the listing may be live, and calling that a refusal is
+    what sends someone to list it twice) and a dry run. A draft save is not a
+    publish attempt at all.
+
+    Never raises: this is bookkeeping about a publish, and a publish that
+    already happened must not be reported as failed because of it.
+    """
+    if mode != "live" or not outcomes:
+        return
+    try:
+        if any(o.ok and o.status == "published" for o in outcomes):
+            reason = ""
+        elif any(o.outcome_unknown for o in outcomes) or all(o.dry_run for o in outcomes):
+            return
+        else:
+            reason = "; ".join(
+                dict.fromkeys(filter(None, (_refusal_sentence(o) for o in outcomes))))[:300]
+            if not reason:
+                return
+
+        def _set(data: dict) -> dict:
+            data["publish_error"] = reason
+            return data
+
+        db.mutate_listing_data(session_id, _set, user_id=uid)
+    except Exception as exc:  # noqa: BLE001 - never fail a publish over this
+        log.warning("publish verdict not recorded for %s: %s", session_id, exc)
+
+
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     """Publish orchestrator.
@@ -8499,6 +8569,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         # upsert here.
         provider = marketplaces.get("ebay")
         outcome = provider.publish(_ctx(), provider.creds_for(uid))
+        _record_publish_verdict(req.session_id, uid, [outcome], req.mode)
         return JSONResponse(outcome.raw)
 
     def _publish_one(key: str) -> PublishOutcome:
@@ -8543,6 +8614,9 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         # No row yet (or no DB): fall back to creating one from the request.
         data = _fold(req.listing.model_dump())
         db.upsert_listing(req.session_id, data, status=top, user_id=uid)
+
+    _record_publish_verdict(req.session_id, uid, list(outcomes.values()),
+                            req.mode)
 
     live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
     failed = [k for k, o in outcomes.items() if not o.ok]
