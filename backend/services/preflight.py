@@ -22,6 +22,7 @@ from typing import Optional
 
 from ..money import money
 from ..models import TITLE_MAX_CHARS, Listing
+from . import taxonomy
 
 # Per-service package weight caps, in ounces, matched case-insensitively as
 # substrings of eBay's shippingServiceCode. Only services with caps BELOW the
@@ -142,6 +143,43 @@ def _check_condition_fits_category(listing: Listing,
         "Very Good / Good / Acceptable exist only for media.)")
 
 
+def _check_condition_descriptors(listing: Listing,
+                                 allowed_conditions: Optional[list[dict]],
+                                 add) -> None:
+    """A trading card's condition is two answers, and eBay refuses the
+    listing over the second one.
+
+    In the single-card categories "Graded" needs a grading service and a
+    grade (and takes a certification number), "Ungraded" needs a card
+    condition. Which conditions carry descriptors, and what each one offers,
+    comes from eBay's own answer for the category (`allowed_conditions`, with
+    `descriptors` per condition); a list without descriptors -- every other
+    category, and every test built before this existed -- checks nothing.
+    """
+    meta = taxonomy.condition_descriptor_meta(allowed_conditions, listing.condition)
+    if not meta:
+        return
+    cond = next((c for c in allowed_conditions
+                 if (c.get("enum") or "").upper() == (listing.condition or "").upper()),
+                {})
+    cond_label = cond.get("label") or condition_label(listing.condition)
+    for hit in taxonomy.condition_descriptor_problems(
+            listing.condition_descriptors, meta):
+        d = hit["descriptor"]
+        offered = ", ".join(v["name"] for v in d.get("values", [])[:6])
+        if hit["problem"] == "missing":
+            add("condition",
+                f"A {cond_label} card needs its {d['name']}",
+                f"eBay asks for the {d['name']} on every {cond_label} listing in "
+                "this category. Pick it under Condition on the Pricing card"
+                + (f" ({offered}…)." if offered else "."))
+        else:
+            add("condition",
+                f"eBay doesn't offer that {d['name']} here",
+                f"Pick a {d['name']} from eBay's list for this category"
+                + (f": {offered}…" if offered else "."))
+
+
 def validate(listing: Listing, mode: str, *,
              has_fulfillment: bool, has_payment: bool, has_return: bool,
              has_location: bool, connected: bool,
@@ -222,6 +260,7 @@ def validate(listing: Listing, mode: str, *,
         add("condition", "A condition is required", "Pick a condition on the Pricing card.")
     else:
         _check_condition_fits_category(listing, allowed_conditions, add)
+        _check_condition_descriptors(listing, allowed_conditions, add)
 
     if mode not in ("live", "revise"):
         return issues

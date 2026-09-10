@@ -4,7 +4,9 @@ import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
 import { turnedUprightMessage } from "@/lib/turnedUpright";
-import { nearestCondition } from "@/lib/conditions";
+import {
+  descriptorsFor, fitDescriptors, nearestCondition, sameDescriptors,
+} from "@/lib/conditions";
 import {
   publishListing, usePublishTargets, blockedReason, fixTargetFor,
 } from "./publishShared";
@@ -31,6 +33,9 @@ const EMPTY = {
   category_suggestion: "", category_id: "", condition: "USED_GOOD",
   // The seller's own eBay Store shelf ("" = the top level of their store).
   store_category_id: "", store_category_name: "",
+  // The second half of a trading card's condition (grading service, grade,
+  // certification number -- or card condition); see lib/conditions.
+  condition_descriptors: [],
   condition_description: "", description: "", item_specifics: [],
   promote: false, ad_rate_percent: 0,
   images: [], image_urls: [], currency: "USD", missing_info: [],
@@ -62,6 +67,7 @@ const CARD_OF = {
   category_id: "category",
   store_category_id: "category",
   condition: "condition",
+  condition_descriptors: "condition",
   condition_description: "condition",
   price: "price",
   auction_start_price: "price",
@@ -310,10 +316,21 @@ export function useListingForm() {
     // never crosses the new/used line, and returns null when the category
     // offers nothing honest, in which case the listing keeps what it has and
     // the Condition card flags it.
+    //
+    // The second step follows the first: a trading card's grade is kept only
+    // in the shape eBay lists for the condition it now has (a category change
+    // away from cards drops it; an imported card's ids pick up eBay's wording).
     if (conditions.length) {
       setForm((f) => {
         const fitted = nearestCondition(f.condition, conditions.map((c) => c.enum));
-        return !fitted || fitted === f.condition ? f : { ...f, condition: fitted };
+        const condition = fitted || f.condition;
+        const descriptors = fitDescriptors(
+          f.condition_descriptors, descriptorsFor(conditions, condition));
+        if (condition === f.condition
+            && sameDescriptors(descriptors, f.condition_descriptors, { labels: true })) {
+          return f;
+        }
+        return { ...f, condition, condition_descriptors: descriptors };
       });
     }
   }, [form.category_id, health.taxonomy_configured]);

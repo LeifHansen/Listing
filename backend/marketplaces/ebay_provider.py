@@ -456,15 +456,31 @@ def fit_condition_to_category(listing: Listing,
     if not current or not allowed:
         return ""
     enums = [c["enum"] for c in allowed if c.get("enum")]
-    if current in enums:
-        return ""
-    fitted = taxonomy.nearest_allowed_condition(current, enums)
-    if not fitted or fitted == current:
-        return ""
-    log.info("condition: %s isn't offered in category %s — publishing as %s",
-             current, listing.category_id, fitted)
-    listing.condition = fitted
-    return current
+    replaced = ""
+    if current not in enums:
+        fitted = taxonomy.nearest_allowed_condition(current, enums)
+        if fitted and fitted != current:
+            log.info("condition: %s isn't offered in category %s — publishing as %s",
+                     current, listing.category_id, fitted)
+            listing.condition = fitted
+            replaced = current
+    # The second half of the condition, held to the same rule: a trading
+    # card's grade is sent only in the shape eBay lists for the condition it
+    # is going out under. A grade left over from before the card was switched
+    # to Ungraded, or a value id eBay has since retired, is dropped here and
+    # the checklist -- which runs on the same answer -- reports what is then
+    # missing. Nothing is invented: an Ungraded card with no card condition
+    # stays that way, and stays blocked.
+    if listing.condition_descriptors:
+        meta = taxonomy.condition_descriptor_meta(allowed, listing.condition)
+        fitted_descriptors = taxonomy.fit_condition_descriptors(
+            listing.condition_descriptors, meta)
+        if [d.model_dump() for d in listing.condition_descriptors] != fitted_descriptors:
+            log.info("condition: descriptors on the %s listing in category %s "
+                     "trimmed to what eBay lists", listing.condition,
+                     listing.category_id)
+            listing.condition_descriptors = fitted_descriptors
+    return replaced
 
 
 def fit_paired_aspects_to_category(listing: Listing) -> list[tuple]:

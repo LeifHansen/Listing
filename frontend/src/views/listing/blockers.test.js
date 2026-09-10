@@ -302,3 +302,69 @@ describe("a listing with eBay variations", () => {
       .map((b) => b.key)).not.toContain("variations");
   });
 });
+
+describe("a trading card's second answer", () => {
+  // eBay's answer for a single-card category: Graded / Ungraded, each with
+  // the descriptors it requires underneath.
+  const CARDS = [
+    { enum: "LIKE_NEW", label: "Graded", descriptors: [
+      { id: "27501", name: "Professional Grader", required: true, free_text: false,
+        values: [{ id: "275010", name: "Professional Sports Authenticator (PSA)" }] },
+      { id: "27502", name: "Grade", required: true, free_text: false,
+        values: [{ id: "275020", name: "10" }] },
+      { id: "27503", name: "Certification Number", required: false, free_text: true, values: [] },
+    ] },
+    { enum: "USED_VERY_GOOD", label: "Ungraded", descriptors: [
+      { id: "40001", name: "Card Condition", required: true, free_text: false,
+        values: [{ id: "400010", name: "Near Mint or Better" }, { id: "400013", name: "Poor" }] },
+    ] },
+  ];
+  const card = (over) => draft({ category_id: "261328", condition: "LIKE_NEW",
+    condition_descriptors: [{ id: "27501", values: ["275010"] }, { id: "27502", values: ["275020"] }],
+    ...over });
+
+  it("blocks a graded card that has no grade, and says which answer is missing", () => {
+    const blockers = ebayBlockers(
+      card({ condition_descriptors: [{ id: "27501", values: ["275010"] }] }),
+      { conditions: CARDS });
+    expect(blockers.map((b) => [b.key, b.target, b.label])).toEqual(
+      [["condition_descriptors", "condition", "Grade"]]);
+    expect(blockers[0].why).toContain("Graded card needs its Grade");
+    expect(blockers[0].why).toContain("10");
+  });
+
+  it("blocks an ungraded card with no card condition, naming eBay's ladder", () => {
+    const blockers = ebayBlockers(
+      card({ condition: "USED_VERY_GOOD", condition_descriptors: [] }), { conditions: CARDS });
+    expect(blockers.map((b) => b.label)).toEqual(["Card Condition"]);
+    expect(blockers[0].why).toContain("Near Mint or Better");
+  });
+
+  it("blocks a grade eBay does not list", () => {
+    const blockers = ebayBlockers(
+      card({ condition_descriptors: [
+        { id: "27501", values: ["275010"] }, { id: "27502", values: ["999999"] }] }),
+      { conditions: CARDS });
+    expect(blockers[0].why).toContain("doesn't offer that Grade");
+  });
+
+  it("lets a complete card through — the certification number is optional", () => {
+    expect(ebayBlockers(card(), { conditions: CARDS })).toEqual([]);
+    expect(ebayBlockers(card({ condition: "USED_VERY_GOOD",
+      condition_descriptors: [{ id: "40001", values: ["400013"] }] }), { conditions: CARDS }))
+      .toEqual([]);
+  });
+
+  it("checks nothing when nobody asked eBay, or where eBay asks one question", () => {
+    expect(ebayBlockers(card({ condition_descriptors: [] }))).toEqual([]);
+    expect(ebayBlockers(card({ condition_descriptors: [] }), { conditions: null })).toEqual([]);
+    expect(ebayBlockers(draft({ condition: "USED_EXCELLENT" }),
+      { conditions: [{ enum: "USED_EXCELLENT", label: "Used" }] })).toEqual([]);
+  });
+
+  it("does not ask the second question about a condition the category refuses", () => {
+    // The first answer is wrong; that is the one blocker to show.
+    const blockers = ebayBlockers(card({ condition: "USED_GOOD" }), { conditions: CARDS });
+    expect(blockers.map((b) => b.key)).toEqual(["condition"]);
+  });
+});

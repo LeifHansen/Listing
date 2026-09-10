@@ -37,7 +37,7 @@ from typing import Any, Optional
 
 from ..config import log
 from ..models import Listing
-from .dirty_fields import TRACKED, _comparable
+from .dirty_fields import TRACKED, comparable_field
 
 # Fields eBay owns outright: live counters and sale facts it reports and we
 # never push back. They are taken from the remote copy without ceremony.
@@ -75,7 +75,7 @@ def _as_text(value: Any) -> str:
 
 def _versions(name: str, value: Any) -> Any:
     """One side of a field, in the form the other side can be compared to."""
-    return _as_text(value) if name == "description" else _comparable(value)
+    return _as_text(value) if name == "description" else comparable_field(name, value)
 
 
 @dataclass
@@ -220,6 +220,7 @@ FIELD_LABELS = {
     "brand": "brand",
     "condition": "condition",
     "condition_description": "condition notes",
+    "condition_descriptors": "card grading",
     "category_id": "category",
     "store_category_id": "store category",
     "price": "price",

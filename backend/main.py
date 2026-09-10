@@ -5773,7 +5773,7 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
 # picker exists to save. `auction_duration` is deliberately NOT here; it
 # stays a full-editor field, defaulted to seven days.
 _PATCHABLE = ("fulfillment_policy_id", "category_id", "category_suggestion",
-              "price", "quantity", "condition",
+              "price", "quantity", "condition", "condition_descriptors",
               "listing_format", "auction_start_price")
 
 

@@ -92,6 +92,10 @@ SPECS: tuple[Spec, ...] = (
     Spec("condition", "Condition", ("condition",), "choice"),
     Spec("condition_description", "Condition notes",
          ("condition_description",), "long"),
+    # A trading card's grading service, grade and certification number (or
+    # its card condition) -- the half of the condition eBay's ids carry.
+    Spec("condition_descriptors", "Card grading",
+         ("condition_descriptors",), "descriptors"),
     Spec("category", "eBay category", ("category_id", "category_suggestion"),
          "category"),
     Spec("store_category", "Store category",
@@ -224,8 +228,45 @@ def _read(spec: Spec, data: dict) -> tuple[str, str]:
         raw = _text(data.get(spec.names[0]))
         return ("", "") if not raw else (raw.upper(), _choice_label(spec.key, raw))
 
+    if spec.kind == "descriptors":
+        return _descriptors(data.get(spec.names[0]))
+
     raw = _text(data.get(spec.names[0]))
     return ("", "") if not raw else (raw.casefold(), _clip(raw))
+
+
+def _descriptors(raw) -> tuple[str, str]:
+    """A card's grading as one line -- "PSA · 10 · #12345678" -- and a key
+    built from eBay's ids, so two drafts that say PSA 10 in different words
+    (one imported, one picked here) do not read as a disagreement."""
+    keys, shown = [], []
+    for entry in (raw or []):
+        if hasattr(entry, "model_dump"):
+            entry = entry.model_dump()
+        if not isinstance(entry, dict):
+            continue
+        did = _text(entry.get("id"))
+        if not did:
+            continue
+        values = entry.get("values") or []
+        if isinstance(values, str):
+            values = [values]
+        values = [_text(v) for v in values if _text(v)]
+        text = _text(entry.get("text"))
+        if not values and not text:
+            continue
+        keys.append(f"{did}={','.join(values)}:{text}")
+        labels = [_text(v) for v in (entry.get("value_labels") or [])]
+        labels = [v for v in labels if v]
+        if labels:
+            shown.append(" / ".join(labels))
+        elif values:
+            shown.append(", ".join(values))
+        if text:
+            shown.append(f"#{text}")
+    if not keys:
+        return "", ""
+    return "|".join(keys), " · ".join(shown)
 
 
 def _specifics(data: dict) -> dict[str, dict]:
