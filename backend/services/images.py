@@ -38,7 +38,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageChops, ImageFile, ImageFilter, ImageOps
+from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
+                 ImageStat)
 
 from ..config import log
 from ..storage import natural_key
@@ -130,6 +131,43 @@ _MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
 # comment is about.
 _MIN_LARGEST_REGION = float(os.getenv("REMBG_MIN_LARGEST_REGION", "0.6") or 0.6)
 _MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
+
+# --- ...but one PRODUCT is not always one object ----------------------------
+#
+# The rule above says "one product is one object, and a matte of it is one
+# solid blob". That is false for a great deal of what resells, and the way it
+# is false is silent: a seller photographs a PAIR of shoes, two paintings,
+# earrings, a two-piece, a cup and its saucer, an item beside its box — and
+# the largest region is half of what was kept, so the cutout is refused and
+# the photo comes back untouched.
+#
+# Reported as "background removal is not working": two canvases lying on
+# grass. Run through the real isnet model, that photo mattes PERFECTLY — the
+# model keeps both canvases as two clean rectangles and is not fooled by the
+# figures painted on them — and scores coverage 0.47, solidity 1.00, box fill
+# 0.87. It was thrown away on largest-region 0.51 against a floor of 0.60,
+# for no reason except that the seller was selling two things.
+#
+# So it is only the LARGEST-REGION half that gets a second question. The box
+# fill stays a precondition for everything, and it is the clause that keeps
+# #255 intact, exactly as its own comment says: a tree at one edge and a boat
+# at the other span nearly the whole photo while covering little of it, where
+# two canvases side by side fill the box they share. Measured on this file's
+# own fixtures — the traps 0.10, 0.17 and 0.22, a pair of shoes 0.60, the
+# reported canvases 0.87. Nothing about that changes here.
+#
+# What changes is that failing the one-blob test is no longer the end of it.
+# When the box is filled, ask instead: is this A FEW COMPACT OBJECTS?
+#
+#   * the substantial regions must be nearly ALL of what was kept, so a long
+#     tail of confetti disqualifies;
+#   * there must be few of them, because a seller sells a pair or a set, not
+#     a dozen scattered fragments;
+#   * and each must fill its OWN box too, so a pair of ragged pieces cannot
+#     ride in on a tidy arrangement.
+_COMPANION_SHARE = float(os.getenv("REMBG_COMPANION_SHARE", "0.25") or 0.25)
+_MAX_OBJECTS = int(os.getenv("REMBG_MAX_OBJECTS", "4") or 4)
+_OBJECTS_COVER = float(os.getenv("REMBG_OBJECTS_COVER", "0.85") or 0.85)
 # The mask is judged at this size. Shape is a low-frequency question, and the
 # region labelling below is pure Python — at 160px it is a few thousand cells
 # and about a millisecond, against millions of pixels and a visible stall.
@@ -165,17 +203,43 @@ _SHAPE_SIDE = int(os.getenv("REMBG_SHAPE_SIDE", "160") or 160)
 # fringes are not. A ghost answers below 0.15, because its middle is the
 # part that is see-through.
 #
-# The exception this knowingly refuses is genuinely sheer fabric — tulle,
-# organza, a chiffon scarf — which mattes half-opaque all over and is
-# indistinguishable from a model that never committed. Nothing here can tell
-# those apart, and the same error-direction argument decides it: a sheer
-# skirt kept as shot is a photo, and a sheer skirt composited on white is a
-# rumour of one.
+# A HOLE is not a hedge, and the difference is the whole measure. A pixel the
+# matte set to zero — the weave of a basket, the gap under a shoe's laces, the
+# space inside a mug's handle — is not part of the interior at all and is not
+# counted. A pixel it set to 110 is: the model was unsure, that pixel ships at
+# half strength over white, and enough of them is an item rubbed out. Openwork
+# items are ordinary here (wicker, mesh, crochet, cane, wire) and they are not
+# ghosts.
+#
+# WHAT THIS MEASURES NOW. _fill_interior runs first and makes the interior
+# opaque, so on a hedged matte this reads 1.00 where it used to read 0.10 —
+# the ghost is repaired rather than caught. That is the point: refusing was
+# only ever the best answer available while the alternative was shipping the
+# item at a third of its opacity, and it left the middle case (hedged enough
+# to look wrong, not enough to be refused) shipping damaged with nothing
+# said. This stays as the backstop for a matte the repair could not save —
+# one with no interior to promote — and as the thing that fails loudly if
+# _fill_interior is ever broken or removed.
+#
+# The one case that changed hands rather than being fixed is genuinely sheer
+# fabric — tulle, organza, a chiffon scarf — which mattes half-opaque all
+# over and is indistinguishable from a model that never committed. It used to
+# be kept as shot; it now ships opaque, which is wrong for it. Restore
+# original recovers the photo. The trade is deliberate: pale garments on
+# plain backdrops are what the app tells sellers to shoot, and sheer items
+# are rare.
+#
+# One caution for anyone changing this: unlike _shape_stats, which thresholds
+# its downscaled copy LOW on purpose so a merged cell errs toward connected,
+# this one asks a HIGH question — and a high threshold applied after averaging
+# errs toward REFUSING, which is the direction that silently costs the seller
+# the feature. So the opacity question is asked per pixel, before anything is
+# merged. See _interior_solidity.
 _MIN_INTERIOR_SOLIDITY = float(
     os.getenv("REMBG_MIN_SOLIDITY", "0.4") or 0.4)
-# What counts as opaque. _harden already snaps everything from _ALPHA_HIGH up
-# to a flat 255, so an interior cell is exactly 255 or it is a pixel the model
-# hedged on; the slack is for cells that straddle a fold the matte dipped in.
+# What counts as opaque, asked of a PIXEL. _harden already snaps everything
+# from _ALPHA_HIGH up to a flat 255, so a pixel is either 255 or one the model
+# hedged on; the slack is for the rounding a resize leaves behind.
 _SOLID_ALPHA = 250
 # How far in from the background the interior starts, in cells of the
 # _SHAPE_SIDE copy. Two is about 1% of the frame — enough to clear the soft
@@ -332,17 +396,42 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
     return shifted
 
 
-def _shape_stats(kept: Image.Image) -> tuple[float, float]:
-    """(the largest connected region's share of the kept area, the kept area's
-    share of its own bounding box) for a binary mask.
+def _kept_is_the_product(total: int, regions: list, box_fill: float) -> bool:
+    """Whether what the matte kept looks like the thing being sold.
 
-    Both answer "is this one object?" — the first against a matte broken into
-    pieces, the second against one spread thinly across the frame. Measured on
-    a copy no bigger than _SHAPE_SIDE: shape survives the downscale, and the
-    labelling below is pure Python.
+    One solid blob filling its own box is the common case and answers yes
+    immediately. Otherwise the pair-or-set question above — a few compact
+    objects, together accounting for nearly everything kept.
+    """
+    if not total or not regions:
+        return False
+    # Whatever it is, it has to fill the box it sits in. See above: this is
+    # the clause that refuses a matte spread thinly across the frame, and it
+    # is unchanged.
+    if box_fill < _MIN_BBOX_FILL:
+        return False
+    if regions[0][0] / total >= _MIN_LARGEST_REGION:
+        return True
+    objects = [r for r in regions if r[0] >= regions[0][0] * _COMPANION_SHARE]
+    return (len(objects) <= _MAX_OBJECTS
+            and sum(r[0] for r in objects) / total >= _OBJECTS_COVER
+            and all(fill >= _MIN_BBOX_FILL for _cells, fill in objects))
 
-    (0.0, 0.0) for an empty mask, so a caller that reaches here without
-    checking coverage still refuses rather than dividing by zero.
+
+def _kept_shape(kept: Image.Image) -> tuple[int, list[tuple[int, float]], float]:
+    """What a binary mask is made of: (total cells kept, one entry per
+    connected region as (cells, how well it fills ITS OWN bounding box),
+    largest region first, how well the whole lot fills the ONE box around it).
+
+    Every shape question in this file is answered from here, so the labelling
+    below — the only pure-Python loop on the photo path — runs once per photo.
+
+    Per-region box fill is what tells a pair of products from the fragments of
+    one. Two shoes, two canvases, a cup and its saucer are each compact and
+    each fill their own box; a tree and a boat the model found inside a
+    painting do not fill theirs, however tidily they sit in the frame
+    together. Reported rather than reduced to one number, because which
+    question matters depends on how many regions there turn out to be.
     """
     w, h = kept.size
     scale = _SHAPE_SIDE / max(w, h)
@@ -361,33 +450,124 @@ def _shape_stats(kept: Image.Image) -> tuple[float, float]:
             if px[x, y]:
                 total += 1
     if not total:
-        return 0.0, 0.0
+        return 0, [], 0.0
 
     # Flood fill each unvisited region, 4-connected, with an explicit stack:
     # a recursive fill blows Python's stack on a mask that is mostly one blob,
     # which is precisely the healthy case.
     seen = bytearray(w * h)
-    largest = 0
+    regions: list[tuple[int, float]] = []
     for sy in range(h):
         for sx in range(w):
             if seen[sy * w + sx] or not px[sx, sy]:
                 continue
             size = 0
+            lo_x = hi_x = sx
+            lo_y = hi_y = sy
             stack = [(sx, sy)]
             seen[sy * w + sx] = 1
             while stack:
                 x, y = stack.pop()
                 size += 1
+                lo_x, hi_x = min(lo_x, x), max(hi_x, x)
+                lo_y, hi_y = min(lo_y, y), max(hi_y, y)
                 for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
                     if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] \
                             and px[nx, ny]:
                         seen[ny * w + nx] = 1
                         stack.append((nx, ny))
-            largest = max(largest, size)
+            own_box = (hi_x - lo_x + 1) * (hi_y - lo_y + 1)
+            regions.append((size, size / own_box if own_box else 0.0))
+    regions.sort(reverse=True)
 
     box = kept.getbbox()
     box_area = (box[2] - box[0]) * (box[3] - box[1]) if box else 0
-    return largest / total, (total / box_area if box_area else 0.0)
+    return total, regions, (total / box_area if box_area else 0.0)
+
+
+def _shape_stats(kept: Image.Image) -> tuple[float, float]:
+    """(the largest connected region's share of the kept area, the kept area's
+    share of its own bounding box) — the two summary numbers, for callers and
+    tests that want the shape as a pair rather than as its parts.
+
+    (0.0, 0.0) for an empty mask, so a caller that reaches here without
+    checking coverage still refuses rather than dividing by zero.
+    """
+    total, regions, box_fill = _kept_shape(kept)
+    if not total:
+        return 0.0, 0.0
+    return regions[0][0] / total, box_fill
+
+
+def _fill_interior(alpha: Image.Image) -> Image.Image:
+    """The matte with the item's INTERIOR made opaque.
+
+    This is the repair for the failure _interior_solidity was written to
+    detect. The model is confident where there is contrast and unsure where
+    there is not, so a pale item on a pale backdrop — a white shirt on white
+    foamboard, which is exactly what sellers are told to shoot on — comes back
+    with its collar label and its placket at 255 and the fabric between them
+    somewhere in the middle. _harden ships that middle as PARTIAL ALPHA, and a
+    pixel the model half believed in is composited at half strength over
+    white. An item's worth of those is the item rubbed out: the seller gets a
+    crisp logo floating on a ghost of a shirt.
+
+    Detecting that and refusing the cutout (which is what the solidity floor
+    does) leaves two outcomes and no good one — badly hedged means the photo
+    is kept as shot, moderately hedged means it ships damaged. So: repair it.
+    A pixel inside the item is part of the item whatever the model's
+    confidence, because there is nothing else it could be.
+
+    "Inside" is the same interior _interior_solidity measures, and reusing
+    that definition is what keeps a soft edge soft: cells WHOLLY covered by
+    the item, eroded back from the boundary. A rim cell is only partly
+    covered, so it is not interior and is left exactly as the model drew it.
+    The same is true of the gaps between a fur collar's tufts or a wig's
+    flyaway strands — though a fringe dense enough to cover its cells
+    completely does count as interior and will harden, which is the one place
+    this trades a little softness for a great deal of fabric.
+
+    Only where the model saw the item at all — above _ALPHA_LOW, the same
+    line _harden draws between "background" and "an edge". Below it the model
+    was confident there is nothing, so the hole through a ring, the gap under
+    a mug's handle and the backdrop between a pair of boots all stay holes.
+    Gating on any non-zero alpha instead would promote the faintest haze the
+    model left on the backdrop, which is the very thing _harden exists to
+    delete.
+
+    All C — two point operations, a resize, an erosion and two composites.
+    About ten milliseconds on a 12MP photo, and no extra inference.
+    """
+    w, h = alpha.size
+    # The hole gate, read at FULL resolution: a hole is a few pixels wide at
+    # the scale the seller sees, and asking a downscaled copy would round the
+    # gap under a ring's band away and paint it in.
+    seen = alpha.point(lambda a: 255 if a > _ALPHA_LOW else 0)
+    # The interior, read at _SHAPE_SIDE, because "how far in from the edge is
+    # this" is a low-frequency question — the same copy and the same erosion
+    # _interior_solidity uses to answer it.
+    scale = _SHAPE_SIDE / max(w, h)
+    inner = (seen.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                         Image.BOX) if scale < 1 else seen)
+    inner = inner.point(lambda v: 255 if v >= 255 else 0)
+    for _ in range(_INTERIOR_ERODE):
+        inner = inner.filter(ImageFilter.MinFilter(3))
+    # Back to full size as a SOFT mask, blurred by about one cell of the copy
+    # it was found on, and deliberately never re-thresholded.
+    #
+    # This is the difference between measuring a matte and painting one. Where
+    # the promoted interior hands back to the ramp left alone, a hard mask
+    # makes that hand-off a single step — and because the step follows the
+    # 160px working grid, it shows up in the finished photo as a stepped
+    # contour running down the inside of the sleeve. Blurred, it is a
+    # gradient. (Finding the interior on a finer grid would smooth it too,
+    # but a finer grid also starts reading the gaps between a fur collar's
+    # tufts as interior and hardens the fringe. The blur costs nothing and
+    # keeps the fringe.)
+    if inner.size != alpha.size:
+        inner = inner.resize(alpha.size, Image.BILINEAR).filter(
+            ImageFilter.GaussianBlur(max(w, h) / _SHAPE_SIDE))
+    return ImageChops.lighter(alpha, ImageChops.multiply(inner, seen))
 
 
 def _interior_solidity(alpha: Image.Image) -> float:
@@ -399,31 +579,47 @@ def _interior_solidity(alpha: Image.Image) -> float:
     near 1.0 once the boundary is taken off, while a matte the model hedged
     across the whole item is see-through in the middle and scores near 0.
 
-    Measured on the same _SHAPE_SIDE copy as _shape_stats, and unlike it this
-    is all C — an erosion and two histograms, no per-pixel Python.
+    The share is of PIXELS, and it has to be, which is the one subtle thing
+    here. Shape is a low-frequency question so the interior is found on a
+    _SHAPE_SIDE copy, but "is this opaque" is asked of each full-resolution
+    pixel BEFORE anything is merged. Judged the other way round — threshold
+    the averaged copy — a cell of a 3000px photo is a mean of some 350 pixels
+    and comes out "solid" only if very nearly all of them are, so any real
+    internal detail (a seam, a fold, hardware, an openwork weave, a busy
+    print) drags it under. That is not a measure of opacity, it is a measure
+    of uniformity, and it got stricter the bigger the seller's camera was:
+    the same matte scored 0.33 at 640px, 0.06 at 1600 and 0.00 at 3000, so a
+    newer phone had its cutouts refused where an older one passed. Binarising
+    first makes the answer the same at every size.
+
+    All C — two point operations, two resizes and an erosion.
 
     1.0 when erosion leaves nothing, which is a chain or a filigree earring
     rather than a ghost: there is no interior, so this measure has nothing to
     say and must not be what refuses the photo.
     """
     w, h = alpha.size
+    solid = alpha.point(lambda a: 255 if a >= _SOLID_ALPHA else 0)
+    visible = alpha.point(lambda a: 255 if a else 0)
     scale = _SHAPE_SIDE / max(w, h)
     if scale < 1:
-        # BOX averages rather than sampling, so a cell is solid only if what
-        # it merged was solid — a rim cell that is half 255 and half 0 lands
-        # in the middle and is not counted as opaque. It is also eroded away
-        # below, which is the point: rims are not what this is measuring.
-        alpha = alpha.resize((max(1, round(w * scale)), max(1, round(h * scale))),
-                             Image.BOX)
-    visible = alpha.point(lambda a: 255 if a else 0)
-    solid = alpha.point(lambda a: 255 if a >= _SOLID_ALPHA else 0)
-    inner = visible
+        # BOX averages rather than samples, so each cell now carries the SHARE
+        # of its pixels that were solid (or visible) rather than a verdict on
+        # their mean alpha.
+        size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        solid = solid.resize(size, Image.BOX)
+        visible = visible.resize(size, Image.BOX)
+    # Interior: cells that were wholly inside the item, then eroded back from
+    # the boundary. A cell the rim only clips is not fully visible and is not
+    # interior — rims are exactly what this must not measure.
+    inner = visible.point(lambda v: 255 if v >= 255 else 0)
     for _ in range(_INTERIOR_ERODE):
         inner = inner.filter(ImageFilter.MinFilter(3))
-    interior = inner.histogram()[255]
-    if not interior:
+    if not inner.histogram()[255]:
         return 1.0
-    return ImageChops.darker(inner, solid).histogram()[255] / interior
+    # The mean solid-share over the interior cells: every cell covers the same
+    # number of pixels, so this is the share of interior PIXELS kept opaque.
+    return ImageStat.Stat(solid, inner).mean[0] / 255
 
 
 def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
@@ -432,7 +628,10 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
 
     Raises CutoutBusy when the inference slot is taken for longer than
     `wait`; any other failure raises as itself so a caller can say why."""
-    alpha = _harden(_mask(rgb, wait=wait))
+    # Repaired BEFORE it is hardened, and hardened exactly once. _harden maps
+    # the band between LOW and HIGH onto a ramp, so running it over its own
+    # output re-ramps every mid value toward zero and quietly eats the matte.
+    alpha = _harden(_fill_interior(_mask(rgb, wait=wait)))
     kept = alpha.point(lambda a: 255 if a >= 128 else 0)
     coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
     if coverage < _MIN_FG_COVERAGE:
@@ -448,13 +647,15 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
                  "item's interior is opaque (coverage %.3f); keeping the "
                  "photo as shot", solidity, coverage)
         return None
-    # And is it one object? See _MIN_LARGEST_REGION.
-    largest, box_fill = _shape_stats(kept)
-    if largest < _MIN_LARGEST_REGION or box_fill < _MIN_BBOX_FILL:
-        log.info("bg-removal: the matte is not one object — largest region "
-                 "%.2f of what it kept, filling %.2f of its own box "
-                 "(coverage %.3f); keeping the photo as shot",
-                 largest, box_fill, coverage)
+    # And is it the product? One object, or a few — see _COMPANION_SHARE.
+    total, regions, box_fill = _kept_shape(kept)
+    if not _kept_is_the_product(total, regions, box_fill):
+        log.info("bg-removal: what the matte kept is not the product — %d "
+                 "region(s), largest %.2f of what it kept and filling %.2f of "
+                 "its own box, the lot filling %.2f of theirs (coverage "
+                 "%.3f); keeping the photo as shot",
+                 len(regions), (regions[0][0] / total) if total else 0.0,
+                 regions[0][1] if regions else 0.0, box_fill, coverage)
         return None
     canvas = Image.new("RGB", rgb.size, WHITE)
     canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
@@ -727,9 +928,10 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     if out is None:
         raise ValueError(
             "Couldn't separate this photo from its background — it's likely "
-            "a close-up, a dark shot, or a pale item on a pale backdrop. Try "
-            "cropping in tighter, shooting against a contrasting surface, or "
-            "painting the background out with the white brush.")
+            "a close-up, a dark item on a dark surface, or a photo OF a "
+            "picture rather than of an object. Try cropping in tighter, "
+            "shooting against a contrasting surface, or painting the "
+            "background out with the white brush.")
     return out, "local"
 
 

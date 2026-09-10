@@ -19,8 +19,9 @@ import secrets
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
@@ -6104,11 +6105,21 @@ _RESUMABLE_PHASES = ("uploading", "optimizing", "grouping")
 _DRAFTING_PHASE = "identifying"
 
 
-def _compact_item(item: dict) -> dict:
+def _compact_item(item: dict, gi: int) -> dict:
     """The part of a drafted item worth mirroring: enough to rebuild the
     queue's row from disk after a restart, and nothing that is already in
-    the item's own listing.json."""
-    return {"session_id": item.get("session_id"), "name": item.get("name"),
+    the item's own listing.json.
+
+    `gi` is the index of the group this item was drafted from, and it is the
+    whole reason a restart can pick a batch back up while several items are
+    in flight at once. Before that, position in the list WAS the index —
+    finished items were a contiguous prefix, so the n-th entry could only be
+    group n. Items finishing out of order break that, so each one now says
+    which group it is. It rides in the mirror only, never on the queue row
+    the client polls.
+    """
+    return {"gi": gi,
+            "session_id": item.get("session_id"), "name": item.get("name"),
             "status": item.get("status"), "error": item.get("error"),
             "title": item.get("title")}
 
@@ -6117,6 +6128,10 @@ def _bulk_items_from_disk(done: list[dict]) -> list[dict]:
     """The queue rows for items finished before a restart, rebuilt from their
     saved listings. The same shape _run_bulk_job produces, so the poller
     cannot tell a resumed batch from one that never stopped.
+
+    Ordered by group, not by the order the drafts happened to land: the queue
+    is the seller's pile in shooting order, and items finishing out of order
+    is now the ordinary case rather than an impossible one.
 
     The database row is read where the disk copy is gone, in that order and
     for the reason _listing_image_order gives: a database is OPTIONAL, so
@@ -6132,7 +6147,7 @@ def _bulk_items_from_disk(done: list[dict]) -> list[dict]:
     the card already knows how to render and the seller can act on.
     """
     items: list[dict] = []
-    for rec in done:
+    for rec in sorted(done, key=lambda r: r.get("gi") or 0):
         sid = str(rec.get("session_id") or "")
         listing = storage.load_listing(sid) if sid else None
         if listing is None and sid:
@@ -6159,6 +6174,42 @@ def _bulk_items_from_disk(done: list[dict]) -> list[dict]:
     return items
 
 
+def _mirrored_done(record: dict) -> list[dict]:
+    """The mirror's finished items, each carrying the group it drafted.
+
+    A mirror written before drafting ran several items at once has no `gi` on
+    its entries, because back then POSITION was identity: finished items were
+    a contiguous prefix, so the n-th entry could only be group n. Reading such
+    a record positionally reproduces exactly what the old code did, which is
+    what lets a deploy land mid-batch without the resume losing an item or
+    drafting one twice.
+    """
+    out: list[dict] = []
+    for pos, entry in enumerate(record.get("_done") or []):
+        if not isinstance(entry, dict) or not entry.get("session_id"):
+            continue
+        gi = entry.get("gi")
+        out.append({**entry, "gi": gi if isinstance(gi, int) else pos})
+    return out
+
+
+def _mirrored_inflight(record: dict, done: list[dict]) -> list[dict]:
+    """The mirror's in-flight items as [{"gi", "session_id"}].
+
+    A bare session id is the old single-in-flight shape; see _mirrored_done
+    for why it means "the item straight after the finished prefix".
+    """
+    raw = record.get("_inflight")
+    if isinstance(raw, str) and raw:
+        return [{"gi": len(done), "session_id": raw}]
+    out: list[dict] = []
+    for entry in (raw or []):
+        if (isinstance(entry, dict) and entry.get("session_id")
+                and isinstance(entry.get("gi"), int)):
+            out.append({"gi": entry["gi"], "session_id": entry["session_id"]})
+    return out
+
+
 def _drafting_plan(record: dict, staging: str) -> Optional[dict]:
     """What a batch interrupted while drafting needs to carry on, or None.
 
@@ -6168,13 +6219,20 @@ def _drafting_plan(record: dict, staging: str) -> Optional[dict]:
     not come back. list_optimized is read-only on purpose: asking must never
     re-create the tree the orphan sweep just removed.
 
-    The item in flight is the one judgement call. Its draft can land and the
-    process die before the job ticks, in which case its listing.json is on
-    disk and it is finished (and billed) — drafting it again would duplicate
-    both. With photos in its session but no draft, it is finished IN that
-    session, without a second charge: the first one bought nothing, and the
-    receipt died with the process. With neither, it never really started and
-    is drafted like any other remaining item.
+    The items in flight are the judgement call, and it is made per item
+    rather than per batch because several are drafted at once. A draft can
+    land and the process die before the job ticks, in which case its
+    listing.json is on disk and that item is finished (and billed) —
+    drafting it again would duplicate both. With photos in its session but no
+    draft, it is finished IN that session, without a second charge: the first
+    one bought nothing, and the receipt died with the process. With neither,
+    it never really started and is drafted like any other remaining item.
+
+    What comes back is `remaining` (every group with no draft, in order) and
+    `precharged` ({group index: session id}) rather than a single "start
+    here", because the gap a restart leaves behind is no longer a suffix: a
+    batch that died with three items in flight can be missing group 4 while
+    groups 5 and 6 are saved.
     """
     names = [n for n in (record.get("_names") or []) if isinstance(n, str)]
     groups = [g for g in (record.get("_groups") or [])
@@ -6183,23 +6241,29 @@ def _drafting_plan(record: dict, staging: str) -> Optional[dict]:
         return None
     if not storage.list_optimized(staging):
         return None
-    done = [dict(d) for d in (record.get("_done") or [])
-            if isinstance(d, dict) and d.get("session_id")]
+    done = _mirrored_done(record)
     if len(done) > len(groups):
         return None
-    inflight = record.get("_inflight") or None
-    if inflight:
-        listing = storage.load_listing(inflight)
-        if listing is not None and len(done) < len(groups):
-            group = groups[len(done)]
-            done.append({"session_id": inflight, "name": group.get("name") or "",
-                         "status": "draft", "error": None,
-                         "title": listing.get("title") or group.get("name") or ""})
-            inflight = None
-        elif listing is not None or not storage.list_optimized(inflight):
-            inflight = None
+    done_by_gi = {d["gi"]: d for d in done if 0 <= d["gi"] < len(groups)}
+    precharged: dict[int, str] = {}
+    for entry in _mirrored_inflight(record, done):
+        gi, sid = entry["gi"], entry["session_id"]
+        if not (0 <= gi < len(groups)) or gi in done_by_gi:
+            continue
+        listing = storage.load_listing(sid)
+        if listing is not None:
+            group = groups[gi]
+            done_by_gi[gi] = {
+                "gi": gi, "session_id": sid, "name": group.get("name") or "",
+                "status": "draft", "error": None,
+                "title": listing.get("title") or group.get("name") or ""}
+        elif storage.list_optimized(sid):
+            precharged[gi] = sid
+    done = [done_by_gi[gi] for gi in sorted(done_by_gi)]
+    remaining = [gi for gi in range(len(groups)) if gi not in done_by_gi]
     return {"names": names, "groups": groups, "done": done,
-            "inflight": inflight, "items": _bulk_items_from_disk(done)}
+            "remaining": remaining, "precharged": precharged,
+            "items": _bulk_items_from_disk(done)}
 
 
 def _settle_interrupted_jobs(records: list[dict]) -> None:
@@ -6274,13 +6338,18 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
                 "id": job_id, "phase": _DRAFTING_PHASE, "done": False,
                 "error": None, "items": plan["items"],
                 "total_items": len(plan["groups"]),
-                "current": min(len(plan["done"]) + 1, len(plan["groups"])),
+                # Items FINISHED, not the one being worked on: several are now
+                # in flight at once, so "current" counts what has landed.
+                "current": len(plan["done"]),
                 "total_photos": record.get("total_photos") or len(plan["names"]),
                 "resumed": True, "remove_bg": strip_bg,
                 "_staging_id": staging, "_strip_bg": strip_bg,
                 "_resumes": resumes + 1,
                 "_names": plan["names"], "_groups": plan["groups"],
-                "_done": plan["done"], "_inflight": plan["inflight"],
+                # Nothing is in flight until this run picks an item up; the
+                # ones the dead process held are in plan["precharged"], which
+                # the worker re-registers as it starts each of them.
+                "_done": plan["done"], "_inflight": [],
             }, uid=uid)
             threading.Thread(
                 target=_run_bulk_job, args=(job_id, staging, strip_bg, uid),
@@ -6333,6 +6402,311 @@ def _adopt_job_mirrors() -> None:
                      args=(interrupted,), daemon=True).start()
 
 
+# How many items of one bulk batch are drafted at the same time. Each one is a
+# chain of five to nine Anthropic calls and a handful of eBay lookups, and the
+# machine spends nearly all of that waiting on somebody else's server -- so
+# drafting them strictly one at a time left the box idle for most of a batch.
+#
+# Three, not more, and the ceiling is this machine rather than any API: each
+# worker holds a listing's photos as base64 for its vision calls and crops the
+# full-size originals for the tag close-ups, on a 4GB box that is already
+# holding a 176MB cutout model (fly.toml). The chain is mostly network wait,
+# but the crops and the encoding are real work on two shared CPUs.
+#
+# BULK_DRAFT_WORKERS=1 is the off switch, and it is exactly the old behaviour:
+# one item in flight, drafted in group order.
+BULK_DRAFT_WORKERS = max(1, int(os.getenv("BULK_DRAFT_WORKERS", "3") or 3))
+
+
+@dataclass(frozen=True)
+class _BulkContext:
+    """Everything a bulk batch's drafting needs that is the same for every
+    item in it, read once rather than per item (the preferences, the pricing
+    strategy and the Promote default are each a database round trip).
+
+    Frozen because it is shared by every worker thread: nothing here may be
+    written to while a batch is drafting.
+    """
+    uid: Optional[str]
+    prefs: dict
+    strategy: Optional[str]
+    auto_promote: bool
+    billing: bool
+    notes: str
+    names: list           # the staging pile's optimized photos, in order
+    groups: list          # {"name", "indices"} per item, indices into `names`
+    opt_dir: Path
+    # {group index: session id} for items a dead process had already charged
+    # for and never delivered. Finished in the session that already holds
+    # their photos, without a second charge. See _drafting_plan.
+    precharged: dict = field(default_factory=dict)
+
+
+class _BulkProgress:
+    """The drafting half of a bulk job's status, kept whole while several
+    workers write to it.
+
+    jobstore.update merges whole FIELDS, so two workers that each read `items`,
+    append their own row and write it back would lose one of them -- and the
+    lost one is a draft the seller has already paid for, sitting on disk with
+    nothing in the queue pointing at it. Every transition goes through here
+    instead, and the lock is held while the maps are updated AND the payload is
+    built, so each status the client polls is one consistent picture rather
+    than a blend of two.
+
+    Everything is keyed by group index and published in that order: the queue
+    is the seller's pile in the order they shot it, and which item happens to
+    finish first is an accident of how many photos it had and how long the AI
+    took.
+    """
+
+    def __init__(self, job_id: str) -> None:
+        self._job_id = job_id
+        self._lock = threading.Lock()
+        self._items: dict[int, dict] = {}      # queue rows, for the client
+        self._compact: dict[int, dict] = {}    # the same rows, for the mirror
+        self._inflight: dict[int, str] = {}    # group index -> session id
+
+    def seed(self, done: list[dict]) -> None:
+        """Adopt the items a resumed batch finished before the restart. Both
+        lists are in group order (_bulk_items_from_disk sorts), so they pair
+        up position by position."""
+        rows = _bulk_items_from_disk(done)
+        with self._lock:
+            for compact, row in zip(sorted(done, key=lambda d: d["gi"]), rows):
+                self._items[compact["gi"]] = row
+                self._compact[compact["gi"]] = compact
+
+    def mark_started(self, gi: int, session_id: str) -> None:
+        """This item's photos are in place and its AI is about to be charged
+        for. Written down BEFORE the charge: a restart between here and the
+        draft landing finishes this item in this session, charged once."""
+        with self._lock:
+            self._inflight[gi] = session_id
+            self._publish()
+
+    def mark_done(self, gi: int, item: dict) -> None:
+        """This item is finished -- drafted, or failed with a reason the card
+        can show. Either way it is no longer in flight and never runs again."""
+        with self._lock:
+            self._inflight.pop(gi, None)
+            self._items[gi] = item
+            self._compact[gi] = _compact_item(item, gi)
+            self._publish()
+
+    def items(self) -> list[dict]:
+        with self._lock:
+            return [self._items[gi] for gi in sorted(self._items)]
+
+    def finish(self, **fields) -> None:
+        """The batch's last word, published with the same consistency as every
+        tick before it."""
+        with self._lock:
+            self._publish(**fields)
+
+    def _publish(self, **extra) -> None:
+        # Caller holds the lock.
+        _bulk_set(self._job_id,
+                  current=len(self._items),
+                  items=[self._items[gi] for gi in sorted(self._items)],
+                  _done=[self._compact[gi] for gi in sorted(self._compact)],
+                  _inflight=[{"gi": gi, "session_id": sid}
+                             for gi, sid in sorted(self._inflight.items())],
+                  **extra)
+
+
+def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool]:
+    """This item's own session: (session_id, photo names, already charged).
+
+    An item a restart cut off already has its photos in a session of its own
+    and its AI was charged for, so it is finished there rather than copied out
+    again -- and not charged twice for what the first attempt never delivered.
+    """
+    sid = ctx.precharged.get(gi)
+    if sid:
+        return sid, storage.list_optimized(sid), True
+    sid = storage.new_session_id()
+    item_dir = storage.optimized_dir(sid)
+    item_names = []
+    for j, idx in enumerate(ctx.groups[gi]["indices"]):
+        shutil.copyfile(ctx.opt_dir / ctx.names[idx], item_dir / f"img_{j:03d}.jpg")
+        item_names.append(f"img_{j:03d}.jpg")
+    objstore.upload_optimized(sid, item_dir, item_names)
+    # Each item inherits the WHOLE pile's hints, not just the line it was
+    # grouped under: the split is the model's guess, and the identify prompt
+    # already tells it to use only the lines matching the photos in front of
+    # it. The staging session (where they live now) is purged when this batch
+    # ends, so without the copy a "Start over" on any of these drafts loses
+    # them.
+    storage.save_notes(sid, ctx.notes)
+    return sid, item_names, False
+
+
+def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
+                         progress: _BulkProgress) -> Optional[dict]:
+    """Draft one item of a bulk batch, and return its queue row.
+
+    None means the item never started: the seller called the batch off before
+    it was charged for, so there is nothing to report and nothing to refund.
+
+    Everything this touches is its own -- its session directory, its own token
+    charge, its own Listing -- which is what makes it safe to run several at
+    once. The only shared thing is `progress`, which serialises the status they
+    publish.
+
+    It does not raise for anything the seller could be told about. One item
+    that hits a rate limit, an unreadable answer or a refusal comes back as a
+    row with an error on it; the rest of the pile carries on.
+    """
+    group = ctx.groups[gi]
+    # Between items, never inside one: an item that has started has already
+    # been charged for, so it is finished and saved. Asked here as well as
+    # before the submit, because a stop can land while this one was queued.
+    if jobstore.cancel_requested(job_id):
+        return None
+    sid, item_names, charged = _bulk_item_session(gi, ctx)
+    item = {"session_id": sid, "name": group["name"], "status": "draft",
+            "error": None, "listing_id": None,
+            "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
+    # Named BEFORE the charge, once its photos are in place: a restart between
+    # here and the draft landing finishes this item in this session, once.
+    progress.mark_started(gi, sid)
+    # Each bulk item is one AI draft — same token price as a single listing.
+    # Out of tokens mid-batch: the item keeps its photos as a stub draft
+    # (retryable via "Start over" after a top-up), no AI spend happens for it,
+    # and the batch keeps going so the count of what's left is honest.
+    spent = (tokens.spend(ctx.uid, "identify")
+             if ctx.billing and not charged else None)
+    if spent is not None and not spent.get("ok"):
+        stub = Listing(images=item_names, missing_info=[
+            "Out of AI tokens when this item's turn came — your photos "
+            "are safe. Top up (or wait for the monthly reset), then "
+            "use Start over to run the AI."])
+        storage.save_listing(sid, stub)
+        db.upsert_listing(sid, stub.model_dump(), status="draft", user_id=ctx.uid)
+        item.update({"status": "error", "listing": stub.model_dump(),
+                     "title": group["name"],
+                     "error": tokens.insufficient_message(spent)})
+        _bulk_set(job_id, tokens_exhausted=True)
+        progress.mark_done(gi, item)
+        return item
+    item_dir = storage.optimized_dir(sid)
+    paths = [item_dir / n for n in item_names]
+    try:
+        result = claude_ai.identify(paths, item_names, strategy=ctx.strategy,
+                                    notes=ctx.notes)
+        # Each item's confidence onto its own draft: the queue card
+        # is where a seller decides which of forty to open first.
+        result.listing.ai_confidence = result.confidence
+        listing = _apply_listing_defaults(result.listing, ctx.uid, ctx.prefs)
+        barcodes.apply_to_listing(listing, result.identifiers)
+        # Carry the account's Promote default onto the draft itself, so
+        # the queue card shows what will actually happen at publish
+        # rather than an unchecked box that promotes anyway.
+        listing.promote = listing.promote or ctx.auto_promote
+        _resolve_category(listing)
+        _assign_store_category(listing, ctx.uid)
+        # Fill item specifics (and the maker) up front so the draft the
+        # seller reviews carries real specifics, not just the generic
+        # first pass — one consolidated call on chain v2.
+        _enrich_listing(listing, paths, tags=result.tags)
+        # A note the fill just answered must not outlive it: it is
+        # what the dashboard's "Fill in details" reads, and a fresh
+        # draft carrying "size" beside a filled Size was suggested
+        # for a fill that then found nothing to do.
+        _drop_answered_missing_info(listing)
+        _lookup_artwork(listing, paths, sid, result.raw_observations,
+                        tags=result.tags)
+        _research_draft(listing, paths, result.raw_observations,
+                        result.confidence)
+        _price_against_comps(listing, ctx.uid, ctx.prefs)
+        storage.save_listing(sid, listing)
+        db.upsert_listing(sid, listing.model_dump(), status="draft",
+                          user_id=ctx.uid)
+        item["listing"] = listing.model_dump()
+        item["title"] = listing.title
+    except Exception as exc:  # noqa: BLE001 - one bad item shouldn't kill the batch
+        tokens.refund(spent)
+        log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
+        item["status"] = "error"
+        # The card shows this. A decoder's complaint about the
+        # model's JSON, a rate limit, a refusal -- none of them is
+        # something a seller can act on as the SDK words it; the
+        # sentence ai_error_message gives each of them is.
+        item["error"] = (claude_ai.ai_error_message(exc)[1]
+                         if claude_ai.is_ai_error(exc)
+                         else str(exc))
+        item["listing"] = None
+        item["title"] = group["name"]
+    # Published by the worker that produced it, not by whoever collects it: an
+    # item that is saved and billed must reach the queue even if a SIBLING
+    # item takes the whole batch down a moment later.
+    progress.mark_done(gi, item)
+    return item
+
+
+def _draft_bulk_items(job_id: str, remaining: list, ctx: _BulkContext,
+                      progress: _BulkProgress) -> None:
+    """Draft every group in `remaining`, up to BULK_DRAFT_WORKERS at a time.
+
+    Submission is bounded rather than handing the pool the whole pile at once:
+    a batch the seller stops should have a handful of items to let finish, not
+    two hundred queued ones to reason about. So a slot is waited for before
+    each submit, and the stop is checked there -- the only place it can be
+    checked for free, since an item already running has been paid for and is
+    always finished and saved.
+
+    Raises _BatchStopped once the pool has drained, so a stopped batch reports
+    what it got to exactly as it always did. Anything else a worker raises is
+    the batch's own failure and travels up unchanged: the drafts its siblings
+    finished are already saved, billed and in the queue, because each worker
+    publishes its own row rather than waiting to be collected.
+    """
+    workers = min(BULK_DRAFT_WORKERS, len(remaining))
+    if workers <= 1:
+        # One at a time, in group order: the old behaviour exactly, and what
+        # BULK_DRAFT_WORKERS=1 buys as an off switch. No warm-up either --
+        # the first item warms the cache by drafting, so a separate prefill
+        # would be a second write for nothing.
+        for gi in remaining:
+            _stop_if_cancelled(job_id)
+            if _draft_one_bulk_item(job_id, gi, ctx, progress) is None:
+                break
+    else:
+        # The identify prompt's static half is prompt-cached, and a cache entry
+        # only becomes readable once the request that wrote it starts answering
+        # -- so workers started together would every one of them MISS it and
+        # each write its own copy. One cheap prefill first, and they all read.
+        claude_ai.warm_identify_cache()
+        pending: dict = {}
+        stopped = False
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="bulk-draft") as pool:
+            queue = list(remaining)
+            while queue or pending:
+                while queue and not stopped and len(pending) < workers:
+                    if jobstore.cancel_requested(job_id):
+                        stopped = True
+                        break
+                    gi = queue.pop(0)
+                    pending[pool.submit(_draft_one_bulk_item, job_id, gi,
+                                        ctx, progress)] = gi
+                if not pending:
+                    break
+                for fut in wait(list(pending), return_when=FIRST_COMPLETED).done:
+                    pending.pop(fut)
+                    # The worker answered for its own failures and published
+                    # its own row; None means it never started because the
+                    # batch was called off under it.
+                    if fut.result() is None:
+                        stopped = True
+                if stopped:
+                    queue.clear()
+    # Whether the stop was noticed at a submit or inside a worker, this is
+    # where the batch leaves -- after every item already paid for has landed.
+    _stop_if_cancelled(job_id)
+
+
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                   uid: Optional[str], resumed: bool = False,
                   resume_from: Optional[dict] = None) -> None:
@@ -6376,12 +6750,13 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     bg_refunded = 0
     n_photos = 0
     delivered = False
-    # Declared out here so a batch the seller stops can still report the items
-    # it had drafted by then — they are saved listings, not a partial result.
-    items: list[dict] = []
-    # Where drafting starts, and the item a restart cut off mid-draft. A fresh
-    # batch starts at the first item with nothing in flight.
-    start, inflight = 0, None
+    # The drafting status, and the one thing several workers share. Declared
+    # out here so a batch the seller stops can still report the items it had
+    # drafted by then — they are saved listings, not a partial result.
+    progress = _BulkProgress(job_id)
+    # Every group with no draft yet. A fresh batch is all of them.
+    remaining: list[int] = []
+    precharged: dict[int, str] = {}
     try:
         if resume_from is not None:
             # Picked back up mid-draft. The pile is still on the volume and
@@ -6390,14 +6765,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             names = list(resume_from["names"])
             groups = list(resume_from["groups"])
             done = list(resume_from.get("done") or [])
-            inflight = resume_from.get("inflight") or None
+            remaining = list(resume_from.get("remaining") or [])
+            precharged = dict(resume_from.get("precharged") or {})
             opt_dir = storage.optimized_dir(staging_id)
-            items = _bulk_items_from_disk(done)
-            start = len(done)
+            progress.seed(done)
             _bulk_set(job_id, total_items=len(groups), total_photos=len(names),
-                      items=list(items), _names=names, _groups=groups,
-                      _done=[_compact_item(it) for it in items],
-                      _inflight=inflight)
+                      _names=names, _groups=groups)
         else:
             # Bulk background removal is metered per photo, charged before the
             # engines run. Not enough tokens -> photos are kept as-is (with a
@@ -6497,125 +6870,19 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             # The plan, written down before the first draft: this is what lets a
             # restart continue from the next item instead of ending the batch.
             _bulk_set(job_id, total_items=len(groups), _names=names, _groups=groups,
-                      _done=[], _inflight=None)
+                      _done=[], _inflight=[])
+            remaining = list(range(len(groups)))
 
-        for gi in range(start, len(groups)):
-            group = groups[gi]
-            # Between items, never inside one: an item that has started has
-            # already been charged for, so it is finished and saved.
-            _stop_if_cancelled(job_id)
-            # Every finished item written down as it lands, so a restart here
-            # continues from the next one rather than drafting these again.
-            _bulk_set(job_id, phase="identifying", current=gi + 1,
-                      items=list(items),
-                      _done=[_compact_item(it) for it in items], _inflight=None)
-            # The item a restart cut off already has its photos in a session
-            # of its own, and its AI was charged for. Finish it there, and
-            # don't charge twice for what the first attempt never delivered.
-            charged = bool(inflight) and gi == start
-            if charged:
-                sid = inflight
-                item_dir = storage.optimized_dir(sid)
-                item_names = storage.list_optimized(sid)
-            else:
-                sid = storage.new_session_id()
-                item_dir = storage.optimized_dir(sid)
-                item_names = []
-                for j, idx in enumerate(group["indices"]):
-                    src = opt_dir / names[idx]
-                    dst_name = f"img_{j:03d}.jpg"
-                    shutil.copyfile(src, item_dir / dst_name)
-                    item_names.append(dst_name)
-                objstore.upload_optimized(sid, item_dir, item_names)
-                # Each item inherits the WHOLE pile's hints, not just the line
-                # it was grouped under: the split is the model's guess, and the
-                # identify prompt already tells it to use only the lines
-                # matching the photos in front of it. The staging session
-                # (where they live now) is purged when this batch ends, so
-                # without the copy a "Start over" on any of these drafts loses
-                # them. An item picked back up after a restart already has its
-                # copy from the first attempt.
-                storage.save_notes(sid, notes)
-
-            item = {"session_id": sid, "name": group["name"], "status": "draft",
-                    "error": None, "listing_id": None,
-                    "thumb": f"/media/{sid}/optimized/{item_names[0]}"}
-            # Each bulk item is one AI draft — same token price as a single
-            # listing. Out of tokens mid-batch: the item keeps its photos as a
-            # stub draft (retryable via "Start over" after a top-up), no AI
-            # spend happens for it, and the batch keeps going so the count of
-            # what's left is honest.
-            # Named BEFORE the charge, once its photos are in place: a restart
-            # between here and the draft landing finishes this item in this
-            # session, charged once.
-            _bulk_set(job_id, _inflight=sid)
-            spent = (tokens.spend(uid, "identify")
-                     if billing and not charged else None)
-            if spent is not None and not spent.get("ok"):
-                stub = Listing(images=item_names, missing_info=[
-                    "Out of AI tokens when this item's turn came — your photos "
-                    "are safe. Top up (or wait for the monthly reset), then "
-                    "use Start over to run the AI."])
-                storage.save_listing(sid, stub)
-                db.upsert_listing(sid, stub.model_dump(), status="draft", user_id=uid)
-                item.update({"status": "error", "listing": stub.model_dump(),
-                             "title": group["name"],
-                             "error": tokens.insufficient_message(spent)})
-                _bulk_set(job_id, tokens_exhausted=True)
-                items.append(item)
-                continue
-            try:
-                result = claude_ai.identify([item_dir / n for n in item_names],
-                                            item_names, strategy=strategy,
-                                            notes=notes)
-                # Each item's confidence onto its own draft: the queue card
-                # is where a seller decides which of forty to open first.
-                result.listing.ai_confidence = result.confidence
-                listing = _apply_listing_defaults(result.listing, uid, prefs)
-                barcodes.apply_to_listing(listing, result.identifiers)
-                # Carry the account's Promote default onto the draft itself, so
-                # the queue card shows what will actually happen at publish
-                # rather than an unchecked box that promotes anyway.
-                listing.promote = listing.promote or auto_promote
-                _resolve_category(listing)
-                _assign_store_category(listing, uid)
-                # Fill item specifics (and the maker) up front so the draft the
-                # seller reviews carries real specifics, not just the generic
-                # first pass — one consolidated call on chain v2.
-                _enrich_listing(listing, [item_dir / n for n in item_names],
-                                tags=result.tags)
-                # A note the fill just answered must not outlive it: it is
-                # what the dashboard's "Fill in details" reads, and a fresh
-                # draft carrying "size" beside a filled Size was suggested
-                # for a fill that then found nothing to do.
-                _drop_answered_missing_info(listing)
-                _lookup_artwork(listing, [item_dir / n for n in item_names],
-                                sid, result.raw_observations, tags=result.tags)
-                _research_draft(listing, [item_dir / n for n in item_names],
-                                result.raw_observations, result.confidence)
-                _price_against_comps(listing, uid, prefs)
-                storage.save_listing(sid, listing)
-                db.upsert_listing(sid, listing.model_dump(), status="draft", user_id=uid)
-                item["listing"] = listing.model_dump()
-                item["title"] = listing.title
-            except Exception as exc:  # noqa: BLE001 - one bad item shouldn't kill the batch
-                tokens.refund(spent)
-                log.warning("bulk %s: item %d failed: %s", job_id, gi, exc)
-                item["status"] = "error"
-                # The card shows this. A decoder's complaint about the
-                # model's JSON, a rate limit, a refusal -- none of them is
-                # something a seller can act on as the SDK words it; the
-                # sentence ai_error_message gives each of them is.
-                item["error"] = (claude_ai.ai_error_message(exc)[1]
-                                 if claude_ai.is_ai_error(exc)
-                                 else str(exc))
-                item["listing"] = None
-                item["title"] = group["name"]
-            items.append(item)
+        ctx = _BulkContext(uid=uid, prefs=prefs, strategy=strategy,
+                           auto_promote=auto_promote, billing=billing,
+                           notes=notes, names=names, groups=groups,
+                           opt_dir=opt_dir, precharged=precharged)
+        _bulk_set(job_id, phase="identifying")
+        _draft_bulk_items(job_id, remaining, ctx, progress)
 
         delivered = True
-        _bulk_set(job_id, phase="done", done=True, items=items, current=len(groups),
-                  _done=[_compact_item(it) for it in items], _inflight=None)
+        items = progress.items()
+        progress.finish(phase="done", done=True)
         log.info("bulk %s: %d photos -> %d items", job_id, len(names), len(items))
     except (_BatchStopped, images.Stopped):
         # The seller stopped this batch. Every item it had already drafted was
@@ -6628,11 +6895,11 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # taken per photo up front: cutouts that rode out on a saved draft were
         # delivered and stand, and a stop before the first draft delivered
         # nothing, so the `finally` below gives the whole remainder back.
-        delivered = bool(items)
-        _bulk_set(job_id, phase="stopped", done=True, cancelled=True,
-                  items=items, current=len(items))
+        stopped_items = progress.items()
+        delivered = bool(stopped_items)
+        progress.finish(phase="stopped", done=True, cancelled=True)
         log.info("bulk %s: stopped by the seller after %d item(s)",
-                 job_id, len(items))
+                 job_id, len(stopped_items))
     except OSError as exc:  # disk-level failure — reclaim, then say so plainly
         if exc.errno == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)

@@ -159,10 +159,14 @@ def test_a_batch_that_never_reached_drafting_does_not_promise_drafts():
 
 def test_a_batch_that_did_reach_drafting_points_at_them():
     """The other half: once identifying starts, each finished item IS saved,
-    so the seller needs to know they are there before re-running the rest."""
+    so the seller needs to know they are there before re-running the rest.
+
+    What it counts is what FINISHED. Several items are drafted at once, so
+    naming the item it stopped on would name one of three in flight and imply
+    the other two were never started."""
     message = jobstore.interrupted_message(
         {"phase": "identifying", "current": 4, "total_items": 12})
-    assert "Drafts" in message and "item 4 of 12" in message
+    assert "Drafts" in message and "4 of 12 items drafted" in message
 
 
 def test_an_adopted_job_keeps_its_owner(store):
@@ -195,7 +199,7 @@ def test_a_batch_that_failed_keeps_its_own_reason(store):
 
 @pytest.mark.parametrize("phase, fields, expected", [
     ("optimizing", {"current": 37, "total_photos": 38}, "preparing photo 37 of 38"),
-    ("identifying", {"current": 4, "total_items": 12}, "identifying item 4 of 12"),
+    ("identifying", {"current": 4, "total_items": 12}, "4 of 12 items drafted"),
     ("grouping", {}, "sorting the photos into items"),
     ("uploading", {}, "receiving the photos"),
 ])

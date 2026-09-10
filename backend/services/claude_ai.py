@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -131,6 +132,40 @@ def _refused(resp) -> None:
             "only the item for sale, then try again.")
 
 
+# The last few photos encoded for a vision call, keyed by what they were when
+# they were read. images.vision_copy already caches the RESIZE on disk, but the
+# read and the base64 of it happened again on every call — and one listing goes
+# through four to ten calls, each re-encoding the same eight photos. Small and
+# bounded on purpose: an entry is a whole photo as base64 (a few hundred KB),
+# and a bulk batch would hold a quarter of a gigabyte of them if this grew.
+_B64_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
+_B64_CACHE_MAX = 64
+_B64_LOCK = threading.Lock()
+
+
+def _image_b64(path: Path) -> str:
+    """`path` as base64, remembered against its own mtime and size. A photo
+    edited in the studio has a new stat, so it is read again rather than sent
+    as the version the seller just changed."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return base64.standard_b64encode(path.read_bytes()).decode("ascii")
+    with _B64_LOCK:
+        hit = _B64_CACHE.get(key)
+        if hit is not None:
+            _B64_CACHE.move_to_end(key)
+            return hit
+    data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+    with _B64_LOCK:
+        _B64_CACHE[key] = data
+        _B64_CACHE.move_to_end(key)
+        while len(_B64_CACHE) > _B64_CACHE_MAX:
+            _B64_CACHE.popitem(last=False)
+    return data
+
+
 def _image_block(path: Path) -> dict:
     # Whole-frame vision payloads ride as ~1092px cached copies: identical
     # reads at roughly half the image tokens and upload bytes of the full
@@ -139,10 +174,10 @@ def _image_block(path: Path) -> dict:
     from . import images
     path = images.vision_copy(path)
     media_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
-    data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
     return {
         "type": "image",
-        "source": {"type": "base64", "media_type": media_type, "data": data},
+        "source": {"type": "base64", "media_type": media_type,
+                   "data": _image_b64(path)},
     }
 
 
@@ -432,6 +467,39 @@ _IDENTIFY_SYSTEM = (
     "You are an expert eBay reseller and product cataloguer. Examine the "
     "product photos and produce a complete, accurate eBay listing draft.\n\n"
     + LISTING_SCHEMA)
+
+
+def warm_identify_cache() -> bool:
+    """Write the identify prompt's cached prefix, so callers that start
+    together can read it instead of each writing their own copy.
+
+    A cache entry only becomes readable once the request that wrote it starts
+    answering. That is invisible while a bulk batch drafts one item at a time
+    — the second item reads what the first wrote — but three items started at
+    the same moment all MISS, and all three pay the write premium for the same
+    several thousand tokens. This is that write, done once and cheaply:
+    max_tokens=0 runs the prefill (which is what fills the cache) and returns
+    immediately with no content and no output tokens billed.
+
+    Best-effort in every direction. Returns whether it ran; a batch must never
+    fail because a warm-up did, and the items behind it are correct either
+    way — just colder.
+    """
+    if not config.anthropic_ready():
+        return False
+    try:
+        resp = _client().with_options(max_retries=0).messages.create(
+            model=config.VISION_MODEL,
+            max_tokens=0,
+            system=[{"type": "text", "text": _IDENTIFY_SYSTEM,
+                     "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": "ready"}],
+        )
+        _log_usage("identify-warm", resp)
+        return True
+    except Exception as exc:  # noqa: BLE001 - a cold cache is not a failure
+        log.info("identify cache warm-up skipped: %s", exc)
+        return False
 
 
 def identify(image_paths: list[Path], image_names: list[str],

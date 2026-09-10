@@ -62,6 +62,18 @@ primary_region = 'sjc'
   # whatever it is given, so feeding it less means it upscales our downscale
   # for the same cost and a worse matte.
   REMBG_MAX_SIDE = '1024'
+  # How many items of one bulk batch are drafted at the same time. Each one is
+  # five to nine Anthropic calls and a handful of eBay lookups, and the machine
+  # spends nearly all of that waiting on somebody else's server -- so one at a
+  # time left the box idle for most of a batch.
+  #
+  # Three, and the ceiling is this machine rather than any API: each worker
+  # holds a listing's photos as base64 for its vision calls and crops the
+  # full-size originals for the tag close-ups, on the 4GB VM below that is
+  # already holding a 176MB cutout model. Here rather than in code so raising
+  # it -- or dropping to 1, which is the off switch and the old behaviour
+  # exactly -- is a one-line commit somebody can review.
+  BULK_DRAFT_WORKERS = '3'
 
 # Sessions (uploaded/optimized photos) and exports must survive machine
 # restarts and deploys: eBay fetches the listing's image URLs from /media/...

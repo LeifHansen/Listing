@@ -18,14 +18,19 @@ boat — and deletes the artwork around it, exactly as built. Art, prints,
 posters, book covers, trading cards, patterned fabric and printed packaging
 are the same trap, and they are a large share of what people resell.
 
-So the matte is now asked whether it is ONE OBJECT, by two measures that fail
+So the matte is now asked whether it is THE PRODUCT, by measures that fail
 the two shapes this produces:
 
-  * the largest connected region must be most of what was kept — against a
-    dozen brushstrokes scattered over the frame;
   * what was kept must fill its own bounding box — against a tree at one edge
     and a boat at the other, which together span the photo while covering
-    little of it.
+    little of it. This one is a precondition for everything below.
+  * and it must be one object — the largest connected region most of what was
+    kept — OR a few compact ones. That second half was added after "one
+    product is one object" turned out to be false for a great deal of what
+    resells: a seller photographing a PAIR of shoes, two paintings, earrings
+    or a boxed set got a perfect matte thrown away for having two pieces in
+    it. See _COMPANION_SHARE in services/images. The box-fill precondition is
+    what keeps the trap above refused while a pair gets through.
 
 Both are deliberately generous, because the error directions are not equal. A
 cutout wrongly refused leaves the photo EXACTLY AS SHOT and says why, costing
@@ -194,3 +199,106 @@ def test_a_guard_that_refuses_everything_would_be_caught_here(model):
     fails if someone tightens a threshold until nothing is ever cut out."""
     model.says(_framed_picture)
     assert images.cutout(_photo()) is not None
+
+
+# --- one product is not always one object -----------------------------------
+#
+# The report: two canvas paintings lying side by side on grass, and background
+# removal doing nothing at all. Run through the real model that photo mattes
+# perfectly -- both canvases kept as clean rectangles, the figures painted on
+# them correctly ignored -- and scored coverage 0.47, solidity 1.00, box fill
+# 0.87. It was refused on largest-region 0.51 against a floor of 0.60, for no
+# reason except that the seller was selling two things.
+
+def _two_canvases(d, size=SIZE):
+    """The reported photo: two rectangular canvases side by side, a sliver of
+    background between them."""
+    w, h = size
+    d.polygon([(w*.10, h*.22), (w*.46, h*.17), (w*.49, h*.80), (w*.13, h*.86)],
+              fill=255)
+    d.polygon([(w*.53, h*.16), (w*.90, h*.19), (w*.88, h*.82), (w*.51, h*.79)],
+              fill=255)
+
+
+def _pair_of_shoes(d, size=SIZE):
+    w, h = size
+    d.ellipse([w*.10, h*.38, w*.46, h*.64], fill=255)
+    d.polygon([(w*.16, h*.44), (w*.30, h*.24), (w*.40, h*.30), (w*.40, h*.48)],
+              fill=255)
+    d.ellipse([w*.54, h*.38, w*.90, h*.64], fill=255)
+    d.polygon([(w*.60, h*.44), (w*.74, h*.24), (w*.84, h*.30), (w*.84, h*.48)],
+              fill=255)
+
+
+def _a_jug_and_a_bowl(d, size=SIZE):
+    """Two pieces of different shapes and sizes rather than a matched pair —
+    a jug beside its bowl, a phone beside its box, a lamp beside its shade."""
+    w, h = size
+    d.ellipse([w*.14, h*.28, w*.56, h*.74], fill=255)
+    d.ellipse([w*.58, h*.30, w*.99, h*.68], fill=255)
+
+
+PAIRS = [("two canvases", _two_canvases),
+         ("a pair of shoes", _pair_of_shoes),
+         ("a jug and a bowl", _a_jug_and_a_bowl)]
+
+
+@pytest.mark.parametrize("name,draw", PAIRS, ids=[n for n, _ in PAIRS])
+def test_a_pair_of_products_is_still_the_product(name, draw):
+    kept = _matte(draw).point(lambda a: 255 if a >= 128 else 0)
+    total, regions, box_fill = images._kept_shape(kept)
+    assert regions[0][0] / total < images._MIN_LARGEST_REGION, (
+        f"{name}: fixture no longer exercises the multi-object path")
+    assert images._kept_is_the_product(total, regions, box_fill), name
+
+
+@pytest.mark.parametrize("name,draw", SHIPPED, ids=[n for n, _ in SHIPPED])
+def test_the_pieces_of_a_painting_are_still_refused(name, draw):
+    """The whole point of letting a pair through is that it must not let THESE
+    through. Each is two or three pieces too, and each is refused."""
+    kept = _matte(draw).point(lambda a: 255 if a >= 128 else 0)
+    total, regions, box_fill = images._kept_shape(kept)
+    assert not images._kept_is_the_product(total, regions, box_fill), name
+
+
+def test_a_tidy_arrangement_of_too_many_pieces_is_refused():
+    """A seller sells a pair or a small set. A dozen compact fragments filling
+    the frame neatly is a matte that fell apart, not eleven products."""
+    def many(d, size=SIZE):
+        w, h = size
+        for row in range(3):
+            for col in range(4):
+                x, y = w*(.10 + col*.21), h*(.16 + row*.26)
+                d.rectangle([x, y, x + w*.15, y + h*.19], fill=255)
+
+    kept = _matte(many).point(lambda a: 255 if a >= 128 else 0)
+    total, regions, box_fill = images._kept_shape(kept)
+    assert box_fill >= images._MIN_BBOX_FILL, "the arrangement is tidy"
+    assert len(regions) > images._MAX_OBJECTS
+    assert not images._kept_is_the_product(total, regions, box_fill)
+
+
+def test_a_pair_that_does_not_fill_its_shared_box_is_refused():
+    """Two compact pieces in opposite corners are the tree-and-boat shape,
+    whatever each one looks like on its own."""
+    def far_apart(d, size=SIZE):
+        w, h = size
+        d.rectangle([w*.04, h*.06, w*.20, h*.26], fill=255)
+        d.rectangle([w*.80, h*.74, w*.96, h*.94], fill=255)
+
+    kept = _matte(far_apart).point(lambda a: 255 if a >= 128 else 0)
+    total, regions, box_fill = images._kept_shape(kept)
+    assert all(fill >= images._MIN_BBOX_FILL for _c, fill in regions), (
+        "each piece is compact on its own — the union is what refuses it")
+    assert not images._kept_is_the_product(total, regions, box_fill)
+
+
+def test_the_regions_are_reported_largest_first():
+    kept = _matte(_a_jug_and_a_bowl).point(lambda a: 255 if a >= 128 else 0)
+    _total, regions, _fill = images._kept_shape(kept)
+    assert [r[0] for r in regions] == sorted([r[0] for r in regions], reverse=True)
+
+
+def test_an_empty_matte_has_no_regions():
+    assert images._kept_shape(Image.new("L", (64, 64), 0)) == (0, [], 0.0)
+    assert not images._kept_is_the_product(0, [], 0.0)
