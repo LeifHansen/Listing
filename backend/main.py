@@ -1880,7 +1880,15 @@ def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[in
 _MAKER_ASPECT_NAMES = {"brand", "maker", "manufacturer"}
 # Placeholder values that mean the maker is effectively unknown.
 _GENERIC_MAKERS = {"", "unbranded", "unknown", "generic", "n/a", "none",
-                   "no brand", "handmade", "does not apply"}
+                   "no brand", "handmade", "does not apply",
+                   # ...and the ways a first pass says "I could not read
+                   # the signature". Each of these in brand used to count
+                   # as an artist, so the art lookup stood down over a
+                   # print whose title said "Artist Proof" -- "unknown
+                   # artist".split()[-1] is in that title.
+                   "unknown artist", "artist unknown", "unsigned",
+                   "not signed", "anonymous", "unattributed",
+                   "unidentified", "unknown maker"}
 
 
 def _maker_targets(listing: Listing) -> tuple[bool, list[str]]:
@@ -3670,6 +3678,12 @@ _ART_WORDS = (
     "woodcut", "linocut", "poster", "painting", "watercolor", "watercolour",
     "gouache", "canvas print", "framed print", "artwork", "fine art",
     "exhibition print", "museum print",
+    # The words the first pass writes when it has read a margin and not a
+    # name: the piece is art, and it is the lookup's to name.
+    "drawing", "oil on canvas", "oil on board", "oil on panel",
+    "acrylic on canvas", "acrylic on board", "mixed media", "signed print",
+    "numbered print", "hand signed", "hand-signed", "artist proof",
+    "artist's proof", "original art", "wall art", "sculpture",
 )
 
 
@@ -3733,7 +3747,8 @@ def _reverse_image_leads(session_id: str, path) -> list[dict]:
 
 
 def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
-                    observations: str = "") -> Optional[dict]:
+                    observations: str = "",
+                    tags: Optional[list] = None) -> Optional[dict]:
     """Name the artist and the work behind a drafted print, in place.
 
     Runs when the draft is artwork and does not yet lead with its artist.
@@ -3744,6 +3759,11 @@ def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
     seller must check -- an edition number, a pencil signature, a blind
     stamp. What it may never do: demote a print, touch a price, or overwrite
     a title that already names the artist. Never raises.
+
+    `tags` are the boxes the identify pass drew -- on art, the signature,
+    the edition number, a chop, the labels on the back. Their zoomed crops
+    ride the lookup beside the whole frames, because a pencil signature is
+    a few pixels tall in a whole frame and legible in its crop.
     """
     if ART_LOOKUP == "off" or not config.anthropic_ready():
         return None
@@ -3753,11 +3773,17 @@ def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
     if not paths:
         return None
     leads = _reverse_image_leads(session_id, paths[0]) if session_id else []
-    log.info("art lookup: %r with %d reverse-image lead(s)",
-             (listing.title or "")[:60], len(leads))
+    try:
+        crops = claude_ai.tag_crops(paths, tags) if tags else []
+    except Exception as exc:  # noqa: BLE001 - the whole frames still go
+        log.info("art lookup: no crops: %s", exc)
+        crops = []
+    log.info("art lookup: %r with %d reverse-image lead(s), %d crop(s)",
+             (listing.title or "")[:60], len(leads), len(crops))
     try:
         found = claude_ai.identify_artwork(paths, listing, leads=leads,
-                                          observations=observations)
+                                          observations=observations,
+                                          crops=crops)
     except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
         log.info("art lookup failed: %s", exc)
         return None
@@ -3791,6 +3817,165 @@ def _set_artist_specific(listing: Listing, artist: str, conf: str) -> bool:
     return True
 
 
+# How the lookup's reading of the margin is understood. "hand signed in
+# pencil, lower right" is a hand signature; "signed in the plate only" and
+# "not visible in these photos" are not, and the second is a photo to ask
+# for. The wording is the model's, so this reads for the words that decide
+# it rather than for one phrasing.
+_HAND_SIGNED_RE = re.compile(
+    r"\b(hand[- ]?signed|pencil|ink|paint|signed (?:in|on|at|lower|upper|"
+    r"bottom|top|verso|recto|centre|center|left|right|beneath|below))", re.I)
+_NOT_HAND_SIGNED_RE = re.compile(
+    r"\b(not visible|not signed|unsigned|no signature|cannot|can't|"
+    r"in the (?:plate|stone|screen|image|print)|plate[- ]signed|printed|"
+    r"facsimile|stamped signature|signature stamp)", re.I)
+_NOT_VISIBLE_RE = re.compile(r"\b(not visible|cannot see|can't see|hidden|"
+                             r"out of frame|not in (?:the )?(?:photos|frame))",
+                             re.I)
+# "84/250", "84 of 250" and "XX/L": this sheet's number over the edition
+# size.
+_EDITION_FRACTION_RE = re.compile(
+    r"(?<![\d/])(\d{1,4})\s*(?:/|\s+(?:out\s+)?of\s+)\s*(\d{1,5})(?![\d/])")
+_ROMAN_FRACTION_RE = re.compile(r"\b([IVXLCDM]{1,8})\s*/\s*([IVXLCDM]{1,8})\b")
+# The proofs, by the letters collectors write them with. Case-sensitive,
+# because "ea" and "pp" are syllables and "A/P" is not.
+_PROOF_RE = re.compile(
+    r"(?<![A-Za-z])(A\.?/?P\.?|E\.?/?A\.?|H\.?/?C\.?|P\.?/?P\.?|T\.?/?P\.?|"
+    r"B\.?A\.?T\.?)(?![A-Za-z])")
+# The names a year specific goes by across eBay's art categories. Filled
+# only where the category already put a blank row on the draft: creating
+# one under the wrong name is a specific eBay refuses.
+_ART_YEAR_ASPECTS = ("year produced", "year manufactured", "date of creation",
+                     "year of production")
+
+
+def _fill_blank_specific(listing: Listing, name: str, value: str, conf: str,
+                         create: bool) -> bool:
+    """Write `value` to the specific `name` when it is blank. A row that
+    holds a value keeps it -- the zoom pass read it off the margin at a
+    resolution this pass did not, and the seller may have typed it. With
+    `create`, a row that does not exist is added. Returns whether anything
+    was written."""
+    key = name.strip().lower()
+    for s in listing.item_specifics:
+        if s.name.strip().lower() == key:
+            if (s.value or "").strip():
+                return False
+            s.value = value
+            s.confidence = conf
+            return True
+    if not create:
+        return False
+    listing.item_specifics.append(
+        ItemSpecific(name=name, value=value, confidence=conf))
+    return True
+
+
+def _art_markers(found: dict) -> dict:
+    """What the lookup read off the margin, as facts: whether the piece is
+    hand signed, the edition annotation as written, its size, and which of
+    the two it could not see."""
+    signature = str(found.get("signature") or "").strip()
+    edition = str(found.get("edition") or "").strip()[:40]
+    hand_signed = bool(signature and _HAND_SIGNED_RE.search(signature)
+                       and not _NOT_HAND_SIGNED_RE.search(signature))
+    fraction = _EDITION_FRACTION_RE.search(edition)
+    roman = None if fraction else _ROMAN_FRACTION_RE.search(edition)
+    # A proof is a proof even when it carries its own count ("A/P 3/20"):
+    # the 20 is how many proofs were pulled, not the edition size.
+    proof = bool(_PROOF_RE.search(edition))
+    numbered = ""
+    size = ""
+    if fraction:
+        numbered = f"{fraction.group(1)}/{fraction.group(2)}"
+        size = "" if proof else fraction.group(2)
+    elif roman:
+        numbered = f"{roman.group(1)}/{roman.group(2)}"
+    return {
+        "hand_signed": hand_signed,
+        "signature": signature,
+        "numbered": numbered,
+        "edition_size": size,
+        "proof": proof,
+        "signature_unseen": bool(signature and _NOT_VISIBLE_RE.search(signature)),
+        "edition_unseen": bool(edition and _NOT_VISIBLE_RE.search(edition)),
+    }
+
+
+def _title_with_markers(title: str, markers: dict) -> str:
+    """The title with "Hand Signed" and "Numbered 84/250" on it, when the
+    lookup read them and the title does not already say so and the 80
+    characters allow. They go on the END, after the artist, the work and
+    the medium, which is where the title rule puts the words that price a
+    piece; a title that cannot fit them is left alone rather than cut."""
+    out = (title or "").strip()
+    lower = out.lower()
+    additions: list[str] = []
+    if markers["hand_signed"] and "signed" not in lower:
+        additions.append("Hand Signed")
+    if markers["proof"] and "proof" not in lower:
+        additions.append("Artist Proof" + (f" {markers['numbered']}"
+                                           if markers["numbered"] else ""))
+    elif markers["numbered"] and markers["numbered"] not in out \
+            and "numbered" not in lower:
+        additions.append(f"Numbered {markers['numbered']}")
+    for add in additions:
+        if out and len(out) + 1 + len(add) <= TITLE_MAX_CHARS:
+            out = f"{out} {add}"
+    return out
+
+
+def _apply_art_markers(listing: Listing, found: dict, artist: str,
+                       notes: list[str]) -> bool:
+    """Write what the lookup read off the margin onto the draft: the
+    Signed / Signed By / Edition Type / Edition Size specifics and a year
+    written on the piece, each only where blank, and the title's "Hand
+    Signed" and "Numbered 84/250". A mark the lookup could not see becomes
+    the photo to ask for. These are readings of the photos, not of the
+    web, so they do not wait on the attribution's confidence -- but they
+    are written only from a plain reading, never from its absence: nothing
+    here ever writes "No", "Open Edition" or "Reproduction". Returns
+    whether anything was written."""
+    m = _art_markers(found)
+    create = _artwork_category(listing)
+    written = False
+    if m["hand_signed"]:
+        written |= _fill_blank_specific(listing, "Signed", "Yes", "high", create)
+        if artist:
+            written |= _fill_blank_specific(listing, "Signed By", artist,
+                                            "high", create)
+    if m["proof"]:
+        written |= _fill_blank_specific(listing, "Edition Type",
+                                        "Artist Proof", "high", create)
+    elif m["numbered"]:
+        written |= _fill_blank_specific(listing, "Edition Type",
+                                        "Limited Edition", "high", create)
+        if m["edition_size"]:
+            written |= _fill_blank_specific(listing, "Edition Size",
+                                            m["edition_size"], "high", create)
+    year = re.search(r"(?<!\d)(1[6-9]\d{2}|20\d{2})(?!\d)",
+                     str(found.get("year") or ""))
+    if year:
+        for name in _ART_YEAR_ASPECTS:
+            if _fill_blank_specific(listing, name, year.group(1), "medium",
+                                    create=False):
+                written = True
+                break
+    titled = _title_with_markers(listing.title, m)
+    if titled != (listing.title or ""):
+        log.info("art lookup: title %r -> %r (markers)", listing.title, titled)
+        listing.title = titled
+        written = True
+    if m["signature_unseen"] or m["edition_unseen"]:
+        what = " and ".join(w for w, unseen in (
+            ("signature", m["signature_unseen"]),
+            ("edition number", m["edition_unseen"])) if unseen)
+        notes.append(f"Verify: the {what} could not be seen in these "
+                     "photos -- photograph the lower margin close up, both "
+                     "corners, and the back of the piece.")
+    return written
+
+
 def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
     """Fold a lookup's answer into the draft under _lookup_artwork's rules.
     Returns `found` when anything was applied or noted, else None."""
@@ -3800,15 +3985,19 @@ def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
     notes: list[str] = []
     applied = False
     known = _artist_on(listing)
-    if artist and conf in ("medium", "high") and known and \
-            not _same_artist(known, artist):
+    contested = bool(artist and conf in ("medium", "high") and known
+                     and not _same_artist(known, artist))
+    if contested:
         # The draft names someone else. Two attributions on one listing is a
         # question for the seller, not a coin for this pass to flip.
         notes.append(f"The lookup reads the artist as {artist}"
                      + (f" ({work})" if work else "")
                      + f"; the draft says {known} -- check which is right.")
     elif artist and conf in ("medium", "high"):
-        if not known:
+        if (listing.brand or "").strip().lower() in _GENERIC_MAKERS:
+            # Blank, or a placeholder -- including the case where the zoom
+            # pass already read the artist into the Artist specific and
+            # nothing carried it to the brand the title and search use.
             listing.brand = artist
             applied = True
         has_row = any(s.name.strip().lower() == "artist"
@@ -3838,6 +4027,14 @@ def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
     elif artist or work:
         reading = ", ".join(x for x in (artist, work) if x)
         notes.append(f"The lookup wasn't sure -- its best reading: {reading}")
+    # The signature and the edition are read off the photos, and they are
+    # written whatever the attribution's confidence: "hand signed, numbered
+    # 84/250" is true of the sheet whoever signed it. Signed By takes the
+    # artist only when the draft or the lookup settled one.
+    settled = "" if contested else (
+        known or (artist if conf in ("medium", "high") else ""))
+    if _apply_art_markers(listing, found, settled, notes):
+        applied = True
     for item in (found.get("verify") or [])[:3]:
         text = str(item or "").strip()
         if text:
@@ -6369,7 +6566,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 # for a fill that then found nothing to do.
                 _drop_answered_missing_info(listing)
                 _lookup_artwork(listing, [item_dir / n for n in item_names],
-                                sid, result.raw_observations)
+                                sid, result.raw_observations, tags=result.tags)
                 _research_draft(listing, [item_dir / n for n in item_names],
                                 result.raw_observations, result.confidence)
                 _price_against_comps(listing, uid, prefs)
@@ -6646,7 +6843,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _drop_answered_missing_info(result.listing)
         _beat("artwork")
         _lookup_artwork(result.listing, [opt_dir / n for n in names],
-                        session_id, result.raw_observations)
+                        session_id, result.raw_observations, tags=result.tags)
         _beat("research")
         _research_draft(result.listing, [opt_dir / n for n in names],
                         result.raw_observations, result.confidence)

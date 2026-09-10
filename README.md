@@ -629,6 +629,75 @@ Two things the rule forbids matter as much as what it asks for:
   from a tape in the photos — otherwise "measured waist, inseam and rise" is a
   `missing_info` item. Collectors buy on measurements.
 
+### Art: the signature, the edition number, the chop and the surface
+
+A print is a $15 listing or a $1,500 one, and the difference is written in
+pencil in the bottom margin — a hand signature at the lower right, an edition
+fraction at the lower left, an embossed chop beside them. A painting is an
+original or a canvas print, and the difference is a surface the camera can
+see. Every one of those marks is in frame in an ordinary set of photos, and
+every one is searched for **by name**: "hand signed", "numbered", "artist
+proof", "original oil". A hand-signed, numbered lithograph was drafted as
+"Vintage Art Print" — no artist, no "signed", no edition — because a pencil
+signature is thirty pixels tall in a whole-frame photo and nothing told any
+pass that the small grey scrawl under the picture is the most valuable thing
+in it. `listing_prompt.ART_RULE` names each place to look, what each mark
+looks like, and what each one establishes:
+
+| Mark | Where | What it says |
+|------|-------|--------------|
+| Signature | Bottom margin, lower right first; a lower corner of a painting; the base of a sculpture; the back | A **hand** signature sits on the paper — pencil with a graphite sheen, ink, paint — and does not share the printed image's dots. One **in the plate** is part of the printed picture and means the artist signed the original, not this sheet: never "hand signed". Read letter by letter; the letters name the artist for the title, the brand and the Artist specific |
+| Edition number | Lower left of the margin | `84/250` = this sheet over the edition size (Edition Size 250): a numbered limited edition. `A/P`, `E/A`, `H/C`, `P/P`, `T/P`, `B.A.T.` are proofs, searched by name, sometimes with their own count (`A/P 3/20` — the 20 is how many proofs, not the edition). A missing fraction is a missing photo, never an open edition |
+| Title on the sheet | Centre of the lower margin, in pencil | The work's name, right after the artist in the title |
+| Chop / blind stamp | A lower corner of the margin, embossed and colourless | The printer's, publisher's or artist's mark: Tamarind, Gemini G.E.L., Mourlot, ULAE, Tyler Graphics date and authenticate an edition. An ink stamp on the back is an estate, gallery or collection stamp |
+| Plate mark | A rectangular indentation a few millimetres outside the image | An intaglio print (etching, engraving, aquatint, drypoint) pressed into damp paper. Lithographs, screenprints and offset reproductions have none; a plate mark around halftone dots is a fake one |
+| Surface | Any photo taken close | Brushstrokes with relief, impasto and canvas weave = original painting; pooled washes and paper tooth = original watercolor or drawing; flat raised ink layers = serigraph; grainy crayon texture with no dots = hand-pulled lithograph; a random spray of tiny dots = giclée; a regular halftone rosette everywhere, signature included = offset poster or open edition; a uniform sheet with printed "strokes" or a mirrored wrap = canvas print, not a painting |
+| Printed lines along the edge | Under the image | A credit line (`© 1987 Artist / Publisher`, "Printed in Italy", a museum and exhibition dates) names the publisher and the year of *this* printing and marks an open edition or exhibition poster — unless a pencil signature and number are also there. The publisher is never the brand |
+| The back and the frame | Verso, frame back | Gallery, framer, exhibition and auction labels, a certificate in a sleeve, an inscription, a publisher's stamp — read verbatim. Deckled edges, a watermark (Arches, Rives BFK, Fabriano), foxing and toning say something about the edition and the age |
+
+The rule rides with the identify pass (appended to `LISTING_SCHEMA` after the
+denim rule), the tag locator (`ART_TAG_SCAN_RULE`, which adds `signature`,
+`edition`, `stamp`, `caption` and `label` box kinds and says to box the whole
+bottom margin when the writing is too faint to place), the zoom-and-transcribe
+pass (`ART_TRANSCRIBE_LINES`: one `SIGNATURE:` / `EDITION:` / `TITLE ON SHEET:`
+/ `STAMP:` / `CAPTION:` / `LABEL:` / `PLATE MARK:` / `SURFACE:` line per mark,
+so the specifics fill quotes them the way it quotes a barcode), the specifics
+fill (Artist, Signed, Signed By, Edition Type, Edition Size, Print Type,
+Original/Licensed Reprint, Year Produced, Features) and the art lookup. One
+text, one home, so the passes cannot drift.
+
+The art lookup (`claude_ai.identify_artwork`, run by `_lookup_artwork` on any
+art draft whose title does not yet name its artist) is now handed the zoomed
+crops of those boxes beside its four whole frames — that is where the pencil
+is legible — plus the specifics the zoom pass already read off the margin, and
+it answers how the piece is signed and numbered as well as who made it. The
+server folds that in the way it folds the artist: Signed, Signed By, Edition
+Type and Edition Size are written where blank; "Hand Signed" and "Numbered
+84/250" (or "Artist Proof") go on the end of the title when the 80 characters
+allow; a year written on the piece fills a year row the category already put
+on the draft. A brand of "Unknown artist" or "Unsigned" now counts as blank,
+so the lookup runs instead of standing down over it, and an artist the zoom
+pass read into the Artist specific reaches the brand the title and search use.
+
+Two things the rule forbids matter as much as what it asks for:
+
+* **A mark not in the photos is never written — and never denied.** "Hand
+  signed", "numbered", "artist proof", "original" and a chop's name are each
+  a price claim a buyer checks on arrival; "unsigned", "open edition",
+  "poster" and "reproduction" about a margin under the mat, a back never
+  photographed or a surface not seen up close are the same false claim in the
+  cheaper direction. Nothing in the server ever writes "No", "Open Edition"
+  or "Reproduction" from a reading's absence; a mark out of frame becomes a
+  `missing_info` item naming the photo to take ("photograph the lower margin
+  close up, both corners, and the back").
+* **A signature is read, never completed.** The letters are transcribed as
+  they appear; when they spell a name, that is the artist; when they spell
+  part of one, the reading the letters, the hand and the image point to goes
+  in `raw_observations` and `missing_info` as a reading to confirm — never in
+  the title. Naming the wrong artist is the one error a buyer never forgives,
+  and hedging the right one into "style of" costs the seller most of the
+  price; both are avoided the same way.
+
 ### How sure the AI was, on the card
 
 The identify pass grades its own draft — `low`, `medium` or `high` — and that

@@ -293,6 +293,228 @@ DENIM_TRANSCRIBE_LINES = (
     "hem not turned up').\n\n"
 )
 
+# --- art: the signature, the edition number, the chop, the plate mark ------
+#
+# A print is a $15 listing or a $1,500 one, and the difference is written in
+# pencil in the bottom margin: a hand signature at the lower right, an edition
+# fraction at the lower left, an embossed chop beside them. A painting is an
+# original or a canvas print, and the difference is a surface the camera can
+# see: brushstrokes and canvas weave, or a flat uniform sheet with the strokes
+# printed on. Every one of those marks is in frame in an ordinary set of
+# photos, every one is searched for by name ("hand signed", "numbered",
+# "artist proof", "original oil"), and the identify prompt said to look for
+# them in one sentence buried in a rule about autographs and trading cards.
+#
+# What the app kept doing was reading the image and not the margin: a signed
+# and numbered lithograph drafted as "Vintage Art Print", no artist, no
+# "signed", no edition, because a pencil signature is thirty pixels tall in a
+# whole-frame photo and nothing told the pass that the small grey scrawl under
+# the picture is the most valuable thing in it. The sticker rule could not
+# say so: a pencil signature is not a sticker and not printed, a blind stamp
+# is embossed and colourless, a plate mark is a dent in the paper, and a
+# label on the back is a photo the seller has to be asked for. So this rule
+# names each place to look, what each mark looks like, what each one
+# establishes, and how to write it into the listing -- and it rides with the
+# identify pass, the tag locator, the zoom-and-transcribe pass, the specifics
+# fill and the art lookup, as one text, exactly as the denim rule does.
+#
+# Two things ride along with it, for the same reason the other rules carry
+# their own:
+#
+#   * every mark is a PRICE claim, so a mark that is not in the photos is
+#     never claimed and never denied. "Unsigned" about a print whose margin
+#     is under the mat is as false as "signed" would be; the honest line is
+#     "signature not visible in these photos" and a request for the photo.
+#   * a signature is READ, letter by letter, never completed into a name the
+#     letters do not spell. Naming the wrong artist is the one error a buyer
+#     never forgives, and hedging the right one into "style of" costs the
+#     seller most of the price. Both are avoided the same way: transcribe
+#     what is there, then say which artist it points to and why.
+ART_RULE = """
+- ART -- PRINTS, PAINTINGS, DRAWINGS, PHOTOGRAPHS AND SCULPTURE -- IS
+  IDENTIFIED BY ITS SIGNATURE, ITS EDITION NUMBER AND ITS SURFACE, AND THOSE
+  ARE MOST OF THE PRICE. A signed and numbered lithograph and a poster of the
+  same picture look identical from across the room and differ in price by a
+  hundred times. The facts that separate them are small, faint, in pencil,
+  embossed, or on the back, and every one of them is worth a close look.
+  Read the MARGIN and the BACK before you read the picture. Check each of the
+  following and say what you found:
+  * THE SIGNATURE. Look in the bottom margin below the image, at the LOWER
+    RIGHT first, then the lower left and the lower edge of the image itself,
+    then the back. A HAND signature sits ON the paper: pencil (grey, with a
+    graphite sheen, slightly indented), ink or paint, and it does not share
+    the dot pattern or ink layer of the printed picture. A signature IN THE
+    PLATE (also "in the stone", "in the screen") is part of the printed image
+    -- same ink, same dots, usually inside the picture area -- and it means
+    the artist signed the ORIGINAL, not this sheet; it is not "hand signed".
+    A signature on a painting is usually a lower corner, in paint; on a
+    sculpture it is on the base or the back, with the edition and often a
+    foundry mark. Transcribe the signature LETTER BY LETTER as it reads,
+    where it is, and what it is made with. When the letters spell a name,
+    that name is the ARTIST: put it first in the title, in brand, and in an
+    Artist item specific. When you can read only part of it, give the
+    letters you can read, then -- separately, in raw_observations and
+    missing_info, never in the title -- the artist the letters, the hand and
+    the image together most plausibly point to, as a reading for the seller
+    to confirm. Never write a name the letters do not support, and never
+    resolve an unclear signature by dropping it: "signed in pencil lower
+    right, reads 'J. W...', signature partly legible" is the honest line.
+  * THE EDITION NUMBER. Look at the LOWER LEFT of the margin. A fraction --
+    "84/250", "12/75", "XX/L" in Roman numerals -- is this sheet's number
+    over the edition size: a NUMBERED LIMITED EDITION, and 250 is the
+    Edition Size. The letters that take its place are also editions and are
+    searched by name: "A/P" or "AP" (artist's proof), "E/A" (epreuve
+    d'artiste, the same in French), "H/C" (hors commerce, not for sale),
+    "P/P" (printer's proof), "T/P" (trial proof), "B.A.T." (bon a tirer, the
+    approved proof), sometimes with their own count ("A/P 3/20"). Transcribe
+    the annotation EXACTLY as written, including the slash and any letters.
+    A pencil fraction beside a pencil signature is the strongest evidence a
+    print is a hand-signed limited edition; a fraction printed in the same
+    ink as the image is a printed reproduction of one and is reported as
+    such. A print with no fraction is not thereby an open edition: say
+    "edition number not visible" and ask for the margin.
+  * THE TITLE ON THE SHEET. Many signed editions carry the work's title in
+    pencil in the CENTRE of the lower margin, between the number and the
+    signature. Read it: it is the name collectors search for, and it goes in
+    the title right after the artist.
+  * CHOPS, BLIND STAMPS AND INK STAMPS. A BLIND STAMP (chop mark) is an
+    EMBOSSED, colourless mark pressed into the paper, usually in a lower
+    corner of the margin, sometimes only visible as a raised shape in raking
+    light: the printer's, publisher's or artist's mark. Well-known workshop
+    chops (Tamarind, Gemini G.E.L., Mourlot, ULAE, Tyler Graphics, Cirrus,
+    Landfall, Pace Editions) date and authenticate an edition, so read and
+    name the chop when you can and box it for the zoom when you cannot. An
+    INK stamp on the back is an estate, gallery, publisher or collection
+    stamp -- transcribe it.
+  * THE PLATE MARK. An INTAGLIO print (etching, engraving, aquatint,
+    drypoint, mezzotint) leaves a rectangular INDENTATION in the paper around
+    the image, where the plate was pressed in under the press: a soft ridge
+    a few millimetres outside the picture, often with a faint tone inside it.
+    Lithographs, screenprints, woodcuts and offset reproductions have none.
+    A plate mark with a pencil signature is an original etching; a plate
+    mark on a picture whose surface is halftone dots is a reproduction with
+    a fake plate mark, and worth saying.
+  * THE SURFACE, up close. This is how an ORIGINAL is told from a PRINT and a
+    hand-pulled print from a reproduction, and it is visible in any photo
+    taken close enough:
+    - brushstrokes with relief, impasto, paint that changes sheen, canvas
+      weave showing through thin paint, paint over the tacking edge: an
+      ORIGINAL PAINTING;
+    - pooled and bled washes, pencil under-drawing, the tooth of the paper
+      holding pigment, graphite or charcoal or pastel dust: an ORIGINAL
+      WATERCOLOR or DRAWING;
+    - flat, slightly raised layers of opaque ink with crisp edges and no
+      dots: a SERIGRAPH / screenprint;
+    - a soft grainy crayon texture with no dot pattern: a hand-pulled stone
+      or plate LITHOGRAPH;
+    - a fine random spray of tiny dots in several colours: an inkjet /
+      GICLEE, usually an open or limited-edition reproduction;
+    - a regular grid or rosette of halftone DOTS, the same everywhere
+      including in the signature: an OFFSET reproduction -- a poster or an
+      open-edition print;
+    - a perfectly uniform sheet with printed "strokes" that cast no shadow,
+      or a canvas whose image wraps around the stretcher with the picture's
+      edge mirrored: a CANVAS PRINT, not a painting.
+    Say which surface you see. A picture you cannot get close enough to
+    judge is "surface not visible at this size", never "print" by default.
+  * THE PRINTED LINES ALONG THE EDGE. A credit line printed under the image
+    ("(c) 1987 Artist Name / Publisher, Inc.", "Printed in Italy", a museum
+    and exhibition dates, a poster shop's name) names the PUBLISHER and
+    usually the YEAR of this printing and marks an open-edition print or
+    exhibition poster -- unless a pencil signature and number are ALSO there,
+    which makes it a signed poster or a publisher's signed edition, and both
+    are searched for by name. Transcribe every printed line verbatim,
+    including the copyright year. The publisher is never the brand: the
+    artist is.
+  * THE BACK AND THE FRAME. Gallery labels, framer's labels, exhibition and
+    auction labels, inventory numbers, a certificate of authenticity in a
+    sleeve, an artist's inscription, a publisher's stamp, an old price: all
+    of these are on the verso or the frame back, and each one is a fact for
+    the listing. Read every label verbatim. Note the paper too: a deckled
+    (feathered, hand-torn) edge, a watermark (Arches, Rives BFK, Fabriano,
+    Somerset), foxing (brown spots) and toning all say something about the
+    edition and the age, and each is a word buyers search.
+  REPORTING. In raw_observations, write one line per mark you checked --
+  SIGNATURE, EDITION, TITLE ON SHEET, STAMP, PLATE MARK, CAPTION, LABEL,
+  SURFACE -- with what it showed, INCLUDING the ones you could not see
+  ("EDITION: margin hidden under the mat -- not visible"). In the title, lead
+  with the ARTIST'S NAME as it is catalogued (first name then surname:
+  "Salvador Dali", "Marc Chagall"), then the TITLE of the work when you have
+  it, then the medium by its collector name (lithograph, serigraph, etching,
+  woodblock, giclee, oil on canvas, watercolor), then the words that price
+  it in the order buyers type them -- "Hand Signed", "Signed & Numbered
+  84/250", "Artist Proof", "Original" -- then framed/matted and the size:
+  "Salvador Dali Lincoln in Dalivision Lithograph Hand Signed Numbered
+  84/250 Framed". Put the artist in brand and in an "Artist" item specific,
+  and answer the art specifics: Signed (Yes only for a hand signature you
+  can see, never for one in the plate), Signed By, Edition Type ("Limited
+  Edition" with a fraction, "Open Edition" only when a printed credit line
+  and no number say so, "Artist Proof" for an A/P), Edition Size (the number
+  under the slash), Print Type or Production Technique (the medium), Type
+  (Print / Painting / Drawing / Photograph / Sculpture), Original/Licensed
+  Reprint or Original/Reproduction (Original for a surface that is paint or
+  a hand-pulled print; never Reproduction to be safe), Year Produced (only a
+  year written on the piece), Subject, Style, Material (Paper / Canvas /
+  Board), Features (Numbered, Signed, Framed, Matted, Certificate of
+  Authenticity -- only the ones in the photos), and the sheet or frame size
+  from a tape in the photos. In the description's Key Details, write the
+  signature, the edition, the chop and the labels in the words you read
+  them. Never write "hand signed", "numbered", "artist proof", "original" or
+  a chop's name about a mark that is not in the photos: each is a price
+  claim a buyer checks on arrival. Never write "unsigned", "open edition",
+  "poster" or "reproduction" about a piece whose margin, back or surface
+  you cannot see: that is the same false claim in the cheaper direction.
+  When a mark is out of frame, ask for it in missing_info by name
+  ("photograph the lower margin close up, both corners", "photograph the
+  back of the frame and any labels", "photograph the surface at an angle in
+  raking light").
+"""
+
+# What the tag LOCATOR is told, separately: it draws boxes, it does not read,
+# and the thing it has to be told is that on art the facts are in pencil in
+# a margin, embossed into paper and on labels round the back -- none of which
+# looks like a tag, and the first of which is nearly invisible at scan size.
+ART_TAG_SCAN_RULE = """
+- ART -- prints, paintings, drawings, photographs, sculpture -- carries its
+  facts in the MARGINS and on the BACK, in pencil, in blind embossing and on
+  paper labels, none of which looks like a tag, and each of these is worth a
+  box: the SIGNATURE in the bottom margin (usually lower right, below the
+  image, sometimes a lower corner of the picture or the base of a sculpture)
+  as "signature"; the EDITION fraction or A/P annotation (usually lower left)
+  as "edition"; any embossed chop, blind stamp or ink stamp as "stamp"; a
+  printed title, credit, copyright or publisher line along the bottom edge as
+  "caption"; and every gallery, framer, publisher, auction or certificate
+  label on the back or the frame as "label". A pencil signature is a faint
+  grey scrawl a few pixels tall at this size and the single most valuable
+  thing in the photo -- box it anyway, generously, with the whole bottom
+  margin if you cannot tell where in it the writing is; that is what the zoom
+  is for.
+"""
+
+# What the zoom-and-transcribe pass writes for art, one mark per line, so the
+# specifics fill can quote the signature, the edition and the chop as ground
+# truth the way it quotes a barcode.
+ART_TRANSCRIBE_LINES = (
+    "For ART, add one line per mark you can see, exactly as read: "
+    "'SIGNATURE: <the letters as they read, what it is written with "
+    "(pencil / ink / paint), where (lower right margin / in the image / on "
+    "the back), and whether it is hand-written on the paper or printed as "
+    "part of the image (in the plate)>', 'EDITION: <the fraction or "
+    "annotation exactly as written -- 84/250, A/P, H/C, E/A, P/P -- and "
+    "where>', 'TITLE ON SHEET: <as written>', 'STAMP: <what an embossed "
+    "chop or an ink stamp says or shows, and where>', 'CAPTION: <every "
+    "printed credit, copyright or publisher line verbatim, with its "
+    "year>', 'LABEL: <each gallery, framer, publisher, auction or "
+    "certificate label, verbatim>', 'PLATE MARK: <present / not visible>', "
+    "'SURFACE: <brushstrokes and canvas weave / flat ink layers / grainy "
+    "crayon texture / inkjet spray / halftone dots / cannot tell>'. A mark "
+    "you looked for and could not see is a line too ('EDITION: not visible "
+    "in these crops'). Read a signature letter by letter and never complete "
+    "it into a name the letters do not spell; when it points to a known "
+    "artist, say so on the same line, as a reading to confirm.\n\n"
+)
+
+
 LISTING_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this exact shape:
 {
@@ -315,7 +537,7 @@ Return ONLY a JSON object (no markdown fences) with this exact shape:
   "confidence": "low|medium|high",
   "raw_observations": "brief notes on what you actually see in the photos",
   "identifiers": [{"type": "UPC|EAN|ISBN|MPN|Model|Style|Serial|other", "value": "the code EXACTLY as printed, digit for digit — never completed or corrected", "source": "where you read it (e.g. 'barcode on the box end', 'plate under the base')", "legible": true|false}],
-  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|sticker|price|patch|tab|selvedge|button|other"} ]
+  "tags": [ {"photo": <1-based photo number>, "box": [x0, y0, x1, y1], "kind": "size|care|brand|model|barcode|signature|edition|stamp|caption|label|sticker|price|patch|tab|selvedge|button|other"} ]
 }
 Rules:
 - Only state facts you can see or reasonably infer. Never invent serial numbers,
@@ -365,7 +587,9 @@ Rules:
   the title of the work, then the medium, then "hand signed" or "signed and
   numbered" when the photos show it. Never call a signed piece a plain
   "print" because you are unsure, and never call an unmarked one an
-  "original".
+  "original". For art, the ART rule below says where each of these
+  marks is, what it looks like and what it establishes: read the
+  margin and the back under it before you write the title.
 - PRICE — never guess LOW to be safe. A price under the market is not the
   cautious answer, it is the expensive one: the item sells within the hour and
   the seller cannot get it back. When the value turns on an attribution you
@@ -518,13 +742,20 @@ Rules:
   jeans and denim jackets, box the red tab ("tab"), the waistband patch
   ("patch"), the back of the top button ("button") and the fabric edge at a
   turned-up hem or turned-out outseam ("selvedge") — the last is the most
-  valuable detail on the pair and is only visible there.
+  valuable detail on the pair and is only visible there. On ART, box the
+  pencil signature in the bottom margin ("signature"), the edition
+  fraction or A/P annotation ("edition"), any embossed chop or ink stamp
+  ("stamp"), a printed credit or publisher line ("caption") and every
+  label on the back or the frame ("label") — a pencil signature is a
+  faint scrawl at this size and the most valuable thing in the photo, so
+  box the whole bottom margin when you cannot tell where in it the
+  writing is.
   box is the tag's bounding region as FRACTIONS of that photo's width/height
   (x0,y0 = top-left, x1,y1 = bottom-right), padded a little so nothing is cut
   off. Include a tag even when you can't read it at this size — it will be
   zoomed in on later. At most 6 entries, best candidates first; no tags at
   all -> [].
-""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE
+""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE
 # Appended rather than interpolated so each rule's text is one string with one
 # home: the tag-scan, tag-transcribe and specifics passes in claude_ai read the
 # same constants, and a rule that exists twice is a rule that agrees with
