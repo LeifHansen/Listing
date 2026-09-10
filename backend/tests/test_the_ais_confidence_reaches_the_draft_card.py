@@ -96,7 +96,11 @@ def app(monkeypatch):
 @pytest.fixture
 def ai(app, monkeypatch):
     """claude_ai.identify, stubbed to answer with the confidences it is
-    handed, one per call, in order."""
+    handed, one per call, in order.
+
+    "In order" is only the order of the CALLS. A bulk batch drafts several
+    items at once, so a test that wants the n-th confidence on the n-th item
+    has to ask for one worker (see the bulk test below)."""
     def _install(*levels):
         queue = list(levels)
 
@@ -164,6 +168,11 @@ def test_every_bulk_draft_carries_its_own(app, ai, monkeypatch):
     deciding which to open first. Each item's card must show ITS verdict,
     not the batch's first or last."""
     ai("high", "low")
+    # One at a time, so the n-th answer really is the n-th item's: this fake
+    # hands out confidences by call, and which of three workers calls first is
+    # an accident. That each item keeps its OWN draft when they run together is
+    # test_a_batch_drafts_several_items_at_once.py's job.
+    monkeypatch.setattr(app, "BULK_DRAFT_WORKERS", 1)
     monkeypatch.setattr(app.claude_ai, "group_photos", lambda images, notes="": {
         "groups": [{"name": f"Item {i + 1}", "indices": [i]}
                    for i in range(len(images))]})

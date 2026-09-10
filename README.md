@@ -1003,15 +1003,42 @@ Someone watching the photo studio's spinner wants a fast "busy, try again"
 gets no retry, so it queues (`REMBG_BATCH_WAIT_SECONDS`, default 300) and, if
 even that runs out, is saved as shot with the reason rather than lost.
 
+**Photos one at a time, drafts several.** The two halves of a batch have
+opposite shapes, so they are run in opposite ways. Background removal is
+inference on this machine, single-flight and memory-bound -- two at once
+double peak memory and OOM the box -- so the photo pass stays strictly serial.
+Drafting is five to nine Anthropic calls and a handful of eBay lookups per
+item, nearly all of it spent waiting on somebody else's server, so items are
+drafted `BULK_DRAFT_WORKERS` at a time (default 3, in fly.toml; 1 is the off
+switch). The ceiling is the machine rather than any API: each worker holds a
+listing's photos as base64 for its vision calls and crops the full-size
+originals for the tag close-ups, beside the 176MB cutout model.
+
+Every guarantee the serial loop gave still holds, and they are what the change
+actually cost. An item is charged for once and refunded if its AI fails. An
+item that fails takes only itself down. The queue stays in the order the
+seller shot the pile, however the drafts land -- each item says which GROUP it
+is rather than relying on its position, which is also what lets a restart tell
+apart the several items that were in flight. And because a prompt cache entry
+is only readable once the request that wrote it starts answering, a batch
+warms the identify prompt once before the fan-out; without that, three workers
+starting together would each miss it and each pay to write the same several
+thousand tokens.
+
 **A batch survives the machine it started on.** Bulk does every photo's
 background removal up front and only then starts drafting, so until the last
 cutout lands nothing durable exists. Optimized outputs are renamed into place
 -- so a file existing means it is complete -- and the photo pass skips any it
 already has. On boot, a batch that was interrupted *before it drafted
 anything* is re-registered under its own job id and run again, so a browser
-still polling simply carries on. Batches interrupted during `identifying` are
-left alone: each finished item is already saved and already billed per item,
-so resuming would duplicate both. `BULK_MAX_RESUMES` (default 2) stops a batch
+still polling simply carries on. A batch interrupted while `identifying`
+carries on too, from its written-down plan: every group with no draft is
+drafted, and the items that were charged for and never delivered are finished
+in the sessions that already hold their photos rather than charged again. The
+gap several workers leave is not a suffix -- a batch can die with group 4 in
+flight while 5 and 6 are saved -- so the plan records each item's group, and a
+mirror written before that is still read the old way, by position, which is
+what makes it safe for a deploy to land mid-batch. `BULK_MAX_RESUMES` (default 2) stops a batch
 that keeps dying from taking the machine with it.
 
 ## Bi-directional eBay sync

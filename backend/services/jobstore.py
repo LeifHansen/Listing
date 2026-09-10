@@ -297,7 +297,10 @@ def interrupted_message(record: dict) -> str:
     photos = record.get("total_photos") or 0
     items = record.get("total_items") or 0
     if phase == "identifying":
-        where = (f" while identifying item {min(current, items)} of {items}"
+        # What FINISHED, not which item it was on: several are drafted at
+        # once, so "it stopped on item 2" would name one of three in flight
+        # and imply the other two were never started.
+        where = (f" with {min(current, items)} of {items} items drafted"
                  if items else "")
         return (f"The server restarted{where}, so this batch stopped early. "
                 "The items it had already finished are saved in Drafts — "
