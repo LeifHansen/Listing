@@ -24,7 +24,12 @@ from __future__ import annotations
 
 import pytest
 
+# backend.main pulls in the whole stack (services.claude_ai imports the
+# Anthropic SDK, the photo pass imports Pillow), and the lint gate installs
+# neither -- the same three guards every other test that imports main carries.
 pytest.importorskip("fastapi")
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
 
 from backend import main  # noqa: E402
 from backend.marketplaces.base import PublishOutcome  # noqa: E402
