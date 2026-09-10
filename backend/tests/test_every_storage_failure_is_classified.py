@@ -85,6 +85,9 @@ def _classify(module: str = "db.py") -> tuple[set[str], set[str]]:
 # that removing one has to be a deliberate act somebody notices.
 MUST_RAISE = {
     "get_user_by_id": "returning None logged every seller out during one DB blip",
+    "get_user_by_email":
+        "returning None told a seller with the right password it was wrong "
+        "for as long as the status cache took to notice the outage",
     "list_listings": "returning [] made the sync import the seller's store a second time",
     "get_prefs": "returning {} showed the app's fallbacks as the seller's saved settings",
     "save_prefs": "returning {} reported a write that never landed as saved",
@@ -199,8 +202,6 @@ WHY_A_BLANK_IS_SAFE = {
     # --- auth, where a blank fails closed ---------------------------------
     "create_user":
         "None makes signup answer 503 rather than pretending an account exists",
-    "get_user_by_email":
-        "None fails the login rather than letting one through",
     "get_password_hash":
         "None fails the password check; it can only refuse, never admit",
     "delete_user":

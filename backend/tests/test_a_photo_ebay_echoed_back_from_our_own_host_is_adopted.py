@@ -63,8 +63,8 @@ def test_the_photo_is_copied_from_the_volume(data_dir, monkeypatch):
     names = image_import.import_listing_images(
         "ebay-555", ["https://app.thryftshop.com/media/published-1/optimized/img_000.jpg"])
 
-    assert names == ["img_00.jpg"]
-    assert (storage.optimized_dir("ebay-555") / "img_00.jpg").is_file()
+    assert names == ["img_000.jpg"]
+    assert (storage.optimized_dir("ebay-555") / "img_000.jpg").is_file()
 
 
 def test_the_photo_comes_back_from_r2_once_offloaded(data_dir, monkeypatch):
@@ -79,7 +79,7 @@ def test_the_photo_comes_back_from_r2_once_offloaded(data_dir, monkeypatch):
     names = image_import.import_listing_images(
         "ebay-556", ["https://app.thryftshop.com/media/published-2/optimized/img_003.jpg"])
 
-    assert names == ["img_00.jpg"]
+    assert names == ["img_000.jpg"]
     assert keys == [objstore.key_for("published-2", "img_003.jpg")]
 
 
@@ -88,3 +88,24 @@ def test_a_photo_that_is_nowhere_is_one_missing_photo_not_a_crash(data_dir, monk
     names = image_import.import_listing_images(
         "ebay-557", ["https://app.thryftshop.com/media/published-3/optimized/img_000.jpg"])
     assert names == []
+
+
+def test_an_imported_photo_can_be_restored(data_dir, monkeypatch):
+    """The working copy is named the way the photo pass names its own output
+    -- img_NNN, three digits -- because that is the only shape restore-original
+    reads back. Imports wrote img_NN, so every "Restore original" on an
+    imported photo answered "nothing to restore" for a file that was there."""
+    from backend.services import images
+
+    src = storage.optimized_dir("published-4")
+    (src / "img_000.jpg").write_bytes(_jpeg("red"))
+    monkeypatch.setattr(image_import, "fetch_ebay_image",
+                        lambda url: pytest.fail(f"fetched over the network: {url}"))
+
+    names = image_import.import_listing_images(
+        "ebay-558", ["https://app.thryftshop.com/media/published-4/optimized/img_000.jpg"])
+
+    assert names == ["img_000.jpg"]
+    original = images.source_for(storage.original_dir("ebay-558"), names[0])
+    assert original is not None and original.name == "src_000.jpg"
+    assert original.read_bytes() == _jpeg("red")
