@@ -254,6 +254,31 @@ class Listing(BaseModel):
     # on has nothing more to gain from running it again, and this is how the
     # suggestion knows to stop asking.
     enriched_at: str = ""
+    # When the seller said "these are fine, stop asking" about the notes the
+    # AI left for a person (ISO-8601 UTC), on the server's own clock. ""
+    # means they never have.
+    #
+    # `missing_info` is what the AI declined to invent -- a measurement, a
+    # signature to confirm, an exact model number. It is right to leave those
+    # to a person, and it is right that "Check details" says so. What was
+    # missing is any way for the person to ANSWER: the group is rebuilt from
+    # the listing on every load, so a seller with 177 of them faced a list
+    # that could only shrink one hand-checked listing at a time and would not
+    # otherwise move. Their reply: "I want all of this done and submitted to
+    # eBay with one click, not individually."
+    #
+    # So this is that reply, written down. The notes STAY on the listing --
+    # nothing is deleted, and the editor still shows them -- but the chore
+    # list stops asking, because the seller has answered it. Nothing about
+    # this reaches eBay: `missing_info` is a note to the seller, never
+    # listing content, so accepting one publishes nothing and changes nothing
+    # a buyer sees.
+    #
+    # Server-owned (state.SERVER_OWNED_FIELDS), like `enriched_at` and for
+    # the same reason: a tab that loaded before the seller accepted carries a
+    # blank one, and honouring that blank would put every listing straight
+    # back on the list they just cleared.
+    notes_accepted_at: str = ""
     # When this listing's asking price was last LOWERED (ISO-8601 UTC), on the
     # server's own clock. "" means it never has been.
     #

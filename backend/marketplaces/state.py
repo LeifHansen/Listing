@@ -165,6 +165,11 @@ SERVER_OWNED_FIELDS = (
     # back in the group the fill just finished with — the same staleness every
     # other field here is protected from.
     "enriched_at",
+    # And the seller's answer to the notes that fill could not settle: "these
+    # are fine, stop asking". Same staleness, same cost -- a tab that loaded
+    # before they cleared the list carries a blank one, and honouring it puts
+    # all 177 back.
+    "notes_accepted_at",
     # How sure the AI was when it drafted the listing (Listing.ai_confidence).
     # Written by the identify pass alone, and read by the draft cards. A
     # refine round-trips the draft through the model and rebuilds the listing

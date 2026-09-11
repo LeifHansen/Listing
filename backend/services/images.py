@@ -572,6 +572,150 @@ def _fill_interior(alpha: Image.Image) -> Image.Image:
     return ImageChops.lighter(alpha, ImageChops.multiply(inner, seen))
 
 
+# How far an enclosed region's colour has to sit from the backdrop's before it
+# is read as ITEM the model dropped rather than backdrop showing through, as a
+# plain RGB distance (0-441). Dark navy against a pale studio sweep is 150+;
+# the noise across one seamless backdrop is a handful.
+_HOLE_COLOUR_DIST = float(os.getenv("REMBG_HOLE_COLOUR_DIST", "40") or 40)
+
+
+def _mean_rgb(rgb: Image.Image, mask: Image.Image) -> Optional[tuple]:
+    """Mean colour of `rgb` over the non-zero pixels of `mask`, or None when
+    the mask is empty."""
+    if not mask.getbbox():
+        return None
+    stat = ImageStat.Stat(rgb, mask)
+    return tuple(stat.mean[:3])
+
+
+def _apart(a: Optional[tuple], b: Optional[tuple]) -> float:
+    """Plain RGB distance between two mean colours; 0 when either is missing,
+    which reads as "no evidence" everywhere this is used."""
+    if a is None or b is None:
+        return 0.0
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
+    """The matte with ENCLOSED regions of nothing given back to the item, when
+    the photo says they were never background.
+
+    The failure this repairs, reported with a screenshot: a Scotch & Soda camp
+    shirt, black across the shoulders with a bright print below. The print
+    survived every cutout. The black did not — several photos came back with
+    the shoulder, a sleeve, or a chunk of the back simply gone, a white hole
+    punched through the middle of the garment.
+
+    Neither guard could see it, and not by accident. `_fill_interior` and
+    `_interior_solidity` both begin at "what the model SAW" — alpha above
+    _ALPHA_LOW — and a region the model set to zero is not seen, so it is not
+    interior, so it is background as far as either is concerned. That is the
+    right reading for the hole through a ring and it is exactly wrong here.
+    Solidity stays high the whole time (the fabric that survived is perfectly
+    opaque), coverage stays high, the shape is one tidy object: every gate
+    passes and the photo ships with a hole in it.
+
+    What separates the two cases is not the matte, which is identical, but the
+    PHOTO underneath — so this is the one repair that has to look at it. A
+    hole through a ring shows the backdrop; a hole in a shirt shows the shirt.
+    So each enclosed region is asked which it resembles, and only a region
+    that is both far from the backdrop AND nearer the item than the backdrop
+    is given back. Both halves matter: the distance alone would fill a gap
+    that happens to fall in shadow, and the comparison alone would fill a
+    genuine hole on a backdrop that merely differs from the item.
+
+    "Enclosed" means not reachable from the frame edge through background,
+    which is what keeps the gap between a pair of boots — real backdrop, open
+    to the edge — out of this entirely, however dark it is.
+
+    Runs on the _SHAPE_SIDE grid like every other shape question here, with
+    the same explicit-stack labelling as _kept_shape, and returns the matte
+    untouched (no allocation, no colour statistics) when nothing is enclosed,
+    which is almost every photo.
+    """
+    w, h = alpha.size
+    scale = _SHAPE_SIDE / max(w, h)
+    size = ((max(1, round(w * scale)), max(1, round(h * scale)))
+            if scale < 1 else (w, h))
+    # Err toward SEEN, the way _kept_shape errs toward connected: a cell the
+    # item merely touches counts as item, so a soft rim never reads as a hole
+    # and the regions below are the frankly-empty ones.
+    small = (alpha.resize(size, Image.BOX) if size != (w, h) else alpha)
+    seen = small.point(lambda v: 255 if v > _ALPHA_LOW else 0)
+    sw, sh = size
+    px = seen.load()
+
+    # Label the EMPTY cells, 4-connected, recording for each region whether it
+    # ever touched the frame edge. Anything that did is backdrop with a way
+    # out; the rest is enclosed by the item.
+    labels = [0] * (sw * sh)
+    regions: list[list] = []          # [cells, touches_edge]
+    for sy in range(sh):
+        for sx in range(sw):
+            if px[sx, sy] or labels[sy * sw + sx]:
+                continue
+            tag = len(regions) + 1
+            cells, edge = 0, False
+            stack = [(sx, sy)]
+            labels[sy * sw + sx] = tag
+            while stack:
+                x, y = stack.pop()
+                cells += 1
+                if x == 0 or y == 0 or x == sw - 1 or y == sh - 1:
+                    edge = True
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if 0 <= nx < sw and 0 <= ny < sh \
+                            and not labels[ny * sw + nx] and not px[nx, ny]:
+                        labels[ny * sw + nx] = tag
+                        stack.append((nx, ny))
+            regions.append([cells, edge])
+    enclosed = [i + 1 for i, (_, edge) in enumerate(regions) if not edge]
+    if not enclosed:
+        return alpha
+
+    # What the backdrop and the item actually look like, measured on a copy of
+    # the photo at the same grid so every mask below lines up with it.
+    photo = rgb.convert("RGB")
+    photo = photo.resize(size, Image.BOX) if size != (w, h) else photo
+    outside = Image.frombytes(
+        "L", size, bytes(255 if labels[i] and regions[labels[i] - 1][1] else 0
+                         for i in range(sw * sh)))
+    backdrop = _mean_rgb(photo, outside)
+    item = _mean_rgb(photo, seen)
+    if backdrop is None or item is None:
+        # No backdrop to compare against (the item fills the frame) or no item
+        # at all. Either way there is no evidence, and inventing some here
+        # would paint over a photo on a guess.
+        return alpha
+
+    give_back = bytearray(sw * sh)
+    for tag in enclosed:
+        patch = Image.frombytes(
+            "L", size, bytes(255 if labels[i] == tag else 0
+                             for i in range(sw * sh)))
+        here = _mean_rgb(photo, patch)
+        if _apart(here, backdrop) <= _HOLE_COLOUR_DIST:
+            continue                       # looks like the backdrop: a real hole
+        if _apart(here, item) >= _apart(here, backdrop):
+            continue                       # nearer the backdrop than the item
+        for i in range(sw * sh):
+            if labels[i] == tag:
+                give_back[i] = 255
+    if not any(give_back):
+        return alpha
+
+    # Back to full size the way _fill_interior hands its interior back: as a
+    # soft mask, blurred by about one cell, never re-thresholded, so the join
+    # is a gradient rather than a stepped contour on the 160px grid.
+    mask = Image.frombytes("L", size, bytes(give_back))
+    if size != (w, h):
+        mask = mask.resize((w, h), Image.BILINEAR).filter(
+            ImageFilter.GaussianBlur(max(w, h) / _SHAPE_SIDE))
+    log.info("bg-removal: gave back %d enclosed region(s) the photo says are "
+             "the item, not the backdrop", sum(1 for _ in enclosed))
+    return ImageChops.lighter(alpha, mask)
+
+
 def _interior_solidity(alpha: Image.Image) -> float:
     """The share of the item's interior that the matte keeps fully opaque.
 
@@ -633,7 +777,18 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     # Repaired BEFORE it is hardened, and hardened exactly once. _harden maps
     # the band between LOW and HIGH onto a ramp, so running it over its own
     # output re-ramps every mid value toward zero and quietly eats the matte.
-    alpha = _harden(_fill_interior(_mask(rgb, wait=wait)))
+    # Three passes, in this order and each exactly once.
+    #
+    # _reclaim_enclosed first, because it is the only one that can see the
+    # failure it repairs: it reads the PHOTO to tell a hole through a ring
+    # from a hole punched in a shirt, and both of the others start from "what
+    # the model saw" and so cannot tell those apart at all.
+    #
+    # Then _fill_interior, then _harden — and _harden last and once, since it
+    # maps the band between LOW and HIGH onto a ramp and running it over its
+    # own output re-ramps every mid value toward zero and quietly eats the
+    # matte.
+    alpha = _harden(_fill_interior(_reclaim_enclosed(rgb, _mask(rgb, wait=wait))))
     kept = alpha.point(lambda a: 255 if a >= 128 else 0)
     coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
     if coverage < _MIN_FG_COVERAGE:

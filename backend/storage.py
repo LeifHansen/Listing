@@ -13,6 +13,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from . import config
 from .config import log
@@ -293,16 +294,88 @@ def writable() -> bool:
         return False
 
 
+def as_shot_copy(session_id: str, name: str) -> Optional[Path]:
+    """The faithful copy of one photo kept beside the cutout that changed it
+    (services/images._keep_as_shot), or None.
+
+    The first thing "Restore original" falls back to once the upload is gone,
+    and better than the history snapshot below it: this IS the photo as the
+    camera saw it, minus only the optimize pass, whereas a snapshot is
+    whatever the working copy happened to be before some earlier edit.
+
+    Deliberately NOT images.as_shot(), which is for the passes that READ a
+    photo and so refuses a copy older than the working file — the seller's
+    own later edit has to win there. Here the seller is asking to undo edits,
+    so an older copy is precisely the point.
+
+    Both this and the uploads are swept by prune_originals on one timer, but
+    not in step: a copy is rewritten every time the cutout runs, so it can
+    outlive the upload it was made from.
+    """
+    path = optimized_path(session_id).parent / "as_shot" / name
+    return path if path.is_file() else None
+
+
+def earliest_snapshot(session_id: str, name: str) -> Optional[Path]:
+    """The OLDEST surviving history snapshot of one photo, or None.
+
+    What "Restore original" falls back to once the upload itself is gone.
+    Originals are reclaimed after ORIGINALS_TTL_HOURS (12 by default, and as
+    little as fifteen minutes when the volume is nearly full), while snapshots
+    keep for HISTORY_TTL_DAYS (14) -- so for all but the first half-day of a
+    listing's life, the only copy of the photo from before an edit is here.
+
+    Oldest, not newest: snapshot_image runs before each edit overwrites the
+    working copy, so the earliest one is the furthest back this listing can
+    go. The newest is the state immediately before the LAST edit, which on a
+    photo the seller has cut out and then straightened is still a cutout --
+    and a cutout is precisely what they are trying to undo.
+
+    Names are `<photo>.<ms>`, so the millisecond stamp sorts oldest-first as
+    an integer. A stamp that will not parse is skipped rather than sorted as
+    text, which would order 9 after 10.
+
+    RAISES on a read failure rather than answering None, which is the one
+    thing this must not get wrong. None here reaches the seller as a sentence
+    about their photo -- "there's no earlier version saved either, so there's
+    nothing to restore it from" -- and a directory we merely failed to read is
+    not that. It is the same mistake, one directory over, as the report this
+    fallback exists for: being told a photo is unrecoverable while a copy of
+    it sits on the server. A raise reaches them as "try again in a moment",
+    which is true.
+    """
+    hist = session_dir(session_id) / "history"
+    if not hist.is_dir():
+        return None
+    # Matched rather than parsed-and-caught: anything else in history/ is not
+    # a version of this photo, and that is a fact about the filename, not a
+    # storage failure. Keeping the two apart is what lets everything above
+    # raise (see test_every_storage_failure_is_classified).
+    stamp = re.compile(rf"{re.escape(name)}\.(\d+)$")
+    stamped = []
+    for p in hist.iterdir():
+        m = stamp.fullmatch(p.name)
+        if m and p.is_file():
+            stamped.append((int(m.group(1)), p))
+    return min(stamped)[1] if stamped else None
+
+
 def prune_originals(max_age_seconds: int) -> int:
     """Delete source uploads (session original/ dirs) and the as-shot copies
     beside them, older than the cutoff.
 
-    Only Restore original reads the uploads after the optimize pass — the
-    optimized JPEGs are what the app, the browser, and eBay use — but they're
-    the BIGGEST thing on the volume: a phone photo is several MB against a few
+    Two things read the uploads after the optimize pass, and both are the
+    "put it back" path: Restore original (images.source_for) and, failing
+    that, the fallbacks below it. Everything else uses the optimized JPEGs —
+    they are what the app, the browser and eBay see — but the uploads are the
+    BIGGEST thing on the volume: a phone photo is several MB against a few
     hundred KB optimized. A full volume takes the whole app down ("No space
     left on device" on every upload), so old originals are reclaimed on a
     timer. Returns bytes freed. Never raises.
+
+    Pruning one costs the seller the shortest way back to what they shot,
+    which is why restore falls through to as_shot/ and then to the oldest
+    history snapshot rather than telling them there is nothing to restore.
 
     as_shot/ is swept on the same timer and for the same reason. It holds one
     JPEG per photo the cutout changed (services/images._keep_as_shot), which

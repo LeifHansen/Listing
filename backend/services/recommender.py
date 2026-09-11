@@ -251,6 +251,13 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     # count not at all: the loop a seller reads, correctly, as the button not
     # working. What is left for them then is to LOOK, which is the other rec.
     enriched = str(listing.get("enriched_at") or "").strip()
+    # ...and `notes_accepted_at` is what ends the OTHER half of it. The notes
+    # below are the ones the AI declined to invent, so no pass will ever
+    # answer them and the group could only shrink one hand-checked listing at
+    # a time -- which on a store of 177 is not a to-do list, it is wallpaper.
+    # A seller who has said "these are fine" has answered the question, and
+    # the list has to take the answer. See Listing.notes_accepted_at.
+    accepted = str(listing.get("notes_accepted_at") or "").strip()
     have = filled_specifics(listing)
     if blank_specifics is None:
         worth_filling = have < MIN_SPECIFICS
@@ -268,7 +275,8 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     since_filled = _age_days(enriched) if enriched else None
     if not enriched and worth_filling:
         add("specifics", "Fill in details", reason, 45)
-    elif notes and (since_filled is None or since_filled >= VERIFY_QUIET_DAYS):
+    elif (notes and not accepted
+            and (since_filled is None or since_filled >= VERIFY_QUIET_DAYS)):
         # Notes on a listing whose specifics are filled are what the fill
         # could NOT answer: a measurement, an authentication, a flaw only the
         # person holding it can see. They earn a nudge to LOOK, never a button

@@ -5112,13 +5112,38 @@ async def image_restore_original(
     def _restore() -> None:
         source = images.source_for(storage.original_dir(session_id), name)
         if source is None or not source.is_file():
-            # Originals are pruned on a timer (storage.prune_originals), so
-            # this is a real answer and not an error to hide: an old listing
-            # genuinely has nothing to go back to, and saying so beats
-            # reporting a restore that did not happen.
-            raise FileNotFoundError(
-                "The original upload for this photo isn't on the server "
-                "anymore, so there's nothing to restore it from.")
+            # The upload is gone -- originals are reclaimed after twelve
+            # hours, and after fifteen minutes when the volume is tight -- so
+            # go back to the oldest snapshot of the working copy instead.
+            #
+            # Without this the button was dead on all but the newest
+            # listings, which is how it was reported: "reverting to original
+            # does not work -- no longer on server". A seller who has just
+            # watched the background remover eat a sleeve is exactly the
+            # person pressing it, and telling them their photo is
+            # unrecoverable while a copy from before that edit sits in
+            # history/ is both wrong and the worst possible moment for it.
+            #
+            # Snapshots keep for fourteen days against the originals' twelve
+            # hours, so for nearly all of a listing's life this IS the way
+            # back. It is a second-best one and says so below: it restores
+            # the photo to before the first edit we hold, not to the camera's
+            # own file.
+            # as_shot/ first: it is the photo the camera saw with only the
+            # optimize pass on it, which is exactly what this button
+            # promises. A history snapshot is second best -- whatever the
+            # working copy happened to be before some earlier edit -- and is
+            # what survives longest, so it is the last word rather than the
+            # first.
+            source = (storage.as_shot_copy(session_id, name)
+                      or storage.earliest_snapshot(session_id, name))
+            if source is None:
+                raise FileNotFoundError(
+                    "The original upload for this photo isn't on the server "
+                    "anymore, and there's no earlier version saved either, "
+                    "so there's nothing to restore it from.")
+            log.info("restore-original: upload gone for %s/%s, going back to "
+                     "the oldest snapshot instead", session_id, name)
         storage.snapshot_image(session_id, name)
         images.optimize(source, path, remove_bg=False)
 
@@ -7733,6 +7758,37 @@ def _blank_specifics_by_id(items: list[dict]) -> dict:
 INSIGHTS_GROUP_CAP = 50
 
 
+# The suggestion groups "Finish everything" clears. Both are the same job seen
+# from two ends -- "Fill in details" is what the AI has not read yet, "Check
+# details" is what it read and could not settle -- and a seller looking at
+# 131 of one and 177 of the other is looking at one chore, not two. Groups
+# that need a decision per listing stay out: a price cut needs a percentage,
+# photos need someone holding the item.
+FINISH_ALL_TYPES = ("specifics", "verify")
+
+
+def _finish_all_plan(recs: list[dict], items: list[dict]) -> dict:
+    """What one press of "Finish everything" would do, before it is pressed.
+
+    Split by what it COSTS, because that is the part the seller is agreeing
+    to: `enrich` listings get a vision pass and an eBay revise and are charged
+    for it; `accept` listings have been read already, so all that happens is
+    their outstanding notes are accepted, which is free. Quoting the total as
+    though every listing costs would price a 308-listing press at four times
+    what it actually spends.
+    """
+    wanted = {r["listing_id"] for r in recs if r["type"] in FINISH_ALL_TYPES}
+    enrich = accept = 0
+    for it in items:
+        if it.get("id") not in wanted:
+            continue
+        if str((it.get("listing") or {}).get("enriched_at") or "").strip():
+            accept += 1
+        else:
+            enrich += 1
+    return {"total": enrich + accept, "enrich": enrich, "accept": accept}
+
+
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
@@ -7741,6 +7797,7 @@ def insights(request: Request) -> dict:
     user = auth.current_user(request)
     if not user:
         return {"recommendations": [], "group_totals": {},
+                "finish_all": {"total": 0, "enrich": 0, "accept": 0},
                 "bulk_caps": _bulk_caps()}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
@@ -7759,6 +7816,10 @@ def insights(request: Request) -> dict:
                 # been below the line took their place. See
                 # recommender.totals_by_type.
                 "group_totals": recommender.totals_by_type(recs),
+                # What one press of "Finish everything" reaches, and how much
+                # of it costs. The button spans two groups, so neither group's
+                # own total answers for it.
+                "finish_all": _finish_all_plan(recs, items),
                 # What one tap on a group can actually reach in a single run —
                 # the group renders its button, so it has to know. See
                 # _bulk_caps.
@@ -7766,6 +7827,7 @@ def insights(request: Request) -> dict:
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
         return {"recommendations": [], "group_totals": {},
+                "finish_all": {"total": 0, "enrich": 0, "accept": 0},
                 "bulk_caps": _bulk_caps()}
 
 
@@ -8203,6 +8265,224 @@ def enrich_listings(payload: dict, request: Request) -> dict:
              job_id, uid, len(records), len(deferred))
     return {"job_id": job_id, "running": True, "total": len(records),
             "deferred": len(deferred)}
+
+
+
+
+def _accept_remaining_notes(rec: dict, uid: str) -> dict:
+    """Record the seller's "these are fine" on ONE listing's leftover notes.
+
+    `missing_info` is what the AI declined to invent — a measurement, a
+    signature to confirm, an exact model number. No pass will ever answer
+    those, so "Check details" could only shrink one hand-checked listing at a
+    time; on a store of 177 that is not a to-do list, it is wallpaper.
+
+    The notes are NOT deleted. The editor still shows them, and a buyer never
+    saw them either way — `missing_info` is a note to the seller, never
+    listing content. All that changes is that the dashboard stops asking,
+    because the seller has answered. Nothing here reaches eBay: there is
+    nothing in this to push.
+    """
+    rid = rec["id"]
+    listing = Listing(**(rec.get("listing") or {}))
+    notes = [n for n in (listing.missing_info or []) if str(n or "").strip()]
+    if not notes:
+        return {"noop": True}
+    if str(listing.notes_accepted_at or "").strip():
+        return {"noop": True}   # already answered; saying so again writes nothing
+    listing.notes_accepted_at = datetime.now(timezone.utc).isoformat(
+        timespec="seconds")
+    storage.save_listing(rid, listing)
+    db.upsert_listing(rid, listing.model_dump(), status=_sticky_status(rec),
+                      user_id=uid)
+    return {"ok": True, "accepted": len(notes)}
+
+
+def _run_finish_job(job_id: str, records: list[dict], uid: str,
+                    creds: Optional[dict], base_url: str) -> None:
+    """Background worker for "Finish everything" — the whole suggestions list
+    cleared in one press.
+
+    Two things happen to each listing, and which ones depend only on whether
+    the AI has read it before:
+
+      * never enriched -> the full fill (a vision pass over its own photos,
+        eBay's recommended item specifics merged in, pushed to the live
+        listing). This is the "Fill in details" half, and it is what costs;
+      * always, afterwards -> whatever notes are still outstanding are
+        accepted. This is the "Check details" half, and it is free, because
+        re-reading a listing the AI has already read buys nothing and the
+        seller should not be charged twice to be told so again.
+
+    The record is re-read between the two: the fill writes to it (and drops
+    the notes it managed to answer), so the notes to accept are whatever
+    genuinely survived the pass — never the ones it just settled.
+
+    UNCAPPED, deliberately. Every other bulk action here takes a slice and
+    hands back a `deferred` remainder, which is right for a button that says
+    "Enrich all" on one group and wrong for one that says "finish this list":
+    a seller with 308 outstanding does not want to press it thirteen times.
+    It is a polled background job with a live progress line, so length costs
+    nothing but time.
+    """
+    result = bulk_actions.BulkResult()
+    stopped = ""
+    finished = accepted = filled_total = 0
+    try:
+        for i, rec in enumerate(records):
+            rid = rec.get("id") or ""
+            title = ((rec.get("listing") or {}).get("title")
+                     or rec.get("title") or "this listing")
+            jobstore.update(job_id, phase="finishing", current=i,
+                            current_title=title[:80])
+            data = rec.get("listing") or {}
+            # The AI half — only for listings it has never read. `enriched_at`
+            # is the record of that (see Listing.enriched_at), and skipping
+            # the ones that carry it is what keeps this button from charging
+            # a second time for the same empty answer.
+            if not str(data.get("enriched_at") or "").strip():
+                try:
+                    outcome = _enrich_one(
+                        rec, uid, creds, base_url,
+                        note_charge=lambda r: jobstore.update(job_id, _refunds=r)
+                    ) or {}
+                except HTTPException as exc:
+                    # Out of AI credits (402) or logged out from under the job.
+                    # Whatever is filled is filled; say where it stopped rather
+                    # than reporting the rest as failures.
+                    stopped = str(exc.detail)
+                    break
+                except Exception as exc:  # noqa: BLE001 - one listing can't sink the run
+                    log.warning("finish: enrich failed for %s: %s", rid, exc)
+                    result.failed.append({"listing_id": rid, "title": title,
+                                          "message": str(exc)[:200]})
+                    outcome = {}
+                if outcome.get("skip"):
+                    result.skipped.append({"listing_id": rid, "title": title,
+                                           "message": outcome["skip"]})
+                elif outcome.get("ok"):
+                    filled_total += int(outcome.get("added") or 0)
+                    result.changed.append({"listing_id": rid, "title": title,
+                                           **{k: v for k, v in outcome.items()
+                                              if k != "ok"}})
+                elif outcome.get("message"):
+                    result.failed.append({"listing_id": rid, "title": title,
+                                          "message": outcome["message"]})
+            # The notes half, for every listing either way — including one the
+            # fill could not run on. A listing whose photos are gone still has
+            # notes the seller has now answered, and leaving it on the list
+            # would be this button failing at the one thing it promised.
+            #
+            # Re-read: the fill above just wrote to this record and dropped
+            # the notes it answered, so `rec` is stale by exactly the field
+            # this reads.
+            try:
+                fresh = db.get_listing(rid) or rec
+            except Exception:  # noqa: BLE001 - a stale read, not a lost run
+                fresh = rec
+            try:
+                if _accept_remaining_notes(fresh, uid).get("ok"):
+                    accepted += 1
+            except Exception as exc:  # noqa: BLE001 - one listing, not the run
+                log.warning("finish: couldn't accept notes on %s: %s", rid, exc)
+            finished = i + 1
+        log.info("finish-all %s: user=%s listings=%d changed=%d skipped=%d "
+                 "failed=%d specifics=%d accepted=%d", job_id, uid,
+                 len(records), len(result.changed), len(result.skipped),
+                 len(result.failed), filled_total, accepted)
+        jobstore.update(job_id, done=True, phase="done", current=finished,
+                        result={"deferred": 0, "filled": filled_total,
+                                "accepted": accepted, "stopped": stopped,
+                                **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = _support_reference()
+        log.warning("finish-all job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish your list. Try again in a moment — if it "
+            f"keeps happening, quote {reference} to support."))
+    finally:
+        with _ENRICH_LOCK:
+            if _ENRICH_JOBS.get(uid) == job_id:
+                _ENRICH_JOBS.pop(uid, None)
+
+
+def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
+    """The records "Finish everything" acts on: every listing the dashboard is
+    currently offering "Fill in details" or "Check details" for.
+
+    Read off the SAME ranking the screen is built from (recommender.ranked,
+    strongest rec per listing), so the button clears exactly the two groups
+    the seller is looking at — no more, and nothing the screen isn't showing.
+    A set assembled from its own rules would drift from the badges the moment
+    either side changed.
+    """
+    recs = recommender.ranked(
+        items, metrics_by_id=_metrics_by_record_id(creds, items),
+        blanks_by_id=_blank_specifics_by_id(items))
+    wanted = {r["listing_id"] for r in recs if r["type"] in FINISH_ALL_TYPES}
+    return [it for it in items if it.get("id") in wanted]
+
+
+@app.post("/api/listings/finish-all")
+def finish_all(request: Request) -> dict:
+    """Clear the whole "what to do next" list in one press: fill in every
+    listing the AI has never read, push each to eBay, and accept the notes it
+    left for a person on the rest.
+
+    Takes NO ids. Every other bulk route is handed the group's membership by
+    the client, which is right when the client is naming a selection and
+    wrong here: the recommendations payload is a capped slice per type, so a
+    client-named set could only ever reach the rows it had been sent, and the
+    seller pressing this one is asking for the number on the badge — all of
+    it. The set is worked out here, from the same ranking the dashboard
+    renders.
+
+    Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    if not config.anthropic_ready():
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    uid = user["id"]
+    # Check AND reserve in one critical section, sharing the enrich route's
+    # reservation: both spend AI credits on the same listings, and two of them
+    # running at once would pay twice to fill the same blanks.
+    job_id = storage.new_session_id()
+    with _ENRICH_LOCK:
+        running = _ENRICH_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                return {"job_id": running, "running": True, "total": 0,
+                        "deferred": 0}
+        _ENRICH_JOBS[uid] = job_id
+    try:
+        items = db.list_listings(limit=LIST_CAP, user_id=uid)
+        creds = _ebay_creds_for(request)
+        records = _finish_all_set(items, creds)
+        if not records:
+            raise HTTPException(400, "There's nothing left on your list.")
+        base_url = _base_url(request)
+    except BaseException:
+        # The reservation stands for a job that will never start; without this
+        # the next press is told "already running".
+        with _ENRICH_LOCK:
+            if _ENRICH_JOBS.get(uid) == job_id:
+                _ENRICH_JOBS.pop(uid, None)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "finish", "phase": "finishing", "done": False,
+        "error": None, "current": 0, "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_finish_job,
+                     args=(job_id, records, uid, creds, base_url),
+                     daemon=True).start()
+    log.info("finish-all %s: started for user=%s listings=%d",
+             job_id, uid, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records),
+            "deferred": 0}
 
 
 @app.get("/api/listings/{listing_id}")
