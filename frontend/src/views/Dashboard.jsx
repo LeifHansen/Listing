@@ -4,14 +4,12 @@ import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, TrendingDown,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign, AlertTriangle, Sparkles, X, Undo2, ClipboardCheck,
+  ChevronDown, DollarSign, AlertTriangle, Sparkles, ClipboardCheck,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { api, pollJob, postJson } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
-import { dismiss as dismissRec, dismissAll, readDismissed, restoreAll,
-         withoutDismissed } from "@/lib/dismissedRecs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { StatCard } from "@/components/ui/StatCard";
@@ -96,13 +94,17 @@ const REC_GROUP_LABEL = {
   verify: "Check details",
 };
 
-// One suggestion row. Every row carries a dismiss control, because this list
-// is rebuilt from scratch on every load: advice the seller has considered and
-// decided against otherwise comes back for good, and a to-do list that will
-// not shrink stops being read. See lib/dismissedRecs — and the "Restore
-// dismissed" control on the section header, which is what keeps a mis-tapped
-// X from being a one-way door.
-function RecRow({ rec, openListing, onDismiss }) {
+// One suggestion row: what the listing is, why it is here, and the way in.
+//
+// No dismiss control, and deliberately none. Every row used to carry an X
+// because the list was rebuilt from scratch on every load and could not be
+// finished — advice the seller had considered and decided against came back
+// for good, so the only way to make it shrink was to hide it. "Finish all"
+// is the answer that was missing: the list shrinks because the work gets
+// done. Hiding a row would only put back the thing that made the counter
+// meaningless — a number that says how much is left while quietly not
+// counting the parts the seller waved away.
+function RecRow({ rec, openListing }) {
   const Icon = REC_ICON[rec.type] || Lightbulb;
   return (
     <div className="flex items-center gap-3.5 p-4">
@@ -116,15 +118,9 @@ function RecRow({ rec, openListing, onDismiss }) {
         <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
         <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
       </div>
-      <Button variant="soft" size="sm" className="shrink-0"
+      <Button variant="soft" size="sm" className="shrink-0 -mr-1"
         onClick={() => openListing(rec.listing_id)}>
         {rec.label} <ArrowRight aria-hidden />
-      </Button>
-      <Button variant="ghost" size="iconSm" className="shrink-0 -mr-1"
-        aria-label={`Dismiss: ${rec.label} — ${rec.listing_title}`}
-        title="Dismiss this suggestion"
-        onClick={() => onDismiss(rec)}>
-        <X aria-hidden />
       </Button>
     </div>
   );
@@ -270,7 +266,7 @@ function GroupHead({ group, Icon }) {
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, cap, openListing, lowerAll, enrichAll, onDismiss,
+function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
                     busy, progress }) {
   const [open, setOpen] = useState(false);
   const [amountOpen, setAmountOpen] = useState(false);
@@ -363,7 +359,7 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll, onDismiss,
             <div className="divide-y divide-line border-t border-line">
               {group.recs.map((rec) => (
                 <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
-                  openListing={openListing} onDismiss={onDismiss} />
+                  openListing={openListing} />
               ))}
             </div>
           </motion.div>
@@ -599,24 +595,6 @@ export function Dashboard() {
   const storeShape = useMemo(
     () => items.map((i) => `${i.id}:${i.status}`).join("|"), [items]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, storeShape]);
-
-  // The suggestions this seller has waved away. Read once, from this browser
-  // (see lib/dismissedRecs); the API has no idea and rebuilds the full list
-  // every time, so the filtering happens here.
-  const [dismissed, setDismissed] = useState(readDismissed);
-  const visibleInsights = withoutDismissed(insights, dismissed);
-  const hiddenCount = insights.length - visibleInsights.length;
-  const dismissOne = (rec) => setDismissed((d) => dismissRec(d, rec));
-  const restoreDismissed = () => setDismissed(restoreAll());
-  // Clear the whole section in one go. Two groups cannot be emptied any other
-  // way -- "Fill in details" and "Check details" render as a header and a
-  // button with no rows behind them, so they carry no per-row X, and a seller
-  // who has decided against the advice had no way at all to stop being asked.
-  // Dismissing the VISIBLE list, not `insights`: anything already dismissed is
-  // dismissed, and re-adding it would move it to the newest end of a capped
-  // list and push somebody else's older decision off the back.
-  const clearAllInsights = () =>
-    setDismissed((d) => dismissAll(d, visibleInsights));
 
   // Bulk price drop across one suggestion group. Reports per-listing outcomes
   // rather than a bare success: over a dozen listings some will have sold or
@@ -1162,45 +1140,25 @@ export function Dashboard() {
       </motion.div>
 
       {/* Suggested actions — the recommendation engine's picks, one collapsed
-          group per category (expand for the per-listing rows), minus whatever
-          the seller has dismissed.
+          group per category (expand for the per-listing rows).
 
-          The section is gated on the WHOLE list rather than the visible one,
-          so dismissing the last row leaves the "Restore dismissed" control on
-          screen instead of taking it away with the thing it undoes. */}
+          One control, and it is the one that finishes the work. The header
+          used to carry two more beside it — Clear all, and a "Restore N
+          dismissed" that climbed into the hundreds and sat there naming
+          every suggestion the seller had already waved away. Both existed
+          only because the list could not be finished; hiding it was the
+          nearest thing to done available. "Finish all" is done, so they
+          go. */}
       {insights.length > 0 && (
         <motion.div variants={rise}>
           <SectionHeader icon={Lightbulb} title="Suggested actions"
-            action={(
-              /* Clear sits next to Restore, never instead of it: clearing the
-                 list is only safe to offer as one tap because the way back is
-                 already on screen when it lands. */
-              <div className="flex items-center gap-1 shrink-0">
-                {/* The whole list, in one press. It leads the row because it
-                    is the answer to the question the list poses, and because
-                    the alternative the seller actually had was two different
-                    motions and thirteen presses. Primary next to two ghosts:
-                    Clear only hides the list, this one finishes it. */}
-                {finishPlan.total > 0 && (
-                  <Button variant="primary" size="sm"
-                    loading={bulkBusy === FINISH_ALL}
-                    disabled={!!bulkBusy}
-                    onClick={finishEverything}>
-                    <Sparkles aria-hidden /> Finish all {finishPlan.total}
-                  </Button>
-                )}
-                {visibleInsights.length > 0 && (
-                  <Button variant="ghost" size="sm" onClick={clearAllInsights}
-                    title="Dismiss every suggestion below">
-                    <X aria-hidden /> Clear all
-                  </Button>
-                )}
-                {hiddenCount > 0 && (
-                  <Button variant="ghost" size="sm" onClick={restoreDismissed}>
-                    <Undo2 aria-hidden /> Restore {hiddenCount} dismissed
-                  </Button>
-                )}
-              </div>
+            action={finishPlan.total > 0 && (
+              <Button variant="primary" size="sm" className="shrink-0"
+                loading={bulkBusy === FINISH_ALL}
+                disabled={!!bulkBusy}
+                onClick={finishEverything}>
+                <Sparkles aria-hidden /> Finish all {finishPlan.total}
+              </Button>
             )} />
           {/* Which listing the press is on, and how far through. Sits above
               the Card rather than inside a group, because the run spans
@@ -1217,38 +1175,33 @@ export function Dashboard() {
             </p>
           )}
           <Card className="p-0 divide-y divide-line overflow-hidden">
-            {visibleInsights.length === 0 ? (
-              <p className="p-4 text-[13px] text-ink-secondary">
-                Nothing left here — every suggestion is dismissed.
-              </p>
-            ) : (() => {
+            {(() => {
               // Group by type, preserving arrival order: the API sorts by
               // priority desc, so groups order by their strongest rec.
               const groups = [];
               const byType = {};
-              for (const rec of visibleInsights) {
+              for (const rec of insights) {
                 if (!byType[rec.type]) {
                   byType[rec.type] = { type: rec.type, recs: [], total: 0 };
                   groups.push(byType[rec.type]);
                 }
                 byType[rec.type].recs.push(rec);
               }
-              // The server's count, less the rows this browser is hiding.
-              // Dismissals live in localStorage (lib/dismissedRecs) and the
-              // API has never heard of them, so a group whose total came from
-              // the server has to have them taken off here — otherwise a
-              // waved-away suggestion stays in the number that says how much
-              // is left to do.
+              // The server's count, straight through. It used to have this
+              // browser's hidden rows netted off it, which is what a count
+              // has to do while suggestions can be hidden — and is exactly
+              // the arithmetic that made the badge hard to trust. Nothing
+              // hides now, so the number on screen is the server's answer to
+              // "how much is left", with nothing done to it here.
               for (const group of groups) {
-                const sent = insights.filter((r) => r.type === group.type).length;
                 group.total = Math.max(
-                  (groupTotals[group.type] || sent) - (sent - group.recs.length),
+                  groupTotals[group.type] || group.recs.length,
                   group.recs.length);
               }
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
                   openListing={openListing} lowerAll={lowerAll}
-                  enrichAll={enrichAll} onDismiss={dismissOne}
+                  enrichAll={enrichAll}
                   busy={bulkBusy === g.type}
                   progress={bulkProgress?.type === g.type ? bulkProgress : null} />
               ));
