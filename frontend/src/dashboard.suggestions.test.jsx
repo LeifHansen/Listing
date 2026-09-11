@@ -78,13 +78,18 @@ function json(body) {
 // (/api/insights); `running` is the job's own report of the split; `statuses`
 // are polls to serve before the finished one, for the live progress line.
 function server(calls, { jobResult, recs, bulkCaps, groupTotals, running,
-                        statuses } = {}) {
+                        statuses, finishAll, tokens } = {}) {
   let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
     if (path === "/api/ebay/lower-prices") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
       return json({ changed: 1, skipped: 0, failed: 0, deferred: 0 });
+    }
+    if (path === "/api/listings/finish-all") {
+      calls.push({ path, body: JSON.parse(opts.body || "{}") });
+      return json({ job_id: "job-1", running: true,
+                    total: (finishAll || {}).total || 0, deferred: 0 });
     }
     if (path === "/api/listings/enrich") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
@@ -103,12 +108,14 @@ function server(calls, { jobResult, recs, bulkCaps, groupTotals, running,
     if (path.startsWith("/api/insights")) {
       return json({ recommendations: recs || RECS,
                     group_totals: groupTotals || {},
+                    finish_all: finishAll || { total: 0, enrich: 0, accept: 0 },
                     bulk_caps: bulkCaps || {} });
     }
     if (path.startsWith("/api/listings")) {
       return json({ authed: true, db: { configured: true, connected: true },
                     listings: [] });
     }
+    if (tokens && path.startsWith("/api/tokens")) return json(tokens);
     const key = Object.keys(BASE).find((k) => path.startsWith(k));
     return key ? json(BASE[key]) : json({ detail: "Not found" });
   };
@@ -384,6 +391,120 @@ describe("a group bigger than the rows it was sent", () => {
     const badge = [...host.querySelectorAll("span")].find(
       (el) => (el.textContent || "").trim() === "8");
     expect(badge).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+});
+
+/* One press for the whole list.
+ *
+ * The seller, looking at "Fill in details · 131" above "Check details · 177":
+ * "I want all of this to be done and submitted to eBay with one click, not
+ * individually, and not broken out into multiple steps." No button spanned
+ * both groups; "Check details" had no bulk verb at all; and "Enrich all" ran
+ * a capped 25 and deferred the rest, so 131 was six presses. */
+describe("finishing the whole list in one press", () => {
+  // A store shaped like the screenshot, scaled down: some the AI has never
+  // read, some it has read and left notes on.
+  const PLAN = { finishAll: { total: 308, enrich: 131, accept: 177 },
+                 groupTotals: { specifics: 131, verify: 177 } };
+
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("offers one button for the whole list, counting all of it", async () => {
+    const { root } = await mount([], PLAN);
+    expect(byText("Finish all 308")).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+
+  it("prices only the listings it will actually charge for", async () => {
+    // 308 listings do not cost 308 fills: the AI has already read 177 of
+    // them, and re-reading buys nothing. Quoting the total would price the
+    // press at more than twice what it spends.
+    const { root, text } = await mount([], {
+      ...PLAN,
+      tokens: { enabled: true, total: 900, packs: [], costs: { specifics: 2 } },
+    });
+    await click(byText("Finish all 308"));
+    expect(text()).toContain("Finish all 308 listings?");
+    expect(text()).toContain("262 AI tokens");   // 131 x 2, not 308 x 2
+    await act(async () => { root.unmount(); });
+  });
+
+  it("says what happens to each half before it happens", async () => {
+    const { root, text } = await mount([], PLAN);
+    await click(byText("Finish all 308"));
+    expect(text()).toContain("131 listings it hasn't read yet");
+    expect(text()).toContain("pushes them straight to the live listing");
+    expect(text()).toContain("On the other 177");
+    expect(text()).toContain("nothing about them goes to eBay");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("sends no ids — the server works out the set", async () => {
+    // The recommendations payload is a capped slice per type, so a
+    // client-named set could only ever reach the rows it was sent.
+    const calls = [];
+    const { root } = await mount(calls, PLAN);
+    await click(byText("Finish all 308"));
+    await click(byText("Finish them"));
+    expect(calls).toEqual([{ path: "/api/listings/finish-all", body: {} }]);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("does nothing at all if the seller backs out", async () => {
+    const calls = [];
+    const { root } = await mount(calls, PLAN);
+    await click(byText("Finish all 308"));
+    await click(byText("Cancel"));
+    expect(calls).toHaveLength(0);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("reports both halves, and what it could not finish", async () => {
+    const { root, text } = await mount([], {
+      ...PLAN,
+      jobResult: {
+        changed: 130, skipped: 1, failed: 0, total: 308, filled: 412,
+        accepted: 307, deferred: 0, stopped: "",
+        results: {
+          changed: [], failed: [],
+          skipped: [{ listing_id: "z", title: "Kyrie 5 CNY",
+                      message: "This listing's photos aren't on the server anymore." }],
+        },
+      },
+    });
+    await click(byText("Finish all 308"));
+    await click(byText("Finish them"));
+    expect(text()).toContain("Filled in 130 listings · 412 details added");
+    expect(text()).toContain("307 marked as checked");
+    // The honest remainder, named — a listing the fill genuinely could not
+    // run on stays on the list, and saying so is the difference between
+    // falling short and quietly claiming to have finished.
+    expect(text()).toContain("1 still need you");
+    expect(text()).toContain("Kyrie 5 CNY: This listing's photos aren't on the server");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("shows which listing it is on while it runs", async () => {
+    const { root, text } = await mount([], {
+      ...PLAN,
+      statuses: [{ id: "job-1", done: false, phase: "finishing", current: 3,
+                   total_items: 308, current_title: "Radmor Henley Polo" }],
+    });
+    await click(byText("Finish all 308"));
+    await click(byText("Finish them"));
+    expect(text()).toContain("Radmor Henley Polo");
+    expect(text()).toContain("4 of 308");
+    await act(async () => { await new Promise((r) => setTimeout(r, 1600)); });
+    await act(async () => { root.unmount(); });
+  });
+
+  it("stays out of the way when there is nothing left to finish", async () => {
+    const { root } = await mount([], { groupTotals: { photos: 2 } });
+    expect(byText("Finish all 0")).toBeFalsy();
+    expect(buttons().some((b) => (b.textContent || "").includes("Finish all")))
+      .toBe(false);
     await act(async () => { root.unmount(); });
   });
 });

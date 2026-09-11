@@ -43,6 +43,14 @@ const NO_CAPS = Object.freeze({});
 // and empty means "fall back to the rows", which is what the group did before
 // the server counted.
 const NO_TOTALS = Object.freeze({});
+// The "Finish everything" plan before /api/insights has answered. Zero total
+// hides the button rather than offering one that cannot say what it will do.
+const NO_PLAN = Object.freeze({ total: 0, enrich: 0, accept: 0 });
+// `bulkBusy` / `bulkProgress` are keyed by rec type, because until now every
+// bulk action belonged to exactly one group. The whole-list press belongs to
+// none of them, so it needs a key of its own that no rec type can collide
+// with.
+const FINISH_ALL = "__all__";
 
 // How many of a group ONE tap actually reaches. Both bulk actions fill a
 // capped number of listings per run and defer the rest, so the group must not
@@ -543,6 +551,13 @@ export function Dashboard() {
   // the rows are a capped slice per type, and counting them is how "Enrich
   // all" came to fill 25 listings and leave the badge exactly where it was.
   const [groupTotals, setGroupTotals] = useState(NO_TOTALS);
+  // What one press of "Finish everything" would do, split by what it costs
+  // (see main._finish_all_plan). `enrich` is the listings the AI has never
+  // read — those are the ones charged for; `accept` have been read already,
+  // so all that is left on them is the notes, and saying "these are fine" is
+  // free. Quoting the total as though it all costs would price a 308-listing
+  // press at four times what it spends.
+  const [finishPlan, setFinishPlan] = useState(NO_PLAN);
   // Signing out throws the suggestions away — they are one account's to-do
   // list, and eBay actions fire straight off them. That reset used to sit at
   // the top of `refreshInsights`, which made it a setState inside the effect
@@ -570,6 +585,7 @@ export function Dashboard() {
         setInsights(r.recommendations || NO_INSIGHTS);
         setBulkCaps(r.bulk_caps || NO_CAPS);
         setGroupTotals(r.group_totals || NO_TOTALS);
+        setFinishPlan(r.finish_all || NO_PLAN);
       })
       .catch(() => {});
   }, [user]);
@@ -635,6 +651,117 @@ export function Dashboard() {
     } finally { setBulkBusy(null); }
   };
 
+  // What a long run is doing right now, or null. Both the fill and the
+  // whole-list press are background JOBS the client polls — minutes of vision
+  // passes and eBay revises, far longer than any browser holds a request open
+  // — and a spinner with no end in sight is the shape of a hang. `type` says
+  // which control the line belongs under: a group's own rec type, or
+  // FINISH_ALL for the press that spans them.
+  const [bulkProgress, setBulkProgress] = useState(null);
+
+  // "Finish everything" — the whole suggestions list, in one press.
+  //
+  // The seller was looking at "Fill in details · 131" above "Check details ·
+  // 177" and said: "I want all of this to be done and submitted to eBay with
+  // one click, not individually, and not broken out into multiple steps."
+  // Every word of that named something real. There was no button spanning
+  // both groups; "Check details" had no bulk verb at all, only 177 rows each
+  // opening one listing; and "Enrich all" ran a capped 25 and deferred the
+  // rest, so 131 was six presses.
+  //
+  // So this one sends NO ids. Every other bulk action here hands the server
+  // the group's membership, which is right when the client is naming a
+  // selection and wrong here: the recommendations payload is a capped slice
+  // per type, so a client-named set could only reach the rows it happens to
+  // have been sent. The server works the set out from the same ranking this
+  // screen is rendered from, which is what makes "it clears the list" true
+  // rather than approximately true.
+  const finishEverything = async () => {
+    const plan = finishPlan;
+    if (!plan.total) return;
+    // Same reason as the fill: these listings are live on eBay, and filling
+    // one means revising it there. Asked of the SERVER, not the cached flag,
+    // so a seller who pressed early isn't bounced to Settings.
+    if (!ebay.connected) {
+      const fresh = await loadEbayStatus();
+      if (fresh && !fresh.connected) {
+        toast("Connect eBay first — these listings are live there, so filling "
+          + "them in means updating them on eBay.", { kind: "warning" });
+        setView("settings");
+        return;
+      }
+    }
+    const cost = tokens.enabled && tokens.costs?.specifics && plan.enrich
+      ? ` It uses ${tokens.costs.specifics * plan.enrich} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
+      : "";
+    // Said plainly, because the two halves are not the same promise and the
+    // seller is agreeing to both: one spends money and changes the live
+    // listing, the other retires a nag.
+    const fills = plan.enrich
+      ? `The AI reads the photos on ${plan.enrich} listing${plan.enrich === 1 ? "" : "s"} `
+        + "it hasn't read yet, fills in eBay's recommended item specifics, and "
+        + "pushes them straight to the live listing. "
+      : "";
+    const accepts = plan.accept
+      ? `On the other ${plan.accept}, it has already looked and left notes only `
+        + "you can settle — a measurement, a signature. Those get marked as "
+        + "checked so they stop asking. The notes stay on the listing and "
+        + "nothing about them goes to eBay. "
+      : "";
+    if (!(await confirm({
+      title: `Finish all ${plan.total} listing${plan.total === 1 ? "" : "s"}?`,
+      message: `${fills}${accepts}Anything you've already written is left `
+        + "exactly as it is. This runs in the background — you can keep "
+        + `working while it does.${cost}`,
+      confirmLabel: "Finish them",
+    }))) return;
+    setBulkBusy(FINISH_ALL);
+    setBulkProgress({ type: FINISH_ALL, done: 0, total: plan.total,
+                      deferred: 0, title: "" });
+    try {
+      const start = await postJson("/api/listings/finish-all", {});
+      const total = start.total || plan.total;
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setBulkProgress({
+          type: FINISH_ALL, done: j.current || 0,
+          total: j.total_items || total, deferred: 0,
+          title: j.current_title || "",
+        }),
+      });
+      const parts = [];
+      if (res.changed) {
+        parts.push(`Filled in ${res.changed} listing${res.changed === 1 ? "" : "s"}`
+          + (res.filled ? ` · ${res.filled} detail${res.filled === 1 ? "" : "s"} added` : ""));
+      }
+      if (res.accepted) parts.push(`${res.accepted} marked as checked`);
+      // The honest remainder. A listing whose photos are no longer on the
+      // server has not been read and the fill is still ahead of it, so it
+      // stays on the list — and saying so is the difference between a button
+      // that fell short and one that quietly lied about finishing.
+      if (res.skipped) parts.push(`${res.skipped} still need you`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      if (res.stopped) parts.push(res.stopped);
+      const results = res.results || {};
+      const undone = [...(results.skipped || []), ...(results.failed || [])];
+      const lines = undone.slice(0, 3).map(
+        (r) => `• ${r.title || "A listing"}: ${r.message}`);
+      const more = undone.length - lines.length;
+      if (more > 0) lines.push(`• …and ${more} more`);
+      toast([parts.join(" · ") || "Nothing left to do.", ...lines].join("\n"), {
+        kind: res.failed ? "error" : "success",
+        ttl: lines.length ? 12000 : undefined,
+      });
+      refreshInsights();
+      loadListings({ quiet: true });
+      loadTokens();
+    } catch (e) {
+      toast(`Couldn't finish your list: ${e.message}`, { kind: "error" });
+    } finally {
+      setBulkBusy(null);
+      setBulkProgress(null);
+    }
+  };
+
   // "Enrich all" — the whole "Fill in details" group filled in at once.
   //
   // This is what the suggestion used to ask the seller to do by hand: open a
@@ -645,8 +772,6 @@ export function Dashboard() {
   // It runs as a background JOB rather than one long request: a vision pass
   // per listing over a dozen listings is minutes of work, which no browser
   // (or the proxy in front of the server) will hold a connection open for.
-  // `bulkProgress` is what the job reports as it goes, rendered on the group.
-  const [bulkProgress, setBulkProgress] = useState(null);
   const enrichAll = async (group, cap) => {
     // Every listing in this group is LIVE on eBay (the recommender only
     // offers the fill for published ones), and filling a live listing means
@@ -1051,6 +1176,19 @@ export function Dashboard() {
                  list is only safe to offer as one tap because the way back is
                  already on screen when it lands. */
               <div className="flex items-center gap-1 shrink-0">
+                {/* The whole list, in one press. It leads the row because it
+                    is the answer to the question the list poses, and because
+                    the alternative the seller actually had was two different
+                    motions and thirteen presses. Primary next to two ghosts:
+                    Clear only hides the list, this one finishes it. */}
+                {finishPlan.total > 0 && (
+                  <Button variant="primary" size="sm"
+                    loading={bulkBusy === FINISH_ALL}
+                    disabled={!!bulkBusy}
+                    onClick={finishEverything}>
+                    <Sparkles aria-hidden /> Finish all {finishPlan.total}
+                  </Button>
+                )}
                 {visibleInsights.length > 0 && (
                   <Button variant="ghost" size="sm" onClick={clearAllInsights}
                     title="Dismiss every suggestion below">
@@ -1064,6 +1202,20 @@ export function Dashboard() {
                 )}
               </div>
             )} />
+          {/* Which listing the press is on, and how far through. Sits above
+              the Card rather than inside a group, because the run spans
+              them — and by the end the groups it was working through are
+              gone from the list underneath it. */}
+          {bulkProgress?.type === FINISH_ALL && (
+            <p className="mb-2 text-[13px] text-ink-secondary flex items-center gap-1.5">
+              <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
+              <span className="truncate">
+                {bulkProgress.title ? `“${bulkProgress.title}” · ` : ""}
+                {Math.min(bulkProgress.done + 1, bulkProgress.total)} of{" "}
+                {bulkProgress.total}
+              </span>
+            </p>
+          )}
           <Card className="p-0 divide-y divide-line overflow-hidden">
             {visibleInsights.length === 0 ? (
               <p className="p-4 text-[13px] text-ink-secondary">

@@ -146,6 +146,11 @@ def test_the_scan_covers_every_free_text_field_on_the_model():
         # Written on the server's own clock when the AI specifics fill runs,
         # read only by the dashboard's suggestions. Never sent to eBay.
         "enriched_at",
+        # When the seller said "these notes are fine, stop asking", on the
+        # server's own clock. `missing_info` is a note to the seller and has
+        # never been listing content, so neither is the date they answered it:
+        # accepting one publishes nothing.
+        "notes_accepted_at",
         # When the asking price was last cut, on the server's own clock and
         # derived from the price already stored. The dashboard reads it to
         # stop asking for a markdown the seller has already made; eBay is told
