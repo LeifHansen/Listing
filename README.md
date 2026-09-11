@@ -1067,6 +1067,23 @@ mirror written before that is still read the old way, by position, which is
 what makes it safe for a deploy to land mid-batch. `BULK_MAX_RESUMES` (default 2) stops a batch
 that keeps dying from taking the machine with it.
 
+**A batch is reviewed in the drafts grid, not in a grid of its own.** The
+batch screen used to draw its own cards -- the title and the price as text
+boxes, its own columns, its own Publish / Delete / Merge buttons, its own
+selection -- beside the Sell screen's drafts grid, which draws the same
+listings as photo tiles with the AI's confidence, the review count and the
+price badge. Two grids of the same drafts, and the trip a seller actually
+takes goes through both: open one item from a batch, save it, and the app
+handed back the *other* grid. So `BulkQueue` renders `DraftsStrip` scoped to
+the batch's own session ids, and what stays on the batch screen is what
+belongs to the run rather than to a draft -- the progress bar and stop
+switch, the duplicate and blocked-count notes, the receipt of what went live,
+and the items the AI could not identify at all (those have no draft for the
+grid to show). The cards read the SAVED drafts rather than the job's own copy
+of them, so an edit made anywhere shows up on the batch card; a clean draft
+save closes the editor back onto the screen it was opened from; and
+`Publish all` is the one thing the grid grew for this screen.
+
 ## Bi-directional eBay sync
 
 **Sync with eBay** (on the Listings page, once eBay is connected) mirrors the

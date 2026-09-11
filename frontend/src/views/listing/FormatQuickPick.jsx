@@ -26,8 +26,8 @@ import {
  * it defaults to 7 days, and the format chip on the card says which.)
  *
  * `onPick` is handed a patch of changed fields only and owns persistence, the
- * same split CategoryQuickPick uses — the bulk queue saves into its own local
- * copy, a saved draft PATCHes (DraftFormatEdit below).
+ * same split CategoryQuickPick uses — the editor holds the change in its
+ * form, a saved draft PATCHes (DraftFormatEdit below).
  */
 
 // A money field that saves when you LEAVE it, not on every keystroke: this

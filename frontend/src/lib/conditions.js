@@ -10,7 +10,7 @@
    this on every draft it creates and again before it publishes
    (backend/services/taxonomy.py, which these tables mirror — it is the
    authority; keep the two in step). This copy is what lets the editor and the
-   bulk queue show the right choices while the seller is still typing. */
+   editor show the right choices while the seller is still typing. */
 
 import { postJson } from "@/lib/api";
 

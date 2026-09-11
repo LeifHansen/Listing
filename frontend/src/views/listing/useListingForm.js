@@ -106,7 +106,7 @@ function fromListing(l) {
 export function useListingForm() {
   const {
     session, setSession, health, loadListings, invalidateListings,
-    openListings, patchListing,
+    openListings, patchListing, activeBulk,
   } = useApp();
   const { toast } = useToast();
 
@@ -696,10 +696,10 @@ export function useListingForm() {
       // The editor is not allowed its own publish path.
       const result = await publishListing(sessionId, listing, chipTargets, mode);
       setPublishResult(result);
-      // A clean draft save is "done editing" — hand the seller back the Sell
-      // overview (drafts + listings grid) instead of leaving them parked in
-      // the editor. Saves with problems stay put so the fix-it highlight has
-      // a form to point at.
+      // A clean draft save is "done editing" — hand the seller back the screen
+      // they opened this listing from, instead of leaving them parked in the
+      // editor. Saves with problems stay put so the fix-it highlight has a
+      // form to point at.
       let savedClean = false;
       if (result.multi) {
         if (!result.published && mode === "draft") {
@@ -763,14 +763,25 @@ export function useListingForm() {
           .find(Boolean);
       if (recordWarning) toast(recordWarning, { kind: "warning" });
       loadListings({ quiet: true });
-      if (savedClean) openListings("drafts");
+      if (savedClean) {
+        // Back to where the seller came from, which is not always the Sell
+        // overview: a draft opened out of a batch is reviewed ON the batch
+        // screen — its progress, its receipt, its "Publish all" — and
+        // jumping to the overview instead took the seller off that screen
+        // the moment they saved one item. Clearing the session alone closes
+        // the editor onto whichever of the two they were on (NewListing
+        // remembers), and it is the same trip the editor's own "Back to
+        // batch" button makes.
+        if (activeBulk) setSession(null);
+        else openListings("drafts");
+      }
     } catch (e) {
       toast(`Publish error: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
   }), [collect, sessionId, setSession, loadListings, openListings, patchListing,
-      toast, chipTargets, isLive]);
+      toast, chipTargets, isLive, activeBulk]);
 
   // End (withdraw) the live listing everywhere it's live. Once it is live
   // nowhere the listing has ended, and the server settles the record: the

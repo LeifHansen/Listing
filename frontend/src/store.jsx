@@ -114,6 +114,16 @@ export function authIntentFromSearch(search) {
   return null;
 }
 
+// The same list of session ids, in the same order? Answers "nothing changed"
+// for a batch that has been settled twice with the same result — see
+// bulkSettled, where handing back a fresh object for the same facts is a
+// state change the whole app re-renders on.
+function sameIds(a, b) {
+  const x = a || [];
+  const y = b || [];
+  return x.length === y.length && x.every((id, i) => id === y[i]);
+}
+
 // Per user, so connecting a different eBay account (or a different person on
 // a shared device) still gets the first-run import rather than inheriting
 // someone else's "recently synced".
@@ -1168,7 +1178,15 @@ export function AppProvider({ children }) {
     const ids = Array.isArray(itemIds) ? itemIds.filter(Boolean) : null;
     setActiveBulk((b) => {
       if (!b) return b;
-      if (b.done && !ids) return b;
+      // Already settled on the same items: hand back the SAME object. A new
+      // one is a state change every reader of this context sees, and the
+      // batch screen re-settles its job every time it mounts — which is
+      // every time the seller comes back from the editor. NewListing reads
+      // the pending listings-jump on exactly that change, so a re-settle
+      // that changed nothing was enough to decide the seller had asked for
+      // the lists and throw them off the batch screen they had just
+      // returned to.
+      if (b.done && (!ids || sameIds(b.itemIds, ids))) return b;
       return { ...b, done: true, itemIds: ids || b.itemIds || null };
     });
     clearLocal("bulk");

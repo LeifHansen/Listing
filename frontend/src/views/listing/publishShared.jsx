@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { api, postJson, PUBLISH_TIMEOUT_MS } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
@@ -6,9 +6,10 @@ import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 
 /* Publish-target selection + the one-click publish recipe, shared by the
-   editor's publish bar (useListingForm), the bulk queue, and the Sell
-   screen's drafts strip. One localStorage-remembered selection drives all
-   three.
+   editor's publish bar (useListingForm) and the drafts grid (DraftsStrip) —
+   which is what a batch is reviewed in too, so a batch publish and a Sell
+   screen publish are the same publish. One localStorage-remembered
+   selection drives all of them.
 
    What DISABLES those publish buttons isn't here: it's ebayBlockers in
    blockers.js, the app's single definition of "what stops this reaching
@@ -16,6 +17,29 @@ import { useApp } from "@/store";
    publishable from its card and blocked in the editor. */
 
 const STORAGE_KEY = "publish-marketplaces";   // see lib/localPrefs
+const EBAY_ONLY = ["ebay"];
+
+function readTargets() {
+  try {
+    const raw = readLocal(STORAGE_KEY);
+    const arr = raw ? JSON.parse(raw) : null;
+    return Array.isArray(arr) && arr.length ? arr : EBAY_ONLY;
+  } catch (e) { return EBAY_ONLY; }
+}
+
+/* THE selection, held once for the whole app.
+
+   "One localStorage-remembered selection drives all three" is what this file
+   has always said, and a useState per caller was not that: every screen
+   seeded its own COPY on mount, so ticking Etsy on one of them left the
+   others judging publishes — and counting what eBay would refuse — against
+   the selection from before the tick, until whichever screen the seller was
+   not looking at happened to remount. Now there is one value and everyone
+   who reads it re-renders when it changes. */
+let targets = readTargets();
+const watchers = new Set();
+const subscribe = (fn) => { watchers.add(fn); return () => { watchers.delete(fn); }; };
+const snapshot = () => targets;
 
 // Which marketplaces publishes go to. Remembered across listings; the
 // selector only matters once a non-eBay marketplace is connected — until
@@ -23,20 +47,15 @@ const STORAGE_KEY = "publish-marketplaces";   // see lib/localPrefs
 // publish path (byte-identical responses).
 export function usePublishTargets() {
   const { connectedMarketplaces } = useApp();
-  const [selected, setSelected] = useState(() => {
-    try {
-      const raw = readLocal(STORAGE_KEY);
-      const arr = raw ? JSON.parse(raw) : null;
-      return Array.isArray(arr) && arr.length ? arr : ["ebay"];
-    } catch (e) { return ["ebay"]; }
-  });
+  const selected = useSyncExternalStore(subscribe, snapshot, snapshot);
   const toggle = useCallback((key) => {
-    setSelected((cur) => {
-      const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
-      if (!next.length) return cur; // always at least one target
-      writeLocal(STORAGE_KEY, JSON.stringify(next));
-      return next;
-    });
+    const next = targets.includes(key)
+      ? targets.filter((k) => k !== key)
+      : [...targets, key];
+    if (!next.length) return;      // always at least one target
+    targets = next;
+    writeLocal(STORAGE_KEY, JSON.stringify(next));
+    watchers.forEach((fn) => fn());
   }, []);
   const otherConnected = useMemo(
     () => connectedMarketplaces.filter((m) => m.key !== "ebay"),
@@ -52,7 +71,8 @@ export function usePublishTargets() {
 }
 
 // THE publish recipe — every publish in the app goes through here: the
-// drafts strip, the bulk queue, and the editor's Publish/Save Draft bar.
+// drafts grid (a batch's review included) and the editor's Publish/Save
+// Draft bar.
 // Persist first, then publish, so the record eBay is built from is exactly
 // what was just saved. The editor used to skip the save and publish straight
 // out of its in-memory form, which meant the same listing could publish fine
@@ -105,7 +125,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // and nothing in the app was asking it.
 //
 // Reads only, and a read that fails proves nothing either way, so a failed
-// poll just waits for the next one. Sound because both bulk queues publish
+// poll just waits for the next one. Sound because every bulk run publishes
 // DRAFTS: a record that now reads published is this publish's doing and
 // nothing else's.
 //
