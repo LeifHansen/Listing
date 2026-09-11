@@ -33,6 +33,7 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("PIL")
 
+import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from PIL import Image  # noqa: E402
@@ -45,12 +46,19 @@ from backend.services import images  # noqa: E402
 SHOT = (30, 140, 90)
 
 
-def _session(tmp_path: Path, monkeypatch, count: int = 3) -> str:
+def _session(tmp_path: Path, monkeypatch, count: int = 3,
+             sid: str = "sess1") -> str:
     """A session whose originals are `count` green photos, and whose
     optimized copies have been replaced with white squares — standing in for
-    the cutout having eaten them."""
+    the cutout having eaten them.
+
+    `sid` is per-test for anything that writes to history/. storage.session_dir
+    reads config.SESSIONS_DIR, not the DATA_DIR patched here, so every test in
+    this file shares one directory on disk: the originals and optimized copies
+    below are rewritten each time and do not care, but a history entry would
+    survive into the next test and answer its question for it.
+    """
     monkeypatch.setattr(storage, "DATA_DIR", tmp_path, raising=False)
-    sid = "sess1"
     orig = storage.original_dir(sid)
     opt = storage.optimized_dir(sid)
     for i in range(count):
@@ -150,3 +158,94 @@ def test_a_photo_added_later_goes_back_to_its_own_original(tmp_path, monkeypatch
     assert images.source_for(orig, "img_000.jpg").name == "src_000.jpg"
     assert images.source_for(orig, "img_001.jpg").name == "src_001.jpg"
     assert images.source_for(orig, "img_003.jpg") is None
+
+
+# --- when the upload itself is gone -----------------------------------------
+#
+# Reported straight after the background remover ate part of a shirt:
+# "reverting to original does not work. 'no longer on server'". Both halves
+# were true and they compound. Originals are reclaimed after twelve hours (as
+# little as fifteen minutes when the volume is tight) while HISTORY snapshots
+# keep for fourteen days — so for all but the first half-day of a listing's
+# life the upload is gone, and the button that undoes a damaged cutout was
+# dead exactly when someone reached for it.
+#
+# There is almost always a way back: snapshot_image runs before every edit
+# overwrites the working copy. Restore now falls back to the OLDEST of those.
+
+def _snapshot(sid: str, name: str, stamp: int, colour) -> Path:
+    """One history entry for `name`, stamped as `snapshot_image` stamps."""
+    hist = storage.history_dir(sid)
+    path = hist / f"{name}.{stamp}"
+    Image.new("RGB", (800, 600), colour).save(path, "JPEG")
+    return path
+
+
+def test_the_oldest_snapshot_is_the_one_to_go_back_to(tmp_path, monkeypatch):
+    """Oldest, not newest. snapshot_image runs BEFORE each edit, so on a photo
+    that was cut out and then straightened the newest snapshot is still a
+    cutout — and a cutout is what the seller is undoing."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_oldest")
+    _snapshot(sid, "img_000.jpg", 1000, SHOT)              # before the cutout
+    _snapshot(sid, "img_000.jpg", 2000, (255, 255, 255))   # before the straighten
+
+    found = storage.earliest_snapshot(sid, "img_000.jpg")
+    assert found is not None and found.name.endswith(".1000")
+
+
+def test_a_photo_with_no_history_has_none(tmp_path, monkeypatch):
+    sid = _session(tmp_path, monkeypatch, sid="hist_none")
+    assert storage.earliest_snapshot(sid, "img_000.jpg") is None
+
+
+def test_the_stamps_sort_as_numbers_not_as_text(tmp_path, monkeypatch):
+    """`9` must not come after `10`. The stamps are milliseconds and roll over
+    a digit constantly."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_stamps")
+    _snapshot(sid, "img_000.jpg", 9, SHOT)
+    _snapshot(sid, "img_000.jpg", 10, (255, 255, 255))
+    found = storage.earliest_snapshot(sid, "img_000.jpg")
+    assert found is not None and found.name.endswith(".9")
+
+
+def test_another_photos_history_is_not_offered(tmp_path, monkeypatch):
+    sid = _session(tmp_path, monkeypatch, sid="hist_other")
+    _snapshot(sid, "img_001.jpg", 1000, SHOT)
+    assert storage.earliest_snapshot(sid, "img_000.jpg") is None
+
+
+def test_a_file_that_is_not_a_stamp_is_skipped(tmp_path, monkeypatch):
+    """Anything else in history/ is not a version of this photo, and sorting
+    it as text would put it first."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_junk")
+    (storage.history_dir(sid) / "img_000.jpg.tmp").write_bytes(b"not a stamp")
+    _snapshot(sid, "img_000.jpg", 1000, SHOT)
+    found = storage.earliest_snapshot(sid, "img_000.jpg")
+    assert found is not None and found.name.endswith(".1000")
+
+
+def test_restore_falls_back_to_history_when_the_upload_is_pruned(tmp_path,
+                                                                 monkeypatch):
+    """The report, end to end: the upload is gone, a pre-cutout snapshot is
+    not, and the button puts the photo back instead of refusing."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_restore")
+    _snapshot(sid, "img_000.jpg", 1000, SHOT)
+    shutil.rmtree(storage.original_dir(sid))       # twelve hours later
+
+    assert images.source_for(storage.original_dir(sid), "img_000.jpg") is None
+    source = storage.earliest_snapshot(sid, "img_000.jpg")
+    assert source is not None
+    images.optimize(source, storage.optimized_dir(sid) / "img_000.jpg",
+                    remove_bg=False)
+
+    assert _corner(storage.optimized_dir(sid) / "img_000.jpg") != (255, 255, 255)
+
+
+def test_with_neither_an_upload_nor_a_snapshot_it_still_says_so(tmp_path,
+                                                                monkeypatch):
+    """The one case that is genuinely unrecoverable. Saying so beats reporting
+    a restore that did not happen — the rule this file opened with."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_empty")
+    shutil.rmtree(storage.original_dir(sid))
+    assert images.source_for(storage.original_dir(sid), "img_000.jpg") is None
+    assert storage.earliest_snapshot(sid, "img_000.jpg") is None

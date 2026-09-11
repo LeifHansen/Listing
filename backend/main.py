@@ -5112,13 +5112,31 @@ async def image_restore_original(
     def _restore() -> None:
         source = images.source_for(storage.original_dir(session_id), name)
         if source is None or not source.is_file():
-            # Originals are pruned on a timer (storage.prune_originals), so
-            # this is a real answer and not an error to hide: an old listing
-            # genuinely has nothing to go back to, and saying so beats
-            # reporting a restore that did not happen.
-            raise FileNotFoundError(
-                "The original upload for this photo isn't on the server "
-                "anymore, so there's nothing to restore it from.")
+            # The upload is gone -- originals are reclaimed after twelve
+            # hours, and after fifteen minutes when the volume is tight -- so
+            # go back to the oldest snapshot of the working copy instead.
+            #
+            # Without this the button was dead on all but the newest
+            # listings, which is how it was reported: "reverting to original
+            # does not work -- no longer on server". A seller who has just
+            # watched the background remover eat a sleeve is exactly the
+            # person pressing it, and telling them their photo is
+            # unrecoverable while a copy from before that edit sits in
+            # history/ is both wrong and the worst possible moment for it.
+            #
+            # Snapshots keep for fourteen days against the originals' twelve
+            # hours, so for nearly all of a listing's life this IS the way
+            # back. It is a second-best one and says so below: it restores
+            # the photo to before the first edit we hold, not to the camera's
+            # own file.
+            source = storage.earliest_snapshot(session_id, name)
+            if source is None:
+                raise FileNotFoundError(
+                    "The original upload for this photo isn't on the server "
+                    "anymore, and there's no earlier version saved either, "
+                    "so there's nothing to restore it from.")
+            log.info("restore-original: upload gone for %s/%s, going back to "
+                     "the oldest snapshot instead", session_id, name)
         storage.snapshot_image(session_id, name)
         images.optimize(source, path, remove_bg=False)
 
