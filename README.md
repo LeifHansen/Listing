@@ -1196,6 +1196,37 @@ problem:
 - **Lower prices → "Lower all…"** opens an amount field (*lower every price in
   this group by X %*) with its own submit. Each listing is repriced and pushed to
   eBay through the same revise path a single edit uses.
+
+  **The group clears once the cut is made** (`Listing.price_lowered_at`), and
+  until it did, this was the same broken-looking button as "Enrich all" below.
+  Both rules that put a listing in this group are computed from signals a price
+  cut does not move: the age heuristic counts from `created_at`, which never
+  changes, and the traffic one reads eBay's **view** count, which is cumulative
+  for the life of the listing — the thirty views that earned *"buyers are
+  looking; the price may be high"* are still thirty views the second after the
+  price comes down, and stay so for good. So the seller pressed "Lower all…",
+  sat through a dozen serial eBay revises, was told *"Lowered 12 prices by
+  10%"*, and the group came back in the same slot with the same twelve
+  listings and the same count. Reported, reasonably, as the button not
+  working.
+
+  The stamp is what ends it. A cut buys `recommender.PRICE_QUIET_DAYS` (the
+  same three weeks a listing gets before it is called stale in the first
+  place) before either rule may ask again, and after that the age rule runs
+  its clock **from the last cut** rather than from the listing's birthday —
+  *"still here 24 days after the last price drop"*, which is what the rule was
+  always about. Every way a price can come down stamps it: the bulk button,
+  the card's quick edit, an editor save, and a markdown the seller made in
+  Seller Hub or the eBay app, which reaches the record through the sync.
+  A relist starts without one.
+
+  It is **derived, not sent** (`recommender.price_drop_stamp`): every write
+  works it out from the price already stored, so the payload's copy is never
+  read — a second tab cannot blank it, and a body cannot mint one to silence
+  advice a listing has earned. That is also why it is deliberately *not* in
+  `SERVER_OWNED_FIELDS`, whose rule is that the **stored** value wins: under
+  that rule the stamp could never move forward on the one write entitled to
+  move it.
 - **Fill in details → "Enrich all"** fills every listing in the group in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft

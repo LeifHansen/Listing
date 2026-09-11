@@ -5780,6 +5780,13 @@ def _restore_server_state(session_id: str, listing: Listing,
     # than at each call site because this runs on every save path, and a save
     # that skipped it would leave the seller's edit unsent.
     dirty_fields.accumulate(listing, stored)
+    # When the asking price was last CUT, worked out from the same stored copy
+    # rather than taken from the payload — the client has no business setting
+    # it, and a tab that loaded before this morning's markdown would otherwise
+    # blank it and put the listing straight back into "Lower prices". The
+    # dashboard reads it to tell a price that has sat from one that was just
+    # dropped; recommender.price_drop_stamp is where that is decided.
+    listing.price_lowered_at = recommender.price_drop_stamp(stored, listing.price)
     return rec
 
 
@@ -5892,6 +5899,14 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
 
     merged = dict(rec.get("listing") or {})
     merged.update(changes)
+    if "price" in changes:
+        # A markdown typed on a card counts exactly as much as one made in the
+        # editor or by the bulk button: it is the advice taken, and the
+        # suggestion has to stop asking for it. (Unconditional this would be a
+        # no-op — `merged` carries the stored stamp already — but the guard
+        # says which change this is here for.)
+        merged["price_lowered_at"] = recommender.price_drop_stamp(
+            rec.get("listing") or {}, merged.get("price"))
     try:
         listing = Listing(**merged)
     except Exception as exc:  # noqa: BLE001 - a bad value is the caller's
@@ -7800,6 +7815,12 @@ def lower_prices(payload: dict, request: Request) -> dict:
         listing = Listing(**data)
         was = listing.price
         listing.price = new_price
+        # The whole point of the button, recorded on the listing. Without it
+        # the suggestion that offered this drop is rebuilt from `created_at`
+        # and from eBay's cumulative view count — neither of which a price cut
+        # moves — so the group came back in the same slot with the same twelve
+        # listings the moment the run finished. See recommender.price_drop_stamp.
+        listing.price_lowered_at = recommender.price_drop_stamp(data, new_price)
         # This edit never passes through a save, so there is no diff for
         # dirty_fields to find — and a revise only carries fields marked as
         # changed. Unmarked, this would send eBay an empty revise: the record
@@ -8304,6 +8325,10 @@ _SALE_ONLY_FIELDS = {
     "ebay_listing_id": "", "sku": "", "source": "", "ebay_start_time": "",
     "view_url": "", "watch_count": 0, "sold_quantity": 0,
     "sold_price": None, "sold_at": "",
+    # A markdown made on the listing that has already sold. Carried over, it
+    # would buy the NEW listing three weeks of silence from a price nudge it
+    # has done nothing to earn — the new draft is priced from scratch.
+    "price_lowered_at": "",
 }
 
 

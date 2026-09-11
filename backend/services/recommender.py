@@ -18,6 +18,25 @@ from typing import Optional
 STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
 FEW_PHOTOS = 3    # fewer than this → suggest adding photos
 
+# What a price drop BUYS: neither price nudge below comes back until the new
+# price has had this long to be seen.
+#
+# Both of them are computed from signals a drop does not move. The age
+# heuristic counts from `created_at`, which never changes. The traffic one
+# reads eBay's view count, which is cumulative for the life of the listing —
+# the thirty views that earned "buyers are looking; the price may be high" are
+# still thirty views the second after the price comes down, and stay so
+# forever. So the group a seller had just cleared came straight back, same
+# listings, same count, saying the same thing. Reported as the button not
+# working, and from the outside it is not distinguishable from that.
+#
+# The same three weeks a listing gets before it is called stale in the first
+# place. A new price deserves at least the run the old one got, and nothing is
+# lost by waiting: if the cut does not work, the nudge is right again — and
+# comes back on its own, worded from the drop rather than from the listing's
+# birthday.
+PRICE_QUIET_DAYS = STALE_DAYS
+
 # How long a listing gets left alone after the AI fill has run on it, before
 # "Check details" is allowed to nudge about the notes the fill could not
 # answer.
@@ -55,6 +74,38 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return max(0, (datetime.now(timezone.utc) - dt).days)
+
+
+def _price(value) -> Optional[float]:
+    """`value` as a comparable price, or None when it isn't one."""
+    try:
+        price = round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0 else None
+
+
+def price_drop_stamp(stored: dict, new_price) -> str:
+    """The `price_lowered_at` to persist for a listing being saved at
+    `new_price`, given the record already stored for it.
+
+    Now when this write actually LOWERS the asking price; otherwise whatever
+    the stored record already held. This is the writer for the field the two
+    price rules above read, and it lives beside them so the two cannot drift.
+
+    Every write path derives it this way — from the stored price and nothing
+    else — rather than honouring what arrived in the payload. That is what
+    makes the field server-owned in the way that matters here: a second tab
+    saving a copy loaded this morning cannot blank the stamp, and a payload
+    cannot mint one to silence advice the listing has earned. It is also why
+    the field is absent from state.SERVER_OWNED_FIELDS, whose rule is that the
+    STORED value wins — under that rule the stamp could never move forward on
+    the one write that is entitled to move it.
+    """
+    was, now_ = _price((stored or {}).get("price")), _price(new_price)
+    if was is not None and now_ is not None and now_ < was:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return str((stored or {}).get("price_lowered_at") or "").strip()
 
 
 # "Fill in details" fills ONE thing: eBay's item specifics for the listing's
@@ -142,15 +193,29 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     watchers = m.get("watchers")
     age = _age_days(item.get("created_at"))
     images = listing.get("images") or listing.get("image_urls") or []
+    # How long ago the asking price was last CUT, in days — None when it never
+    # has been. Both price rules below are gated on it, because neither of the
+    # signals they read moves when a seller takes the advice: see
+    # PRICE_QUIET_DAYS above, and `price_lowered_at` on the model.
+    since_cut = _age_days(str(listing.get("price_lowered_at") or "").strip() or None)
+    quiet = since_cut is not None and since_cut < PRICE_QUIET_DAYS
 
     # Data-driven (real eBay traffic) beats the age heuristics below.
     # (No "Add a sale" nudge — removed on request: it read as noise.)
-    if views is not None and views >= 30 and not watchers:
+    if views is not None and views >= 30 and not watchers and not quiet:
         add("lower_price", "Lower the price",
             f"{views} views but no watchers — buyers are looking; the price may be high.", 92)
 
-    # Heuristics that need no eBay metrics.
-    if age is not None and age >= STALE_DAYS:
+    # Heuristics that need no eBay metrics. The stale clock runs from the last
+    # price cut where there has been one: what this rule is actually about is
+    # how long the CURRENT price has been sitting there, and on a listing that
+    # has been marked down twice the date it went up is no longer that.
+    if since_cut is not None:
+        if since_cut >= STALE_DAYS:
+            add("lower_price", "Lower the price",
+                f"Still here {since_cut} days after the last price drop — "
+                "another cut can restart interest.", 68)
+    elif age is not None and age >= STALE_DAYS:
         add("lower_price", "Lower the price",
             f"Live {age} days — a price drop can restart interest.", 68)
     if len(images) < FEW_PHOTOS:

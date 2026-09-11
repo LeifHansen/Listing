@@ -146,6 +146,11 @@ def test_the_scan_covers_every_free_text_field_on_the_model():
         # Written on the server's own clock when the AI specifics fill runs,
         # read only by the dashboard's suggestions. Never sent to eBay.
         "enriched_at",
+        # When the asking price was last cut, on the server's own clock and
+        # derived from the price already stored. The dashboard reads it to
+        # stop asking for a markdown the seller has already made; eBay is told
+        # the new PRICE, never the date we noticed it.
+        "price_lowered_at",
         # The identify pass's grade on its own draft — one of three levels,
         # anything else coerced to "" by the model's validator. Read by the
         # draft cards, never sent to eBay.
