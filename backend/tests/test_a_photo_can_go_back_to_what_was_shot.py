@@ -249,3 +249,44 @@ def test_with_neither_an_upload_nor_a_snapshot_it_still_says_so(tmp_path,
     shutil.rmtree(storage.original_dir(sid))
     assert images.source_for(storage.original_dir(sid), "img_000.jpg") is None
     assert storage.earliest_snapshot(sid, "img_000.jpg") is None
+
+
+def test_the_as_shot_copy_is_preferred_over_a_snapshot(tmp_path, monkeypatch):
+    """#291 keeps a faithful copy beside every cutout it changes. That IS the
+    photo the camera saw, so restore reaches for it before the history
+    snapshot, which is only ever "whatever the working copy was before some
+    earlier edit"."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_as_shot")
+    kept = storage.optimized_path(sid).parent / "as_shot"
+    kept.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (800, 600), SHOT).save(kept / "img_000.jpg", "JPEG")
+    _snapshot(sid, "img_000.jpg", 1000, (255, 255, 255))
+
+    found = storage.as_shot_copy(sid, "img_000.jpg")
+    assert found is not None and found.parent.name == "as_shot"
+
+
+def test_no_as_shot_copy_is_not_an_error(tmp_path, monkeypatch):
+    """Most photos never had a cutout, so most have no copy — and the caller
+    falls through to history rather than treating it as a failure."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_no_as_shot")
+    assert storage.as_shot_copy(sid, "img_000.jpg") is None
+
+
+def test_an_older_as_shot_copy_is_still_offered(tmp_path, monkeypatch):
+    """images.as_shot() refuses a copy older than the working file, because
+    the passes that READ a photo must let the seller's later edit win. Restore
+    is the opposite case: undoing later edits is the whole request."""
+    sid = _session(tmp_path, monkeypatch, sid="hist_old_as_shot")
+    kept = storage.optimized_path(sid).parent / "as_shot"
+    kept.mkdir(parents=True, exist_ok=True)
+    copy = kept / "img_000.jpg"
+    Image.new("RGB", (800, 600), SHOT).save(copy, "JPEG")
+    import os
+    old = copy.stat().st_mtime - 3600
+    os.utime(copy, (old, old))          # the seller edited after the cutout
+
+    assert images.as_shot(storage.optimized_dir(sid) / "img_000.jpg").parent.name \
+        == "optimized", "the read path should refuse a stale copy"
+    assert storage.as_shot_copy(sid, "img_000.jpg") is not None, \
+        "restore should still offer it"

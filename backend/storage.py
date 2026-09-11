@@ -294,6 +294,28 @@ def writable() -> bool:
         return False
 
 
+def as_shot_copy(session_id: str, name: str) -> Optional[Path]:
+    """The faithful copy of one photo kept beside the cutout that changed it
+    (services/images._keep_as_shot), or None.
+
+    The first thing "Restore original" falls back to once the upload is gone,
+    and better than the history snapshot below it: this IS the photo as the
+    camera saw it, minus only the optimize pass, whereas a snapshot is
+    whatever the working copy happened to be before some earlier edit.
+
+    Deliberately NOT images.as_shot(), which is for the passes that READ a
+    photo and so refuses a copy older than the working file — the seller's
+    own later edit has to win there. Here the seller is asking to undo edits,
+    so an older copy is precisely the point.
+
+    Both this and the uploads are swept by prune_originals on one timer, but
+    not in step: a copy is rewritten every time the cutout runs, so it can
+    outlive the upload it was made from.
+    """
+    path = optimized_path(session_id).parent / "as_shot" / name
+    return path if path.is_file() else None
+
+
 def earliest_snapshot(session_id: str, name: str) -> Optional[Path]:
     """The OLDEST surviving history snapshot of one photo, or None.
 
@@ -339,16 +361,29 @@ def earliest_snapshot(session_id: str, name: str) -> Optional[Path]:
 
 
 def prune_originals(max_age_seconds: int) -> int:
-    """Delete source uploads (session original/ dirs) older than the cutoff.
+    """Delete source uploads (session original/ dirs) and the as-shot copies
+    beside them, older than the cutoff.
 
-    "Restore original" reads these (images.source_for), so pruning one costs
-    the seller the way back to what they shot — which is why that button falls
-    back to the oldest history snapshot (earliest_snapshot above) rather than
-    telling them there is nothing to restore. Everything else uses the
-    optimized JPEGs, and originals are the BIGGEST thing on the volume: a phone photo is several MB against a few hundred KB optimized. A
-    full volume takes the whole app down ("No space left on device" on every
-    upload), so old originals are reclaimed on a timer. Returns bytes freed.
-    Never raises."""
+    Two things read the uploads after the optimize pass, and both are the
+    "put it back" path: Restore original (images.source_for) and, failing
+    that, the fallbacks below it. Everything else uses the optimized JPEGs —
+    they are what the app, the browser and eBay see — but the uploads are the
+    BIGGEST thing on the volume: a phone photo is several MB against a few
+    hundred KB optimized. A full volume takes the whole app down ("No space
+    left on device" on every upload), so old originals are reclaimed on a
+    timer. Returns bytes freed. Never raises.
+
+    Pruning one costs the seller the shortest way back to what they shot,
+    which is why restore falls through to as_shot/ and then to the oldest
+    history snapshot rather than telling them there is nothing to restore.
+
+    as_shot/ is swept on the same timer and for the same reason. It holds one
+    JPEG per photo the cutout changed (services/images._keep_as_shot), which
+    is a second copy of that photo, and it is a CACHE: the passes that read it
+    fall back to the optimized photo when it is gone, exactly as they do for a
+    photo that never had a cutout. Reclaiming it costs an old listing a little
+    fidelity if it is identified again months later, and keeping it costs
+    every seller the volume."""
     freed = 0
     try:
         base = config.SESSIONS_DIR
@@ -356,17 +391,18 @@ def prune_originals(max_age_seconds: int) -> int:
             return 0
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
-            orig = d / "original"
-            try:
-                if not orig.is_dir():
+            for sub in ("original", "as_shot"):
+                old_dir = d / sub
+                try:
+                    if not old_dir.is_dir():
+                        continue
+                    for p in old_dir.iterdir():
+                        if p.is_file() and p.stat().st_mtime <= cutoff:
+                            size = p.stat().st_size
+                            p.unlink(missing_ok=True)
+                            freed += size
+                except Exception:  # noqa: BLE001 - keep pruning the rest
                     continue
-                for p in orig.iterdir():
-                    if p.is_file() and p.stat().st_mtime <= cutoff:
-                        size = p.stat().st_size
-                        p.unlink(missing_ok=True)
-                        freed += size
-            except Exception:  # noqa: BLE001 - keep pruning the rest
-                continue
     except Exception as exc:  # noqa: BLE001
         log.warning(f"storage: prune_originals failed: {exc}")
     return freed

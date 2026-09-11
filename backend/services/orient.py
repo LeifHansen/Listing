@@ -51,6 +51,12 @@ with the API off. A wrong turn, when one gets through, is one tap of the
 rotate button on the tile or the card, and Restore original goes back to
 the photo as shot.
 
+The screen also reports something it is not named for and that nothing used
+to read: whether a photo is a CLOSE-UP OF PART of an item rather than a photo
+of the whole thing. The cutout needs that answer — run on a close-up of a
+tag it deletes the garment and keeps the label — and this pass is the only
+thing that looks at the photo before the cutout does. See _details.
+
 Runs on the ORIGINALS, before the cutout, so the contact shadow falls below
 an upright item. Never on the upload request itself: every path that
 optimizes photos is a background job the client polls.
@@ -62,7 +68,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from .. import config
 from ..config import log
@@ -103,6 +109,26 @@ _PER_PHOTO = float(os.getenv("ORIENT_SECONDS_PER_PHOTO", "2") or 2)
 # because a flat-lay or a close-up has no "up" for the model to find and an
 # answer for one is an invention.
 _TURNS_ON_ITS_OWN = ("standing", "hanging", "worn", "garment_flat")
+
+# The one "sits" answer that means there is no whole item in the frame. The
+# screen has always collected it -- a close-up of a label, a tag, a stitch or
+# a texture -- and used it only to refuse a turn. It answers a second question
+# the photo pass badly needs and had no way to ask; see _details.
+_DETAIL = "detail"
+
+
+class Screened(NamedTuple):
+    """What one look at a pile of photos found.
+
+    `rotations` is {filename: clockwise degrees} for the items lying sideways
+    or on their head. `details` is the filenames that are close-ups of part of
+    an item, which the cutout must leave alone -- see _details.
+    """
+    rotations: dict[str, int]
+    details: frozenset[str]
+
+
+_NOTHING = Screened({}, frozenset())
 
 _SCREEN_RULES = """
 These are photos 1 to {n} of secondhand items being listed for sale. The
@@ -220,9 +246,10 @@ def _ask(content: list[dict], max_tokens: int) -> dict:
 
 # --- the screen ---------------------------------------------------------------
 
-def _screen_batch(batch: list[Path]) -> dict[str, int]:
-    """{filename: clockwise degrees} the screen proposes for one batch. {} on
-    any failure: these photos stay as shot."""
+def _screen_batch(batch: list[Path]) -> Screened:
+    """What the screen makes of one batch: the turns it proposes, and the
+    photos it says are close-ups. _NOTHING on any failure — these photos stay
+    as shot, and are cut out as usual."""
     from . import images
     # A file that cannot be read — truncated past what Pillow forgives, or
     # not an image at all — is skipped by the photo pass anyway. It costs
@@ -240,7 +267,7 @@ def _screen_batch(batch: list[Path]) -> dict[str, int]:
         content.append({"type": "text", "text": f"Photo {len(sent)}:"})
         content.append(_image_block(data))
     if not sent:
-        return {}
+        return _NOTHING
     try:
         content.append({"type": "text",
                         "text": _SCREEN_RULES.format(n=len(sent))})
@@ -249,8 +276,8 @@ def _screen_batch(batch: list[Path]) -> dict[str, int]:
         answer = _ask(content, max_tokens=200 + 120 * len(sent))
     except Exception as exc:  # noqa: BLE001 - orientation is an enhancement
         log.info("auto-orient: screen batch skipped (%s)", exc)
-        return {}
-    return _proposals(answer, sent)
+        return _NOTHING
+    return Screened(_proposals(answer, sent), _details(answer, sent))
 
 
 def _proposals(data: dict, batch: list[Path]) -> dict[str, int]:
@@ -284,6 +311,66 @@ def _proposals(data: dict, batch: list[Path]) -> dict[str, int]:
                  batch[idx].name, deg, entry.get("item", "?"),
                  sits or "?", text)
     return out
+
+
+def _details(data: dict, batch: list[Path]) -> frozenset[str]:
+    """The photos in the batch that are CLOSE-UPS OF PART OF AN ITEM.
+
+    The screen has always been asked this — "detail": a label, a tag, a
+    stitch, a mark, a texture, a logo without the rest of the item in view —
+    and has always thrown the answer away after using it to refuse a turn.
+    The cutout needs it, because on one of these photos the cutout has nothing
+    to do and no way to know that.
+
+    The report, with a screenshot: a vintage Hawaiian shirt, four photos,
+    cutouts on. The two whole-garment shots came out right. The two close-ups
+    of its tags came back as fragments of a label floating on white — the
+    brand tag torn in half, the care label with a bite out of it and a smear
+    of the shirt left beside it. The draft that followed named a brand that
+    does not exist, because the identify pass reads the OPTIMIZED photos and
+    the tag it had to read had been deleted.
+
+    That is the salient-object model working exactly as built. Handed a photo
+    whose every pixel is the item — a label filling the frame, the garment
+    behind it — it still answers the only question it knows, "which part of
+    this is the subject", and dutifully deletes the rest. The rest was the
+    shirt.
+
+    Nothing downstream can catch it. The three guards in services/images all
+    read the ALPHA, and on a photo like this the alpha is beyond reproach: the
+    matte of that torn label is one connected region, opaque throughout, and
+    fills its own bounding box — coverage 0.18, solidity 1.00, largest region
+    0.82, box fill 0.84. It is arithmetically indistinguishable from a perfect
+    cutout of a framed picture. The information that separates them is not in
+    the matte at all; it is in the photo, and the only thing that ever looks
+    at the photo before the cutout runs is this pass.
+
+    So it is answered here, where it is already being asked and already paid
+    for, and the cutout is simply not run on these photos.
+
+    Unconfirmed, unlike a turn, and deliberately so: the two errors are not
+    equal and do not need the same evidence. A whole-item shot wrongly called
+    a close-up keeps its background, which costs one photo an opt-in feature
+    and is what this file does with every photo it cannot answer for anyway.
+    A close-up missed here is exactly today's behaviour — the guards get their
+    turn, same as before. Neither is worth a second call.
+    """
+    out = set()
+    for entry in (data.get("photos") or []) if isinstance(data, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            idx = int(entry.get("photo", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < len(batch)):
+            continue
+        if str(entry.get("sits", "")).strip().lower() != _DETAIL:
+            continue
+        out.add(batch[idx].name)
+        log.info("auto-orient: %s — a close-up of %s; the cutout will be "
+                 "skipped for it", batch[idx].name, entry.get("item", "?"))
+    return frozenset(out)
 
 
 # --- the confirm --------------------------------------------------------------
@@ -359,18 +446,28 @@ def detect_rotations(paths: list[Path],
                      should_stop: Optional[Callable[[], bool]] = None
                      ) -> dict[str, int]:
     """{filename: clockwise degrees needed} for the photos whose ITEM lies
-    sideways or on its head. Photos already upright, and photos the pass
-    could not answer for, are simply absent. Never raises.
+    sideways or on its head — `screen`'s turns on their own, for callers that
+    want nothing else."""
+    return screen(paths, should_stop=should_stop).rotations
+
+
+def screen(paths: list[Path],
+           should_stop: Optional[Callable[[], bool]] = None) -> Screened:
+    """One look at `paths`: which photos need turning, and which are close-ups
+    of part of an item rather than photos of the whole thing.
+
+    Photos already upright, and photos the pass could not answer for, are
+    simply absent from both halves. Never raises.
 
     `should_stop`, asked before each call, lets a cancelled batch stop paying
-    for orientation it will never use. Names are what the answer is keyed by,
-    so `paths` must come from one directory."""
+    for a pass it will never use. Names are what the answer is keyed by, so
+    `paths` must come from one directory."""
     files = [p for p in paths if p.is_file()]
     if not files or not _enabled():
-        return {}
+        return _NOTHING
     deadline = time.monotonic() + _budget_for(len(files))
 
-    def _guarded(fn):
+    def _guarded(fn, empty):
         """Skip a call once the pass has spent its budget or the batch was
         called off. The photos in it stay as shot, which is the right
         answer for an enhancement: an upload must not wait on orientation,
@@ -378,30 +475,37 @@ def detect_rotations(paths: list[Path],
         deciding which way up they are."""
         def _call(batch):
             if time.monotonic() > deadline:
-                return {}
+                return empty
             if should_stop is not None and should_stop():
-                return {}
+                return empty
             return fn(batch)
         return _call
 
     batches = [files[i:i + _SCREEN_BATCH]
                for i in range(0, len(files), _SCREEN_BATCH)]
     proposed: dict[str, int] = {}
+    details: set[str] = set()
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(batches))) as pool:
-        for part in pool.map(_guarded(_screen_batch), batches):
-            proposed.update(part)
+        for part in pool.map(_guarded(_screen_batch, _NOTHING), batches):
+            proposed.update(part.rotations)
+            details.update(part.details)
+    if details:
+        log.info("auto-orient: %d of %d photo(s) are close-ups — those keep "
+                 "their background", len(details), len(files))
+    # The turns still have to survive the second look; the close-ups are
+    # already final and are carried through whatever the confirm says.
     if not proposed:
         log.info("auto-orient: nothing to turn (of %d photos)", len(files))
-        return {}
+        return Screened({}, frozenset(details))
     by_name = {p.name: p for p in files}
     items = [(by_name[n], deg) for n, deg in proposed.items() if n in by_name]
     chunks = [items[i:i + _CONFIRM_BATCH]
               for i in range(0, len(items), _CONFIRM_BATCH)]
     rotations: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(chunks))) as pool:
-        for part in pool.map(_guarded(_confirm_batch), chunks):
+        for part in pool.map(_guarded(_confirm_batch, {}), chunks):
             rotations.update(part)
     log.info("auto-orient: %d proposed, %d confirmed, %d cancelled by the "
              "second look (of %d photos)", len(proposed), len(rotations),
              len(proposed) - len(rotations), len(files))
-    return rotations
+    return Screened(rotations, frozenset(details))

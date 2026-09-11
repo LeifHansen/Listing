@@ -5129,7 +5129,14 @@ async def image_restore_original(
             # back. It is a second-best one and says so below: it restores
             # the photo to before the first edit we hold, not to the camera's
             # own file.
-            source = storage.earliest_snapshot(session_id, name)
+            # as_shot/ first: it is the photo the camera saw with only the
+            # optimize pass on it, which is exactly what this button
+            # promises. A history snapshot is second best -- whatever the
+            # working copy happened to be before some earlier edit -- and is
+            # what survives longest, so it is the last word rather than the
+            # first.
+            source = (storage.as_shot_copy(session_id, name)
+                      or storage.earliest_snapshot(session_id, name))
             if source is None:
                 raise FileNotFoundError(
                     "The original upload for this photo isn't on the server "
