@@ -2,7 +2,7 @@
 import Base from "../layouts/Base.astro";
 import Container from "../components/Container.astro";
 import CTA from "../components/CTA.astro";
-import { site, FREE_TOKENS_PER_MONTH, draftsFor, LOGIN_URL } from "../lib/site.js";
+import { site, FREE_TOKENS_PER_MONTH, draftsFor, LOGIN_URL, appLink } from "../lib/site.js";
 
 const faqs = [
   {
@@ -108,7 +108,7 @@ const jsonLd = {
           your account context attached, which usually saves a round trip.
         </p>
         <p class="mt-3 text-sm text-ink-secondary">
-          <a class="hover:underline" href={LOGIN_URL}>Log in →</a>
+          <a class="hover:underline" {...appLink(LOGIN_URL)}>Log in →<span class="sr-only"> (opens in a new tab)</span></a>
         </p>
       </div>
     </div>

@@ -50,6 +50,15 @@ there.
 `packs` and `tokenCosts` from `src/lib/site.js`. When `backend/services/
 tokens.py` changes, update that file and every page follows.
 
+**Links into the app open in a new tab.** Every CTA is `appLink(SIGNUP_URL)`
+(or `LOGIN_URL` / `APP_URL`) spread over the `<a>` or `<Button>` — never a bare
+`href` — because the site and the app are separate origins. Navigating the
+current tab leaves this page one Back press behind the product, so Back, or a
+right-edge swipe on a phone, drops a seller out of the app mid-upload and back
+onto the pitch for it. `appLink()` in `src/lib/site.js` is the only place those
+attributes are written, and `npm run links` fails on an app link in `dist/`
+that is missing them.
+
 ### The legal pages
 
 The app still serves its own copies at `/about`, `/terms` and

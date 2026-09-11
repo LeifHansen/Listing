@@ -36,6 +36,38 @@ export const APP_URL = "https://app.thryftshop.com";
 export const LOGIN_URL = `${APP_URL}/?login=1`;
 export const SIGNUP_URL = `${APP_URL}/?signup=1`;
 
+/**
+ * The attributes every link into the app carries. Spread it, never retype it:
+ *
+ *   <Button {...appLink(SIGNUP_URL)} variant="primary">Sign up free</Button>
+ *   <a {...appLink(LOGIN_URL)} class="...">Log in</a>
+ *
+ * `target="_blank"` is the point of this helper. The site and the app are
+ * separate origins, and a CTA that navigates the current tab leaves this page
+ * sitting one Back press behind the app — so Back, or a right-edge swipe on a
+ * phone, drops a seller out of the product they just signed in to and back
+ * onto the pitch for it, mid-upload. A new tab gives the app a history that
+ * starts at the app, and leaves the page they were reading open where it was.
+ *
+ * `_blank` rather than a named target (`target="thryft-app"`), which would
+ * reuse one app tab across clicks: a named target RE-NAVIGATES that tab, so a
+ * stray click on the header's Sign up would reload the app over a draft in
+ * progress. An extra tab is the cheaper mistake.
+ *
+ * `rel="noopener"` severs the new tab's `window.opener` handle back to this
+ * page. `noreferrer` is deliberately NOT set — the app is ours, and the
+ * referring page is how we know which CTA sent someone.
+ *
+ * `<Button>` turns `target="_blank"` into a "(opens in a new tab)" note for
+ * screen readers on its own; a bare `<a>` has to say that itself.
+ * `scripts/check-links.mjs` fails the link check on an app link in the built
+ * HTML that is missing either attribute, so forgetting this is caught in CI
+ * rather than by a seller.
+ */
+export function appLink(href) {
+  return { href, target: "_blank", rel: "noopener" };
+}
+
 export const site = {
   name: "Thryft Shop",
   tagline: "Snap it · AI writes it · list it everywhere.",
