@@ -1484,6 +1484,7 @@ def _resolve_category(listing: Listing) -> None:
     opposite fixes.
     """
     if listing.category_id:
+        _has_a_category(listing)
         return _fit_condition_to_category(listing)
     if not config.taxonomy_ready():
         log.warning("category: no id resolved — the Taxonomy API needs "
@@ -1492,7 +1493,23 @@ def _resolve_category(listing: Listing) -> None:
     for query in _category_queries(listing):
         try:
             best = taxonomy.best_category_id(query)
+        except taxonomy.QueryRefused as exc:
+            # eBay refused THIS query, not the app (see taxonomy.QueryRefused).
+            # The ladder exists for exactly this case, so take the next rung
+            # rather than the exit: the first query carries the whole item --
+            # brand, an 80-character title, model numbers, the AI's path -- and
+            # is the one eBay is most likely to refuse, while the title alone,
+            # the path and its leaf sit below it untried. Ending the ladder
+            # here is how a draft came out of identify with a perfectly good
+            # category path and an EMPTY ID BOX, blocked from publishing on a
+            # field nobody had asked the seller to fill.
+            log.info("category: eBay would not search for %r (%s) — trying a "
+                     "narrower query", query[:120], exc)
+            continue
         except Exception as exc:  # noqa: BLE001 - never block identify on this
+            # Anything else is the keys, the quota or eBay itself, and says
+            # nothing about the query: the remaining rungs would fail the same
+            # way, three more times, on a draft the seller is waiting for.
             log.warning("category: eBay's Taxonomy API failed for %r: %s: %s",
                         query[:120], type(exc).__name__, exc)
             return _needs_a_category(listing)
@@ -1500,6 +1517,7 @@ def _resolve_category(listing: Listing) -> None:
             listing.category_id = best["category_id"]
             if best.get("path"):
                 listing.category_suggestion = best["path"]
+            _has_a_category(listing)
             return _fit_condition_to_category(listing)
         log.info("category: no eBay match for %r", query[:120])
     log.warning("category: eBay matched no category for %r — the draft goes "
@@ -1662,6 +1680,39 @@ def _needs_a_category(listing: Listing) -> None:
     note = "eBay category — we couldn't match one; pick it from the suggestions"
     if not any("ebay category" in m.lower() for m in listing.missing_info):
         listing.missing_info = [*listing.missing_info, note]
+
+
+def _has_a_category(listing: Listing) -> None:
+    """Take `_needs_a_category`'s note back off, because the draft has one now.
+
+    The note is an editor "things to check" entry asking the seller to pick a
+    category. A draft that has since been given one must stop asking for the
+    field sitting filled in beside it — the same rule
+    `_drop_answered_missing_info` applies from the other end, applied here too
+    because only the bulk and async paths call that one.
+    """
+    listing.missing_info = [m for m in listing.missing_info
+                            if "ebay category" not in m.lower()]
+
+
+def _resolve_category_after_research(listing: Listing) -> None:
+    """A second attempt at the category number, on the researched title.
+
+    `_research_draft` runs after the category and can REPLACE the title: a
+    hedged "vintage portable cassette player" becomes "Sony Walkman WM-10",
+    and an empty brand gets filled. Those are the two words the category
+    lookup searches on (see `_category_query`), and a vague title is exactly
+    what eBay matches nothing for — so the draft that most needs a second
+    attempt is the one research just improved most.
+
+    Only ever fills a blank. A category already resolved, or one the seller
+    picked, is left exactly as it is, which is what makes this safe to call
+    unconditionally. It also costs nothing when research changed nothing:
+    the same queries come back off the suggestion cache without touching eBay.
+    """
+    if listing.category_id:
+        return
+    _resolve_category(listing)
 
 
 def _tag_text_for(paths: list, aspects: list[dict]) -> str:
@@ -5373,6 +5424,10 @@ def identify(session_id: str, request: Request) -> dict:
     # and the comp search is only as good as the title it searches for.
     _research_draft(result.listing, paths, result.raw_observations,
                     result.confidence)
+    # Research may have replaced a hedged title with the real one; if the
+    # first attempt left this draft without a category NUMBER, the better
+    # title gets it one now.
+    _resolve_category_after_research(result.listing)
     # After the category: comps are sharper filtered to it. See
     # _price_against_comps — the photos alone never see a comparable listing.
     _price_against_comps(result.listing, _uid(request))
@@ -5624,6 +5679,16 @@ def category_suggestions(payload: dict, request: Request) -> dict:
         raise HTTPException(400, "query is required")
     try:
         return taxonomy.suggest(query, limit=int(payload.get("limit", 5)))
+    except taxonomy.QueryRefused as exc:
+        # eBay will not search for those words (see taxonomy.QueryRefused).
+        # `_lookup_failed` would answer that with "something went wrong on
+        # eBay's side, try again" — and trying again sends the identical query
+        # to the identical refusal. It is the query that has to change, which
+        # is what the picker's own empty state says: "No category matches
+        # found. Try editing the title."
+        log.info("category suggestions: eBay would not search for %r (%s)",
+                 query[:120], exc)
+        return {"query": query, "tree_id": None, "suggestions": []}
     except Exception as exc:  # noqa: BLE001
         raise _lookup_failed("look up eBay's categories", exc) from exc
 
@@ -6619,6 +6684,10 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
                         tags=result.tags)
         _research_draft(listing, paths, result.raw_observations,
                         result.confidence)
+        # Research may have replaced a hedged title with the real one; if the
+        # first attempt left this draft without a category NUMBER, the better
+        # title gets it one now.
+        _resolve_category_after_research(listing)
         _price_against_comps(listing, ctx.uid, ctx.prefs)
         storage.save_listing(sid, listing)
         db.upsert_listing(sid, listing.model_dump(), status="draft",
@@ -7138,6 +7207,10 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _beat("research")
         _research_draft(result.listing, [opt_dir / n for n in names],
                         result.raw_observations, result.confidence)
+        # Research may have replaced a hedged title with the real one; if the
+        # first attempt left this draft without a category NUMBER, the better
+        # title gets it one now.
+        _resolve_category_after_research(result.listing)
         _price_against_comps(result.listing, uid, prefs)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)

@@ -68,6 +68,33 @@ _CONDITIONS_CACHE: dict[tuple, tuple[float, dict]] = {}
 _ASPECTS_LAST_GOOD: dict[str, dict] = {}
 
 
+class QueryRefused(RuntimeError):
+    """eBay would not search categories for THIS string.
+
+    get_category_suggestions answers a query it cannot use with a 4xx, and
+    that is a verdict on the words that went in -- not on the app's keys, its
+    quota, or eBay's health. The distinction is the whole point of the class:
+    a caller holding several queries for the same item (see
+    main._category_queries -- brand + title + the AI's path, then the title
+    alone, then the path, then its leaf) can drop THIS one and try the next,
+    narrower one, while a 401, a 429 or a timeout says nothing about the query
+    and is raised as itself so those callers stand down instead of failing
+    four times over.
+
+    Without it, one refused query ended the whole ladder: the draft kept the
+    AI's readable category path, got no numeric id beside it, and could not
+    publish until the seller picked a category by hand.
+    """
+
+
+# The statuses that mean "that query, not you". 400 is what eBay returns for a
+# query string it will not search; 422 is the same verdict spelled the other
+# way. Everything else -- 401/403 (keys), 429 (quota), 5xx, a timeout -- is
+# about the app or eBay and stops the caller rather than costing it three more
+# identical failures.
+_QUERY_REFUSED_STATUSES = (400, 422)
+
+
 def _app_token() -> str:
     now = time.time()
     if _token_cache["token"] and now < _token_cache["expires_at"] - 60:
@@ -145,8 +172,25 @@ def suggest(query: str, marketplace_id: Optional[str] = None, limit: int = 5) ->
         headers=_headers(),
         timeout=30,
     )
+    if resp.status_code in _QUERY_REFUSED_STATUSES:
+        raise QueryRefused(
+            f"eBay would not search categories for {query[:120]!r} "
+            f"(HTTP {resp.status_code})")
     resp.raise_for_status()
-    data = resp.json()
+    # "Nothing matched that" comes back as an EMPTY BODY rather than an empty
+    # list, and `resp.json()` on no content raises -- which reached the caller
+    # as an exception indistinguishable from eBay being down, and cost a draft
+    # its category id over an answer eBay had actually given. No match is an
+    # answer, and a cacheable one.
+    if resp.status_code == 204 or not resp.content:
+        data: dict = {}
+    else:
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "eBay sent an unreadable answer for category suggestions."
+            ) from exc
 
     suggestions = []
     for s in data.get("categorySuggestions", [])[:limit]:
