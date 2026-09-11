@@ -1252,9 +1252,16 @@ def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
 
     CPU-only — no API call. Each box is cropped from the FULL-SIZE photo (plus
     a margin) and upscaled so small print reads at presentation size. Invalid
-    entries are dropped, never guessed at."""
+    entries are dropped, never guessed at.
+
+    From images.as_shot(), so the zoom lands on the tag the camera saw rather
+    than on whatever a cutout left of it — this pass reads the small print on
+    a brand and care label, which is exactly what a cutout run on a close-up
+    used to delete. It does not go through vision_copy: a tag needs every
+    pixel the photo has, not a whole-frame copy sized down for tokens."""
     from PIL import Image
-    paths = [p for p in image_paths[:8] if p.is_file()]
+    from . import images
+    paths = [images.as_shot(p) for p in image_paths[:8] if p.is_file()]
     crops: list[dict] = []
     for t in (tags or [])[:6]:
         if not isinstance(t, dict):

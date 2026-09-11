@@ -6,10 +6,12 @@ sideways or on its head — which EXIF knows nothing about, so a vision model
 is asked; see services/orient for how, and for why the last one was wrong
 about everything that was not a shirt. It takes the background off when the
 seller asked for that: one run of the local model, the matte hardened a
-little, the item composited on white under a soft contact shadow. And it
-sizes the result for eBay — the longest side to 1600px, never upscaled —
-saved as a JPEG that carries no metadata, so the GPS of the seller's home
-never rides along to a public listing.
+little, the item composited on white under a soft contact shadow — except on
+a close-up of PART of an item, a tag or a label or a stitch, where there is
+no background to take off and the model, asked anyway, deletes the item and
+keeps the label. And it sizes the result for eBay — the longest side to
+1600px, never upscaled — saved as a JPEG that carries no metadata, so the GPS
+of the seller's home never rides along to a public listing.
 
 Deliberately nothing else. The pass used to be a pipeline: the orientation
 guess in its shirt-shaped first form, a matte refined by a border
@@ -703,8 +705,105 @@ def _load(src: Path) -> tuple[Image.Image, tuple[int, int]]:
     return img, shot
 
 
+# What a photo gets instead of a cutout when it is a close-up of part of an
+# item. Not an error and not a refusal — nothing was attempted, because there
+# was nothing for the cutout to do. It rides in `bg_error` so the seller is
+# told and the charge comes back, which is what that field is for.
+DETAIL_KEPT_AS_SHOT = (
+    "This is a close-up of a detail, not a photo of the whole item — there is "
+    "no background to take off, so it was kept as shot.")
+
+
+# --- the photo the cutout replaced -------------------------------------------
+#
+# A cutout is a PRESENTATION change: it is what the buyer should see on the
+# listing. It is not what the app should THINK with, and for a long time it
+# was both, because every vision pass reads the optimized photo.
+#
+# That is the second half of the Hilo Hattie report. The cutout tore up two
+# tag close-ups; identify then read those same torn files, could not find a
+# brand on them, and invented one. The close-ups are spared now (see
+# orient._details), which removes that cause — but not the shape of the
+# problem. Any cutout that goes wrong, for any reason this file has not
+# thought of yet, still silently becomes the app's only record of the item,
+# and the seller reads the result as "the AI is bad at identifying things".
+# Nothing in the draft says a photo was damaged, because nothing downstream
+# knows a photo COULD have been.
+#
+# So the pass keeps the photo it replaced. Written from the image already in
+# memory one step before the composite, so it costs one JPEG encode and no
+# decode, and it is the right frame by construction: upright, EXIF honoured,
+# sized for eBay, metadata stripped — the same photo the seller would get
+# from Restore original, without re-reading a 12MP HEIC to produce it.
+#
+# WHY NOT JUST READ original/. It is tempting, and it is what this looked
+# like at first. Three things are wrong with it. The originals are pruned on
+# a timer (storage.prune_originals), so re-identifying an older listing would
+# quietly read a different photo than a new one. They are pre-rotation — the
+# ITEM's turn is decided by services/orient and applied here, so a photo the
+# pass straightened would go back to the model lying on its side. And they
+# are whatever the camera wrote: a 12MP HEIC to decode on every call, on the
+# same 4GB box that is holding the cutout model.
+#
+# WHY THE MTIME RULE IS THE WHOLE INVALIDATION STORY. This file is preferred
+# only while it is at least as new as the working copy next to it. Every way
+# a photo changes after this pass rewrites that working copy — the studio's
+# save, a quick rotate, Restore original, a pull back from R2 — so each of
+# them makes this file older, and as_shot() stops offering it without any of
+# those routes knowing it exists. The seller's own edit is the seller's
+# intent and must win; this only ever speaks for a photo nobody has touched
+# since the pass ran.
+_AS_SHOT = "as_shot"
+
+
+def _keep_as_shot(dst: Path, img: Image.Image) -> None:
+    """Keep `img` as the faithful copy of the photo written to `dst`.
+
+    Best-effort in the strongest sense: this is an aid to the passes that
+    READ photos, and a photo must never fail to be listed because a cache
+    beside it could not be written. Only for a real session photo — a direct
+    caller optimizing to some other directory gets nothing, exactly as
+    vision_copy does."""
+    if dst.parent.name != "optimized":
+        return
+    try:
+        out = dst.parent.parent / _AS_SHOT / dst.name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f".{out.name}.{os.getpid():x}.tmp")
+        try:
+            img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
+            os.replace(tmp, out)  # atomic: a racing reader never sees a torn file
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    except Exception as exc:  # noqa: BLE001 - a cache is never worth a photo
+        log.info("as-shot copy skipped for %s: %s", dst.name, exc)
+
+
+def as_shot(path: Path) -> Path:
+    """The photo as the camera saw it, for an optimized session photo whose
+    background was taken off — or `path` itself for every other photo, which
+    already IS what the camera saw.
+
+    This is what every pass that has to READ an item should open: what its
+    tag says, what it is made of, what the flaw in the corner is. `path`
+    stays right for anything that has to SHOW the photo.
+
+    Safe to call with any path: one that is not a session photo, has no
+    faithful copy, or has been edited since comes straight back."""
+    if path.parent.name != "optimized":
+        return path
+    kept = path.parent.parent / _AS_SHOT / path.name
+    try:
+        if kept.stat().st_mtime >= path.stat().st_mtime:
+            return kept
+    except OSError:  # no copy kept, or the photo itself is gone
+        pass
+    return path
+
+
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
-             rotate: int = 0) -> dict:
+             rotate: int = 0, detail: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that finds nothing keeps the photo as shot
     and says so in `bg_error`, so the caller can give the charge back.
@@ -716,21 +815,38 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     would resample the photo and report a turn that did not happen. Reported
     as `rotated` when applied. Nothing here asks for a turn: the studio's
     Restore original and every other direct caller ship the photo as shot,
-    and only the batch pass (optimize_batch) decides one."""
+    and only the batch pass (optimize_batch) decides one.
+
+    `detail` says this photo is a close-up of PART of an item — a tag, a
+    label, a stitch, a texture — as decided by the same pass and on the same
+    terms. The cutout is not run on one. Every pixel in the frame is the
+    item, so there is no background to take off, and a salient-object model
+    asked anyway answers the only question it knows: it keeps the label and
+    deletes the garment behind it. The three guards below cannot catch that —
+    the matte of a torn-out label is one opaque region that fills its own box,
+    which is what a GOOD cutout looks like — so the photo has to be spared
+    before the model is asked, not after. See orient._details."""
     img, shot = _load(src)
     turn = int(rotate or 0) % 360
     turn = turn if turn in CW_TRANSPOSE else 0
     if turn:
         img = img.transpose(CW_TRANSPOSE[turn])
     bg_removed, bg_error = False, None
-    if remove_bg:
+    faithful = None
+    if remove_bg and detail:
+        bg_error = DETAIL_KEPT_AS_SHOT
+    elif remove_bg:
         try:
             out = cutout(img)
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
             log.warning("bg-removal: keeping %s as shot (%s)", src.name, exc)
             out, bg_error = None, f"Background removal failed: {exc}"
         if out is not None:
-            img, bg_removed = out, True
+            # Hold on to what the camera saw before the cutout replaces it.
+            # This is the only moment it exists in the right form — upright,
+            # EXIF honoured, sized, metadata stripped — and the only moment
+            # it is free. See _keep_as_shot.
+            faithful, img, bg_removed = img, out, True
         elif not bg_error:
             bg_error = ("The background remover found no item in this photo "
                         "— it was kept as shot.")
@@ -749,6 +865,11 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    # AFTER the working copy, never before: as_shot() prefers this file only
+    # while it is at least as new as the photo beside it, which is what makes
+    # a later edit in the studio win automatically.
+    if faithful is not None:
+        _keep_as_shot(dst, faithful)
     out = {"file": dst.name, "original_size": shot, "output_size": img.size,
            "background_removed": bg_removed}
     if turn:
@@ -859,17 +980,20 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     results = []
     if jobs and should_stop is not None and should_stop():
         raise Stopped()
-    # One batched look at every photo still to do, up front, for the ones
-    # whose ITEM lies sideways or on its head, so each is turned before its
-    # cutout rather than after. Best-effort and bounded: a photo the pass
-    # cannot answer for stays as shot.
-    rotations = _rotations_for([src for src, _dst in jobs], should_stop)
+    # One batched look at every photo still to do, up front. It answers two
+    # things: which photos have their ITEM lying sideways or on its head, so
+    # each is turned before its cutout rather than after, and which are
+    # close-ups of PART of an item, so the cutout is not run on them at all.
+    # Best-effort and bounded: a photo the pass cannot answer for is left as
+    # shot and cut out as usual.
+    turns, details = _screen_for([src for src, _dst in jobs], should_stop)
     for src, dst in jobs:
         if should_stop is not None and should_stop():
             raise Stopped()
         try:
             result = optimize(src, dst, remove_bg,
-                              rotate=rotations.get(src.name, 0))
+                              rotate=turns.get(src.name, 0),
+                              detail=src.name in details)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         results.append(result)
@@ -882,25 +1006,29 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     return results
 
 
-def _rotations_for(sources: list[Path], should_stop=None) -> dict[str, int]:
-    """{filename: clockwise degrees} for the photos in `sources` whose ITEM
-    lies sideways or on its head, per services/orient. Never raises and never
-    costs a photo: with the API off, over budget, or on any failure the
-    answer is "as shot". Keyed by name, which is unique within a batch (one
-    directory) and is how optimize_batch looks a photo's turn up.
+def _screen_for(sources: list[Path],
+                should_stop=None) -> tuple[dict[str, int], frozenset[str]]:
+    """({filename: clockwise degrees}, {filenames that are close-ups}) for the
+    photos in `sources`, per services/orient. Never raises and never costs a
+    photo: with the API off, over budget, or on any failure the answer is "as
+    shot, and cut out as usual" — an empty turn map and no close-ups, which is
+    exactly this file's behaviour before either answer existed. Keyed by name,
+    which is unique within a batch (one directory) and is how optimize_batch
+    looks a photo up.
 
     Imported here, not at module scope: orient reaches the Anthropic SDK, and
     everything else in this file is Pillow. Keeping the AI dependency inside
     the one function that needs it is what lets the photo gate in CI prove
     the pass on Pillow alone."""
     if not sources:
-        return {}
+        return {}, frozenset()
     try:
         from . import orient
-        return orient.detect_rotations(sources, should_stop=should_stop)
-    except Exception as exc:  # noqa: BLE001 - orientation is an enhancement
+        found = orient.screen(sources, should_stop=should_stop)
+        return found.rotations, found.details
+    except Exception as exc:  # noqa: BLE001 - the screen is an enhancement
         log.warning("auto-orient: skipped (%s)", exc)
-        return {}
+        return {}, frozenset()
 
 
 def warm() -> None:
@@ -1010,20 +1138,28 @@ VISION_SIDE = int(os.getenv("VISION_IMAGE_SIDE", "1092") or "1092")
 def vision_copy(path: Path, side: int = 0) -> Path:
     """A cached, right-sized JPEG copy of an optimized photo for vision calls.
 
+    Made from as_shot(path), not from `path`: a vision call is the app trying
+    to work out what the item IS, and a cutout can only have taken detail
+    away from that. See the note above _keep_as_shot.
+
     Lives in the session's vision/ dir (a sibling of optimized/, invisible to
-    the image list and the R2 mirror) and is regenerated whenever the source
-    file is newer — photo edits rewrite the optimized file, so staleness is
-    just an mtime comparison. Returns `path` unchanged for anything that isn't
-    a session's optimized photo, so callers can pass any path safely."""
+    the image list and the R2 mirror) and is regenerated whenever either the
+    source or the photo beside it is newer — photo edits rewrite the optimized
+    file, so staleness is just an mtime comparison, and the same comparison is
+    what hands the seller's edit back to the model. Returns `path` unchanged
+    for anything that isn't a session's optimized photo, so callers can pass
+    any path safely."""
     if path.parent.name != "optimized":
         return path
     side = side or VISION_SIDE
+    src = as_shot(path)
     dst = path.parent.parent / "vision" / path.name
     try:
-        if dst.is_file() and dst.stat().st_mtime >= path.stat().st_mtime:
+        if dst.is_file() and dst.stat().st_mtime >= max(
+                path.stat().st_mtime, src.stat().st_mtime):
             return dst
         dst.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(path) as img:
+        with Image.open(src) as img:
             img = _flatten(img)
             img.thumbnail((side, side), Image.LANCZOS)
             tmp = dst.with_name(dst.name + ".tmp")

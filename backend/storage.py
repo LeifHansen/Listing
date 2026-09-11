@@ -294,14 +294,23 @@ def writable() -> bool:
 
 
 def prune_originals(max_age_seconds: int) -> int:
-    """Delete source uploads (session original/ dirs) older than the cutoff.
+    """Delete source uploads (session original/ dirs) and the as-shot copies
+    beside them, older than the cutoff.
 
-    Nothing reads these after the optimize pass — the optimized JPEGs are what
-    the app, the browser, and eBay use — but they're the BIGGEST thing on the
-    volume: a phone photo is several MB against a few hundred KB optimized. A
-    full volume takes the whole app down ("No space left on device" on every
-    upload), so old originals are reclaimed on a timer. Returns bytes freed.
-    Never raises."""
+    Only Restore original reads the uploads after the optimize pass — the
+    optimized JPEGs are what the app, the browser, and eBay use — but they're
+    the BIGGEST thing on the volume: a phone photo is several MB against a few
+    hundred KB optimized. A full volume takes the whole app down ("No space
+    left on device" on every upload), so old originals are reclaimed on a
+    timer. Returns bytes freed. Never raises.
+
+    as_shot/ is swept on the same timer and for the same reason. It holds one
+    JPEG per photo the cutout changed (services/images._keep_as_shot), which
+    is a second copy of that photo, and it is a CACHE: the passes that read it
+    fall back to the optimized photo when it is gone, exactly as they do for a
+    photo that never had a cutout. Reclaiming it costs an old listing a little
+    fidelity if it is identified again months later, and keeping it costs
+    every seller the volume."""
     freed = 0
     try:
         base = config.SESSIONS_DIR
@@ -309,17 +318,18 @@ def prune_originals(max_age_seconds: int) -> int:
             return 0
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
-            orig = d / "original"
-            try:
-                if not orig.is_dir():
+            for sub in ("original", "as_shot"):
+                old_dir = d / sub
+                try:
+                    if not old_dir.is_dir():
+                        continue
+                    for p in old_dir.iterdir():
+                        if p.is_file() and p.stat().st_mtime <= cutoff:
+                            size = p.stat().st_size
+                            p.unlink(missing_ok=True)
+                            freed += size
+                except Exception:  # noqa: BLE001 - keep pruning the rest
                     continue
-                for p in orig.iterdir():
-                    if p.is_file() and p.stat().st_mtime <= cutoff:
-                        size = p.stat().st_size
-                        p.unlink(missing_ok=True)
-                        freed += size
-            except Exception:  # noqa: BLE001 - keep pruning the rest
-                continue
     except Exception as exc:  # noqa: BLE001
         log.warning(f"storage: prune_originals failed: {exc}")
     return freed
