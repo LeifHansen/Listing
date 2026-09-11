@@ -10,7 +10,7 @@
  */
 import { cn } from "../lib/utils.js";
 
-const { href, variant = "secondary", size = "md", class: className, ...rest } = Astro.props;
+const { href, variant = "secondary", size = "md", class: className, target, ...rest } = Astro.props;
 
 const base =
   "inline-flex items-center justify-center gap-2 font-semibold select-none whitespace-nowrap " +
@@ -34,5 +34,13 @@ const sizes = {
 
 const cls = cn(base, variants[variant], sizes[size], className);
 const Tag = href ? "a" : "button";
+
+/**
+ * A link that opens a new tab says so in its accessible name. Sighted users get
+ * the cue for free — the page they were on is still there behind the new tab —
+ * while a screen reader user would otherwise just find themselves somewhere
+ * else, with the Back they'd reach for doing nothing. Set once here so every
+ * `appLink()` CTA carries it without the call site remembering.
+ */
 ---
-<Tag href={href} class={cls} {...rest}><slot /></Tag>
+<Tag href={href} class={cls} target={target} {...rest}><slot />{target === "_blank" && <span class="sr-only"> (opens in a new tab)</span>}</Tag>

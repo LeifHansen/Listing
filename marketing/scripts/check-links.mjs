@@ -8,6 +8,7 @@
  */
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
+import { APP_URL } from "../src/lib/site.js";
 
 const dist = path.resolve(import.meta.dirname, "../dist");
 if (!existsSync(dist)) {
@@ -26,6 +27,7 @@ const files = walk(dist);
 const pages = files.filter((f) => f.endsWith(".html"));
 const errors = [];
 let checked = 0;
+let appLinks = 0;
 
 /** Does an internal href correspond to something in dist/? */
 function resolves(href) {
@@ -50,6 +52,24 @@ for (const file of pages) {
     if (/^(https?:|mailto:|tel:|data:|#)/.test(href)) continue;
     checked++;
     if (!resolves(href)) errors.push(`${page}: broken link → ${href}`);
+  }
+
+  // --- links into the app open in a new tab ---
+  // A CTA that navigates the current tab leaves this page one Back press behind
+  // the app, so Back — or a phone's edge swipe — throws a seller out of the
+  // product they just signed in to. `appLink()` in src/lib/site.js is the one
+  // place that sets the attributes; this is what makes forgetting it fail, for
+  // a hand-written href as much as a missed helper.
+  for (const [tag] of html.matchAll(/<a\b[^>]*>/g)) {
+    const href = tag.match(/href="([^"]*)"/)?.[1];
+    if (!href?.startsWith(APP_URL)) continue;
+    appLinks++;
+    if (!/\btarget="_blank"/.test(tag)) {
+      errors.push(`${page}: app link without target="_blank" → ${href}`);
+    }
+    if (!/\brel="[^"]*\bnoopener\b[^"]*"/.test(tag)) {
+      errors.push(`${page}: app link without rel="noopener" → ${href}`);
+    }
   }
 
   // --- SEO essentials ---
@@ -124,10 +144,16 @@ for (const required of [
   if (!existsSync(path.join(dist, required))) errors.push(`missing required file: ${required}`);
 }
 
-console.log(`checked ${checked} internal links across ${pages.length} pages`);
+console.log(
+  `checked ${checked} internal links and ${appLinks} links into the app ` +
+    `across ${pages.length} pages`,
+);
 if (errors.length) {
   console.error(`\n${errors.length} problem(s):`);
   for (const e of errors) console.error(`  ✗ ${e}`);
   process.exit(1);
 }
-console.log("✓ all internal links resolve and every page has its SEO tags");
+console.log(
+  "✓ all internal links resolve, every link into the app opens in a new tab, " +
+    "and every page has its SEO tags",
+);

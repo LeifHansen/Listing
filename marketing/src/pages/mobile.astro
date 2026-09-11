@@ -4,7 +4,7 @@ import Container from "../components/Container.astro";
 import Section from "../components/Section.astro";
 import Button from "../components/Button.astro";
 import EmailCapture from "../components/EmailCapture.astro";
-import { site, APP_URL } from "../lib/site.js";
+import { site, APP_URL, appLink } from "../lib/site.js";
 
 const description =
   "Thryft Shop on iOS and Android — list from the aisle, with the camera you " +
@@ -31,7 +31,7 @@ const description =
             ) : (
               <Button href="#early-access" variant="primary" size="xl">Join the iOS beta</Button>
             )}
-            <Button href={APP_URL} variant="secondary" size="xl">Use it on the web</Button>
+            <Button {...appLink(APP_URL)} variant="secondary" size="xl">Use it on the web</Button>
           </div>
           <p class="mt-5 text-sm text-ink-secondary">
             iOS is in TestFlight beta · Android is in development
@@ -148,7 +148,7 @@ const description =
 
     <p class="mt-10 text-sm text-ink-secondary">
       Everything the phone apps do, the web app does today at
-      <a class="font-semibold text-blue-ink hover:underline" href={APP_URL}>{APP_URL.replace("https://", "")}</a> —
+      <a class="font-semibold text-blue-ink hover:underline" {...appLink(APP_URL)}>{APP_URL.replace("https://", "")}<span class="sr-only"> (opens in a new tab)</span></a> —
       no install, no waiting list.
     </p>
   </Section>
