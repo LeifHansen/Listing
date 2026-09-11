@@ -216,12 +216,15 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     return recs
 
 
-def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
-                    limit: int = 8,
-                    blanks_by_id: Optional[dict] = None) -> list[dict]:
-    """Ranked recommendations across many listing records (best first). Keeps
-    the single strongest action per listing so the list spans the whole
-    portfolio instead of piling onto one item."""
+def ranked(items: list[dict], metrics_by_id: Optional[dict] = None,
+           blanks_by_id: Optional[dict] = None) -> list[dict]:
+    """Every listing's strongest recommendation, best first. UNCAPPED.
+
+    The cap belongs to whoever is rendering these, not to the ranking — and
+    it has to be applied somewhere that can still say how many were left out.
+    A count taken after a truncation is not a count of anything (see
+    totals_by_type).
+    """
     metrics_by_id = metrics_by_id or {}
     blanks_by_id = blanks_by_id or {}
     # Keep the strongest action per listing as they are generated, rather than
@@ -240,4 +243,61 @@ def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
             held = best.get(r["listing_id"])
             if held is None or r["priority"] > held["priority"]:
                 best[r["listing_id"]] = r
-    return sorted(best.values(), key=lambda x: -x["priority"])[:limit]
+    return sorted(best.values(), key=lambda x: -x["priority"])
+
+
+def totals_by_type(recs: list[dict]) -> dict[str, int]:
+    """How many listings each recommendation type covers — counted on the
+    WHOLE ranking, before any cap.
+
+    This is the number the dashboard's group badge shows, and it has to be
+    counted here because nothing downstream can. The badge used to be the
+    length of the list that arrived, which on a store with more suggestions
+    than the payload cap is the cap, not the count: a seller with 80 listings
+    needing "Fill in details" read 50, pressed "Enrich all", watched 25 of
+    them get filled and pushed to eBay — and came back to a badge still
+    reading 50, because 25 that had been below the line took their place. The
+    work happened; the number could not show it. That reads exactly like a
+    button that does nothing, and it is the second time this group has been
+    reported for it.
+    """
+    totals: dict[str, int] = {}
+    for r in recs:
+        totals[r["type"]] = totals.get(r["type"], 0) + 1
+    return totals
+
+
+def capped_by_type(recs: list[dict], per_type: int) -> list[dict]:
+    """`recs` trimmed to at most `per_type` of each type, order preserved.
+
+    The dashboard groups these by type, so a flat cap is the wrong shape for
+    it twice over. It makes a group's membership depend on how busy the OTHER
+    groups are — and past 50 stale prices it drops a whole group off the
+    screen, taking the only button that clears it with it. Per type, every
+    group that exists is reachable, and the payload stays bounded by the
+    number of types.
+    """
+    kept: dict[str, int] = {}
+    out = []
+    for r in recs:
+        seen = kept.get(r["type"], 0)
+        if per_type and seen >= per_type:
+            continue
+        kept[r["type"]] = seen + 1
+        out.append(r)
+    return out
+
+
+def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
+                    limit: int = 8,
+                    blanks_by_id: Optional[dict] = None) -> list[dict]:
+    """Ranked recommendations across many listing records (best first). Keeps
+    the single strongest action per listing so the list spans the whole
+    portfolio instead of piling onto one item.
+
+    `limit` is a flat cap across every type. Callers that render these in
+    GROUPS want `ranked` + `capped_by_type` + `totals_by_type` instead: a
+    group cannot say how big it is from a list that was cut to fit.
+    """
+    return ranked(items, metrics_by_id=metrics_by_id,
+                  blanks_by_id=blanks_by_id)[:limit]

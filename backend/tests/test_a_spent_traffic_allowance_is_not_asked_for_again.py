@@ -117,6 +117,20 @@ def test_a_held_report_stands_in_while_the_allowance_is_spent(monkeypatch):
     # An hour on, the held report is stale and eBay is asked — and refuses.
     later = time.time() + metrics._TRAFFIC_TTL + 1
     monkeypatch.setattr(metrics.time, "time", lambda: later)
+    # Two clocks, and they have to be the same one. The latch below runs to
+    # the next midnight Pacific, read off the REAL clock, while everything
+    # after this line runs an hour ahead on a fake one -- so between 23:00 and
+    # midnight Pacific the jump lands PAST the reset, the latch lifts, eBay is
+    # asked a third time, and this failed. For one hour a day, on every
+    # branch, for reasons that had nothing to do with the change under test.
+    #
+    # Pinned rather than frozen: what is under test here is that a spent
+    # allowance is not asked for again BEFORE it resets. WHEN it resets is a
+    # different fact with its own test
+    # (test_the_reset_is_the_next_midnight_pacific), and this one should not
+    # be able to fail for it.
+    monkeypatch.setattr(metrics, "_quota_reset_time",
+                        lambda now=None: later + metrics._TRAFFIC_TTL)
     metrics._CACHE.clear()
     status: dict = {}
     again = metrics.listing_metrics(creds, ["42"], status)
