@@ -408,3 +408,64 @@ describe("the fill is one button, not a list to pick from", () => {
     await act(async () => { root.unmount(); });
   });
 });
+
+
+describe("clearing the whole list", () => {
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("empties the section in one tap", async () => {
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    await click(byText("Clear all"));
+
+    expect(text()).toContain("every suggestion is dismissed");
+    expect(text()).not.toContain("Nike hoodie");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("reaches a group that has no row to dismiss", async () => {
+    // "Fill in details" is a header and a button — no rows, so no per-row X.
+    // Before this control there was no way to stop it asking at all.
+    const { root, text } = await mount();
+    expect(text()).toContain("Fill in details");
+
+    await click(byText("Clear all"));
+    expect(text()).not.toContain("Fill in details");
+    expect(text()).toContain("every suggestion is dismissed");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("is not a one-way door either", async () => {
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    await click(byText("Clear all"));
+    expect(byText("Restore 2 dismissed")).toBeTruthy();
+
+    await click(byText("Restore 2 dismissed"));
+    await expand("Check details");
+    expect(text()).toContain("Nike hoodie");
+    expect(text()).toContain("Canon AE-1");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("stays cleared when the engine rebuilds the list", async () => {
+    const first = await mount([], { recs: VERIFY_RECS });
+    await click(byText("Clear all"));
+    await act(async () => { first.root.unmount(); });
+
+    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    expect(text()).not.toContain("Nike hoodie");
+    expect(text()).toContain("every suggestion is dismissed");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("goes away once there is nothing left to clear", async () => {
+    // A control that would do nothing is not offered — but the way back
+    // stays, because that is the one thing still worth tapping.
+    const { root } = await mount([], { recs: VERIFY_RECS });
+    await click(byText("Clear all"));
+
+    expect(byText("Clear all")).toBeFalsy();
+    expect(byText("Restore 2 dismissed")).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+});

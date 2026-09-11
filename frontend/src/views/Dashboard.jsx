@@ -10,7 +10,7 @@ import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { api, pollJob, postJson } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
-import { dismiss as dismissRec, readDismissed, restoreAll,
+import { dismiss as dismissRec, dismissAll, readDismissed, restoreAll,
          withoutDismissed } from "@/lib/dismissedRecs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -567,6 +567,15 @@ export function Dashboard() {
   const hiddenCount = insights.length - visibleInsights.length;
   const dismissOne = (rec) => setDismissed((d) => dismissRec(d, rec));
   const restoreDismissed = () => setDismissed(restoreAll());
+  // Clear the whole section in one go. Two groups cannot be emptied any other
+  // way -- "Fill in details" and "Check details" render as a header and a
+  // button with no rows behind them, so they carry no per-row X, and a seller
+  // who has decided against the advice had no way at all to stop being asked.
+  // Dismissing the VISIBLE list, not `insights`: anything already dismissed is
+  // dismissed, and re-adding it would move it to the newest end of a capped
+  // list and push somebody else's older decision off the back.
+  const clearAllInsights = () =>
+    setDismissed((d) => dismissAll(d, visibleInsights));
 
   // Bulk price drop across one suggestion group. Reports per-listing outcomes
   // rather than a bare success: over a dozen listings some will have sold or
@@ -988,10 +997,23 @@ export function Dashboard() {
       {insights.length > 0 && (
         <motion.div variants={rise}>
           <SectionHeader icon={Lightbulb} title="Suggested actions"
-            action={hiddenCount > 0 && (
-              <Button variant="ghost" size="sm" onClick={restoreDismissed}>
-                <Undo2 aria-hidden /> Restore {hiddenCount} dismissed
-              </Button>
+            action={(
+              /* Clear sits next to Restore, never instead of it: clearing the
+                 list is only safe to offer as one tap because the way back is
+                 already on screen when it lands. */
+              <div className="flex items-center gap-1 shrink-0">
+                {visibleInsights.length > 0 && (
+                  <Button variant="ghost" size="sm" onClick={clearAllInsights}
+                    title="Dismiss every suggestion below">
+                    <X aria-hidden /> Clear all
+                  </Button>
+                )}
+                {hiddenCount > 0 && (
+                  <Button variant="ghost" size="sm" onClick={restoreDismissed}>
+                    <Undo2 aria-hidden /> Restore {hiddenCount} dismissed
+                  </Button>
+                )}
+              </div>
             )} />
           <Card className="p-0 divide-y divide-line overflow-hidden">
             {visibleInsights.length === 0 ? (
