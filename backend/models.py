@@ -254,6 +254,28 @@ class Listing(BaseModel):
     # on has nothing more to gain from running it again, and this is how the
     # suggestion knows to stop asking.
     enriched_at: str = ""
+    # When this listing's asking price was last LOWERED (ISO-8601 UTC), on the
+    # server's own clock. "" means it never has been.
+    #
+    # This is to the dashboard's "Lower prices" group what `enriched_at` above
+    # is to "Fill in details", and it exists for the same report. Both price
+    # nudges are computed from signals a price drop does not move: the age
+    # heuristic counts from `created_at`, which never changes, and the
+    # traffic one reads eBay's VIEWS, which are cumulative for the life of the
+    # listing and so still say "30 views and no watchers" the second after the
+    # price comes down. So the seller pressed "Lower all…", waited through a
+    # dozen serial eBay revises, was told "Lowered 12 prices by 10%" — and the
+    # group came back in the same slot, same twelve listings, same count,
+    # saying the price may be high. Which is indistinguishable from the button
+    # having done nothing.
+    #
+    # Nothing here is a client's to send. It is derived on every write from
+    # the price already stored (services/recommender.price_drop_stamp), so a
+    # stale tab cannot erase it and a forged payload cannot use it to silence
+    # advice — which is why it is NOT in state.SERVER_OWNED_FIELDS: that list
+    # makes the STORED value win, and this one has to be able to move forward
+    # on the very write that drops the price.
+    price_lowered_at: str = ""
     # Why the LAST live publish attempt did not put this listing on the
     # marketplace, in the sentence the seller should read -- "" when the
     # last attempt went live, or when there has never been one.

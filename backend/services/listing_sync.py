@@ -46,7 +46,7 @@ from ..config import log
 from ..errors import StorageUnavailable
 from ..models import Listing
 from . import (ebay_account, ebay_trading, notifications, publish_guard,
-               sync_merge, taxonomy)
+               recommender, sync_merge, taxonomy)
 from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
@@ -283,6 +283,14 @@ def _reconcile(prior: Optional[dict], merged: dict, fresh: dict) -> dict:
                  fresh.get("ebay_listing_id") or "?", exc)
         return merged
     out = result.listing.model_dump()
+    # A markdown the seller made in Seller Hub or the eBay app arrives HERE
+    # and nowhere else — `price` is one of the fields eBay owns on a re-sync.
+    # Unstamped, the dashboard would go on telling a seller who has just cut
+    # their prices somewhere else to cut them, which is the same loop the
+    # in-app button had. Derived from the price we held before this sync, so
+    # nothing eBay says can invent one.
+    out["price_lowered_at"] = recommender.price_drop_stamp(
+        prior or {}, out.get("price"))
     # The new base: what eBay is telling us right now. Written whether or not
     # anything changed, so the next sync compares against the latest agreement.
     out["remote_shadow"] = sync_merge.shadow_from(fresh)

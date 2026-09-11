@@ -55,7 +55,13 @@ SELLER_FIELDS = {
     #     rather than replaces (a client's map is missing entries, not wrong)
     #   dirty_fields -> services/dirty_fields, which recomputes from the
     #     stored copy instead of believing what the client names
-    "marketplaces", "ebay_listing_id", "dirty_fields",
+    #   price_lowered_at -> services/recommender.price_drop_stamp, same shape:
+    #     every write derives it from the price already stored, so the
+    #     payload's copy is never read and cannot either erase the stamp or
+    #     mint one to silence the "Lower prices" group. Deliberately NOT
+    #     server-owned, whose rule is that the STORED value wins — that would
+    #     stop the stamp moving on the one write entitled to move it.
+    "marketplaces", "ebay_listing_id", "dirty_fields", "price_lowered_at",
 }
 
 
