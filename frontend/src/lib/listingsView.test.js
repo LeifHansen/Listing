@@ -217,6 +217,66 @@ describe("the dashboard's Recent listings strip", () => {
       .toEqual(["2026-03-05", "2026-03-03", "2026-03-01"]);
   });
 
+  it("puts a listing a buyer has bid on ahead of them", () => {
+    // The second defect, reported from the dashboard: the auction with the
+    // bid on it was the LAST of the four cards, behind three nobody had
+    // touched. Recency put it there — the other three had been written more
+    // recently than the bid, by a job, not a buyer.
+    const items = [
+      at("live", "2026-03-05"), at("live", "2026-03-04"),
+      at("live", "2026-03-03"), at("live", "2026-03-01"),
+    ];
+    expect(recentListings(items, { "live2026-03-01": { bids: 1 } })
+      .map((i) => i.updated_at))
+      .toEqual(["2026-03-01", "2026-03-05", "2026-03-04", "2026-03-03"]);
+  });
+
+  it("does not let a batch of enriched listings push a bid off the strip", () => {
+    // The report, in full. A bulk enrich (or a batch of relists) stamps
+    // `updated_at` on every row it touches, so four of them are four cards:
+    // by plain recency the auction is fifth, and the strip is four wide.
+    const enriched = [
+      at("live", "2026-03-09"), at("live", "2026-03-08"),
+      at("live", "2026-03-07"), at("live", "2026-03-06"),
+    ];
+    const bidOn = at("live", "2026-03-01");
+    const out = recentListings([...enriched, bidOn], {
+      [bidOn.id]: { bids: 1, high_bid: 12.44 } });
+    expect(out).toHaveLength(4);
+    expect(out[0].id).toBe(bidOn.id);
+    // And it cost the oldest of the enriched ones its slot, not the strip a card.
+    expect(out.map((i) => i.updated_at))
+      .toEqual(["2026-03-01", "2026-03-09", "2026-03-08", "2026-03-07"]);
+  });
+
+  it("lifts a waiting Best Offer the same way, and keeps recency among them", () => {
+    const items = [
+      at("live", "2026-03-09"), at("live", "2026-03-02"), at("live", "2026-03-03"),
+    ];
+    expect(recentListings(items, {
+      "live2026-03-02": { offers: 1 }, "live2026-03-03": { bids: 2 } })
+      .map((i) => i.updated_at))
+      .toEqual(["2026-03-03", "2026-03-02", "2026-03-09"]);
+  });
+
+  it("is plain recency before eBay has answered", () => {
+    // No numbers is "we don't know who has bid", not "nobody has" — so
+    // nothing is lifted, and nothing already on the strip is moved.
+    const items = [at("live", "2026-03-01"), at("live", "2026-03-05")];
+    expect(recentListings(items).map((i) => i.updated_at))
+      .toEqual(["2026-03-05", "2026-03-01"]);
+    expect(recentListings(items, {}).map((i) => i.updated_at))
+      .toEqual(["2026-03-05", "2026-03-01"]);
+  });
+
+  it("is not lifted into by a bid on something already finished", () => {
+    // A sold auction is settled business wherever its bids landed, and this
+    // strip is what the seller can still act on.
+    const items = [at("sold", "2026-03-09"), at("live", "2026-03-01")];
+    expect(recentListings(items, { "sold2026-03-09": { bids: 5 } })
+      .map((i) => i.status)).toEqual(["live"]);
+  });
+
   it("leaves the caller's array alone", () => {
     // It sorts, and the store's `items` is the array React renders from.
     const items = [at("live", "2026-03-01"), at("live", "2026-03-05")];

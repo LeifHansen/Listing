@@ -1571,6 +1571,25 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
   the deliberate "Sync with eBay" press reading past the server's cache) —
   answering an offer happens in eBay, so nothing here can learn of it except
   by asking again.
+- **A buyer waiting outranks recency — on the grid and on the dashboard.** A
+  bid or a pending offer is money waiting on an answer, and it used to reach
+  the seller as a chip on a card that sat wherever its last write had put it.
+  Both readers of the store now sort in tiers (`orderListings` and
+  `recentListings`, `frontend/src/lib/listingsView.js`): the listings a buyer
+  has acted on, then everything else still in play by `updated_at`, then the
+  archive — newest first within each — so the card that has to be looked at is
+  not the one the seller has to scroll for. It counts for most on the
+  dashboard's *Recent listings* strip, which is four cards wide, where fifth
+  place is off the panel entirely: `updated_at` records what was written last,
+  not what is worth looking at, and the jobs that write are bulk ones — an
+  enrich pass stamps every listing it fills, a relist stamps the one it renews
+  — so four of those were four cards, and the auction with a bid on it was
+  walked off the strip by four listings nobody had bid on. The lift is applied
+  BEFORE the four are taken rather than after, for the same reason the sold
+  ones are dropped before it: fifth place has already been dropped by the time
+  anything downstream could lift it. A count that is ABSENT still lifts
+  nothing — "we couldn't ask" is not "nobody" — so an unreadable metrics call
+  leaves the strip in the recency order it always had.
 - **Every price the app chooses ends in `.99`** (`backend/money.py` →
   `charm_price`, mirrored for the browser in `frontend/src/lib/charmPrice.js`):
   the AI's drafted price, the market number that overrules a draft priced far

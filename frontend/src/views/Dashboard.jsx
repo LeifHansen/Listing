@@ -792,13 +792,19 @@ export function Dashboard() {
         go: () => openListing(drafts[0].id),
       });
 
-  // The four newest listings the seller can still act on. Sold ones are left
-  // out, the same way the Sell screen's tabs leave them out: a sale is
-  // archived under Inactive there, but this strip sorted the whole store by
-  // `updated_at` and a sale is the last thing that touches a row — so the
-  // item that had just left the Sell screen went straight to the top of the
-  // dashboard, took a quarter of the strip, and pushed a live listing off it.
-  const recent = recentListings(items);
+  // The four listings the seller can still act on that are most worth acting
+  // on. Sold ones are left out, the same way the Sell screen's tabs leave them
+  // out: a sale is archived under Inactive there, but this strip sorted the
+  // whole store by `updated_at` and a sale is the last thing that touches a
+  // row — so the item that had just left the Sell screen went straight to the
+  // top of the dashboard, took a quarter of the strip, and pushed a live
+  // listing off it.
+  //
+  // The metrics are passed for the other half of that: a bid or an offer
+  // holds the front of the strip, rather than the last bulk enrich or batch
+  // of relists — which stamp `updated_at` on everything they touch — walking
+  // it off the end. Same rule, same function, as the grid on the Sell screen.
+  const recent = recentListings(items, metricsById);
 
   const quickActions = [
     { label: "Take Photos", icon: Camera, onClick: startNew, tone: "bg-blue-soft text-blue" },

@@ -153,17 +153,32 @@ export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
 const byRecency = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "");
 
 
-/* The newest listings the seller can still do something about, most recently
-   touched first — what the dashboard shows under "Recent listings".
+/* The newest listings the seller can still do something about — what the
+   dashboard shows under "Recent listings", in the order the grid below uses:
+   the ones a buyer is waiting on first, then the rest most recently touched
+   first. `orderListings` is that order, and this is the same four cards off
+   the front of it, so the two readers cannot disagree about which listing
+   matters most.
+
+   The lift is worth MORE here than in the grid it was written for. The grid
+   is the whole store and scrolls; this strip is four cards, and a fifth place
+   in it is no place at all. `updated_at` is a record of what was written
+   last, not of what is worth looking at, and the jobs that write are bulk
+   ones: an enrich pass stamps every listing it fills with "now", and so does
+   a batch of relists. Each one pushed a live auction with a bid on it down a
+   card, and the fourth pushed it off the panel the seller sees first —
+   money on the table, out of sight, behind four listings nobody had bid on.
+   A tier above recency holds it in the first slot until the bid is settled,
+   however many rows are written after it.
 
    The archived ones are dropped BEFORE the slice, not after. Filtering the top
    four would hand back two cards to a seller whose last two events were sales,
    and nothing at all to one who just cleared out a batch, while older live
-   listings sat there waiting to be shown. */
-export function recentListings(items, limit = 4) {
-  return (items || [])
-    .filter((i) => !isArchived(i))
-    .sort(byRecency)
+   listings sat there waiting to be shown. The lift has to happen before it
+   too, and for the same reason: an item sorted into fifth place has already
+   been dropped by the time anything downstream could lift it. */
+export function recentListings(items, metricsById = {}, limit = 4) {
+  return orderListings((items || []).filter((i) => !isArchived(i)), metricsById)
     .slice(0, limit);
 }
 
