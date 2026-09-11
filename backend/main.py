@@ -7632,6 +7632,19 @@ def _blank_specifics_by_id(items: list[dict]) -> dict:
     return out
 
 
+# How many recommendation ROWS of one type the dashboard is sent. Per type,
+# not across the lot: the screen renders these as groups, and a flat cap makes
+# one group's membership depend on how busy the others are — past a storeful
+# of stale prices, "Fill in details" fell off the payload entirely, taking the
+# only button that clears it with it.
+#
+# It is a payload size, never a count. What each group SAYS it holds comes
+# from `group_totals` below, counted before any of this. Comfortably above
+# every bulk run cap, so one tap still fills a whole run's worth from the rows
+# that did arrive.
+INSIGHTS_GROUP_CAP = 50
+
+
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
@@ -7639,22 +7652,33 @@ def insights(request: Request) -> dict:
     available. Returns an empty list for logged-out users. Never raises."""
     user = auth.current_user(request)
     if not user:
-        return {"recommendations": [], "bulk_caps": _bulk_caps()}
+        return {"recommendations": [], "group_totals": {},
+                "bulk_caps": _bulk_caps()}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
         creds = _ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
-        # limit=50: the dashboard groups these by category now, so each group
-        # should show its full membership — the old flat list capped at 8.
-        return {"recommendations": recommender.recommendations(
+        recs = recommender.ranked(
             items, metrics_by_id=metrics_by_id,
-            limit=50, blanks_by_id=_blank_specifics_by_id(items)),
-            # What one tap on a group can actually reach in a single run — the
-            # group renders its button, so it has to know. See _bulk_caps.
-            "bulk_caps": _bulk_caps()}
+            blanks_by_id=_blank_specifics_by_id(items))
+        return {"recommendations": recommender.capped_by_type(
+                    recs, INSIGHTS_GROUP_CAP),
+                # How big each group actually is, counted on the whole
+                # ranking. The dashboard used to read this off the rows it
+                # received, which is the cap and not the count: 80 listings
+                # needing the fill showed 50, "Enrich all" filled 25 of them,
+                # and the badge still read 50 afterwards because 25 that had
+                # been below the line took their place. See
+                # recommender.totals_by_type.
+                "group_totals": recommender.totals_by_type(recs),
+                # What one tap on a group can actually reach in a single run —
+                # the group renders its button, so it has to know. See
+                # _bulk_caps.
+                "bulk_caps": _bulk_caps()}
     except Exception as exc:  # noqa: BLE001 - insights must never break the app
         log.warning("insights failed for user=%s: %s", user["id"], exc)
-        return {"recommendations": [], "bulk_caps": _bulk_caps()}
+        return {"recommendations": [], "group_totals": {},
+                "bulk_caps": _bulk_caps()}
 
 
 # How many listings one bulk price run touches. Each is a serial eBay revise;

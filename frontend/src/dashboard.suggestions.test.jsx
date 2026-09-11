@@ -77,7 +77,8 @@ function json(body) {
 // `bulkCaps` is what the server says one run of a group's button reaches
 // (/api/insights); `running` is the job's own report of the split; `statuses`
 // are polls to serve before the finished one, for the live progress line.
-function server(calls, { jobResult, recs, bulkCaps, running, statuses } = {}) {
+function server(calls, { jobResult, recs, bulkCaps, groupTotals, running,
+                        statuses } = {}) {
   let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
@@ -100,7 +101,9 @@ function server(calls, { jobResult, recs, bulkCaps, running, statuses } = {}) {
                                            stopped: "" } });
     }
     if (path.startsWith("/api/insights")) {
-      return json({ recommendations: recs || RECS, bulk_caps: bulkCaps || {} });
+      return json({ recommendations: recs || RECS,
+                    group_totals: groupTotals || {},
+                    bulk_caps: bulkCaps || {} });
     }
     if (path.startsWith("/api/listings")) {
       return json({ authed: true, db: { configured: true, connected: true },
@@ -312,6 +315,75 @@ describe("a group bigger than one run", () => {
     await click(byText("Enrich all"));
     expect(text()).toContain("Fill in details on 2 listings?");
     expect(text()).not.toContain("second run");
+    await act(async () => { root.unmount(); });
+  });
+});
+
+/* The badge is a COUNT, and /api/insights sends a capped slice of the rows.
+ *
+ * The seller's report: "the Enrich all counter doesn't decrease as we enrich
+ * and update items." The run worked every time — listings filled, revises
+ * reached eBay — and the number above the button never moved, because the
+ * number was the length of the list that arrived and the list was cut to fit.
+ * Fill 25 of 80 and 25 that had been below the cut take their place. So the
+ * server counts the group before cutting it (group_totals) and the screen
+ * reads THAT. */
+describe("a group bigger than the rows it was sent", () => {
+  // What a store of 80 looks like on the wire: the rows are a slice, the
+  // total is the count.
+  const SLICE = { recs: RECS, groupTotals: { specifics: 80 },
+                  bulkCaps: { specifics: 2 },
+                  running: { job_id: "job-1", running: true, total: 2,
+                             deferred: 0 } };
+
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("shows what the store holds, not what the payload carried", async () => {
+    const { root, host } = await mount([], SLICE);
+    const badge = [...host.querySelectorAll("span")].find(
+      (el) => (el.textContent || "").trim() === "80");
+    expect(badge).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+
+  it("counts the rest of the group as still to do, before and after", async () => {
+    const { root, text } = await mount([], SLICE);
+    await click(byText("Enrich all"));
+    // 2 of 80 — not "2 of 2", which is what counting the rows said.
+    expect(text()).toContain("Fill in details on 2 of 80 listings?");
+    expect(text()).toContain("the other 78 stay on the list for a second run");
+
+    await click(byText("Fill them in"));
+    // The job can only defer ids it was handed; the 78 it never saw are
+    // still the seller's next run.
+    expect(text()).toContain("78 left — run it again to finish");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("falls back to the rows when the server sends no count", async () => {
+    // An older server, or an insights fetch that failed: the group reads
+    // exactly as it did before, rather than claiming a size it never got.
+    const { root, text } = await mount([], { bulkCaps: { specifics: 2 } });
+    await click(byText("Enrich all"));
+    expect(text()).toContain("Fill in details on 2 listings?");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("takes a dismissed row off the count the server gave", async () => {
+    // Dismissals live in this browser (lib/dismissedRecs) and /api/insights
+    // has never heard of them, so they have to come off here — otherwise a
+    // suggestion the seller waved away stays in the number that says how
+    // much is left.
+    const { root, host } = await mount([], {
+      recs: VERIFY_RECS, groupTotals: { verify: 9 },
+    });
+    await expand("Check details");
+    await click(buttons().find(
+      (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
+    const badge = [...host.querySelectorAll("span")].find(
+      (el) => (el.textContent || "").trim() === "8");
+    expect(badge).toBeTruthy();
     await act(async () => { root.unmount(); });
   });
 });

@@ -37,6 +37,12 @@ const NO_INSIGHTS = Object.freeze([]);
 // Empty until the fetch lands, and empty is "no cap known" — the group then
 // reads as it always did rather than inventing a limit.
 const NO_CAPS = Object.freeze({});
+// How big each group really is, keyed by rec type (see main's group_totals).
+// The recommendations payload is a capped slice PER TYPE, so the rows that
+// arrive are the ones that fit, never the count. Empty until the fetch lands,
+// and empty means "fall back to the rows", which is what the group did before
+// the server counted.
+const NO_TOTALS = Object.freeze({});
 
 // How many of a group ONE tap actually reaches. Both bulk actions fill a
 // capped number of listings per run and defer the rest, so the group must not
@@ -49,6 +55,12 @@ const runSize = (n, cap) => (cap > 0 ? Math.min(n, cap) : n);
 // listing".
 const runCount = (n, total, noun) =>
   `${n < total ? `${n} of ${total}` : n} ${noun}${Math.max(n, total) === 1 ? "" : "s"}`;
+
+// How many listings a group actually covers. `total` is the server's count
+// over the WHOLE ranking (main's group_totals); `recs` is the capped slice of
+// it that was sent. Never below the rows on screen — a stale total must not
+// make a group claim to be smaller than what it is showing.
+const groupSize = (group) => Math.max(group.total || 0, group.recs.length);
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
@@ -233,8 +245,14 @@ function GroupHead({ group, Icon }) {
       <span className="font-semibold text-sm text-ink truncate">
         {REC_GROUP_LABEL[group.type] || group.recs[0].label}
       </span>
+      {/* The group's real size, not the number of rows that came down the
+          wire. They are the same thing only on a small store: /api/insights
+          ships a capped slice per type, so a seller with 80 listings needing
+          the fill was shown 50, filled 25 of them, and found the badge still
+          reading 50 — 25 that had been below the cap had taken their place.
+          The work happened and the number could not show it. */}
       <span className="grid place-items-center font-display tabular-nums text-[11px] font-bold rounded-full bg-bg-sunken px-1.5 min-w-5 h-5 text-ink-secondary">
-        {group.recs.length}
+        {groupSize(group)}
       </span>
     </>
   );
@@ -254,7 +272,8 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll, onDismiss,
   const solo = !!action?.soloButton;
   // What one tap on this group's button reaches. The badge above it is the
   // whole group; this is the part of it a single run touches.
-  const perRun = runSize(group.recs.length, cap);
+  const total = groupSize(group);
+  const perRun = runSize(total, cap);
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
@@ -315,7 +334,7 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll, onDismiss,
       <AnimatePresence initial={false}>
         {action?.amount && amountOpen && (
           <BulkAmountPanel
-            amount={action.amount} count={perRun} total={group.recs.length}
+            amount={action.amount} count={perRun} total={total}
             busy={busy}
             onCancel={() => setAmountOpen(false)}
             onSubmit={(value) => {
@@ -519,6 +538,11 @@ export function Dashboard() {
   // from the server that enforces it — the dashboard cannot guess it, and
   // guessing wrong is how the group came to promise 46 and deliver 25.
   const [bulkCaps, setBulkCaps] = useState(NO_CAPS);
+  // How many listings each suggestion group really covers — the count the
+  // badge shows. Separate from the rows because it is a different question:
+  // the rows are a capped slice per type, and counting them is how "Enrich
+  // all" came to fill 25 listings and leave the badge exactly where it was.
+  const [groupTotals, setGroupTotals] = useState(NO_TOTALS);
   // Signing out throws the suggestions away — they are one account's to-do
   // list, and eBay actions fire straight off them. That reset used to sit at
   // the top of `refreshInsights`, which made it a setState inside the effect
@@ -545,6 +569,7 @@ export function Dashboard() {
       .then((r) => {
         setInsights(r.recommendations || NO_INSIGHTS);
         setBulkCaps(r.bulk_caps || NO_CAPS);
+        setGroupTotals(r.group_totals || NO_TOTALS);
       })
       .catch(() => {});
   }, [user]);
@@ -575,6 +600,9 @@ export function Dashboard() {
   const [bulkBusy, setBulkBusy] = useState(null); // group type, or null
   const lowerAll = async (group, percent) => {
     const ids = group.recs.map((r) => r.listing_id);
+    // The rows the group holds are a capped slice of it (see groupSize), and
+    // the ones that did not fit are still prices this button has to get to.
+    const unsent = Math.max(groupSize(group) - ids.length, 0);
     setBulkBusy(group.type);
     try {
       const res = await postJson("/api/ebay/lower-prices",
@@ -583,8 +611,11 @@ export function Dashboard() {
       if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${percent}%`);
       if (res.skipped) parts.push(`${res.skipped} skipped`);
       if (res.failed) parts.push(`${res.failed} failed`);
-      // The server caps one run so the request can't outlive the gateway.
-      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
+      // The server caps one run so the request can't outlive the gateway —
+      // and it can only defer what it was sent, so the rest of the group is
+      // added back on here.
+      const left = unsent + (res.deferred || 0);
+      if (left) parts.push(`${left} left — run it again to finish`);
       toast(parts.join(" · ") || "Nothing to change.", {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
       });
@@ -632,15 +663,22 @@ export function Dashboard() {
         return;
       }
     }
-    // The WHOLE group is sent: the server enriches up to its own cap and
-    // counts the remainder for us (a client that pre-trimmed the list would
-    // be told nothing was left over). The cap it publishes on /api/insights is
-    // only for what this dialog SAYS — which is the bug it fixes. The group
-    // used to ask for 46 and quote the AI cost of 46, then fill 25.
+    // Every id the group HOLDS is sent: the server enriches up to its own cap
+    // and counts the remainder for us (a client that pre-trimmed the list
+    // would be told nothing was left over). The cap it publishes on
+    // /api/insights is only for what this dialog SAYS — which is the bug it
+    // fixes. The group used to ask for 46 and quote the AI cost of 46, then
+    // fill 25.
     const ids = group.recs.map((r) => r.listing_id);
-    const total = ids.length;
-    let run = runSize(total, cap);
-    let left = total - run;
+    // ...but the group is usually bigger than the ids it holds, because the
+    // recommendations payload is a capped slice per type. Those extras are
+    // still listings this button has to finish, so they count towards what is
+    // left over — a run that reports "0 left" on a group of 80 is the reason
+    // the badge looked stuck.
+    const total = groupSize(group);
+    const unsent = Math.max(total - ids.length, 0);
+    let run = runSize(ids.length, cap);
+    let left = unsent + (ids.length - run);
     // Every listing this touches spends AI credits, and this button reaches a
     // whole group from one tap. Say what it will do — and what it will cost —
     // before it does it, the same way the bulk price drop does.
@@ -671,7 +709,7 @@ export function Dashboard() {
       // keeps the estimate above, and the poll below corrects it.
       if (start.total) {
         run = start.total;
-        left = start.deferred || 0;
+        left = unsent + (start.deferred || 0);
         setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
       }
       const res = await pollJob(start.job_id, {
@@ -691,7 +729,12 @@ export function Dashboard() {
       // is not done either.
       if (res.skipped) parts.push(`${res.skipped} need you`);
       if (res.failed) parts.push(`${res.failed} failed`);
-      if (res.deferred) parts.push(`${res.deferred} left — run it again to finish`);
+      // The job's own deferred count PLUS the group members it was never
+      // sent: it only ever knew about the ids it was handed, and the group
+      // can be bigger than those. Reporting its number alone is how a run
+      // over 25 of 80 listings came back saying nothing was left.
+      const over = unsent + (res.deferred || 0);
+      if (over) parts.push(`${over} left — run it again to finish`);
       if (res.stopped) parts.push(res.stopped);
       // The counts say how many. What the seller actually asks afterwards is
       // "did it do anything?", and for a listing it could not finish the
@@ -1005,10 +1048,22 @@ export function Dashboard() {
               const byType = {};
               for (const rec of visibleInsights) {
                 if (!byType[rec.type]) {
-                  byType[rec.type] = { type: rec.type, recs: [] };
+                  byType[rec.type] = { type: rec.type, recs: [], total: 0 };
                   groups.push(byType[rec.type]);
                 }
                 byType[rec.type].recs.push(rec);
+              }
+              // The server's count, less the rows this browser is hiding.
+              // Dismissals live in localStorage (lib/dismissedRecs) and the
+              // API has never heard of them, so a group whose total came from
+              // the server has to have them taken off here — otherwise a
+              // waved-away suggestion stays in the number that says how much
+              // is left to do.
+              for (const group of groups) {
+                const sent = insights.filter((r) => r.type === group.type).length;
+                group.total = Math.max(
+                  (groupTotals[group.type] || sent) - (sent - group.recs.length),
+                  group.recs.length);
               }
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
