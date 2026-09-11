@@ -714,6 +714,94 @@ DETAIL_KEPT_AS_SHOT = (
     "no background to take off, so it was kept as shot.")
 
 
+# --- the photo the cutout replaced -------------------------------------------
+#
+# A cutout is a PRESENTATION change: it is what the buyer should see on the
+# listing. It is not what the app should THINK with, and for a long time it
+# was both, because every vision pass reads the optimized photo.
+#
+# That is the second half of the Hilo Hattie report. The cutout tore up two
+# tag close-ups; identify then read those same torn files, could not find a
+# brand on them, and invented one. The close-ups are spared now (see
+# orient._details), which removes that cause — but not the shape of the
+# problem. Any cutout that goes wrong, for any reason this file has not
+# thought of yet, still silently becomes the app's only record of the item,
+# and the seller reads the result as "the AI is bad at identifying things".
+# Nothing in the draft says a photo was damaged, because nothing downstream
+# knows a photo COULD have been.
+#
+# So the pass keeps the photo it replaced. Written from the image already in
+# memory one step before the composite, so it costs one JPEG encode and no
+# decode, and it is the right frame by construction: upright, EXIF honoured,
+# sized for eBay, metadata stripped — the same photo the seller would get
+# from Restore original, without re-reading a 12MP HEIC to produce it.
+#
+# WHY NOT JUST READ original/. It is tempting, and it is what this looked
+# like at first. Three things are wrong with it. The originals are pruned on
+# a timer (storage.prune_originals), so re-identifying an older listing would
+# quietly read a different photo than a new one. They are pre-rotation — the
+# ITEM's turn is decided by services/orient and applied here, so a photo the
+# pass straightened would go back to the model lying on its side. And they
+# are whatever the camera wrote: a 12MP HEIC to decode on every call, on the
+# same 4GB box that is holding the cutout model.
+#
+# WHY THE MTIME RULE IS THE WHOLE INVALIDATION STORY. This file is preferred
+# only while it is at least as new as the working copy next to it. Every way
+# a photo changes after this pass rewrites that working copy — the studio's
+# save, a quick rotate, Restore original, a pull back from R2 — so each of
+# them makes this file older, and as_shot() stops offering it without any of
+# those routes knowing it exists. The seller's own edit is the seller's
+# intent and must win; this only ever speaks for a photo nobody has touched
+# since the pass ran.
+_AS_SHOT = "as_shot"
+
+
+def _keep_as_shot(dst: Path, img: Image.Image) -> None:
+    """Keep `img` as the faithful copy of the photo written to `dst`.
+
+    Best-effort in the strongest sense: this is an aid to the passes that
+    READ photos, and a photo must never fail to be listed because a cache
+    beside it could not be written. Only for a real session photo — a direct
+    caller optimizing to some other directory gets nothing, exactly as
+    vision_copy does."""
+    if dst.parent.name != "optimized":
+        return
+    try:
+        out = dst.parent.parent / _AS_SHOT / dst.name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f".{out.name}.{os.getpid():x}.tmp")
+        try:
+            img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
+            os.replace(tmp, out)  # atomic: a racing reader never sees a torn file
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    except Exception as exc:  # noqa: BLE001 - a cache is never worth a photo
+        log.info("as-shot copy skipped for %s: %s", dst.name, exc)
+
+
+def as_shot(path: Path) -> Path:
+    """The photo as the camera saw it, for an optimized session photo whose
+    background was taken off — or `path` itself for every other photo, which
+    already IS what the camera saw.
+
+    This is what every pass that has to READ an item should open: what its
+    tag says, what it is made of, what the flaw in the corner is. `path`
+    stays right for anything that has to SHOW the photo.
+
+    Safe to call with any path: one that is not a session photo, has no
+    faithful copy, or has been edited since comes straight back."""
+    if path.parent.name != "optimized":
+        return path
+    kept = path.parent.parent / _AS_SHOT / path.name
+    try:
+        if kept.stat().st_mtime >= path.stat().st_mtime:
+            return kept
+    except OSError:  # no copy kept, or the photo itself is gone
+        pass
+    return path
+
+
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
              rotate: int = 0, detail: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
@@ -744,6 +832,7 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     if turn:
         img = img.transpose(CW_TRANSPOSE[turn])
     bg_removed, bg_error = False, None
+    faithful = None
     if remove_bg and detail:
         bg_error = DETAIL_KEPT_AS_SHOT
     elif remove_bg:
@@ -753,7 +842,11 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
             log.warning("bg-removal: keeping %s as shot (%s)", src.name, exc)
             out, bg_error = None, f"Background removal failed: {exc}"
         if out is not None:
-            img, bg_removed = out, True
+            # Hold on to what the camera saw before the cutout replaces it.
+            # This is the only moment it exists in the right form — upright,
+            # EXIF honoured, sized, metadata stripped — and the only moment
+            # it is free. See _keep_as_shot.
+            faithful, img, bg_removed = img, out, True
         elif not bg_error:
             bg_error = ("The background remover found no item in this photo "
                         "— it was kept as shot.")
@@ -772,6 +865,11 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    # AFTER the working copy, never before: as_shot() prefers this file only
+    # while it is at least as new as the photo beside it, which is what makes
+    # a later edit in the studio win automatically.
+    if faithful is not None:
+        _keep_as_shot(dst, faithful)
     out = {"file": dst.name, "original_size": shot, "output_size": img.size,
            "background_removed": bg_removed}
     if turn:
@@ -1040,20 +1138,28 @@ VISION_SIDE = int(os.getenv("VISION_IMAGE_SIDE", "1092") or "1092")
 def vision_copy(path: Path, side: int = 0) -> Path:
     """A cached, right-sized JPEG copy of an optimized photo for vision calls.
 
+    Made from as_shot(path), not from `path`: a vision call is the app trying
+    to work out what the item IS, and a cutout can only have taken detail
+    away from that. See the note above _keep_as_shot.
+
     Lives in the session's vision/ dir (a sibling of optimized/, invisible to
-    the image list and the R2 mirror) and is regenerated whenever the source
-    file is newer — photo edits rewrite the optimized file, so staleness is
-    just an mtime comparison. Returns `path` unchanged for anything that isn't
-    a session's optimized photo, so callers can pass any path safely."""
+    the image list and the R2 mirror) and is regenerated whenever either the
+    source or the photo beside it is newer — photo edits rewrite the optimized
+    file, so staleness is just an mtime comparison, and the same comparison is
+    what hands the seller's edit back to the model. Returns `path` unchanged
+    for anything that isn't a session's optimized photo, so callers can pass
+    any path safely."""
     if path.parent.name != "optimized":
         return path
     side = side or VISION_SIDE
+    src = as_shot(path)
     dst = path.parent.parent / "vision" / path.name
     try:
-        if dst.is_file() and dst.stat().st_mtime >= path.stat().st_mtime:
+        if dst.is_file() and dst.stat().st_mtime >= max(
+                path.stat().st_mtime, src.stat().st_mtime):
             return dst
         dst.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(path) as img:
+        with Image.open(src) as img:
             img = _flatten(img)
             img.thumbnail((side, side), Image.LANCZOS)
             tmp = dst.with_name(dst.name + ".tmp")
