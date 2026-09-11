@@ -248,7 +248,7 @@ def test_quarter_turns_are_the_photo_turned_not_resampled(tmp_path):
 def test_the_screen_asks_about_objects_and_looks_close_enough_to_read(tmp_path, model):
     a = _photo(tmp_path, "a.jpg", size=(2400, 1800))
     model.answers = [_screen({"rotate": 90, "sure": True, "item": "brown boot"})]
-    assert orient._screen_batch([a]) == {"a.jpg": 90}
+    assert orient._screen_batch([a]).rotations == {"a.jpg": 90}
     (w, h), = _sizes_sent(model.calls[0])
     assert max(w, h) >= 600, "a label is not readable off a smaller copy"
     rules = _texts_sent(model.calls[0])
@@ -270,11 +270,11 @@ def test_a_file_that_cannot_be_read_costs_only_itself(tmp_path, model):
     c = _photo(tmp_path, "c.jpg")
     # The model sees two photos; its "photo 2" is c.jpg, not the junk.
     model.answers = [_screen({}, {"rotate": 90, "sure": True})]
-    assert orient._screen_batch([a, junk, c]) == {"c.jpg": 90}
+    assert orient._screen_batch([a, junk, c]).rotations == {"c.jpg": 90}
     assert len(_sizes_sent(model.calls[0])) == 2
     assert "photos 1 to 2" in _texts_sent(model.calls[0])
     model.answers = []
-    assert orient._screen_batch([junk]) == {}
+    assert orient._screen_batch([junk]) == orient._NOTHING
     assert len(model.calls) == 1, "a batch with nothing readable still asked"
 
 

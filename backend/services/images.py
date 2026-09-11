@@ -6,10 +6,12 @@ sideways or on its head — which EXIF knows nothing about, so a vision model
 is asked; see services/orient for how, and for why the last one was wrong
 about everything that was not a shirt. It takes the background off when the
 seller asked for that: one run of the local model, the matte hardened a
-little, the item composited on white under a soft contact shadow. And it
-sizes the result for eBay — the longest side to 1600px, never upscaled —
-saved as a JPEG that carries no metadata, so the GPS of the seller's home
-never rides along to a public listing.
+little, the item composited on white under a soft contact shadow — except on
+a close-up of PART of an item, a tag or a label or a stitch, where there is
+no background to take off and the model, asked anyway, deletes the item and
+keeps the label. And it sizes the result for eBay — the longest side to
+1600px, never upscaled — saved as a JPEG that carries no metadata, so the GPS
+of the seller's home never rides along to a public listing.
 
 Deliberately nothing else. The pass used to be a pipeline: the orientation
 guess in its shirt-shaped first form, a matte refined by a border
@@ -703,8 +705,17 @@ def _load(src: Path) -> tuple[Image.Image, tuple[int, int]]:
     return img, shot
 
 
+# What a photo gets instead of a cutout when it is a close-up of part of an
+# item. Not an error and not a refusal — nothing was attempted, because there
+# was nothing for the cutout to do. It rides in `bg_error` so the seller is
+# told and the charge comes back, which is what that field is for.
+DETAIL_KEPT_AS_SHOT = (
+    "This is a close-up of a detail, not a photo of the whole item — there is "
+    "no background to take off, so it was kept as shot.")
+
+
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
-             rotate: int = 0) -> dict:
+             rotate: int = 0, detail: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that finds nothing keeps the photo as shot
     and says so in `bg_error`, so the caller can give the charge back.
@@ -716,14 +727,26 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     would resample the photo and report a turn that did not happen. Reported
     as `rotated` when applied. Nothing here asks for a turn: the studio's
     Restore original and every other direct caller ship the photo as shot,
-    and only the batch pass (optimize_batch) decides one."""
+    and only the batch pass (optimize_batch) decides one.
+
+    `detail` says this photo is a close-up of PART of an item — a tag, a
+    label, a stitch, a texture — as decided by the same pass and on the same
+    terms. The cutout is not run on one. Every pixel in the frame is the
+    item, so there is no background to take off, and a salient-object model
+    asked anyway answers the only question it knows: it keeps the label and
+    deletes the garment behind it. The three guards below cannot catch that —
+    the matte of a torn-out label is one opaque region that fills its own box,
+    which is what a GOOD cutout looks like — so the photo has to be spared
+    before the model is asked, not after. See orient._details."""
     img, shot = _load(src)
     turn = int(rotate or 0) % 360
     turn = turn if turn in CW_TRANSPOSE else 0
     if turn:
         img = img.transpose(CW_TRANSPOSE[turn])
     bg_removed, bg_error = False, None
-    if remove_bg:
+    if remove_bg and detail:
+        bg_error = DETAIL_KEPT_AS_SHOT
+    elif remove_bg:
         try:
             out = cutout(img)
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
@@ -859,17 +882,20 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     results = []
     if jobs and should_stop is not None and should_stop():
         raise Stopped()
-    # One batched look at every photo still to do, up front, for the ones
-    # whose ITEM lies sideways or on its head, so each is turned before its
-    # cutout rather than after. Best-effort and bounded: a photo the pass
-    # cannot answer for stays as shot.
-    rotations = _rotations_for([src for src, _dst in jobs], should_stop)
+    # One batched look at every photo still to do, up front. It answers two
+    # things: which photos have their ITEM lying sideways or on its head, so
+    # each is turned before its cutout rather than after, and which are
+    # close-ups of PART of an item, so the cutout is not run on them at all.
+    # Best-effort and bounded: a photo the pass cannot answer for is left as
+    # shot and cut out as usual.
+    turns, details = _screen_for([src for src, _dst in jobs], should_stop)
     for src, dst in jobs:
         if should_stop is not None and should_stop():
             raise Stopped()
         try:
             result = optimize(src, dst, remove_bg,
-                              rotate=rotations.get(src.name, 0))
+                              rotate=turns.get(src.name, 0),
+                              detail=src.name in details)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         results.append(result)
@@ -882,25 +908,29 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     return results
 
 
-def _rotations_for(sources: list[Path], should_stop=None) -> dict[str, int]:
-    """{filename: clockwise degrees} for the photos in `sources` whose ITEM
-    lies sideways or on its head, per services/orient. Never raises and never
-    costs a photo: with the API off, over budget, or on any failure the
-    answer is "as shot". Keyed by name, which is unique within a batch (one
-    directory) and is how optimize_batch looks a photo's turn up.
+def _screen_for(sources: list[Path],
+                should_stop=None) -> tuple[dict[str, int], frozenset[str]]:
+    """({filename: clockwise degrees}, {filenames that are close-ups}) for the
+    photos in `sources`, per services/orient. Never raises and never costs a
+    photo: with the API off, over budget, or on any failure the answer is "as
+    shot, and cut out as usual" — an empty turn map and no close-ups, which is
+    exactly this file's behaviour before either answer existed. Keyed by name,
+    which is unique within a batch (one directory) and is how optimize_batch
+    looks a photo up.
 
     Imported here, not at module scope: orient reaches the Anthropic SDK, and
     everything else in this file is Pillow. Keeping the AI dependency inside
     the one function that needs it is what lets the photo gate in CI prove
     the pass on Pillow alone."""
     if not sources:
-        return {}
+        return {}, frozenset()
     try:
         from . import orient
-        return orient.detect_rotations(sources, should_stop=should_stop)
-    except Exception as exc:  # noqa: BLE001 - orientation is an enhancement
+        found = orient.screen(sources, should_stop=should_stop)
+        return found.rotations, found.details
+    except Exception as exc:  # noqa: BLE001 - the screen is an enhancement
         log.warning("auto-orient: skipped (%s)", exc)
-        return {}
+        return {}, frozenset()
 
 
 def warm() -> None:
