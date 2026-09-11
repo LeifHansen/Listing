@@ -9,7 +9,8 @@
  * refuses to answer at all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dismiss, readDismissed, recKey, restoreAll, withoutDismissed } from "./dismissedRecs";
+import { dismiss, dismissAll, readDismissed, recKey, restoreAll,
+         withoutDismissed } from "./dismissedRecs";
 
 const rec = (id, type = "specifics") => ({ listing_id: id, type });
 
@@ -64,5 +65,47 @@ describe("dismissed suggestions", () => {
       throw new Error("QuotaExceededError");
     });
     expect(dismiss([], rec("a"))).toEqual([recKey(rec("a"))]);
+  });
+
+  it("clears a whole list in one write", () => {
+    // One decision, one store. Folding `dismiss` over the list would be a
+    // serialise-and-store per row, which on a full quota is fifty chances to
+    // throw where there needs to be one.
+    const spy = vi.spyOn(Storage.prototype, "setItem");
+    const list = dismissAll([], [rec("a"), rec("b"), rec("c")]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(list).toHaveLength(3);
+    expect(readDismissed()).toEqual(list);
+  });
+
+  it("leaves a clear of nothing alone", () => {
+    const spy = vi.spyOn(Storage.prototype, "setItem");
+    expect(dismissAll(["a|photos"], [])).toEqual(["a|photos"]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("does not re-add what was already dismissed", () => {
+    // Re-adding would move an old decision to the newest end of a capped
+    // list, pushing somebody else's off the back for no reason.
+    const first = dismiss([], rec("a"));
+    const list = dismissAll(first, [rec("a"), rec("b")]);
+    expect(list).toEqual([recKey(rec("a")), recKey(rec("b"))]);
+  });
+
+  it("stays bounded when a big list is cleared at once", () => {
+    let list = [];
+    for (let i = 0; i < 290; i += 1) list = dismiss(list, rec(`old-${i}`));
+    list = dismissAll(list, Array.from({ length: 40 }, (_, i) => rec(`new-${i}`)));
+    expect(list).toHaveLength(300);
+    expect(list.at(-1)).toBe(recKey(rec("new-39")));
+    expect(list).not.toContain(recKey(rec("old-0")));
+  });
+
+  it("survives storage that refuses a bulk write", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    expect(dismissAll([], [rec("a"), rec("b")]))
+      .toEqual([recKey(rec("a")), recKey(rec("b"))]);
   });
 });

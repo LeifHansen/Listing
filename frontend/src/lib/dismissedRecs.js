@@ -58,6 +58,23 @@ export function dismiss(list, rec) {
   return next;
 }
 
+/** `list` with every one of `recs` dismissed, saved in ONE write. Returns the
+ *  new list.
+ *
+ * Clearing the whole section is a single decision, so it is a single write:
+ * folding `dismiss` over the list would re-serialise and re-store on every
+ * row, and on a storage quota shared with the theme and the sold-range picker
+ * that is fifty chances to throw where there needs to be one. Newest last,
+ * same as `dismiss`, so the cap drops the oldest decisions first. */
+export function dismissAll(list, recs) {
+  const keys = recs.map(recKey);
+  if (!keys.length) return list;
+  const gone = new Set(keys);
+  const next = [...list.filter((k) => !gone.has(k)), ...keys].slice(-MAX);
+  try { writeLocal(KEY, JSON.stringify(next)); } catch (e) { /* this session only */ }
+  return next;
+}
+
 /** Bring every dismissed suggestion back. Returns the new (empty) list. */
 export function restoreAll() {
   try { writeLocal(KEY, "[]"); } catch (e) { /* this session only */ }
