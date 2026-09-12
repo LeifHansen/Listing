@@ -1140,6 +1140,37 @@ def _same_money(a, b) -> bool:
 REFINE_PROMPT_MAX_CHARS = 2000
 
 
+# What a refine may REWRITE: the listing copy, which is exactly what
+# _to_listing builds out of the model's answer (LISTING_SCHEMA). Everything
+# else a draft carries is not in that schema and is not the model's to own —
+# the eBay category id and the seller's own store shelf, the selling format
+# with its starting bid and duration, the shipping policy, the promotion they
+# agreed to pay eBay for, the video, the currency, the Etsy and Depop fields.
+#
+# It was rebuilt from the answer anyway, because a refine returned whatever
+# _to_listing could make of the echo and nothing else — so every one of those
+# fields came back at its default. The seller who reported it had to re-pick
+# the eBay category after every rewrite: a listing with no category_id cannot
+# publish at all (services/preflight), so "make the title punchier" quietly
+# left the draft unpublishable. An auction silently became a fixed-price
+# listing, a promoted listing stopped being promoted, and the video went with
+# them — a save that omits one is the seller DELETING it
+# (state.restore_video_state), so nothing downstream could put it back.
+#
+# Named as what a refine WRITES rather than what it keeps, so the default for
+# a field added to Listing tomorrow is to survive a refine rather than to be
+# silently lost by one.
+REFINED_FIELDS = (
+    "title", "subtitle", "brand", "condition", "condition_description",
+    # eBay's ids, echoed rather than written. Named here because the echo is
+    # what the condition rule at the end of refine reasons about.
+    "condition_descriptors",
+    "category_suggestion", "description", "price", "purchase_price",
+    "quantity", "package_weight_lb", "package_weight_oz", "package_length_in",
+    "package_width_in", "package_height_in", "item_specifics", "missing_info",
+)
+
+
 def refine(listing: Listing, prompt: str) -> Listing:
     """Apply a free-form user instruction to an existing listing draft."""
     client = _client()
@@ -1172,9 +1203,15 @@ def refine(listing: Listing, prompt: str) -> Listing:
                            "try a shorter instruction or trim the description")
     text = "".join(b.text for b in resp.content if b.type == "text")
     data = _extract_json(text)
-    updated = _to_listing(data, listing.images)
-    # Preserve images explicitly.
-    updated.images = listing.images
+    # The draft is the BASE, not the answer: only REFINED_FIELDS are taken
+    # from what came back, so the fields the model was never asked to write
+    # (the eBay category id among them) stand as the seller left them. The
+    # image list is one of those — it is popped from the prompt above and
+    # travels with the draft.
+    fresh = _to_listing(data, listing.images)
+    updated = listing.model_copy(deep=True)
+    for name in REFINED_FIELDS:
+        setattr(updated, name, getattr(fresh, name))
     # What the seller PAID is a fact, not listing copy — a refine must never
     # rewrite or drop it (the model may not echo the field back).
     if listing.purchase_price is not None:
