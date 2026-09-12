@@ -413,6 +413,22 @@ def explain(err: dict) -> dict:
         offer = has("best offer", "auction", "bid")
         issue.update(
             target="generic",
+            # `target` stays "generic" because that is a statement about the
+            # SCREEN — there is no field to open, so there is no "Fix this"
+            # button to draw. `locked` is the statement about the FEED, and
+            # the two had been the same word.
+            #
+            # refusal_key reads it (the same way it reads `placeholder`) so
+            # the error row says "refused over locked" rather than "refused
+            # over generic". They are opposite facts: "generic" means the
+            # classifier did not recognise eBay's sentence, which is this
+            # tree's problem to fix, and the daily triage rightly opens a
+            # pull request for it. This branch recognised the sentence
+            # perfectly and wrote the seller a complete answer — nothing is
+            # wrong, the edit is saved, and it goes over when the offer
+            # clears. Filed as "generic" it was proposed for a fix every day
+            # it happened, against code that was working.
+            locked=True,
             title=("eBay has this listing frozen for now"
                    if offer else f"eBay won’t change that on a live listing: {said}"),
             fix=((f"eBay's reason: “{said}” " if said else "")

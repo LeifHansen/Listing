@@ -328,12 +328,6 @@ def nearest_allowed_condition(current: str, allowed) -> Optional[str]:
 # a value id: eBay adds graders and moves ladders, and a stale id is a refused
 # publish naming a number the seller cannot act on.
 
-# The two condition ids that carry descriptors today. Only used to say WHICH
-# step of the two-step picker a condition is, never to decide whether a
-# category takes descriptors -- eBay's answer decides that.
-GRADED_CONDITION_ID = "2750"
-UNGRADED_CONDITION_ID = "4000"
-
 
 def _int_or_none(value) -> Optional[int]:
     try:

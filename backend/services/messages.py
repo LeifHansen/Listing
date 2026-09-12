@@ -149,8 +149,13 @@ def list_conversations(uid: Optional[str], *, marketplace: str = "",
     }
 
 
-def _route(uid: Optional[str], conversation_id: str):
-    """(provider, raw_id) for a namespaced id, or (None, raw)."""
+def _route(conversation_id: str):
+    """(provider, raw_id) for a namespaced id, or (None, raw).
+
+    No uid: which marketplace a conversation id belongs to is a fact about
+    the id. The callers each pass their own uid on to the provider, which is
+    where it is actually needed.
+    """
     key, raw = messaging.split(conversation_id,
                                default=(known_keys() or [""])[0])
     if not raw:
@@ -159,7 +164,7 @@ def _route(uid: Optional[str], conversation_id: str):
 
 
 def get_conversation(uid: str, conversation_id: str, limit: int = 50) -> dict:
-    p, raw = _route(uid, conversation_id)
+    p, raw = _route(conversation_id)
     if p is None:
         raise LookupError("That conversation's marketplace isn't available.")
     out = p.get_conversation(uid, raw, limit=limit) or {}
@@ -172,7 +177,7 @@ def get_conversation(uid: str, conversation_id: str, limit: int = 50) -> dict:
 
 
 def send(uid: str, conversation_id: str, text: str) -> dict:
-    p, raw = _route(uid, conversation_id)
+    p, raw = _route(conversation_id)
     if p is None:
         raise LookupError("That conversation's marketplace isn't available.")
     out = p.send_message(uid, raw, text) or {}
@@ -187,7 +192,7 @@ def send(uid: str, conversation_id: str, text: str) -> dict:
 def mark_read(uid: str, conversation_id: str) -> bool:
     """Best-effort; never raises. The badge re-syncs on the next poll."""
     try:
-        p, raw = _route(uid, conversation_id)
+        p, raw = _route(conversation_id)
         return bool(p is not None and p.mark_read(uid, raw))
     except Exception as exc:  # noqa: BLE001
         log.info("messages: mark_read failed for %s: %s", conversation_id, exc)

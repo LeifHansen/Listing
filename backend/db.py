@@ -205,7 +205,26 @@ class ListingRecord(Base):
     # load, and the per-status counts back the seller-facing tabs too. Same
     # rule as ix_notifications_user_unread: declared on the model so both
     # schema sources (create_all and alembic) can see it exists.
-    __table_args__ = (Index("ix_listings_status", "status"),)
+    #
+    # The second one is the shape of `list_listings`, which is the query
+    # behind nearly every seller-facing screen: filter on user_id, order by
+    # (updated_at DESC, id DESC), take a page. user_id alone stops at the
+    # filter — the sort that follows it is over every listing the seller
+    # owns, on every page load and every "next page", so it costs the most
+    # for exactly the sellers who have the most (LIST_CAP is 3,000). The
+    # three columns in this order let the same scan answer the ordering and
+    # stop at the LIMIT. `id` is in it because the keyset cursor breaks ties
+    # on it: timestamps collide readily, since an import writes a whole
+    # store in one pass.
+    #
+    # Every other keyset-paginated table here already has its composite —
+    # ix_notifications_user_unread, ix_error_events_last_seen,
+    # ix_admin_audit_created. This is the largest and hottest table in the
+    # app and was the one without.
+    __table_args__ = (
+        Index("ix_listings_status", "status"),
+        Index("ix_listings_user_updated", "user_id", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[Optional[str]] = mapped_column(String(64), index=True, nullable=True)
@@ -524,6 +543,13 @@ _MIGRATIONS = (
     # IF NOT EXISTS so this is a no-op after the first boot, same as the
     # notifications index above.
     "CREATE INDEX IF NOT EXISTS ix_listings_status ON listings (status)",
+    # The shape of list_listings, which is the query behind nearly every
+    # seller-facing screen: filter on user_id, order by (updated_at DESC,
+    # id DESC), take a page. user_id alone is an index for the filter and
+    # nothing for the sort, so every page load sorted the seller's whole
+    # store to hand back twenty rows. See ListingRecord.__table_args__.
+    "CREATE INDEX IF NOT EXISTS ix_listings_user_updated "
+    "ON listings (user_id, updated_at, id)",
 )
 
 

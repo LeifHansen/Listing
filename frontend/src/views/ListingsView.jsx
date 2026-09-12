@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle,
@@ -235,13 +235,19 @@ export function ListingsView({ search = "" }) {
   // goes to the top and the archive goes to the bottom: see
   // lib/listingsView.orderListings. The card itself says why it is where it
   // is (the green glow and its chip, or a Sold / Ended badge, in ListingCard).
-  const shown = listingsState.items
-    .filter((i) => inTab(tab, i))
-    .filter((i) => !q
-      || (i.listing?.title || i.title || "").toLowerCase().includes(q)
-      || (i.listing?.brand || "").toLowerCase().includes(q)
-      || (i.listing?.description || "").toLowerCase().includes(q));
-  const items = orderListings(shown, metricsById);
+  // Memoized for the same reason as the drafts grid above it on this screen:
+  // two passes and a sort over every listing the seller owns, re-run on every
+  // render, and the app context hands this component a new value on each
+  // background poll whether or not a listing changed.
+  const items = useMemo(() => {
+    const shown = listingsState.items
+      .filter((i) => inTab(tab, i))
+      .filter((i) => !q
+        || (i.listing?.title || i.title || "").toLowerCase().includes(q)
+        || (i.listing?.brand || "").toLowerCase().includes(q)
+        || (i.listing?.description || "").toLowerCase().includes(q));
+    return orderListings(shown, metricsById);
+  }, [listingsState.items, tab, q, metricsById]);
 
   // "Create Listing" from an empty tab used to look broken: this list now
   // lives on the Sell screen, so startNew() lands you where you already are

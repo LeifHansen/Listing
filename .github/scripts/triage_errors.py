@@ -53,6 +53,21 @@ SELLER_SIDE = re.compile(
     r"\brefused over (?:specifics|title|description|price|photos|policies"
     r"|location|category|condition|weight)\b")
 
+# eBay declining to change a listing it has FROZEN — a Best Offer waiting on
+# it, an auction with a bid, a listing ending within 12 hours. Not a field,
+# so it is not in the list above; not this tree's either. The app recognises
+# the refusal exactly and answers the seller in full ("nothing is missing,
+# your edit is saved and goes over automatically once that clears"), and
+# there is no code change that would make eBay unfreeze a listing.
+#
+# It reached the feed as "refused over generic" — the same token an
+# UNRECOGNISED sentence gets — so the triage offered a pull request against
+# working code on 2026-09-12 and would have every day it happened.
+# ebay_provider.refusal_key gives it its own token now, and this is the rule
+# that reads it. Separate from SELLER_SIDE because the reason differs: there
+# is nothing for the seller to fix either.
+LOCKED = re.compile(r"\brefused over locked\b")
+
 # How many fixes to propose in one run. Not a judgement about how many bugs
 # exist — a bound on how much review one morning can create. The rest keep
 # their place in the feed and come back tomorrow, highest count first.
@@ -131,9 +146,13 @@ def why_not(row: dict, known: dict, repo_root: str) -> str | None:
         return f"already has a fix ({row.get('fix_pr') or 'unnamed'})"
     if row.get("exc_type") in EXTERNAL:
         return f"{row.get('exc_type')} is a third party being unreachable"
-    if SELLER_SIDE.search(str(row.get("message") or "")):
+    message = str(row.get("message") or "")
+    if SELLER_SIDE.search(message):
         return ("eBay refused over a field the seller was pointed at - "
                 "their listing's gap, not this tree's bug")
+    if LOCKED.search(message):
+        return ("eBay has the listing frozen (offer/bid/ending) and the app "
+                "said so - nothing here and nothing the seller can fix")
     if row.get("severity") == "low":
         return "graded low - no traceback and nothing that reads as a failure"
     if not row.get("traceback") and (row.get("count") or 0) < MIN_COUNT:
