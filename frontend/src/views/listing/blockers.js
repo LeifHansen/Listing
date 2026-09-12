@@ -32,6 +32,11 @@ import { specificValue } from "./specifics";
 // in the backend — keep the two in step.
 export const TITLE_MAX = 80;
 export const MAX_PHOTOS = 24;
+// eBay allows ONE video per listing. It enforces that by ignoring the extras
+// rather than refusing them, so the ceiling has to be kept on this side too:
+// an upload that succeeds onto a listing that shows no video is the worst way
+// to learn the rule. Mirrors models.MAX_VIDEOS — keep the two in step.
+export const MAX_VIDEOS = 1;
 export const EBAY_MIN_PRICE = 0.99;
 
 // Does this publish include eBay? `targets` is the effectiveTargets array

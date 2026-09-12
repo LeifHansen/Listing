@@ -113,6 +113,12 @@ export function useListingForm() {
   const { toast } = useToast();
 
   const [form, setForm] = useState(() => fromListing(session?.listing));
+  // The listing's video, held apart from `form` because it is not the seller's
+  // to edit field by field: each entry carries the id eBay minted and where
+  // eBay's moderation got to, and the routes answer with the whole list. See
+  // "the listing's video" further down.
+  const [videos, setVideos] = useState(
+    () => (session?.listing?.videos || []).map((v) => ({ ...v })));
   const [aiBusy, setAiBusy] = useState(null); // string[] of friendly messages, or null
   const [publishResult, setPublishResult] = useState(null);
   const [fixTarget, setFixTarget] = useState(null); // which field group eBay flagged
@@ -163,6 +169,10 @@ export function useListingForm() {
     if (seededFor.current !== sessionId) {
       seededFor.current = sessionId;
       setForm(fromListing(session?.listing));
+      // Re-seeded with everything else, or opening a second listing would
+      // show the first one's video — and offer to remove it from a listing
+      // it was never on.
+      setVideos((session?.listing?.videos || []).map((v) => ({ ...v })));
       setPublishResult(null);
       setFixTarget(null);
       setCatSuggestions(null);
@@ -644,6 +654,99 @@ export function useListingForm() {
   }, [sessionId, form.images, collect, setForm, setSession,
       invalidateListings, toast]);
 
+  // ---------- the listing's video ----------
+  // eBay takes ONE video per listing, MP4, and this is the whole of the
+  // feature: pick the file, it goes up, eBay moderates it. No trimming, no
+  // thumbnail picking, no re-encode — eBay produces its own renditions from
+  // whatever it is given, so an editing pass here would cost the seller
+  // quality and the server minutes to make something eBay throws away.
+  //
+  // The video list is SERVER-OWNED in a way the photo list is not. Each entry
+  // carries the id eBay minted and where eBay's moderation got to, and both
+  // arrive minutes to days after the upload — so the routes answer with the
+  // list and this holds what they said, rather than deriving it from the form.
+  const [addingVideo, setAddingVideo] = useState(false);
+
+  // Keep the session's copy in step, so the next full save (which spreads
+  // session.listing) cannot resurrect a video the seller just removed or drop
+  // one they just added.
+  const rememberVideos = useCallback((list) => {
+    setVideos(list);
+    setSession((s) => (s ? {
+      ...s, listing: { ...(s.listing || {}), videos: list },
+    } : s));
+  }, [setSession]);
+
+  const addVideo = useCallback(async (file) => {
+    if (!file || !sessionId) return;
+    setAddingVideo(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      // The same long budget the photo uploads get: 150MB over a seller's
+      // connection is minutes, and the default deadline would abandon every
+      // real video.
+      const res = await api(`/api/listings/${sessionId}/video`,
+        { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
+      rememberVideos(res.videos || []);
+      toast("Video added. It goes to eBay for review when you publish.",
+        { kind: "success" });
+      invalidateListings();
+    } catch (e) {
+      toast(`Couldn't add that video: ${e.message}`, { kind: "error" });
+    } finally {
+      setAddingVideo(false);
+    }
+  }, [sessionId, rememberVideos, invalidateListings, toast]);
+
+  // `confirmFn` is the editor's own dialog, handed down exactly as it is for
+  // deleteImage above — and for a stronger reason: the video is gone from the
+  // server with no undo, and getting it back means re-shooting or re-sending
+  // up to 150MB over whatever connection the seller has.
+  const removeVideo = useCallback(async (name, confirmFn) => {
+    if (!name || !sessionId) return;
+    if (confirmFn && !(await confirmFn({
+      title: "Remove this video?",
+      message: "This can't be undone — you'd have to upload it again.",
+      confirmLabel: "Remove",
+      danger: true,
+    }))) return;
+    try {
+      const res = await api(`/api/listings/${sessionId}/video/${encodeURIComponent(name)}`,
+        { method: "DELETE" });
+      rememberVideos(res.videos || []);
+      invalidateListings();
+    } catch (e) {
+      toast(`Couldn't remove that video: ${e.message}`, { kind: "error" });
+    }
+  }, [sessionId, rememberVideos, invalidateListings, toast]);
+
+  // eBay moderates a video for hours and up to 48 of them, so there is
+  // nothing to wait on and no job to poll — the status is asked for while a
+  // video is still in flight and then left alone. The server only calls eBay
+  // for videos eBay has not finished with (listing_sync.refresh_video_status),
+  // so a LIVE or BLOCKED video costs nothing but the one request that finds
+  // out, and a tab left open on a settled listing stops asking entirely.
+  const videoPending = videos.some(
+    (v) => !v.status || v.status === "PENDING_UPLOAD" || v.status === "PROCESSING");
+  useEffect(() => {
+    if (!sessionId || !videos.length || !videoPending || addingVideo) return undefined;
+    let alive = true;
+    const id = setInterval(async () => {
+      try {
+        const res = await api(`/api/listings/${sessionId}/video`);
+        // rememberVideos, not setVideos: the session's copy is what the next
+        // full save spreads, so a status the poll learned has to land there
+        // too — one way in, for every write of this list.
+        if (alive && res.videos) rememberVideos(res.videos);
+      } catch {
+        // A poll that fails changes nothing on screen and is not worth a
+        // toast: the video is saved either way, and the next tick asks again.
+      }
+    }, 20000);
+    return () => { alive = false; clearInterval(id); };
+  }, [sessionId, videos.length, videoPending, addingVideo, rememberVideos]);
+
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
     setAiBusy(["Checking everything the marketplaces require…"]);
@@ -1109,6 +1212,7 @@ export function useListingForm() {
     getSpecific, getSpecificValues, upsertSpecific,
     toggleSpecificValue, confirmSpecific, confirmAllSpecifics,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos, addingStatus,
+    videos, addVideo, removeVideo, addingVideo,
     imageVersions, imageBase, bumpImageVersion,
     completion, blockers,
   };

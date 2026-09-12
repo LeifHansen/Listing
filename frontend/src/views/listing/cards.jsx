@@ -4,9 +4,12 @@ import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
   Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
+  Video as VideoIcon,
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
-import { api, postJson, isPhotoFile, PHOTO_ACCEPT } from "@/lib/api";
+import {
+  api, postJson, isPhotoFile, isVideoFile, PHOTO_ACCEPT, VIDEO_ACCEPT,
+} from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
 import {
@@ -25,11 +28,11 @@ import {
 } from "./ShippingPolicySelect";
 import { StoreCategorySelect } from "./StoreCategorySelect";
 import { ConditionPicker } from "./ConditionPicker";
-import { TITLE_MAX, MAX_PHOTOS } from "./blockers";
+import { TITLE_MAX, MAX_PHOTOS, MAX_VIDEOS } from "./blockers";
 import { issuesFor } from "./publishShared";
 import { riskyWords, riskyWordSummary } from "@/lib/riskyWords";
 
-/* The eight workflow cards. Each is presentational; all state lives in
+/* The workflow cards. Each is presentational; all state lives in
    useListingForm (passed down as `w`). */
 
 // Fallback strip for an imported listing whose photos couldn't be copied into
@@ -53,6 +56,14 @@ function EbayPhotos({ urls }) {
     </div>
   );
 }
+
+// Is this drag carrying files from the desktop, rather than something dragged
+// from inside the page? The tiles hold <img>, which browsers make draggable on
+// their own, so without this an internal drag lights up the drop state. Shared
+// by both media cards — two copies that could disagree about what a drop is
+// would be two bugs.
+const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
+
 
 export function PhotosCard({ w, onEdit, onDelete }) {
   const formImages = w.form.images || [];
@@ -78,7 +89,6 @@ export function PhotosCard({ w, onEdit, onDelete }) {
   // the grid, so a plain boolean flickers. Counting entries against leaves
   // keeps the highlight steady until the pointer really leaves.
   const dragDepth = useRef(0);
-  const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
   const onFileDragEnter = (e) => {
     if (w.addingPhotos || !hasFiles(e)) return;
     e.preventDefault();
@@ -217,6 +227,173 @@ export function PhotosCard({ w, onEdit, onDelete }) {
           </span>
         </label>
       </div>
+      )}
+    </WorkflowCard>
+  );
+}
+
+/* The listing's video.
+
+   eBay takes ONE video per listing (MAX_VIDEOS), MP4, up to 150MB and about
+   a minute, and this card is the whole of the feature: pick the file, it goes
+   up, eBay reviews it. There is no trimming, no thumbnail picking and no
+   re-encode — eBay makes its own renditions from whatever it is given, so an
+   editing pass here would cost the seller quality and buy nothing.
+
+   The part that needs saying on screen is the WAIT. A video is not a photo:
+   photos are fetched by eBay at publish time and appear at once, while a
+   video goes into eBay's moderation queue and shows up on the listing within
+   48 hours. A seller who publishes, looks at their listing and sees no video
+   has done nothing wrong, and this card is the only place that can tell them
+   so before they start again. */
+function videoSize(bytes) {
+  if (!bytes) return "";
+  return bytes >= 1e6 ? `${(bytes / 1e6).toFixed(0)} MB`
+    : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+}
+
+export function VideoCard({ w, onRemove }) {
+  const { toast } = useToast();
+  const [fileDrag, setFileDrag] = useState(false);
+  const dragDepth = useRef(0);
+  const videos = w.videos || [];
+  const full = videos.length >= MAX_VIDEOS;
+
+  // One way in for the picker and the drop, so what counts as a video cannot
+  // differ between them — the mistake PhotosCard above documents having made.
+  const addVideo = (files) => {
+    const usable = files.filter(isVideoFile);
+    if (!usable.length) {
+      if (files.length) {
+        toast("eBay only takes MP4 video. Export it as .mp4 (H.264) and try "
+          + "again.", { kind: "warning" });
+      }
+      return;
+    }
+    if (full) {
+      toast(`eBay allows ${MAX_VIDEOS} video per listing — remove the one `
+        + "that's there to add a different one.", { kind: "warning" });
+      return;
+    }
+    if (usable.length > 1) {
+      toast(`eBay allows ${MAX_VIDEOS} video per listing, so only the first `
+        + "was added.", { kind: "warning" });
+    }
+    w.addVideo(usable[0]);
+  };
+
+  const onDragEnter = (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setFileDrag(true);
+  };
+  const onDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (!dragDepth.current) setFileDrag(false);
+  };
+  const onDrop = (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setFileDrag(false);
+    if (w.addingVideo) return;
+    addVideo(Array.from(e.dataTransfer.files || []));
+  };
+
+  return (
+    <WorkflowCard
+      id="video" icon={VideoIcon} title="Video"
+      hint={`Optional. eBay allows ${MAX_VIDEOS} video per listing — MP4, up `
+        + "to a minute, 150MB. Upload only: eBay makes its own versions of "
+        + "whatever you send, so there's nothing here to trim or crop. eBay "
+        + "reviews every video, which is why it appears on the listing within "
+        + "48 hours rather than straight away."}
+      state={videos.length ? "complete" : "todo"}
+    >
+      {videos.length ? (
+        <div className="flex flex-col gap-3">
+          {videos.map((v) => (
+            <div key={v.file || v.status}
+                 className="flex flex-col sm:flex-row gap-4 items-start">
+              {v.url ? (
+                // Plain <video controls>: the browser's own player, the
+                // seller's own file. Nothing here uploads on play, and
+                // nothing re-encodes.
+                <video
+                  src={v.url} controls preload="metadata"
+                  className="w-full sm:w-64 rounded-tile bg-bg-sunken aspect-video object-contain"
+                />
+              ) : (
+                // A video already on the eBay listing whose bytes this app
+                // never held (an imported listing). There is nothing to play
+                // — eBay hosts it — and pretending otherwise is a dead player.
+                <div className="w-full sm:w-64 aspect-video rounded-tile bg-bg-sunken
+                                grid place-items-center text-ink-faint text-[12.5px] px-4 text-center">
+                  This listing’s video is hosted by eBay
+                </div>
+              )}
+              <div className="flex-1 min-w-0 flex flex-col gap-2">
+                <p className="text-[13px] text-ink">{v.note}</p>
+                {/* eBay's own words when it refused one — the seller has no
+                    other way to learn why, because the refusal lands days
+                    after they stopped looking. */}
+                {v.message && (
+                  <p className="text-[12.5px] text-ink-secondary">{v.message}</p>
+                )}
+                {v.size ? (
+                  <p className="text-[12px] text-ink-faint">{videoSize(v.size)}</p>
+                ) : null}
+                <div>
+                  <Button
+                    variant="ghost" size="sm"
+                    onClick={() => onRemove?.(v.file)}
+                    disabled={!v.file}
+                  >
+                    <X size={15} aria-hidden /> Remove video
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <label
+          onDragEnter={onDragEnter}
+          onDragOver={(e) => { if (hasFiles(e)) e.preventDefault(); }}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          className={cn(
+            "flex flex-col items-center justify-center gap-2 rounded-tile border-2",
+            "border-dashed border-line bg-bg-sunken/40 px-6 py-10 cursor-pointer",
+            "text-ink-secondary transition-colors duration-150",
+            "hover:border-blue/50 hover:text-blue",
+            fileDrag && "border-blue text-blue bg-blue-soft",
+            w.addingVideo && "pointer-events-none opacity-70",
+          )}
+        >
+          <input
+            type="file" accept={VIDEO_ACCEPT} className="sr-only"
+            disabled={w.addingVideo}
+            onChange={(e) => {
+              // Copied before the input is cleared: `value = ""` empties this
+              // very FileList.
+              addVideo(Array.from(e.target.files || []));
+              e.target.value = "";
+            }}
+          />
+          {w.addingVideo
+            ? <Loader2 size={22} className="animate-spin" aria-hidden />
+            : <VideoIcon size={22} aria-hidden />}
+          <span className="text-[13px] font-semibold">
+            {w.addingVideo ? "Uploading…"
+              : fileDrag ? "Drop to add" : "Add a video"}
+          </span>
+          <span className="text-[12px] text-ink-faint text-center">
+            MP4, up to a minute, 150MB. eBay reviews it before it shows on the
+            listing.
+          </span>
+        </label>
       )}
     </WorkflowCard>
   );

@@ -826,6 +826,21 @@ class EbayProvider:
         # the way out, so a draft already carrying a refused pairing is
         # rescued without the seller re-doing anything.
         fit_paired_aspects_to_category(listing)
+        # The listing's video, if it has one eBay has not been handed yet.
+        #
+        # The ordinary path uploads it minutes after the seller picks the file
+        # (the job behind POST /api/listings/{id}/video), so this is normally
+        # a no-op that reads one already-stamped id. It is here for the two
+        # cases where it is not: a video added to a draft before eBay was
+        # connected, and an upload that failed. Both look identical to the
+        # seller — a video on the card and nothing on the listing — and this
+        # is the last moment it can be fixed without them noticing anything.
+        #
+        # Never fatal, by construction (see listing_sync.push_videos): a
+        # listing that publishes without its video is recoverable; one that
+        # will not publish is the seller's afternoon.
+        if creds and mode != "draft":
+            listing_sync.push_videos(creds["access_token"], session_id, listing)
         # Which of the three publish routes this request takes is the single
         # most useful thing to know when a publish "does nothing" — create,
         # revise, or the Inventory fallback, and what decided it. One line,

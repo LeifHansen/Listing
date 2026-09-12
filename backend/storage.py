@@ -123,6 +123,50 @@ def optimized_path(session_id: str) -> Path:
     return session_dir(session_id) / "optimized"
 
 
+# Where a listing's video files live, beside "original" and "optimized". A
+# separate directory rather than a name convention inside optimized/, because
+# every pass that walks optimized/ -- the image list, the R2 offload, the
+# thumbnailer, the AI's own reading of the photos -- would otherwise have to
+# learn to skip a 150MB MP4, and the one that forgot would be the one that
+# handed it to Pillow.
+VIDEO_SUBDIR = "video"
+
+# What a stored video may be called. The name is minted by the upload route,
+# never by the client, but it travels in a public /media URL and comes back as
+# a path segment -- so it is checked on the way in AND on the way out, with
+# the same rule for both. Same reasoning as safe_session_name above: accept or
+# reject, never rewrite.
+_VIDEO_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.mp4")
+
+
+def safe_video_name(name: str) -> str:
+    """The video filename, or a rejection. Raises ValueError on anything else."""
+    if not isinstance(name, str) or not _VIDEO_NAME_RE.fullmatch(name):
+        raise ValueError("invalid video name")
+    return name
+
+
+def video_dir(session_id: str) -> Path:
+    """The session's video directory, created if absent (for writers)."""
+    d = ensure_session(session_id) / VIDEO_SUBDIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def video_path(session_id: str) -> Path:
+    """The video directory WITHOUT creating anything -- for readers, exactly
+    as optimized_path is to optimized_dir: a GET must never be a disk write,
+    and re-creating empty dirs for purged sessions undoes the orphan sweep."""
+    return session_dir(session_id) / VIDEO_SUBDIR
+
+
+def list_videos(session_id: str) -> list[str]:
+    d = video_path(session_id)  # read-only — never mkdir on a lookup
+    if not d.is_dir():
+        return []
+    return sorted((p.name for p in d.glob("*") if p.is_file()), key=natural_key)
+
+
 def history_dir(session_id: str) -> Path:
     d = session_dir(session_id) / "history"
     d.mkdir(parents=True, exist_ok=True)

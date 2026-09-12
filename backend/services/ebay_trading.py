@@ -32,9 +32,9 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..models import (SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS, ItemSpecific,
-                      Listing)
-from . import taxonomy
+from ..models import (MAX_VIDEOS, SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS,
+                      ItemSpecific, Listing)
+from . import ebay_video, taxonomy
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -667,6 +667,18 @@ def _item_to_listing(item: ET.Element) -> dict:
     pictures = [(u.text or "").strip() for u in
                 _findall(item, "PictureDetails/PictureURL") if u.text]
 
+    # A video the listing already has on eBay -- put there by this app, in
+    # Seller Hub, or by the eBay app. Imported with no `file`: we never held
+    # the bytes and never will, and the id is the whole of what a revise needs
+    # to keep it. Without this an import would read as "no video", and the
+    # first revise carrying <VideoDetails> would remove one the seller added
+    # themselves. Status is LIVE because eBay only shows a video on a listing
+    # once moderation has passed it.
+    videos = [{"ebay_video_id": (v.text or "").strip(),
+               "status": ebay_video.STATUS_LIVE}
+              for v in _findall(item, "VideoDetails/VideoID")
+              if (v.text or "").strip()][:MAX_VIDEOS]
+
     dims = _find(item, "ShippingPackageDetails")
     weight_major = _int(dims, "WeightMajor") if dims is not None else 0
     weight_minor = _float(dims, "WeightMinor") if dims is not None else None
@@ -723,6 +735,7 @@ def _item_to_listing(item: ET.Element) -> dict:
         "item_specifics": specifics,
         "images": [],           # no local files — this listing came from eBay
         "image_urls": pictures,  # eBay-hosted photos, shown as-is
+        "videos": videos,       # eBay's own video id(s), kept so a revise doesn't drop them
         "ebay_listing_id": _text(item, "ItemID"),
         # eBay's Variations container. Nothing here ever looked for it, so a
         # multi-variation listing imported as ONE flat record -- a single
@@ -1310,7 +1323,51 @@ def _item_fields(listing: Listing, image_urls: Optional[list[str]] = None,
     if image_urls and (wanted("image_urls") or wanted("images")):
         urls = "".join(f"<PictureURL>{_esc(u)}</PictureURL>" for u in image_urls[:24])
         parts.append(f"<PictureDetails>{urls}</PictureDetails>")
+    # The listing's video, by the id eBay minted for it when the bytes were
+    # uploaded through the Media API (services/ebay_video.py). There is no
+    # <VideoURL>: a video eBay has not already been handed cannot be named
+    # here at all, which is why the upload happens long before the publish.
+    #
+    # Same replace-the-whole-set rule as PictureDetails above, and the same
+    # gate on the seller having actually edited it -- eBay reads
+    # <VideoDetails> on a revise as the listing's complete video set, so
+    # sending it on an unrelated edit is how a video added in Seller Hub
+    # would quietly disappear.
+    if wanted("videos"):
+        ids = video_ids(listing)
+        if ids:
+            parts.append("<VideoDetails>"
+                         + "".join(f"<VideoID>{_esc(v)}</VideoID>" for v in ids)
+                         + "</VideoDetails>")
     return parts
+
+
+def video_ids(listing: Listing) -> list[str]:
+    """The eBay video ids this listing may be published with.
+
+    Held apart from the XML so the publish path can ask the same question the
+    request answers -- "is there a video to send yet?" -- without building a
+    payload. Two rules, both eBay's:
+
+      * only a video eBay has actually accepted has an id, and only the
+        statuses in SENDABLE_STATUSES may be sent. A BLOCKED or failed video
+        still has an id, and naming it rejects the whole publish rather than
+        producing a listing without a video.
+      * at most MAX_VIDEOS. The schema repeats <VideoID> and eBay's limit is
+        one; past it eBay ignores the extras silently, which is indis-
+        tinguishable from the app having dropped them.
+    """
+    out = []
+    for video in (listing.videos or []):
+        status = (video.status or "").strip().upper()
+        # A video uploaded before this app recorded statuses carries "" and is
+        # sent: eBay would not have given it an id otherwise.
+        if video.ebay_video_id and (
+                not status or status in ebay_video.SENDABLE_STATUSES):
+            out.append(video.ebay_video_id)
+        if len(out) >= MAX_VIDEOS:
+            break
+    return out
 
 
 # eBay's ListingDuration tokens for a Chinese auction. The model stores the
@@ -1688,6 +1745,11 @@ REVISABLE_FIELDS = frozenset({
     "title", "subtitle", "description", "brand", "category_id", "condition",
     "condition_description", "condition_descriptors", "item_specifics",
     "images", "image_urls",
+    # eBay takes <VideoDetails> on a revise, so a video added to a listing
+    # that is already live actually reaches it. What a revise cannot do is
+    # mint the id -- the Media API upload is what does that, and it has
+    # already happened by the time anything gets here.
+    "videos",
     "price", "quantity", "fulfillment_policy_id",
 })
 

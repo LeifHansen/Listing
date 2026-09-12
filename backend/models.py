@@ -42,6 +42,18 @@ MAX_ITEM_SPECIFICS = 500
 # ungraded one; the bound exists so the list is finite, not to model eBay.
 MAX_CONDITION_DESCRIPTORS = 20
 
+# How many videos eBay allows on one listing. The answer today is ONE -- eBay
+# says so in its seller help and enforces it by ignoring the rest, which is
+# the worst way to find out: the upload succeeds and the listing has no video.
+#
+# The plumbing either side of this number carries a list anyway (Listing.videos
+# below, the repeatable <VideoID> the Trading schema takes), so raising the
+# ceiling the day eBay does is this constant and the one beside it in
+# services/ebay_video.py. Held here as well because models.py is the layer with
+# no eBay dependency -- the route and the editor both need the number, and
+# neither should have to import an httpx-backed module to learn it.
+MAX_VIDEOS = 1
+
 # How a listing sells. FIXED_PRICE is Buy It Now (the default and the great
 # majority); AUCTION takes bids only; AUCTION_BIN is an auction that also
 # carries a Buy It Now price. The choice decides which eBay call publishes it
@@ -106,6 +118,56 @@ class ConditionDescriptor(BaseModel):
         if isinstance(value, list):
             return [str(v).strip() for v in value if v is not None and str(v).strip()]
         return []
+
+
+class ListingVideo(BaseModel):
+    """One video attached to a listing, and where eBay has got to with it.
+
+    A video is not a photo with a bigger file. Photos are pulled -- the
+    publish hands eBay a URL and eBay fetches it -- so a photo needs nothing
+    on the record but its filename. A video is PUSHED through eBay's Media
+    API and comes back as an id, then sits in eBay's moderation queue for
+    hours or days before it appears on the listing. So all three facts have
+    to be kept: the file this app holds, the id eBay gave it, and what eBay
+    last said about it. Losing any one of them means re-uploading 150MB the
+    seller already sent, or publishing a listing that silently has no video.
+
+    See services/ebay_video.py for the statuses (eBay's own words, unmapped)
+    and for what each one means for a publish.
+    """
+
+    # Filename under the session's video dir. Empty for a video that reached
+    # us from eBay on an import -- we never held those bytes and never will.
+    file: str = ""
+    # eBay's id for the video, once the Media API has it. "" while the file is
+    # here and eBay has not been asked yet (a draft made before the seller
+    # connected eBay, or an upload that failed and will be retried).
+    ebay_video_id: str = ""
+    # eBay's own status word: PENDING_UPLOAD | PROCESSING | LIVE | BLOCKED |
+    # PROCESSING_FAILED, or "" before eBay has seen it.
+    status: str = ""
+    # Why eBay blocked or failed it, in eBay's words. The seller has no other
+    # way to learn this -- the refusal arrives days after they stopped looking.
+    message: str = ""
+    # Bytes, as stored. Kept because createVideo has to be told the exact size
+    # BEFORE the upload and eBay rejects a mismatch, and because it is what
+    # the editor shows.
+    size: int = 0
+
+    @field_validator("file", "ebay_video_id", "status", "message", mode="before")
+    @classmethod
+    def _text_fields(cls, value):
+        if value is None:
+            return ""
+        return str(value).strip()[:TEXT_FIELD_MAX_CHARS]
+
+    @field_validator("size", mode="before")
+    @classmethod
+    def _size_field(cls, value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
 
 class MarketplaceState(BaseModel):
@@ -224,6 +286,12 @@ class Listing(BaseModel):
     # local files, so the app renders these directly; app-created listings
     # leave this empty and use `images`.
     image_urls: list[str] = Field(default_factory=list)
+    # The listing's video(s) -- at most MAX_VIDEOS, which is what eBay allows.
+    # A list rather than a single field because the Trading schema repeats
+    # <VideoID> and because the day eBay raises its limit nothing here has to
+    # change shape. See ListingVideo for why a video carries three facts where
+    # a photo carries one.
+    videos: list[ListingVideo] = Field(default_factory=list)
     # fields the model was unsure about; surfaced to the user to fill in
     missing_info: list[str] = Field(default_factory=list)
     # How sure the identify pass was of what this item IS: "low", "medium" or
@@ -538,6 +606,35 @@ class Listing(BaseModel):
                     kept.append(entry)
             elif isinstance(entry, dict) and str(entry.get("id") or "").strip():
                 kept.append(entry)
+        return kept
+
+    @field_validator("videos", mode="before")
+    @classmethod
+    def _cap_videos(cls, value):
+        """eBay's ceiling, held at the model because every write path lands on
+        it -- the upload route, a save from the editor, an import, a client
+        that never enforced it. Past MAX_VIDEOS eBay does not refuse the
+        listing, it silently ignores the extras, so a record that carried
+        three would publish one and look like it had lost two.
+
+        Entries with neither a local file nor an eBay id are dropped: they
+        describe no video at all, and keeping them would have the editor show
+        a slot for something that does not exist."""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+        kept = []
+        for entry in value:
+            if isinstance(entry, ListingVideo):
+                if entry.file or entry.ebay_video_id:
+                    kept.append(entry)
+            elif isinstance(entry, dict) and (
+                    str(entry.get("file") or "").strip()
+                    or str(entry.get("ebay_video_id") or "").strip()):
+                kept.append(entry)
+            if len(kept) >= MAX_VIDEOS:
+                break
         return kept
 
 

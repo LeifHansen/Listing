@@ -97,6 +97,21 @@ SAFE_TO_REPEAT = {
     "backend.services.tokens._stripe_post":
         "creates a Checkout Session, which moves no money — the webhook "
         "credits the purchase, idempotently, and is the thing that charges.",
+    "backend.services.ebay_video.create_video":
+        "reserves a video resource on eBay and returns its id. A lost answer "
+        "leaves a resource with no bytes in it, attached to nothing — eBay "
+        "expires it on its own, and asking again mints another. Nothing of "
+        "the seller's changes, and no listing can name a video until a "
+        "publish does.",
+    "backend.services.ebay_video.upload_video":
+        "sends the bytes for one already-created video id. A lost answer may "
+        "mean eBay has them and is processing — and repeating costs "
+        "bandwidth, not correctness: a video only reaches a listing when the "
+        "publish names its ID (one, capped at models.MAX_VIDEOS), so a "
+        "second upload can never put two videos on a listing. The retry "
+        "(listing_sync.push_videos, at publish time) creates a fresh id "
+        "rather than re-sending into an uncertain one, which leaves the "
+        "first to expire unattached.",
 }
 
 _VERBS = {"post", "put", "patch", "delete", "request"}

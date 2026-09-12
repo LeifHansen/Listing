@@ -39,14 +39,15 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Optional
 
 from .. import db, ebay_auth, objstore, storage
 from ..config import log
 from ..errors import StorageUnavailable
 from ..models import Listing
-from . import (ebay_account, ebay_trading, notifications, publish_guard,
-               recommender, sync_merge, taxonomy)
+from . import (ebay_account, ebay_trading, ebay_video, notifications,
+               publish_guard, recommender, sync_merge, taxonomy)
 from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
@@ -61,6 +62,17 @@ _LIVE_FIELDS = ("price", "quantity", "watch_count", "sold_quantity",
                 # so a listing fixed on eBay would stay read-only here for
                 # good.
                 "has_variations")
+# `videos` is deliberately NOT a live field, unlike image_urls beside it.
+#
+# GetItem reports a video only once eBay's moderation has passed it, and that
+# takes up to 48 hours — so for the whole of that window eBay's answer to
+# "what videos does this listing have" is "none", and refreshing from it would
+# delete the record of a video that is on its way up: the id, the local file,
+# and any chance of the next publish naming it. The listing on eBay is never
+# harmed either way (a revise carries <VideoDetails> only when the seller
+# edited it), so the cost of keeping the local copy is that a video added in
+# Seller Hub is not shown here, and the cost of not keeping it is losing one
+# the seller just uploaded.
 # Detail fetches run a few at a time: each listing is its own GetItem round
 # trip, so a 300-item store takes minutes when they run one after another —
 # long enough for the browser to give up on the request. Small pool, because
@@ -1359,6 +1371,106 @@ def verifier(token: str, image_urls: list[str],
             postal_code=postal, best_offer=best_offer,
             international_shipping=international_shipping)
     return verify
+
+
+def video_file_for(session_id: str, name: str) -> Optional[str]:
+    """The local path of a stored listing video, fetched back from R2 if the
+    reclaim pass has already freed the local copy. None when it is nowhere.
+
+    A 150MB file on a 1GB volume is exactly what the offload exists for, so
+    "the file is not on disk" is the NORMAL state for any video older than a
+    few hours — not a missing video.
+    """
+    path = storage.video_path(session_id) / name
+    if path.is_file():
+        return str(path)
+    if not objstore.enabled():
+        return None
+    key = objstore.video_key_for(session_id, name)
+    target = storage.video_dir(session_id) / name
+    # download, not restore: a video is up to 150MB, and restore() holds the
+    # whole object in memory before writing it.
+    return str(target) if objstore.download(key, target) else None
+
+
+def push_videos(token: str, session_id: str, listing: Listing) -> bool:
+    """Make sure every video on this listing has reached eBay, and record what
+    eBay said. Returns whether anything on the listing changed.
+
+    Called from two places, and it has to be safe from both: the job behind
+    the upload button (so the video is on its way to moderation the moment
+    the seller adds it) and the publish path (so a video added while eBay was
+    disconnected, or an upload that failed, still goes up with the listing).
+    A video that already carries an id is skipped, which is what makes the
+    second call free in the ordinary case.
+
+    NOTHING here raises. A publish must not fail because eBay's Media API
+    blinked: the listing goes live without the video, the failure is recorded
+    on the video where the editor shows it, and the next publish tries again.
+    That is the right way round — a listing with no video sells; a listing
+    that would not publish does not.
+    """
+    changed = False
+    for video in (listing.videos or []):
+        if video.ebay_video_id or not video.file:
+            continue
+        path = video_file_for(session_id, video.file)
+        if not path:
+            log.warning("video: %s is on neither disk nor R2 (session=%s)",
+                        video.file, session_id)
+            video.status = ebay_video.STATUS_FAILED
+            video.message = ("That video file is no longer on the server — "
+                             "add it again.")
+            changed = True
+            continue
+        try:
+            result = ebay_video.send_to_ebay(
+                token, Path(path), title=listing.title or "Listing video")
+        except ebay_video.VideoNotSupported as exc:
+            # The app's keyset, not the seller's file. Deliberately leaves the
+            # status alone so nothing tells the seller their video was
+            # rejected, and leaves the file in place so it goes up whenever
+            # eBay does enable it.
+            log.info("video: eBay's Media API is not open to this app (%s)", exc)
+            return changed
+        except ebay_video.VideoError as exc:
+            log.warning("video: upload failed for session=%s: %s", session_id, exc)
+            video.status = ebay_video.STATUS_FAILED
+            video.message = str(exc)
+            changed = True
+            continue
+        video.ebay_video_id = result["video_id"]
+        video.status = result["status"]
+        video.message = result["message"]
+        changed = True
+        log.info("video: session=%s uploaded to eBay as %s (%s)",
+                 session_id, video.ebay_video_id, video.status)
+    return changed
+
+
+def refresh_video_status(token: str, listing: Listing) -> bool:
+    """Ask eBay where moderation got to on videos it is still looking at.
+
+    Only the non-terminal ones: a video eBay has already passed or refused is
+    never asked about again, which is what keeps the editor's poll from
+    turning into a request per open tab per second for the life of a listing.
+    """
+    changed = False
+    for video in (listing.videos or []):
+        status = (video.status or "").strip().upper()
+        if not video.ebay_video_id or status in ebay_video.TERMINAL_STATUSES:
+            continue
+        try:
+            state = ebay_video.get_video(token, video.ebay_video_id)
+        except ebay_video.VideoError as exc:
+            log.info("video: status read failed for %s: %s",
+                     video.ebay_video_id, exc)
+            continue
+        if state["status"] and state["status"] != video.status:
+            video.status = state["status"]
+            video.message = state["message"]
+            changed = True
+    return changed
 
 
 def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
