@@ -27,6 +27,8 @@ not the work, and never becomes the brand.
 """
 from __future__ import annotations
 
+import pytest
+
 from backend.services.listing_prompt import (
     ART_TAG_SCAN_RULE,
     ART_TRANSCRIBE_LINES,
@@ -176,7 +178,9 @@ def test_the_zoom_pass_writes_a_support_line_and_a_verso_line():
 def test_the_rule_reaches_the_zoom_specifics_and_lookup_passes():
     """The same text, appended the way ART_RULE is, so the pass that names
     the piece and the pass that fills its specifics cannot disagree."""
-    text = open("backend/services/claude_ai.py").read()
+    from pathlib import Path
+    source = Path(__file__).resolve().parents[1] / "services" / "claude_ai.py"
+    text = source.read_text(encoding="utf-8")
     assert "BLANK_CANVAS_RULE," in text           # imported, not paraphrased
     assert "VINTAGE_DENIM_RULE + ART_RULE\n    + BLANK_CANVAS_RULE)" in text
     assert "ART_RULE\n    + BLANK_CANVAS_RULE)" in text
@@ -187,6 +191,11 @@ def test_a_canvas_draft_reaches_the_art_lookup():
     """The gate that decides a draft is art had no word for this one: the bad
     title names no medium and no artist, so nothing matched and the lookup --
     the pass that would have caught it -- never ran."""
+    # Inline and guarded: importing the app pulls in the vision client, and
+    # the lint+unit job deliberately doesn't install it. The smoke job runs
+    # the whole suite with the real requirements, and this runs there.
+    pytest.importorskip("anthropic")
+    pytest.importorskip("PIL")
     from backend.main import _ART_WORDS
 
     bad_title = ("Gronda Blank Stretched Artist Canvas on Wood Frame "
