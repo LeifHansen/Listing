@@ -26,6 +26,7 @@ from .listing_prompt import (
     ART_RULE,
     ART_TAG_SCAN_RULE,
     ART_TRANSCRIBE_LINES,
+    BLANK_CANVAS_RULE,
     DENIM_TAG_SCAN_RULE,
     DENIM_TRANSCRIBE_LINES,
     EBAY_CONDITIONS,
@@ -1319,7 +1320,8 @@ _TAG_TRANSCRIBE_ASK = (
     + DENIM_TRANSCRIBE_LINES + ART_TRANSCRIBE_LINES +
     "If a crop is unreadable, say so — never fill in what you can't see. "
     "Plain text only.\n\nThe rules these crops are read under:\n"
-    + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE)
+    + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE
+    + BLANK_CANVAS_RULE)
 
 
 def read_tag_text(image_paths: list[Path]) -> str:
@@ -1484,7 +1486,8 @@ Rules:
 _ASPECTS_SYSTEM = (
     "You are cataloguing an item for eBay. Using the product photos and the "
     "context provided, fill in the given eBay item specifics as accurately as "
-    "possible.\n\n" + _ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE + ART_RULE)
+    "possible.\n\n" + _ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE + ART_RULE
+    + BLANK_CANVAS_RULE)
 
 
 # How many of a fixed-choice aspect's allowed values to show the model. The old
@@ -2150,7 +2153,7 @@ Rules:
   confidence "low". A guessed attribution is worse than a blank.
 - Cite what you used in sources. A name with no source is a guess.
 The art rule every pass in this app reads the piece under:
-""" + ART_RULE
+""" + ART_RULE + BLANK_CANVAS_RULE
 
 
 def _lead_text(value, limit: int = 200) -> str:

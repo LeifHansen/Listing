@@ -3735,6 +3735,13 @@ _ART_WORDS = (
     "acrylic on canvas", "acrylic on board", "mixed media", "signed print",
     "numbered print", "hand signed", "hand-signed", "artist proof",
     "artist's proof", "original art", "wall art", "sculpture",
+    # The words a draft uses when it read the BACK of a painting and took it
+    # for a blank canvas or an empty frame. That draft names no artist and
+    # no medium, so nothing else here catches it -- and it is precisely the
+    # one that needs the lookup, because the piece is art and the pass that
+    # wrote the title did not know it.
+    "stretched canvas", "stretcher bar", "stretcher frame", "blank canvas",
+    "artist canvas", "empty frame", "verso",
 )
 
 
