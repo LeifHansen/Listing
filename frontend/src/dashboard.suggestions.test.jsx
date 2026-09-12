@@ -1,4 +1,5 @@
-/* Suggested actions is a list the seller can finish.
+/* Suggested actions is a list the seller can finish, in one group, with one
+ * button.
  *
  * What it was not. "Fill in details" was a prompt to go and do it by hand —
  * open a listing, wait for the AI to read its photos, save, push, repeat —
@@ -10,9 +11,17 @@
  * "Restore N dismissed" parked in the header so a mis-tap was not a one-way
  * door.
  *
- * So: one press finishes the whole list, each group still carries the bulk
- * verb that fits it — and none of the hiding machinery is left, because the
- * only reason for it was that the work could not be done.
+ * Then it was one press in the header over two groups that still read as two
+ * jobs — and the button on the group under it, the one actually labelled
+ * "all", reached a capped 25 of the 50 rows the payload happened to carry.
+ * The seller, on a list of 70: "make the Enrich All button actually enrich
+ * them all."
+ *
+ * So: the two halves of finishing a listing's details are ONE group with one
+ * count, its button takes the whole list with no cap and no ids of its own,
+ * and the rows are behind the chevron for a seller who would rather go
+ * through them one at a time. None of the hiding machinery is left, because
+ * the only reason for it was that the work could not be done.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -23,6 +32,7 @@ import { Dashboard } from "@/views/Dashboard";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+// The fill half: listings the AI has never read.
 const RECS = [
   { listing_id: "a", listing_title: "Nike hoodie", type: "specifics",
     label: "Fill in details", reason: "Some fields buyers filter by are still blank.",
@@ -32,22 +42,20 @@ const RECS = [
     action: "open", priority: 45, rate: null },
 ];
 
-// The dismissal tests need a group that still LISTS its rows. "Fill in
-// details" no longer does — it is one button over the whole group, because
-// filling a blank item specific is the same wanted edit on every listing and
-// there was nothing for the seller to choose between. "Check details" is the
-// opposite: every row is a different thing only a person can settle.
+// The other half: read already, with notes left that only a person can
+// settle. A different question per listing, which is why the merged group
+// keeps its rows.
 const VERIFY_RECS = [
-  { listing_id: "a", listing_title: "Nike hoodie", type: "verify",
+  { listing_id: "c", listing_title: "Hokusai print", type: "verify",
     label: "Check details", reason: "2 things the AI left for you to check.",
     action: "open", priority: 40, rate: null },
-  { listing_id: "b", listing_title: "Canon AE-1", type: "verify",
+  { listing_id: "d", listing_title: "Levi's 501", type: "verify",
     label: "Check details", reason: "1 thing the AI left for you to check.",
     action: "open", priority: 40, rate: null },
 ];
 
-// A group with rows AND a bulk verb, for the one test about a dismissal
-// narrowing what the button reaches.
+// A group with its own capped bulk verb — the price drop still runs a capped
+// number per pass, so that arithmetic is tested where it still applies.
 const PRICE_RECS = [
   { listing_id: "a", listing_title: "Nike hoodie", type: "lower_price",
     label: "Lower the price", reason: "Live 30 days — a price drop can restart interest.",
@@ -77,9 +85,9 @@ function json(body) {
 
 // The API this screen talks to, plus a recorder for the calls under test.
 // `bulkCaps` is what the server says one run of a group's button reaches
-// (/api/insights); `running` is the job's own report of the split; `statuses`
-// are polls to serve before the finished one, for the live progress line.
-function server(calls, { jobResult, recs, bulkCaps, groupTotals, running,
+// (/api/insights); `statuses` are polls to serve before the finished one, for
+// the live progress line.
+function server(calls, { jobResult, recs, bulkCaps, groupTotals,
                         statuses, finishAll, tokens } = {}) {
   let polls = 0;
   return (url, opts = {}) => {
@@ -93,10 +101,11 @@ function server(calls, { jobResult, recs, bulkCaps, groupTotals, running,
       return json({ job_id: "job-1", running: true,
                     total: (finishAll || {}).total || 0, deferred: 0 });
     }
+    // Recorded so the one test that asserts nothing reaches it can see a
+    // regression. The capped, client-named fill is no longer this screen's.
     if (path === "/api/listings/enrich") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
-      return json(running
-        || { job_id: "job-1", running: true, total: 2, deferred: 0 });
+      return json({ job_id: "job-1", running: true, total: 1, deferred: 0 });
     }
     if (path.startsWith("/api/bulk/status/")) {
       const pending = statuses && polls < statuses.length ? statuses[polls] : null;
@@ -104,8 +113,8 @@ function server(calls, { jobResult, recs, bulkCaps, groupTotals, running,
       if (pending) return json(pending);
       return json({ id: "job-1", done: true, phase: "done",
                     result: jobResult || { changed: 2, skipped: 0, failed: 0,
-                                           total: 2, filled: 7, deferred: 0,
-                                           stopped: "" } });
+                                           total: 2, filled: 7, accepted: 0,
+                                           deferred: 0, stopped: "" } });
     }
     if (path.startsWith("/api/insights")) {
       return json({ recommendations: recs || RECS,
@@ -167,274 +176,122 @@ async function expand(label) {
   await click(toggle);
 }
 
-describe("filling in a whole group at once", () => {
-  beforeEach(() => { localStorage.clear(); });
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
-
-  it("offers one button for the group instead of a trip to each listing", async () => {
-    const { root, text } = await mount();
-    expect(text()).toContain("Fill in details");
-    expect(byText("Enrich all")).toBeTruthy();
-    await act(async () => { root.unmount(); });
-  });
-
-  it("sends the group's listings — and only those — once confirmed", async () => {
-    const calls = [];
-    const { root, text } = await mount(calls);
-
-    await click(byText("Enrich all"));
-    // Every listing it touches spends AI credits, so it says so first.
-    expect(text()).toContain("Fill in details on 2 listings?");
-    expect(calls).toHaveLength(0);
-
-    await click(byText("Fill them in"));
-    expect(calls).toEqual([{ path: "/api/listings/enrich",
-                             body: { listing_ids: ["a", "b"] } }]);
-    // The job's own report, not a bare "done".
-    expect(text()).toContain("Filled in 2 listings · 7 details added");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("does nothing at all if the seller backs out", async () => {
-    const calls = [];
-    const { root } = await mount(calls);
-    await click(byText("Enrich all"));
-    await click(byText("Cancel"));
-    expect(calls).toHaveLength(0);
-    await act(async () => { root.unmount(); });
-  });
-
-  it("says which listings it could not finish rather than claiming success", async () => {
-    // A group is whatever the engine grouped a while ago: some of it has
-    // sold, lost its photos, or has nothing the photos can answer.
-    const { root, text } = await mount([], {
-      jobResult: { changed: 1, skipped: 1, failed: 0, total: 2, filled: 3,
-                   deferred: 4, stopped: "" },
-    });
-    await click(byText("Enrich all"));
-    await click(byText("Fill them in"));
-    expect(text()).toContain("1 need you");
-    expect(text()).toContain("4 left — run it again to finish");
-    await act(async () => { root.unmount(); });
-  });
-});
-
-describe("what the AI left for a person", () => {
-  beforeEach(() => { localStorage.clear(); });
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
-
-  it("is a nudge to look, with no button that would fill nothing", async () => {
-    // A price the lookup raised, an edition to check, where it looked: none
-    // of it is a blank an item specific answers, so "Enrich all" over it
-    // came back "nothing the photos could answer" every time it was pressed.
-    const recs = [{ listing_id: "c", listing_title: "Hokusai print", type: "verify",
-      label: "Check details", reason: "2 things the AI left for you to check.",
-      action: "open", priority: 40, rate: null }];
-    const { root, text } = await mount([], { recs });
-    expect(text()).toContain("Check details");
-    expect(byText("Enrich all")).toBeFalsy();
-    await expand("Check details");
-    expect(text()).toContain("Hokusai print");
-    expect(text()).toContain("2 things the AI left for you to check.");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("says why each listing the fill could not finish needs a person", async () => {
-    // "1 need you" is a count; the seller's question afterwards is "did it
-    // do anything?", and the reason the job gave per listing is the answer.
-    const { root, text } = await mount([], {
-      jobResult: {
-        changed: 1, skipped: 1, failed: 0, total: 2, filled: 3, deferred: 0,
-        stopped: "",
-        results: {
-          changed: [{ listing_id: "a", title: "Nike hoodie", added: 3 }],
-          skipped: [{ listing_id: "b", title: "Canon AE-1",
-                      message: "No eBay category yet — open it and pick one." }],
-          failed: [],
-        },
-      },
-    });
-    await click(byText("Enrich all"));
-    await click(byText("Fill them in"));
-    expect(text()).toContain("Filled in 1 listing · 3 details added · 1 need you");
-    expect(text()).toContain("Canon AE-1: No eBay category yet");
-    await act(async () => { root.unmount(); });
-  });
-});
-
-/* A group can be bigger than one run. The server fills a capped number of
- * listings per pass and hands the rest back as `deferred` — so a 3-listing
- * group under a cap of 2 asked the seller to confirm 3, quoted the AI cost of
- * 3, then filled 2 and reported "1 of 2" underneath a badge reading 3. The
- * number of listings is the whole content of that dialog; it has to be the
- * one that will actually happen. */
-describe("a group bigger than one run", () => {
-  const THREE = [
-    ...RECS,
-    { listing_id: "c", listing_title: "Levi's 501", type: "specifics",
-      label: "Fill in details", reason: "Some fields buyers filter by are still blank.",
-      action: "open", priority: 45, rate: null },
-  ];
-  const CAPPED = { recs: THREE, bulkCaps: { specifics: 2 },
-                   running: { job_id: "job-1", running: true, total: 2, deferred: 1 } };
-
-  beforeEach(() => { localStorage.clear(); });
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
-
-  it("asks for the listings this pass will really fill, not the whole group", async () => {
-    const { root, text } = await mount([], CAPPED);
-    await click(byText("Enrich all"));
-    expect(text()).toContain("Fill in details on 2 of 3 listings?");
-    expect(text()).toContain("the other 1 stays on the list for a second run");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("still sends the whole group — the server counts what is left over", async () => {
-    // Trimming the list here would cost the seller the "1 left" report: the
-    // remainder is counted from what the request NAMED.
-    const calls = [];
-    const { root } = await mount(calls, CAPPED);
-    await click(byText("Enrich all"));
-    await click(byText("Fill them in"));
-    expect(calls[0].body).toEqual({ listing_ids: ["a", "b", "c"] });
-    await act(async () => { root.unmount(); });
-  });
-
-  it("accounts for the rest of the group while it runs", async () => {
-    const { root, text } = await mount([], {
-      ...CAPPED,
-      statuses: [{ id: "job-1", done: false, phase: "enriching", current: 0,
-                   total_items: 2, current_title: "Nike hoodie" }],
-    });
-    await click(byText("Enrich all"));
-    await click(byText("Fill them in"));
-    // "1 of 2" alone, under a badge reading 3, is the contradiction that
-    // started this. The line carries the whole group's arithmetic.
-    expect(text()).toContain("1 of 2 · 1 more after this run");
-
-    // Let the poll come back done so nothing is left running past the test.
-    await act(async () => { await new Promise((r) => setTimeout(r, 1600)); });
-    await act(async () => { root.unmount(); });
-  });
-
-  it("promises the whole group when one run covers it", async () => {
-    // No cap published (an older server, or a failed insights fetch) reads as
-    // "no limit known" — the group says what it has always said.
-    const { root, text } = await mount();
-    await click(byText("Enrich all"));
-    expect(text()).toContain("Fill in details on 2 listings?");
-    expect(text()).not.toContain("second run");
-    await act(async () => { root.unmount(); });
-  });
-});
-
-/* The badge is a COUNT, and /api/insights sends a capped slice of the rows.
+/* The two halves, as one group.
  *
- * The seller's report: "the Enrich all counter doesn't decrease as we enrich
- * and update items." The run worked every time — listings filled, revises
- * reached eBay — and the number above the button never moved, because the
- * number was the length of the list that arrived and the list was cut to fit.
- * Fill 25 of 80 and 25 that had been below the cut take their place. So the
- * server counts the group before cutting it (group_totals) and the screen
- * reads THAT. */
-describe("a group bigger than the rows it was sent", () => {
-  // What a store of 80 looks like on the wire: the rows are a slice, the
-  // total is the count.
-  const SLICE = { recs: RECS, groupTotals: { specifics: 80 },
-                  bulkCaps: { specifics: 2 },
-                  running: { job_id: "job-1", running: true, total: 2,
-                             deferred: 0 } };
+ * The seller was looking at "Fill in details · 70" stacked on "Check details
+ * · 149": two headers, two counts, a button on one of them, and the same
+ * sentence in both — this listing's details aren't finished. The split is
+ * real to the engine and is not a decision the seller has to make.
+ */
+describe("finishing a listing's details is one group", () => {
+  const BOTH = { recs: [...RECS, ...VERIFY_RECS],
+                 groupTotals: { specifics: 70, verify: 149 },
+                 finishAll: { total: 219, enrich: 70, accept: 149 } };
 
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
-  it("shows what the store holds, not what the payload carried", async () => {
-    const { root, host } = await mount([], SLICE);
+  it("shows one row for both halves, not one each", async () => {
+    const { root, text } = await mount([], BOTH);
+    expect(text()).toContain("Finish details");
+    // The two old headers are gone from the screen — the rows still carry
+    // their own per-listing labels, which is where that wording belongs.
+    expect(buttons().some((b) => (b.textContent || "").includes("Fill in details")
+                                 && b.getAttribute("aria-expanded") !== null))
+      .toBe(false);
+    expect(buttons().some((b) => (b.textContent || "").includes("Check details")
+                                 && b.getAttribute("aria-expanded") !== null))
+      .toBe(false);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("counts both halves in one badge", async () => {
+    // 70 + 149. The server counts per type and has no idea they render as
+    // one row, so a badge showing either number alone would undercount the
+    // thing the button is about to do.
+    const { root, host } = await mount([], BOTH);
     const badge = [...host.querySelectorAll("span")].find(
-      (el) => (el.textContent || "").trim() === "80");
+      (el) => (el.textContent || "").trim() === "219");
     expect(badge).toBeTruthy();
     await act(async () => { root.unmount(); });
   });
 
-  it("counts the rest of the group as still to do, before and after", async () => {
-    const { root, text } = await mount([], SLICE);
-    await click(byText("Enrich all"));
-    // 2 of 80 — not "2 of 2", which is what counting the rows said.
-    expect(text()).toContain("Fill in details on 2 of 80 listings?");
-    expect(text()).toContain("the other 78 stay on the list for a second run");
-
-    await click(byText("Fill them in"));
-    // The job can only defer ids it was handed; the 78 it never saw are
-    // still the seller's next run.
-    expect(text()).toContain("78 left — run it again to finish");
+  it("opens to the line items, from both halves", async () => {
+    // The reason the merged group kept a list: half of it is notes only a
+    // person can settle, one listing at a time.
+    const { root, text } = await mount([], BOTH);
+    expect(text()).not.toContain("Nike hoodie");
+    await expand("Finish details");
+    expect(text()).toContain("Nike hoodie");          // a fill
+    expect(text()).toContain("Hokusai print");        // a check
+    expect(text()).toContain("2 things the AI left for you to check.");
     await act(async () => { root.unmount(); });
   });
 
-  it("falls back to the rows when the server sends no count", async () => {
-    // An older server, or an insights fetch that failed: the group reads
-    // exactly as it did before, rather than claiming a size it never got.
-    const { root, text } = await mount([], { bulkCaps: { specifics: 2 } });
-    await click(byText("Enrich all"));
-    expect(text()).toContain("Fill in details on 2 listings?");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("shows the server's count with nothing taken off it here", async () => {
-    // The badge used to have this browser's hidden rows subtracted from it,
-    // which a count has to do while suggestions can be hidden — and which is
-    // most of what made the number hard to trust. Nothing hides now, so the
-    // count on screen is the server's answer, unedited, open or closed.
-    const { root, host } = await mount([], {
-      recs: VERIFY_RECS, groupTotals: { verify: 9 },
+  it("keeps other groups to themselves", async () => {
+    const { root, text } = await mount([], {
+      recs: [...PRICE_RECS, ...RECS],
+      groupTotals: { lower_price: 2, specifics: 2 },
+      finishAll: { total: 2, enrich: 2, accept: 0 },
     });
-    const badge = () => [...host.querySelectorAll("span")].find(
-      (el) => (el.textContent || "").trim() === "9");
-    expect(badge()).toBeTruthy();
-    await expand("Check details");
-    expect(badge()).toBeTruthy();
+    expect(text()).toContain("Lower prices");
+    expect(text()).toContain("Finish details");
     await act(async () => { root.unmount(); });
   });
 });
 
-/* One press for the whole list.
+/* "Enrich all" means all of them.
  *
- * The seller, looking at "Fill in details · 131" above "Check details · 177":
- * "I want all of this to be done and submitted to eBay with one click, not
- * individually, and not broken out into multiple steps." No button spanned
- * both groups; "Check details" had no bulk verb at all; and "Enrich all" ran
- * a capped 25 and deferred the rest, so 131 was six presses. */
-describe("finishing the whole list in one press", () => {
-  // A store shaped like the screenshot, scaled down: some the AI has never
-  // read, some it has read and left notes on.
-  const PLAN = { finishAll: { total: 308, enrich: 131, accept: 177 },
+ * It meant "up to BULK_ENRICH_CAP of the ids this screen happens to be
+ * holding": the payload carries at most 50 rows per type and the server
+ * filled 25 of those, so a list of 70 was three presses — and with the cap
+ * set to 1 in an environment, the progress line read "1 of 1 · 69 more after
+ * this run". The run this button starts now names no ids and has no cap; the
+ * server works the set out from the same ranking the screen renders.
+ */
+describe("the group's button takes the whole list", () => {
+  const PLAN = { recs: [...RECS, ...VERIFY_RECS],
+                 finishAll: { total: 308, enrich: 131, accept: 177 },
                  groupTotals: { specifics: 131, verify: 177 } };
 
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
-  it("offers one button for the whole list, counting all of it", async () => {
-    const { root } = await mount([], PLAN);
-    expect(byText("Finish all 308")).toBeTruthy();
+  it("sends no ids, and never the capped route", async () => {
+    const calls = [];
+    const { root } = await mount(calls, PLAN);
+    await click(byText("Enrich all"));
+    await click(byText("Finish them"));
+    expect(calls).toEqual([{ path: "/api/listings/finish-all", body: {} }]);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("promises the whole list, with no remainder to run again", async () => {
+    const { root, text } = await mount([], PLAN);
+    await click(byText("Enrich all"));
+    expect(text()).toContain("Finish all 308 listings?");
+    // The words that belonged to a capped run. There is nothing left over
+    // now, so claiming there is would be inventing a second press.
+    expect(text()).not.toContain("second run");
+    expect(text()).not.toContain("of 308 listings?");
     await act(async () => { root.unmount(); });
   });
 
   it("prices only the listings it will actually charge for", async () => {
     // 308 listings do not cost 308 fills: the AI has already read 177 of
-    // them, and re-reading buys nothing. Quoting the total would price the
-    // press at more than twice what it spends.
+    // them, and re-reading buys nothing.
     const { root, text } = await mount([], {
       ...PLAN,
       tokens: { enabled: true, total: 900, packs: [], costs: { specifics: 2 } },
     });
-    await click(byText("Finish all 308"));
-    expect(text()).toContain("Finish all 308 listings?");
+    await click(byText("Enrich all"));
     expect(text()).toContain("262 AI tokens");   // 131 x 2, not 308 x 2
     await act(async () => { root.unmount(); });
   });
 
   it("says what happens to each half before it happens", async () => {
     const { root, text } = await mount([], PLAN);
-    await click(byText("Finish all 308"));
+    await click(byText("Enrich all"));
     expect(text()).toContain("131 listings it hasn't read yet");
     expect(text()).toContain("pushes them straight to the live listing");
     expect(text()).toContain("On the other 177");
@@ -442,21 +299,10 @@ describe("finishing the whole list in one press", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("sends no ids — the server works out the set", async () => {
-    // The recommendations payload is a capped slice per type, so a
-    // client-named set could only ever reach the rows it was sent.
-    const calls = [];
-    const { root } = await mount(calls, PLAN);
-    await click(byText("Finish all 308"));
-    await click(byText("Finish them"));
-    expect(calls).toEqual([{ path: "/api/listings/finish-all", body: {} }]);
-    await act(async () => { root.unmount(); });
-  });
-
   it("does nothing at all if the seller backs out", async () => {
     const calls = [];
     const { root } = await mount(calls, PLAN);
-    await click(byText("Finish all 308"));
+    await click(byText("Enrich all"));
     await click(byText("Cancel"));
     expect(calls).toHaveLength(0);
     await act(async () => { root.unmount(); });
@@ -475,7 +321,7 @@ describe("finishing the whole list in one press", () => {
         },
       },
     });
-    await click(byText("Finish all 308"));
+    await click(byText("Enrich all"));
     await click(byText("Finish them"));
     expect(text()).toContain("Filled in 130 listings · 412 details added");
     expect(text()).toContain("307 marked as checked");
@@ -487,25 +333,118 @@ describe("finishing the whole list in one press", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("shows which listing it is on while it runs", async () => {
+  it("shows which listing it is on, under the group it belongs to", async () => {
     const { root, text } = await mount([], {
       ...PLAN,
       statuses: [{ id: "job-1", done: false, phase: "finishing", current: 3,
                    total_items: 308, current_title: "Radmor Henley Polo" }],
     });
-    await click(byText("Finish all 308"));
+    await click(byText("Enrich all"));
     await click(byText("Finish them"));
     expect(text()).toContain("Radmor Henley Polo");
     expect(text()).toContain("4 of 308");
+    // No "N more after this run": the run has no remainder.
+    expect(text()).not.toContain("more after this run");
     await act(async () => { await new Promise((r) => setTimeout(r, 1600)); });
     await act(async () => { root.unmount(); });
   });
 
   it("stays out of the way when there is nothing left to finish", async () => {
-    const { root } = await mount([], { groupTotals: { photos: 2 } });
-    expect(byText("Finish all 0")).toBeFalsy();
-    expect(buttons().some((b) => (b.textContent || "").includes("Finish all")))
-      .toBe(false);
+    // Another group's suggestions, and nothing of this one's: no button
+    // offering to finish a list that is already finished.
+    const { root } = await mount([], {
+      recs: PRICE_RECS, groupTotals: { lower_price: 2 },
+    });
+    expect(byText("Enrich all")).toBeFalsy();
+    await act(async () => { root.unmount(); });
+  });
+});
+
+/* The badge is a COUNT, and /api/insights sends a capped slice of the rows.
+ *
+ * The seller's report: "the Enrich all counter doesn't decrease as we enrich
+ * and update items." The run worked every time — listings filled, revises
+ * reached eBay — and the number above the button never moved, because the
+ * number was the length of the list that arrived and the list was cut to fit.
+ * Fill 25 of 80 and 25 that had been below the cut take their place. So the
+ * server counts the group before cutting it (group_totals) and the screen
+ * reads THAT. */
+describe("a group bigger than the rows it was sent", () => {
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("shows what the store holds, not what the payload carried", async () => {
+    const { root, host } = await mount([], {
+      recs: RECS, groupTotals: { specifics: 80 },
+      finishAll: { total: 80, enrich: 80, accept: 0 },
+    });
+    const badge = [...host.querySelectorAll("span")].find(
+      (el) => (el.textContent || "").trim() === "80");
+    expect(badge).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+
+  it("falls back to the rows when the server sends no count", async () => {
+    // An older server, or an insights fetch that failed: the group reads
+    // exactly as it did before, rather than claiming a size it never got.
+    const { root, host } = await mount([], { recs: RECS });
+    const badge = [...host.querySelectorAll("span")].find(
+      (el) => (el.textContent || "").trim() === "2");
+    expect(badge).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+
+  it("shows the server's count with nothing taken off it here", async () => {
+    // The badge used to have this browser's hidden rows subtracted from it,
+    // which a count has to do while suggestions can be hidden — and which is
+    // most of what made the number hard to trust. Nothing hides now, so the
+    // count on screen is the server's answer, unedited, open or closed.
+    const { root, host } = await mount([], {
+      recs: VERIFY_RECS, groupTotals: { verify: 9 },
+    });
+    const badge = () => [...host.querySelectorAll("span")].find(
+      (el) => (el.textContent || "").trim() === "9");
+    expect(badge()).toBeTruthy();
+    await expand("Finish details");
+    expect(badge()).toBeTruthy();
+    await act(async () => { root.unmount(); });
+  });
+});
+
+/* A capped run still has to say so — and one still exists.
+ *
+ * The price drop reprices a capped number per pass (BULK_PRICE_CAP) and
+ * defers the rest, so the panel that spends it must not promise the badge.
+ * This is the arithmetic the fill used to need and no longer does. */
+describe("a run that is capped says what it covers", () => {
+  const THREE = [
+    ...PRICE_RECS,
+    { listing_id: "c", listing_title: "Levi's 501", type: "lower_price",
+      label: "Lower the price", reason: "Live 30 days — a price drop can restart interest.",
+      action: "open", priority: 68, rate: null },
+  ];
+
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("names the part of the group one pass reaches", async () => {
+    const { root, text } = await mount([], {
+      recs: THREE, groupTotals: { lower_price: 3 },
+      bulkCaps: { lower_price: 2 },
+    });
+    await click(byText("Lower all…"));
+    expect(text()).toContain("One run covers 2 of them");
+    expect(text()).toContain("the other 1 stays on the list for a second run");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("promises the whole group when one pass covers it", async () => {
+    const { root, text } = await mount([], {
+      recs: PRICE_RECS, groupTotals: { lower_price: 2 },
+      bulkCaps: { lower_price: 40 },
+    });
+    await click(byText("Lower all…"));
+    expect(text()).not.toContain("second run");
     await act(async () => { root.unmount(); });
   });
 });
@@ -517,7 +456,7 @@ describe("finishing the whole list in one press", () => {
  * these suggestions: the engine rebuilds the list from scratch on every load,
  * so a list that could not be finished could only be made to shrink by hiding
  * it, and the way back had to sit on screen forever so a mis-tap was not a
- * one-way door. "Finish all" does the work instead, so all of it goes — and
+ * one-way door. The button does the work instead, so all of it goes — and
  * the count stops being a number with silent subtractions in it.
  */
 describe("nothing on the list is hidden any more", () => {
@@ -526,8 +465,8 @@ describe("nothing on the list is hidden any more", () => {
 
   it("gives a row no way to be waved away", async () => {
     const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await expand("Check details");
-    expect(text()).toContain("Nike hoodie");
+    await expand("Finish details");
+    expect(text()).toContain("Hokusai print");
     // The row is there to be opened, and that is the only thing on it.
     expect(buttons().find(
       (b) => (b.getAttribute("aria-label") || "").includes("Dismiss")))
@@ -535,14 +474,20 @@ describe("nothing on the list is hidden any more", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("carries one control, and it is the one that finishes the work", async () => {
+  it("keeps the section header free of controls", async () => {
+    // The press that finishes the work sits on the group it finishes. It was
+    // in the header while it spanned two groups nothing else could reach;
+    // now that they are one row with a button of their own, a second copy
+    // naming the same number is how a seller comes to distrust both.
     const { root } = await mount([], {
       recs: VERIFY_RECS, finishAll: { total: 12, enrich: 5, accept: 7 },
     });
-    expect(byText("Finish all 12")).toBeTruthy();
+    expect(byText("Finish all 12")).toBeFalsy();
     expect(byText("Clear all")).toBeFalsy();
     expect(buttons().find(
       (b) => (b.textContent || "").includes("dismissed"))).toBeFalsy();
+    // ...and the one that does the work is on the group.
+    expect(byText("Enrich all")).toBeTruthy();
     await act(async () => { root.unmount(); });
   });
 
@@ -551,11 +496,11 @@ describe("nothing on the list is hidden any more", () => {
     // localStorage. It is nobody's reader now, and a row it names must not
     // go on being hidden by a feature that no longer exists.
     localStorage.setItem("thryft-dismissed-recs",
-      JSON.stringify(["a|verify", "b|verify"]));
+      JSON.stringify(["c|verify", "d|verify"]));
     const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await expand("Check details");
-    expect(text()).toContain("Nike hoodie");
-    expect(text()).toContain("Canon AE-1");
+    await expand("Finish details");
+    expect(text()).toContain("Hokusai print");
+    expect(text()).toContain("Levi's 501");
     await act(async () => { root.unmount(); });
   });
 
@@ -568,26 +513,6 @@ describe("nothing on the list is hidden any more", () => {
     await click(buttons().find(
       (b) => (b.textContent || "").startsWith("Lower 2 prices")));
     expect(calls[0].body.listing_ids).toEqual(["a", "b"]);
-    await act(async () => { root.unmount(); });
-  });
-});
-
-
-describe("the fill is one button, not a list to pick from", () => {
-  beforeEach(() => { localStorage.clear(); });
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
-
-  it("shows the count and the button, and nothing to expand", async () => {
-    const { root, text } = await mount();
-    expect(text()).toContain("Fill in details");
-    expect(byText("Enrich all")).toBeTruthy();
-    // No toggle promising a list: every listing in this group wants the same
-    // edit, so there is nothing to choose between.
-    expect(buttons().find((b) => (b.textContent || "").includes("Fill in details")
-                                 && b.getAttribute("aria-expanded") !== null))
-      .toBeFalsy();
-    // ...and the names are not on screen.
-    expect(text()).not.toContain("Nike hoodie");
     await act(async () => { root.unmount(); });
   });
 });
