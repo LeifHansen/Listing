@@ -578,6 +578,55 @@ def _fill_interior(alpha: Image.Image) -> Image.Image:
 # the noise across one seamless backdrop is a handful.
 _HOLE_COLOUR_DIST = float(os.getenv("REMBG_HOLE_COLOUR_DIST", "40") or 40)
 
+# --- ...and when the colour cannot tell them apart --------------------------
+#
+# The colour question above compares two MEAN colours, and there is one case
+# where that is not enough — the case this whole file's shape guards were
+# written for, arriving by a different door.
+#
+# A framed watercolour on a neutral backdrop. The model keeps the frame and
+# deletes everything inside it; the interior is one enclosed region, 61% as
+# large as the entire matte. Averaged, a white mount plus a pale sky plus a
+# green tree comes to (203, 219, 225), which is 27 from the backdrop's
+# (211, 208, 201) — inside _HOLE_COLOUR_DIST, so it is read as the backdrop
+# showing through and thrown away. What ships is an EMPTY PICTURE FRAME on
+# white, and it ships silently: coverage 0.19, solidity 0.95, one region
+# holding 99% of what was kept, box fill 0.54. Every gate in this file passes
+# a ring, because a ring is a perfectly respectable shape.
+#
+# Size alone cannot rescue it — measured on this file's own fixtures, the
+# artwork's hole is 0.61 of the matte while a wreath's is 0.76 and an empty
+# frame's 1.14, and those two are real holes that must stay holes.
+#
+# What separates them is that a backdrop seen through a gap IS the backdrop:
+# the same seamless sweep, the same paper, the same table, and therefore the
+# same flatness. Artwork is not flat, and neither is anything else that gets
+# photographed inside a border — a print, a poster, a book cover, a trading
+# card, a label on a box. So the second question is asked of SPREAD rather
+# than of colour: how varied is this region, against how varied the backdrop
+# is in this same photo. As a ratio, so that a photo shot on grass or a rug
+# answers it on its own terms rather than against a number picked here.
+#
+# The same fixtures: mug handle 0.50, wreath 0.39, empty frame 0.06 — every
+# genuine hole at or below half the backdrop's own spread — against the
+# watercolour's 3.37. The floor sits at 1.5, which is well clear of both.
+_HOLE_FLAT_RATIO = float(os.getenv("REMBG_HOLE_FLAT_RATIO", "1.5") or 1.5)
+# ...and a ratio needs a floor under the thing it divides by, or it says
+# nothing at all. A backdrop drawn as one flat colour has a spread of zero, so
+# ANY region beats any multiple of it — the anti-aliased rim of a ring's hole
+# scored 2.8x and the ring filled in. A photograph's backdrop is never that
+# flat, but a guard that only holds on photographs is not a guard, so the
+# region must also carry enough detail to be a picture in its own right.
+# Measured: every genuine hole 4.4 or below (mug handle 4.4, wreath 3.7, a
+# ring's hole 2.8, an empty frame 0.6), the artwork 31.5.
+_HOLE_DETAIL_FLOOR = float(os.getenv("REMBG_HOLE_DETAIL", "10") or 10)
+# ...asked only of a hole big enough to BE the item's face. A mug's handle is
+# 0.04 of its matte and a basket's weave smaller still; asking this of them
+# would trade a well-understood rule for a statistic taken over a handful of
+# cells. Everything below this share keeps the colour answer it has always
+# had, so openwork stays openwork.
+_HOLE_BIG_SHARE = float(os.getenv("REMBG_HOLE_BIG_SHARE", "0.12") or 0.12)
+
 
 def _mean_rgb(rgb: Image.Image, mask: Image.Image) -> Optional[tuple]:
     """Mean colour of `rgb` over the non-zero pixels of `mask`, or None when
@@ -594,6 +643,18 @@ def _apart(a: Optional[tuple], b: Optional[tuple]) -> float:
     if a is None or b is None:
         return 0.0
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _spread(rgb: Image.Image, mask: Image.Image) -> Optional[float]:
+    """How VARIED `rgb` is over the non-zero pixels of `mask` — the mean of
+    the per-channel standard deviations — or None when the mask is empty.
+
+    A seamless backdrop answers a few units whatever colour it is; anything
+    with a picture on it answers many. See _HOLE_FLAT_RATIO.
+    """
+    if not mask.getbbox():
+        return None
+    return sum(ImageStat.Stat(rgb, mask).stddev[:3]) / 3
 
 
 def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
@@ -688,12 +749,43 @@ def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
         # would paint over a photo on a guess.
         return alpha
 
+    # How varied the backdrop is in THIS photo, and how much of the frame the
+    # matte kept — the two things the big-hole question below is asked
+    # against. Both are measured once, on the same grid as everything else.
+    backdrop_spread = _spread(photo, outside)
+    kept_cells = sum(1 for i in range(sw * sh) if not labels[i])
+
     give_back = bytearray(sw * sh)
+    face = False
     for tag in enclosed:
         patch = Image.frombytes(
             "L", size, bytes(255 if labels[i] == tag else 0
                              for i in range(sw * sh)))
         here = _mean_rgb(photo, patch)
+        # A hole big enough to be the item's own face, carrying more detail
+        # than the backdrop does anywhere in this photo, is not the backdrop
+        # showing through — it is a picture, and the thing it is a picture of
+        # is what the seller is selling. Asked BEFORE the colour tests
+        # because it is the case they cannot answer: a pale artwork inside a
+        # frame averages out to something that reads as a pale backdrop, and
+        # no comparison of means will ever separate those two. See
+        # _HOLE_FLAT_RATIO.
+        cells = regions[tag - 1][0]
+        here_spread = _spread(photo, patch)
+        if (kept_cells and cells >= kept_cells * _HOLE_BIG_SHARE
+                and backdrop_spread is not None and here_spread is not None
+                and here_spread >= _HOLE_DETAIL_FLOOR
+                and here_spread >= backdrop_spread * _HOLE_FLAT_RATIO):
+            log.info("bg-removal: an enclosed region worth %.0f%% of the matte "
+                     "carries %.1fx the backdrop's detail — keeping it as the "
+                     "item's own face, not a hole",
+                     100 * cells / kept_cells,
+                     here_spread / max(backdrop_spread, 0.01))
+            face = True
+            for i in range(sw * sh):
+                if labels[i] == tag:
+                    give_back[i] = 255
+            continue
         if _apart(here, backdrop) <= _HOLE_COLOUR_DIST:
             continue                       # looks like the backdrop: a real hole
         if _apart(here, item) >= _apart(here, backdrop):
@@ -701,6 +793,38 @@ def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
         for i in range(sw * sh):
             if labels[i] == tag:
                 give_back[i] = 255
+    if face:
+        # A picture has no edge in the middle of it.
+        #
+        # Giving the region back is not the whole repair, because the band
+        # around it is not empty — it is hedged. On the watercolour the model
+        # answers about 70 across the inside of the mount: over _ALPHA_LOW, so
+        # those cells are "seen" and belong to no enclosed region at all, and
+        # too ragged for _fill_interior's wholly-covered test to promote. What
+        # _harden then makes of a 70 is a 53, and an eighth of the artwork
+        # ships at a fifth of its opacity — the same white smear the region
+        # itself would have been, in a thinner band.
+        #
+        # Once the photo has said this is a picture inside a border, there is
+        # nothing inside that border for a soft alpha to mean. So the whole
+        # silhouette is made solid: every cell that is not background with a
+        # way out to the frame edge, which is the item's outline FILLED.
+        #
+        # Eroded by the same _INTERIOR_ERODE as everywhere else, so this
+        # reaches the inside and never the outer rim. The rim is where soft
+        # alpha is the matte doing its job, and hardening it would trade a
+        # white smear for a jagged edge.
+        outline = Image.frombytes(
+            "L", size, bytes(0 if labels[i] and regions[labels[i] - 1][1] else 255
+                             for i in range(sw * sh)))
+        for _ in range(_INTERIOR_ERODE):
+            outline = outline.filter(ImageFilter.MinFilter(3))
+        inside = outline.load()
+        for y in range(sh):
+            for x in range(sw):
+                if inside[x, y]:
+                    give_back[y * sw + x] = 255
+
     if not any(give_back):
         return alpha
 
