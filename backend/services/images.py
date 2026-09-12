@@ -95,7 +95,15 @@ _ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "192") or 192)
 # A matte that keeps less than this share of the frame found no item — a
 # close-up texture, a dark item on a dark table — and shipping it would ship
 # a white square. The photo is kept as shot instead, and says so.
-_MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
+#
+# It sat at 0.02 and refused a necklace. A thin product covers very little of
+# the frame it is laid out in and is still perfectly obviously an item: run
+# through the real model, a chain on a sweep scores 0.015, a belt 0.052, a
+# bangle 0.065. What "found nothing" actually scores is not near those — an
+# empty backdrop is 0.0000, a close-up of fabric 0.0009, a speck of dust
+# 0.0017. The two populations are an order of magnitude apart and the floor
+# was sitting on the wrong side of the gap; it now sits in the middle of it.
+_MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.005") or 0.005)
 
 # --- and whether what it kept is an OBJECT ----------------------------------
 #
@@ -133,6 +141,15 @@ _MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
 # comment is about.
 _MIN_LARGEST_REGION = float(os.getenv("REMBG_MIN_LARGEST_REGION", "0.6") or 0.6)
 _MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
+# The same question asked of a matte that IS one object, where it is not about
+# scatter — one object cannot be scattered — but about whether the object has
+# any substance at all. See _kept_is_the_product for why the two cannot share
+# a number: at 0.3 a necklace (0.20), a belt (0.12) and a guitar (0.20) are
+# all refused, and what deserves refusing is the wisp the model traces across
+# a close-up of fabric, which fills 0.01 of its box. The floor sits between
+# them, nearer the wisp.
+_MIN_BBOX_FILL_ONE_OBJECT = float(
+    os.getenv("REMBG_MIN_BBOX_FILL_ONE", "0.05") or 0.05)
 
 # --- ...but one PRODUCT is not always one object ----------------------------
 #
@@ -401,18 +418,48 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
 def _kept_is_the_product(total: int, regions: list, box_fill: float) -> bool:
     """Whether what the matte kept looks like the thing being sold.
 
-    One solid blob filling its own box is the common case and answers yes
-    immediately. Otherwise the pair-or-set question above — a few compact
-    objects, together accounting for nearly everything kept.
+    One solid blob is the common case and answers yes immediately. Otherwise
+    the pair-or-set question above — a few compact objects, together
+    accounting for nearly everything kept, and each filling its own box.
     """
     if not total or not regions:
         return False
-    # Whatever it is, it has to fill the box it sits in. See above: this is
-    # the clause that refuses a matte spread thinly across the frame, and it
-    # is unchanged.
-    if box_fill < _MIN_BBOX_FILL:
+    one_object = regions[0][0] / total >= _MIN_LARGEST_REGION
+    # Box fill is the SCATTER question, and it is asked where scatter is
+    # possible — which is not everywhere.
+    #
+    # It was asked of every matte, as a precondition on the lot, and what that
+    # refuses is not only scatter: it refuses any product that is THIN. A
+    # necklace laid out in a curve fills 0.20 of the box around it, a belt
+    # laid diagonally 0.12, a guitar 0.20, a bangle 0.29 against a floor of
+    # 0.30 — every one of them a perfect matte of one connected object,
+    # correctly found, and every one of them thrown away with "the matte kept
+    # is not the product". Chains, straps, cables, tools, instruments, hoops
+    # and anything photographed at an angle are all that shape, and they are
+    # a large part of what resells. The seller is told no item was found.
+    #
+    # Which is not what the measure was written for. Read its own case back:
+    # a tree at one edge and a boat at the other span nearly the whole photo
+    # while covering little of it. That is a statement about PIECES lying far
+    # apart, and every fixture in test_the_cutout_does_not_eat_the_artwork
+    # that it exists to refuse — the brushstrokes, the tree and the boat, the
+    # tree and boat and sketch, two fragments in opposite corners — is two or
+    # more pieces. A matte that is one object cannot be spread across the
+    # frame; it can only be long, and long is a shape products come in.
+    #
+    # So the precondition holds exactly where it always did the work: on a
+    # matte that is NOT one object, where it is what keeps the pair-or-set
+    # rule below from letting a painting's pieces through.
+    #
+    # One object still has to be an OBJECT, though, and the floor for that is
+    # a different number rather than no number. Handed a close-up of fabric
+    # the model traces a wisp across the frame — one region holding 99% of
+    # what was kept, filling 0.01 of the box around it, and about half a
+    # percent of the photo. That is the "white square" case this file refuses
+    # on principle, and it is one object by every measure here.
+    if box_fill < (_MIN_BBOX_FILL_ONE_OBJECT if one_object else _MIN_BBOX_FILL):
         return False
-    if regions[0][0] / total >= _MIN_LARGEST_REGION:
+    if one_object:
         return True
     objects = [r for r in regions if r[0] >= regions[0][0] * _COMPANION_SHARE]
     return (len(objects) <= _MAX_OBJECTS
