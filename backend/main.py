@@ -35,6 +35,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
                objstore, ratelimit, redact, storage)
@@ -321,6 +322,33 @@ async def _out_of_space(request: Request, exc: OSError):
     )
 
 
+@app.exception_handler(ClientDisconnect)
+async def _client_went_away(request: Request, exc: ClientDisconnect):
+    """The browser left mid-request. That is not this server failing.
+
+    Starlette raises this while READING a request body that stops arriving.
+    In this app that body is almost always a pile of photos, so a phone that
+    loses signal partway up, or a tab closed on a slow upload, produces it in
+    the ordinary course of a seller's day.
+
+    With no handler it fell to `_unhandled` below and was dressed as a crash:
+    a support reference minted for a seller who is no longer connected to
+    read it, a traceback recorded, and a row in the error feed that the daily
+    triage offered to open a pull request against. ClientDisconnect carries no
+    message of its own, so that row read "ClientDisconnect:" with nothing
+    after it — nothing to act on, and nothing anybody could have acted on.
+
+    Logged at INFO, which is below the capture handler's WARNING floor, so it
+    stays visible in the Fly window and out of the error table.
+
+    499 is nginx's code for exactly this. Nothing will read it — the
+    connection it would travel on is the one that closed — so the status
+    matters only to the access log, where it should not read as a 500.
+    """
+    log.info("client went away during %s %s", request.method, request.url.path)
+    return Response(status_code=499)
+
+
 @app.exception_handler(Exception)
 async def _unhandled(request: Request, exc: Exception):
     """The last resort: a crash answers with a reference somebody can quote.
@@ -345,6 +373,15 @@ async def _unhandled(request: Request, exc: Exception):
     CSP. test_security_headers.py::test_an_error_response_is_protected_too
     passes today only because a 404 is raised INSIDE the middleware stack.
     """
+    if isinstance(exc, ClientDisconnect):
+        # The handler above catches these where they are raised, inside a
+        # route. One raised further out — in a middleware reading the body —
+        # arrives here instead, and is the same non-event: say so at INFO and
+        # record nothing, rather than let the one path the handler cannot
+        # cover put the row back in the feed.
+        log.info("client went away during %s %s",
+                 request.method, request.url.path)
+        return Response(status_code=499)
     reference = errorlog.current_reference() or errorlog.new_reference()
     # error, not exception: ServerErrorMiddleware re-raises after this, so
     # uvicorn prints the traceback anyway and log.exception would put a
@@ -2351,8 +2388,15 @@ def _purge_session_images(session_id: str) -> None:
     (see _offload_to_r2), so for any listing older than the offload TTL the
     local dir is empty and a name-by-name delete removed nothing at all.
     """
-    if objstore.enabled():
-        objstore.delete_prefix_strict(objstore.session_prefix(session_id))
+    # Unconditionally, NOT behind `objstore.enabled()`. That guard was the
+    # same conflation the function it guards was written to end: `enabled()`
+    # is false both when no bucket is configured and when a configured one is
+    # latched off after a failed init, and skipping the call in the second
+    # case returns cleanly from a purge that never looked at the bucket —
+    # which is exactly how the debt gets dropped on photos that are still
+    # there. delete_prefix_strict answers 0 for the no-bucket case itself and
+    # raises for the unreachable one, so the decision belongs to it alone.
+    objstore.delete_prefix_strict(objstore.session_prefix(session_id))
     d = storage.session_dir(session_id)
     if d.exists():
         # ignore_errors is deliberate and is NOT the swallow above: the
@@ -9662,7 +9706,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     # side commits first. (Concurrent providers make that race likelier, not
     # rarer: each one is writing its own marketplace's state at the same time.)
     top = marketplace_state.derive_top_status(
-        prev_rec.get("status") or "", outcomes, req.mode)
+        prev_rec.get("status") or "", outcomes)
 
     def _fold(data: dict) -> dict:
         for key, outcome in outcomes.items():

@@ -66,24 +66,24 @@ def test_merge_backfills_ebay_entry_from_legacy_field():
 def test_top_status_any_live_success_publishes():
     outcomes = {"ebay": PublishOutcome(ok=False, message="x"),
                 "etsy": _ok()}
-    assert derive_top_status("draft", outcomes, "live") == "published"
+    assert derive_top_status("draft", outcomes) == "published"
 
 
 def test_top_status_sticky_never_demoted():
     for sticky in STICKY_STATUSES:
         outcomes = {"ebay": PublishOutcome(ok=False, message="x")}
-        assert derive_top_status(sticky, outcomes, "live") == sticky
+        assert derive_top_status(sticky, outcomes) == sticky
 
 
 def test_top_status_all_dry_run():
     outcomes = {"ebay": PublishOutcome(ok=True, dry_run=True),
                 "etsy": PublishOutcome(ok=True, dry_run=True)}
-    assert derive_top_status("", outcomes, "live") == "dry_run"
+    assert derive_top_status("", outcomes) == "dry_run"
 
 
 def test_top_status_draft_save_stays_draft():
     outcomes = {"ebay": PublishOutcome(ok=True, status="draft")}
-    assert derive_top_status("draft", outcomes, "draft") == "draft"
+    assert derive_top_status("draft", outcomes) == "draft"
 
 
 # --- server-owned state (what a client save must not be able to erase) -------

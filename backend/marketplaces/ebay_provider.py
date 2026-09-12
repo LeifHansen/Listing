@@ -635,6 +635,16 @@ def refusal_key(issues: Optional[list]) -> str:
     target = str(first.get("target") or "generic")
     if first.get("placeholder"):
         target = "unexplained"
+    # eBay declining to change a listing it has frozen (a Best Offer waiting,
+    # an auction with a bid, an ending listing). `target` is "generic" there
+    # because there is no field to draw a "Fix this" button for — but generic
+    # is also what an unrecognised sentence gets, and the triage reads the two
+    # as the same thing and offers to fix code that is working. See
+    # ebay_errors.explain's "cannot be changed" branch: it recognises the
+    # refusal exactly, and tells the seller their edit is saved and goes over
+    # when the lock clears. A separate token so the feed can say which it is.
+    elif first.get("locked"):
+        target = "locked"
     fields = [str(f).strip() for f in (first.get("fields") or []) if str(f).strip()]
     return target + (f"[{','.join(fields)}]" if fields else "")
 

@@ -265,10 +265,6 @@ def begin_request(method: str = "", path: str = "",
     return ctx
 
 
-def current_request() -> Optional[dict]:
-    return _request.get()
-
-
 def current_reference() -> str:
     return (_request.get() or {}).get("reference") or ""
 

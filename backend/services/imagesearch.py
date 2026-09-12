@@ -46,7 +46,19 @@ def reverse_image(url: str) -> list[dict]:
     except Exception as exc:  # noqa: BLE001 - a lead is optional
         # The type only: httpx puts the request URL in its messages, and the
         # request URL carries the key.
-        log.warning("image search: lookup failed (%s)", type(exc).__name__)
+        #
+        # Plus the STATUS, when there is one. The error feed carried 40 of
+        # these over three days in September, every one of them reading
+        # "lookup failed (HTTPStatusError)" — one fingerprint covering two
+        # opposite situations. A 401 or 403 is our key expired or revoked,
+        # which nobody will notice because the pass degrades silently and
+        # the draft just stops getting a reverse-image lead; a 429 or a 5xx
+        # is SerpAPI having a bad day and there is nothing to do. The number
+        # is the only thing that separates them, it is not a secret, and
+        # without it the row could not tell an operator which one they had.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        log.warning("image search: lookup failed (%s%s)",
+                    type(exc).__name__, f" {status}" if status else "")
         return []
     leads = parse_leads(data)
     log.info("image search: %d match(es)", len(leads))
