@@ -196,6 +196,49 @@ def restore_server_fields(listing, stored: dict) -> list[str]:
     return changed
 
 
+# The parts of a video entry the SERVER writes, never the seller. The seller
+# owns exactly one thing about a video: which file it is. Everything else —
+# the id eBay minted, where eBay's moderation got to, why it was refused —
+# arrives from eBay minutes or days after the save that put the file here.
+_VIDEO_SERVER_FIELDS = ("ebay_video_id", "status", "message", "size")
+
+
+def restore_video_state(listing, stored: dict) -> bool:
+    """Put eBay's own answers back onto the videos a save is carrying.
+
+    `videos` cannot be blanket-protected the way image_urls is, because
+    removing a video IS a save that omits it — protecting the whole field
+    would make a video impossible to delete. But the client's copy of the
+    eBay id is only ever as fresh as the moment the tab loaded, and the
+    upload job stamps it seconds later. A stale tab saving over it costs the
+    seller a second 150MB upload and, on a listing published in between, a
+    publish that quietly carries no video at all.
+
+    So the merge is per video and keyed on the file: an entry the client
+    still lists keeps whatever the server last learned about it; an entry the
+    client dropped is dropped, because that is the seller deleting it.
+
+    Returns whether anything was restored, for the caller to log.
+    """
+    by_file = {}
+    for entry in (stored.get("videos") or []):
+        if isinstance(entry, dict) and str(entry.get("file") or "").strip():
+            by_file[str(entry["file"]).strip()] = entry
+    if not by_file:
+        return False
+    restored = False
+    for video in (getattr(listing, "videos", None) or []):
+        known = by_file.get((video.file or "").strip())
+        if not known:
+            continue
+        for name in _VIDEO_SERVER_FIELDS:
+            value = known.get(name)
+            if value and value != getattr(video, name, None):
+                setattr(video, name, value)
+                restored = True
+    return restored
+
+
 def derive_top_status(prev_status: str,
                       outcomes: dict[str, PublishOutcome]) -> str:
     """The top-level status column after a multi-marketplace publish.

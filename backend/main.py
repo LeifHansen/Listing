@@ -45,13 +45,15 @@ from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
-from .models import (LISTING_FORMATS, TITLE_MAX_CHARS, ImageOrderRequest,
-                     ItemSpecific, Listing, MarketplaceState, PublishRequest,
-                     RefineRequest, SessionOnlyRequest)
+from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
+                     ImageOrderRequest, ItemSpecific, Listing,
+                     MarketplaceState, PublishRequest, RefineRequest,
+                     SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        duplicates, easypost, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_orders,
-                       ebay_trading, image_import, images, imagesearch, jobstore,
+                       ebay_trading, ebay_video, image_import, images,
+                       imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
                        messages as messages_service, metrics, notifications,
                        owed_refunds, preflight, pricing,
@@ -172,7 +174,9 @@ def build_csp(index_html: Path) -> str:
 
     img-src allows https: because listings legitimately show eBay-hosted
     photos (i.ebayimg.com), and data:/blob: because the photo editor works on
-    canvas output before anything is uploaded.
+    canvas output before anything is uploaded. media-src says the same for
+    listing videos, which are served from the R2 bucket and previewed from a
+    blob: URL before they are.
     """
     try:
         hashes = _inline_script_hashes(index_html.read_text(encoding="utf-8"))
@@ -185,6 +189,14 @@ def build_csp(index_html: Path) -> str:
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' https: data: blob:",
+        # Listing videos. Without this they fall back to default-src 'self',
+        # which blocks the two places a video is ever played from: the R2
+        # public bucket the /media route redirects to, and the blob: URL the
+        # editor previews a just-picked file with before it has been uploaded.
+        # The symptom is a silent one -- a player that shows a frame and never
+        # starts -- which is why it is written down beside img-src rather than
+        # discovered.
+        "media-src 'self' https: blob:",
         "connect-src 'self' https:",
         "object-src 'none'",
         "base-uri 'self'",
@@ -579,9 +591,17 @@ _RECLAIM_INTERVAL = 3 * 3600
 _RECLAIM_INTERVAL_LOW = 15 * 60
 
 
+# The session subdirectories the offload pass moves into the bucket, and the
+# media type each is stored under. Videos joined photos here because they are
+# what made the pass a correctness matter rather than housekeeping: one video
+# is 150MB of a 1GB volume, so a sweep that walked only optimized/ could free
+# every photo on the box and still leave it full.
+_OFFLOADABLE = {"optimized": "image/jpeg", storage.VIDEO_SUBDIR: "video/mp4"}
+
+
 def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
                    upload_budget: int = 300) -> int:
-    """Free local copies of optimized photos that are safely in R2.
+    """Free local copies of photos and videos that are safely in R2.
 
     With object storage configured, R2 is where eBay and the browser actually
     read photos from (/media redirects there when the local file is gone), so
@@ -605,35 +625,39 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
             return 0
         cutoff = time.time() - max_age_seconds
         for d in sorted(base.iterdir(), key=lambda p: p.stat().st_mtime):
-            opt = d / "optimized"
-            if not opt.is_dir():
-                continue
-            for p in opt.iterdir():
-                if checked >= budget:  # bounded work per pass
-                    return freed
-                try:
-                    if not p.is_file() or p.stat().st_mtime > cutoff:
-                        continue
-                    checked += 1
-                    key = objstore.key_for(d.name, p.name)
-                    if not objstore.exists(key):
-                        if uploaded >= upload_budget:
-                            continue
-                        uploaded += 1
-                        # Backfill, then re-verify: upload() swallows its own
-                        # failures, so a non-None return is not proof enough
-                        # to delete the only copy of a live listing's photo.
-                        if objstore.upload(p, key) is None:
-                            continue
-                        if not objstore.exists(key):
-                            continue
-                    size = p.stat().st_size
-                    p.unlink(missing_ok=True)
-                    freed += size
-                except Exception:  # noqa: BLE001 - keep going
+            for kind in _OFFLOADABLE:
+                sub = d / kind
+                if not sub.is_dir():
                     continue
+                for p in sub.iterdir():
+                    if checked >= budget:  # bounded work per pass
+                        return freed
+                    try:
+                        if not p.is_file() or p.stat().st_mtime > cutoff:
+                            continue
+                        checked += 1
+                        key = objstore.key_for(d.name, p.name, kind=kind)
+                        if not objstore.exists(key):
+                            if uploaded >= upload_budget:
+                                continue
+                            uploaded += 1
+                            # Backfill, then re-verify: upload() swallows its
+                            # own failures, so a non-None return is not proof
+                            # enough to delete the only copy of a live
+                            # listing's photo.
+                            if objstore.upload(
+                                    p, key,
+                                    content_type=_OFFLOADABLE[kind]) is None:
+                                continue
+                            if not objstore.exists(key):
+                                continue
+                        size = p.stat().st_size
+                        p.unlink(missing_ok=True)
+                        freed += size
+                    except Exception:  # noqa: BLE001 - keep going
+                        continue
         if uploaded:
-            log.info("reclaim: backfilled %d photo(s) into R2", uploaded)
+            log.info("reclaim: backfilled %d file(s) into R2", uploaded)
     except Exception as exc:  # noqa: BLE001
         log.warning("reclaim: R2 offload failed: %s", exc)
     return freed
@@ -5849,6 +5873,13 @@ def _restore_server_state(session_id: str, listing: Listing,
     if changed:
         log.info("save: kept server-owned %s for session=%s",
                  ", ".join(changed), session_id)
+    # The same protection, one level down, for the video. `videos` is not in
+    # SERVER_OWNED_FIELDS because a seller REMOVING a video is a save that
+    # omits it — but the eBay id and the moderation status inside an entry the
+    # seller kept are the server's, and a tab that loaded before the upload
+    # job stamped them would erase both.
+    if marketplace_state.restore_video_state(listing, stored):
+        log.info("save: kept eBay's video state for session=%s", session_id)
     # Record what the SELLER changed, by diffing against the copy just read.
     # A revise sends only these: every other field this app holds is a
     # snapshot of eBay taken at the last sync, and re-sending a snapshot
@@ -6213,6 +6244,350 @@ def delete_image(payload: dict, request: Request) -> dict:
     # against. A session with no saved listing has only its files to report.
     return {"ok": True, "images": images if images is not None else remaining,
             "remaining": remaining}
+
+
+# ---------- Listing video ---------------------------------------------------
+# eBay allows ONE video per listing (models.MAX_VIDEOS), 150MB, MP4. The whole
+# feature is: put the file somewhere durable, hand it to eBay's Media API, and
+# say what eBay made of it. There is no editing — no trimming, no thumbnail
+# picking, no re-encode — and that is deliberate rather than unfinished: eBay
+# re-encodes what it is given into its own renditions, so a pass here would
+# cost the seller quality and the server minutes to produce something eBay
+# throws away.
+#
+# The upload does NOT wait for eBay. The bytes land on disk, the listing gains
+# the video, and the request returns; the push to eBay's Media API and the R2
+# offload run behind it, exactly as "Add photos" does its optimize pass. Then
+# eBay MODERATES the video, which takes hours and up to 48 of them — no
+# request could wait for that, so the status is polled (GET .../video below)
+# and shown on the card.
+
+# The read cap on one streamed chunk. 1MB keeps a 150MB upload to 150 reads
+# and never holds more than a megabyte of it in memory — which is the whole
+# point of streaming it rather than awaiting file.read() as the photo routes
+# do with their few-MB images.
+_VIDEO_CHUNK = 1024 * 1024
+# Headroom the volume must have BEFORE a video is accepted. The session store
+# is a 1GB volume that also holds every listing's photos, and a 150MB file is
+# a sixth of it: accepting one with nothing spare is how an upload takes the
+# photo pipeline down with it. Checked before a byte is written, and again by
+# the write itself (ENOSPC is still handled below — a check is not a lock).
+_VIDEO_DISK_HEADROOM = 200 * 1024 * 1024
+
+
+def _ebay_creds(uid: Optional[str]) -> Optional[dict]:
+    """This seller's eBay credentials, or None — for anyone signed out, for a
+    seller who has not connected eBay, and for a deployment that does not
+    offer eBay at all (marketplaces.get answers None for a withheld
+    marketplace, and a video path must not be the one place that assumes it
+    never will)."""
+    provider = marketplaces.get("ebay") if uid else None
+    return provider.creds_for(uid) if provider else None
+
+
+def _listing_record_for(session_id: str) -> tuple[Optional[dict], Optional[dict]]:
+    """(db row, listing data) for a session, from the row or the disk draft.
+
+    A listing can be saved in either place — the row when there is a database,
+    the on-disk draft for a session that predates one, or for an install with
+    no DATABASE_URL at all — and the video routes have to write to whichever
+    holds it, exactly as _listing_image_order and _save_image_order do for
+    photos.
+
+    A row, when there is one, is the truth for BOTH halves: reading its blob
+    and then writing through the disk (or the reverse) is how a save ends up
+    built from one copy and committed over another. So the disk is consulted
+    only when there is no row at all. (None, None) means the listing is saved
+    nowhere yet, which is a 404 rather than an empty listing.
+    """
+    rec = db.get_listing(session_id) or None
+    if rec:
+        return rec, dict(rec.get("listing") or {})
+    disk = storage.load_listing(session_id)
+    return None, (dict(disk) if disk is not None else None)
+
+
+def _save_listing_videos(session_id: str, rec: Optional[dict],
+                         videos: list[dict], user_id: Optional[str]) -> list[dict]:
+    """Persist the listing's video list, and nothing else.
+
+    Same shape, and the same reasoning, as _save_image_order above: a
+    read-modify-write under the ROW LOCK, because the background thread that
+    stamps eBay's video id onto this listing runs alongside whatever the
+    seller is doing in the editor, and a plain get/edit/upsert would have
+    whichever landed second erase the other.
+    """
+    def _set_videos(data: dict) -> dict:
+        data["videos"] = list(videos)
+        return data
+
+    if rec:
+        data = db.mutate_listing_data(session_id, _set_videos,
+                                      status=_sticky_status(rec), user_id=user_id)
+        if data is None:
+            raise errors.StorageUnavailable(
+                "Couldn't update this listing's video just now — nothing has "
+                "changed. Try again in a moment.")
+        try:
+            storage.save_listing(session_id, Listing(**data))
+        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+            log.warning("video: disk mirror not updated for %s: %s",
+                        session_id, exc)
+        return [dict(v) for v in (data.get("videos") or videos)]
+
+    disk = storage.load_listing(session_id)
+    if disk is None:
+        raise errors.StorageUnavailable(
+            "Couldn't add a video just now — this listing isn't saved yet. "
+            "Try again in a moment.")
+    data = _set_videos(dict(disk))
+    try:
+        listing = Listing(**data)
+        storage.save_listing(session_id, listing)
+    except Exception as exc:  # noqa: BLE001 - nothing was persisted; say so
+        log.warning("video: could not write the list for %s: %s", session_id, exc)
+        raise errors.StorageUnavailable(
+            "Couldn't update this listing's video just now — nothing has "
+            "changed. Try again in a moment.") from exc
+    return [v.model_dump() for v in listing.videos]
+
+
+# What each of eBay's status words MEANS for the seller, said once here.
+#
+# eBay's vocabulary is not written for them: "PROCESSING" is really "eBay is
+# reviewing this, and it appears on your listing within 48 hours", and the
+# gap between that and "BLOCKED" is the difference between waiting and
+# re-shooting. The words are eBay's and travel unmapped (services/ebay_video);
+# the sentences are ours and live here rather than in the editor, so the
+# routes and the card can never disagree about what a status means.
+_VIDEO_STATUS_NOTES = {
+    "": "Saved. It goes to eBay when you publish.",
+    ebay_video.STATUS_PENDING: "Sending to eBay…",
+    ebay_video.STATUS_PROCESSING: (
+        "eBay is reviewing this video. It appears on the listing once that's "
+        "done — usually within 48 hours."),
+    ebay_video.STATUS_LIVE: "On eBay.",
+    ebay_video.STATUS_BLOCKED: (
+        "eBay wouldn't accept this video. Remove it and add a different one."),
+    ebay_video.STATUS_FAILED: (
+        "eBay couldn't process this video. Remove it and add a different one."),
+}
+
+
+def _video_payload(session_id: str, videos: list[dict]) -> list[dict]:
+    """What the client is told about each video. eBay's status word is passed
+    through as eBay's, with a sentence beside it — the editor shows the
+    sentence and nothing has to keep a second copy of the vocabulary."""
+    out = []
+    for v in videos:
+        status = str(v.get("status") or "").strip().upper()
+        name = v.get("file") or ""
+        out.append({
+            "file": name,
+            "size": int(v.get("size") or 0),
+            "on_ebay": bool(v.get("ebay_video_id")),
+            "status": status,
+            "message": v.get("message") or "",
+            "note": _VIDEO_STATUS_NOTES.get(
+                status, _VIDEO_STATUS_NOTES[ebay_video.STATUS_PROCESSING]),
+            # Where the editor plays it from. Empty for a video imported from
+            # eBay, whose bytes this app never held.
+            "url": (f"/media/{quote(session_id)}/video/{quote(name)}"
+                    if name else ""),
+        })
+    return out
+
+
+def _run_video_upload(session_id: str, name: str, uid: Optional[str]) -> None:
+    """Offload one video to R2 and hand it to eBay. Runs off the request.
+
+    Order matters. R2 first, because that is what makes the file survive the
+    machine and the reclaim pass; eBay second, because it is the slow one and
+    the one that can be retried at publish time (listing_sync.push_videos) if
+    it does not land now.
+    """
+    path = storage.video_path(session_id) / name
+    objstore.upload_video(session_id, path, name)
+    creds = _ebay_creds(uid)
+    if not creds:
+        # No eBay connection yet. Nothing is wrong and nothing is said: the
+        # file is saved, and the publish path uploads it once there is one.
+        log.info("video: session=%s stored; eBay not connected yet", session_id)
+        return
+    rec, data = _listing_record_for(session_id)
+    if data is None:
+        return
+    listing = Listing(**data)
+    if not listing_sync.push_videos(creds["access_token"], session_id, listing):
+        return
+    try:
+        _save_listing_videos(session_id, rec,
+                             [v.model_dump() for v in listing.videos], uid)
+    except Exception as exc:  # noqa: BLE001 - the video is on eBay either way
+        # The bytes ARE on eBay; only the bookkeeping failed. Worth a warning
+        # because the consequence is a second 150MB upload at publish time,
+        # not a lost video.
+        log.warning("video: couldn't record eBay's id for %s: %s", session_id, exc)
+
+
+@app.post("/api/listings/{session_id}/video")
+async def add_listing_video(session_id: str, request: Request,
+                            file: UploadFile = File(...)) -> dict:
+    """Attach a video to a listing. One file, no editing.
+
+    The file is streamed to disk a megabyte at a time rather than read whole:
+    150MB awaited into a bytes object, on the 4GB box that is also holding a
+    176MB cutout model and three bulk workers, is an OOM waiting for the day
+    two sellers upload at once.
+    """
+    await run_in_threadpool(_assert_session_owner, session_id, request)
+    rec, data = await run_in_threadpool(_listing_record_for, session_id)
+    if data is None:
+        raise HTTPException(404, "Listing not found")
+    existing = [dict(v) for v in (data.get("videos") or [])]
+    if len(existing) >= MAX_VIDEOS:
+        raise HTTPException(
+            400, f"eBay allows {MAX_VIDEOS} video per listing. Remove the one "
+                 "that's there to add a different one.")
+    # 0 from disk_free_bytes means "could not tell", not "nothing left" (see
+    # storage.disk_free_bytes), so it is never read as a refusal.
+    free = await run_in_threadpool(storage.disk_free_bytes)
+    if free and free < _VIDEO_DISK_HEADROOM:
+        # Try to make the room before refusing — the reclaim pass frees media
+        # the bucket already holds, which is usually plenty.
+        await run_in_threadpool(reclaim_space, True)
+        free = await run_in_threadpool(storage.disk_free_bytes)
+        if free and free < _VIDEO_DISK_HEADROOM:
+            raise HTTPException(
+                507, "The server is low on storage — try adding the video "
+                     "again shortly.")
+
+    suffix = Path(file.filename or "video.mp4").suffix.lower()
+    if suffix not in ebay_video.ACCEPTED_EXTENSIONS:
+        raise HTTPException(
+            400, "eBay only takes MP4 video. Export it as .mp4 (H.264) and "
+                 "try again.")
+    # Minted here, never taken from the client: the name ends up in a public
+    # /media URL and comes back as a path segment.
+    name = f"video_{int(time.time())}.mp4"
+    dest = (await run_in_threadpool(storage.video_dir, session_id)) / name
+    written = 0
+    try:
+        with dest.open("wb") as out:
+            while True:
+                chunk = await file.read(_VIDEO_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > ebay_video.MAX_VIDEO_BYTES:
+                    raise HTTPException(
+                        400, "That video is over eBay's "
+                             f"{ebay_video.MAX_VIDEO_BYTES // (1024 * 1024)}MB "
+                             "limit. Trim it or export it at a lower quality "
+                             "and try again.")
+                await run_in_threadpool(out.write, chunk)
+    except HTTPException:
+        await run_in_threadpool(dest.unlink, True)
+        raise
+    except OSError as exc:
+        await run_in_threadpool(dest.unlink, True)
+        if getattr(exc, "errno", None) == errno.ENOSPC:
+            await run_in_threadpool(reclaim_space, True)
+        log.warning("video: write failed for %s: %s", session_id, exc)
+        raise HTTPException(
+            507, "The server ran out of storage — try again shortly.") from exc
+
+    # Everything eBay refuses that can be known from the file itself, checked
+    # now. eBay's own refusal for the same file arrives up to 48 hours later
+    # with the seller long gone, which is the whole reason this is worth the
+    # millisecond it costs.
+    refusal = await run_in_threadpool(ebay_video.check, dest)
+    if refusal:
+        await run_in_threadpool(dest.unlink, True)
+        raise HTTPException(400, refusal)
+
+    entry = {"file": name, "size": written, "status": "", "message": "",
+             "ebay_video_id": ""}
+    uid = await run_in_threadpool(_uid, request)
+    try:
+        videos = await run_in_threadpool(
+            _save_listing_videos, session_id, rec, existing + [entry], uid)
+    except Exception:
+        # Nothing was recorded, so nothing may be left on the volume — this is
+        # the same rule delete-image follows the other way round ("out of the
+        # listing first, then off the disk").
+        await run_in_threadpool(dest.unlink, True)
+        raise
+    _in_background(_run_video_upload, session_id, name, uid,
+                   what="video upload (R2 + eBay)")
+    log.info("video: session=%s added %s (%.1f MB)", session_id, name, written / 1e6)
+    return {"ok": True, "videos": _video_payload(session_id, videos)}
+
+
+@app.get("/api/listings/{session_id}/video")
+def listing_video_status(session_id: str, request: Request) -> dict:
+    """This listing's video and where eBay's moderation got to.
+
+    Polled by the editor. It asks eBay only about videos eBay is still
+    looking at (see listing_sync.refresh_video_status): a video already LIVE
+    or BLOCKED is terminal, so an open tab does not turn into a request per
+    second for the life of the listing.
+    """
+    _assert_session_owner(session_id, request)
+    rec, data = _listing_record_for(session_id)
+    if data is None:
+        raise HTTPException(404, "Listing not found")
+    listing = Listing(**data)
+    uid = _uid(request)
+    creds = _ebay_creds(uid)
+    if creds and listing_sync.refresh_video_status(creds["access_token"], listing):
+        try:
+            _save_listing_videos(session_id, rec,
+                                 [v.model_dump() for v in listing.videos], uid)
+        except Exception as exc:  # noqa: BLE001 - a poll must not fail on a write
+            log.info("video: status not persisted for %s: %s", session_id, exc)
+    return {"videos": _video_payload(
+                session_id, [v.model_dump() for v in listing.videos]),
+            "max_videos": MAX_VIDEOS}
+
+
+@app.delete("/api/listings/{session_id}/video/{name}")
+def delete_listing_video(session_id: str, name: str, request: Request) -> dict:
+    """Take the video off the listing, and off the disk and the bucket.
+
+    Out of the LISTING first, then off the storage — the rule delete-image
+    documents: a file unlinked while the record still names it is a tile that
+    comes back after a reload pointing at bytes that are gone.
+
+    The copy eBay holds is deliberately left alone. It is attached to nothing
+    once the listing stops naming it, eBay expires it on its own, and a delete
+    call on eBay is one more thing that can fail while the seller waits for a
+    button that has already done its job here.
+    """
+    _assert_session_owner(session_id, request)
+    try:
+        safe = storage.safe_video_name(name)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid video name") from exc
+    rec, data = _listing_record_for(session_id)
+    if data is None:
+        raise HTTPException(404, "Listing not found")
+    existing = [dict(v) for v in (data.get("videos") or [])]
+    remaining = [v for v in existing if (v.get("file") or "") != safe]
+    if len(remaining) != len(existing):
+        remaining = _save_listing_videos(session_id, rec, remaining, _uid(request))
+    path = storage.video_path(session_id) / safe
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.warning("video: couldn't unlink %s for %s: %s",
+                        safe, session_id, exc)
+    if objstore.enabled():
+        _in_background(objstore.delete, objstore.video_key_for(session_id, safe),
+                       what="delete-video R2")
+    log.info("video: session=%s removed %s", session_id, safe)
+    return {"ok": True, "videos": _video_payload(session_id, remaining)}
 
 
 # ---------- Bulk mode: one photo dump -> many listings ----------
@@ -10239,6 +10614,45 @@ def media(session_id: str, name: str, request: Request = None, v: str = ""):
         log.warning("media: couldn't sign a URL for %s", key)
         raise HTTPException(
             503, "That photo is temporarily unavailable — try again shortly.")
+    raise HTTPException(404, "Not found")
+
+
+@app.get("/media/{session_id}/video/{name}")
+def media_video(session_id: str, name: str, request: Request = None):
+    """Serve a listing's video — the local copy, or the bucket's.
+
+    Deliberately a separate route from /media/.../optimized/{name} rather than
+    one with a `kind` parameter: the two answer to different rules. A photo is
+    mutable at a stable URL (rotate, crop, cut out) and is revalidated on
+    every use; a video is written once under a name carrying its own
+    timestamp and never rewritten. And a video is played, not shown, so this
+    one has to answer Range requests for a browser to seek in it — which
+    FileResponse does and a redirect cannot, hence the local copy first.
+
+    Only the editor reads this. eBay never does: a video reaches eBay by being
+    uploaded through the Media API, not by being fetched from a URL, which is
+    the whole difference between this route and the photo one beside it.
+    """
+    try:
+        safe = storage.safe_video_name(name)
+    except ValueError as exc:
+        raise HTTPException(404, "Not found") from exc
+    path = storage.video_path(session_id) / safe
+    if path.is_file():
+        # FileResponse answers Range, which is what lets the player seek.
+        return FileResponse(path, media_type="video/mp4")
+    # Freed off the volume by the reclaim pass — the normal state for any
+    # video older than a few hours. The bucket is where it lives.
+    if objstore.enabled():
+        url = objstore.url_for(objstore.video_key_for(session_id, safe),
+                               expires=3600)
+        if url:
+            return RedirectResponse(
+                url, headers={"Cache-Control": "private, max-age=300"})
+        # Configured storage that could not sign a URL is not "no such video".
+        log.warning("media: couldn't sign a URL for video %s/%s", session_id, safe)
+        raise HTTPException(
+            503, "That video is temporarily unavailable — try again shortly.")
     raise HTTPException(404, "Not found")
 
 

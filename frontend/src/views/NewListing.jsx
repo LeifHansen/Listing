@@ -23,7 +23,7 @@ import { ConflictBanner } from "./listing/ConflictBanner";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import { FinishUpCard } from "./listing/FinishUpCard";
 import {
-  PhotosCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
+  PhotosCard, VideoCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard, PromoteCard, EtsyCard, DepopCard,
 } from "./listing/cards";
 
@@ -442,6 +442,14 @@ function Workflow() {
         <TitleCard w={w} />
         <PricingCard w={w} />
         <CategoryCard w={w} />
+        {/* Optional, and below the fields a listing cannot publish without —
+            a video sells an item, a price is what makes it sellable. It sits
+            outside More Details all the same, because a seller who has shot
+            one has to be able to find where it goes. */}
+        {/* Confirmed for the same reason a photo delete is, and a stronger
+            one: the video is gone from the server with no undo, and getting
+            it back means re-shooting or re-sending up to 150MB. */}
+        <VideoCard w={w} onRemove={(name) => w.removeVideo(name, confirm)} />
         {/* Marketplace extras — each renders only while its marketplace is
             among the publish targets picked in the publish bar. */}
         <EtsyCard w={w} />

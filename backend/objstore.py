@@ -138,11 +138,24 @@ def probe() -> None:
     _get_client()
 
 
-def key_for(session_id: str, name: str) -> str:
+def key_for(session_id: str, name: str, kind: str = "optimized") -> str:
     # Same sanitization as the on-disk session dir, so the key a photo is
     # uploaded under (raw id, e.g. "ebay-123") and the key housekeeping checks
     # (dir name "ebay123") can never diverge.
-    return f"sessions/{storage.safe_session_name(session_id)}/optimized/{name}"
+    #
+    # `kind` is the session subdirectory -- "optimized" for photos,
+    # storage.VIDEO_SUBDIR for a listing video. It mirrors the on-disk layout
+    # deliberately: session_prefix() below is what the erasure and the orphan
+    # sweep delete by, and both already cover everything under the session, so
+    # a new media kind is cleaned up the day it is added rather than the day
+    # somebody remembers it.
+    return f"sessions/{storage.safe_session_name(session_id)}/{kind}/{name}"
+
+
+def video_key_for(session_id: str, name: str) -> str:
+    """The bucket key for one listing video."""
+    return key_for(session_id, storage.safe_video_name(name),
+                   kind=storage.VIDEO_SUBDIR)
 
 
 def public_url(key: str) -> str:
@@ -164,20 +177,41 @@ def url_for(key: str, expires: int = 3600) -> Optional[str]:
         return None
 
 
-def upload(local_path: Path, key: str) -> Optional[str]:
-    """Upload a file to R2 and return a fetchable URL. None on failure/disabled."""
+def upload(local_path: Path, key: str,
+           content_type: str = "image/jpeg") -> Optional[str]:
+    """Upload a file to R2 and return a fetchable URL. None on failure/disabled.
+
+    `content_type` defaults to image/jpeg because for most of this module's
+    life every object was one. It is not cosmetic for a video: a browser
+    handed an MP4 as image/jpeg will not play it, and the /media route
+    redirects straight at the bucket rather than re-stating the type.
+    """
     try:
         client = _get_client()
         if client is None:
             return None
         client.upload_file(
             str(local_path), config.R2_BUCKET, key,
-            ExtraArgs={"ContentType": "image/jpeg"},
+            ExtraArgs={"ContentType": content_type},
         )
         return url_for(key)
     except Exception as exc:  # noqa: BLE001 - never break the request
         log.warning(f"objstore: upload failed: {exc}")
         return None
+
+
+def upload_video(session_id: str, local_path: Path, name: str) -> Optional[str]:
+    """Best-effort offload of one listing video to R2.
+
+    The volume this app runs on is 1GB and a video may be 150MB of it, so the
+    bucket is where a video lives for anything but the minutes around its
+    upload. Best-effort like the photo path: a video that cannot be offloaded
+    stays local and is served from there.
+    """
+    if not enabled() or not local_path.is_file():
+        return None
+    return upload(local_path, video_key_for(session_id, name),
+                  content_type="video/mp4")
 
 
 def upload_optimized(session_id: str, local_dir: Path, names: list[str]) -> None:
@@ -255,6 +289,29 @@ def restore(key: str, local_path: Path) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 - caller falls back to its clear error
         log.warning(f"objstore: restore of {key} failed: {exc}")
+        return False
+
+
+def download(key: str, local_path: Path) -> bool:
+    """`restore`, streamed — for objects too big to hold in memory.
+
+    restore() above reads the whole object into a bytes and then writes it,
+    which is fine for a photo and is two copies of a 150MB video on a box
+    that is also holding a 176MB cutout model. boto3's download_file chunks
+    it. Same contract otherwise: atomic via a temp name, False on any
+    failure, never raises.
+    """
+    try:
+        client = _get_client()
+        if client is None:
+            return False
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = local_path.with_name(local_path.name + ".tmp")
+        client.download_file(config.R2_BUCKET, key, str(tmp))
+        tmp.replace(local_path)
+        return True
+    except Exception as exc:  # noqa: BLE001 - caller falls back to its own error
+        log.warning(f"objstore: download of {key} failed: {exc}")
         return False
 
 
