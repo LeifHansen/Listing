@@ -296,6 +296,80 @@ DENIM_TRANSCRIBE_LINES = (
     "hem not turned up').\n\n"
 )
 
+# --- denim in a pile: the front and the back of one pair ---------------------
+#
+# The rules above tell a pass what to READ on a pair of jeans. This one tells
+# the grouping passes how a pair ARRIVES, which is the thing they kept getting
+# wrong: denim is shot laid flat, one pair at a time, front first and then the
+# same pair turned over. Every pair in a pile is therefore TWO photos, and a
+# seller with six pairs uploads twelve.
+#
+# Bulk mode read that pile as twelve items. The reason is in the pictures: the
+# front and the back of one pair of jeans look nothing alike -- the front is a
+# fly, a coin pocket and a top button, the back is a yoke, two arcuate-stitched
+# pockets, a red tab and a leather patch -- and every rule the grouping pass
+# had pushed the same way. "Identity evidence outranks looks" is true, and on
+# denim every identity mark is on the BACK, so a front and its own back read as
+# one photo with marks and one without; "count the tags and patches you can see
+# and expect at least that many items" counted the tab, the patch and the care
+# tag of ONE pair as three. The result was two live eBay listings for one pair
+# of jeans -- the worst outcome bulk mode has -- and the halves scattered, a
+# front under one draft and its back under another.
+#
+# So the grouping passes are told the shape of the upload, and told it where
+# they would otherwise infer the opposite:
+#
+#   * the two views of one pair look different BY DESIGN, and that difference
+#     is never evidence of a second pair;
+#   * pairs are counted by BACKS, never by how many markers are in frame;
+#   * a second pair is a second BACK whose patch reads differently, quoted;
+#   * the back that follows a front is the back OF that front, so the pair's
+#     own order is kept and no photo is moved between pairs. A back filed under
+#     the wrong pair puts the wrong lot and the wrong W/L size on two listings,
+#     and nothing downstream can see that it happened.
+DENIM_FRONT_AND_BACK_RULE = """
+- JEANS ARE SHOT FRONT AND BACK, AND BOTH SHOTS ARE ONE LISTING. Denim is
+  photographed laid flat, one pair at a time: the front, then the SAME pair
+  turned over. Every pair in the pile is therefore at least two photos, a
+  FRONT and a BACK of one item, and a pile of six pairs is six listings, not
+  twelve. A back view is never an item of its own.
+  * THE TWO VIEWS OF ONE PAIR LOOK NOTHING ALIKE, AND THAT IS NORMAL. The
+    front shows the fly, the top button, the coin pocket and the front
+    pockets; the back shows the yoke, the two back pockets and their arcuate
+    stitching, the RED TAB and the leather PATCH. Every marker that names a
+    pair -- tab, patch, lot number, W/L size -- is on the BACK, so the front
+    of a pair carries none of them. One pair photographed from both sides is
+    SUPPOSED to look like this. It is NOT evidence of two items.
+  * COUNT PAIRS BY BACKS, NOT BY MARKERS. The number of pairs is the number of
+    BACK views -- equivalently, the number of distinct patches -- never the
+    number of tags, tabs and labels in frame: one pair shows a tab AND a patch
+    AND a care tag and is still one pair. A photo with no patch in it is the
+    FRONT of a pair whose back you have already counted, not an item whose tag
+    is missing.
+  * A SECOND PAIR IS A SECOND BACK THAT READS DIFFERENTLY. Two pairs are two
+    listings when two BACK views show patch, lot, tab or size text that reads
+    differently ("501 W32 L34" against "505 W34 L32"), or a plainly different
+    wash, fade, hem or repair. Quote both readings as the evidence. Two backs
+    that read the SAME, or two you cannot read, stay ONE listing: the seller
+    can drag a spare photo out of a draft in a second, and nobody can undo two
+    live eBay listings for one pair.
+  * WHEN YOU ARE SHOWN ONE PHOTO PER GROUP, the front and the back of one
+    pair are the two groups to put back together: a group whose photo is a
+    BACK belongs with the group holding the FRONT it was shot with, which is
+    almost always the group immediately before it. The reverse is NOT true --
+    several groups each showing a FRONT are several pairs, and their backs
+    are simply not in front of you. Never merge two fronts because neither
+    one shows a patch.
+  * KEEP EACH PAIR'S OWN ORDER AND NEVER MOVE A PHOTO BETWEEN PAIRS. The back
+    that follows a front is the back OF that front. List a pair's photos in
+    the order they were shot -- the front, then that front's back, then the
+    close-ups taken with them -- and never collect the fronts into one item
+    and the backs into another, or hand a pair the back of the pair beside it.
+    A swapped back puts the wrong lot, the wrong era and the wrong W/L size on
+    two listings at once, and neither the seller nor the buyer can see from
+    the photos that it went wrong.
+"""
+
 # --- art: the signature, the edition number, the chop, the plate mark ------
 #
 # A print is a $15 listing or a $1,500 one, and the difference is written in

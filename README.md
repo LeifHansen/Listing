@@ -677,6 +677,64 @@ Two things the rule forbids matter as much as what it asks for:
   from a tape in the photos — otherwise "measured waist, inseam and rise" is a
   `missing_info` item. Collectors buy on measurements.
 
+### Denim in a pile: the front and the back of one pair
+
+Denim arrives in bulk mode in a fixed shape: laid flat, one pair at a time,
+the front and then the same pair turned over. Six pairs is twelve photos — and
+bulk mode read it as twelve items, every pair listed twice, once for its front
+and once for its back, with the halves scattered so a front sat under one
+draft and its own back under another. Two live eBay listings for one pair of
+jeans is the worst outcome bulk mode has, and the seller has to end one by
+hand.
+
+Every rule the grouping pass had pushed it there. "Identity evidence outranks
+looks" is right, and on denim every identity mark — red tab, leather patch,
+lot, W/L size — is on the **back**, so a front and its own back read as one
+photo with marks and one without. "Count the tags and patches you can see and
+expect at least that many items" counted the tab, the patch and the care tag
+of *one* pair as three. Nothing said what the front of a pair is supposed to
+look like, so the pass inferred it was a different garment.
+
+`listing_prompt.DENIM_FRONT_AND_BACK_RULE` tells the grouping passes the shape
+of the upload instead, and rides with all three of them — the pass that
+**groups** (`_GROUP_SCHEMA`), the one that **merges** an over-split pile
+(`_GROUP_VERIFY_SCHEMA`) and the one that **splits** a group that is really
+two items (`_GROUP_SPLIT_SCHEMA`), since each can make this mistake on its
+own:
+
+* **The two views look nothing alike by design.** The front is the fly, the
+  top button, the coin pocket; the back is the yoke, the arcuate stitching,
+  the tab and the patch. That difference is what one pair looks like from both
+  sides, not evidence of two items.
+* **Pairs are counted by backs, not by markers.** The number of pairs is the
+  number of back views (equivalently, of distinct patches) — one pair shows a
+  tab *and* a patch *and* a care tag and is still one pair. A photo with no
+  patch in it is a **front**, not an item whose tag went missing.
+* **A second pair is a second back that reads differently**, quoted: "501 W32
+  L34" against "505 W34 L32", or a plainly different wash, fade or repair. Two
+  backs that read the same, or two nobody can read, stay one listing — a spare
+  photo is a drag away, a duplicate live listing is not.
+* **The merge pass is told which way its evidence runs.** It sees one photo
+  per group and can never read a patch, so a group whose photo is a *back*
+  belongs with the group holding the front it was shot with — but several
+  groups each showing a *front* are several pairs. Never merge two fronts
+  because neither shows a patch.
+* **A pair keeps its own order and no photo moves between pairs.** The back
+  that follows a front is the back *of* that front. A swapped back puts the
+  wrong lot, era and W/L size on two listings at once, and neither the seller
+  nor the buyer can see from the photos that it went wrong.
+
+The grouping pass's own counting line was corrected with it: it counts tags
+and patches that **read differently**, rather than every mark in frame.
+
+The shuffle has a second half no prompt can fix, because the answer is free to
+list a group's photos in any order and does. `_lead_then_upload_order` keeps
+the lead photo the model chose — the draft's cover image, the one thing it is
+actually asked to pick — and puts everything behind it back into the order the
+seller uploaded it in. It runs on the first-pass answer and on the split
+check's, and the group's order is the listing's: `indices` are copied out to
+`img_000.jpg`, `img_001.jpg`, … in exactly that sequence.
+
 ### Art: the signature, the edition number, the chop and the surface
 
 A print is a $15 listing or a $1,500 one, and the difference is written in
