@@ -42,7 +42,7 @@ def test_sorted_by_priority_desc():
     assert priorities == sorted(priorities, reverse=True)
 
 
-# --- the quiet period after a fill ------------------------------------------
+# --- a note the AI left for a person is never a suggestion ------------------
 #
 # A seller opened Home, found "Fill in details · 12" with a button on it,
 # pressed it, and waited several minutes while the AI read twelve listings'
@@ -54,9 +54,15 @@ def test_sorted_by_priority_desc():
 # From outside that is indistinguishable from the button having done nothing,
 # and it was reported as exactly that ("it should fill in all possible missing
 # fields... I don't know why you keep showing me a list view... they are not
-# updating as far as I can tell"). The notes behind it are real, but they are
-# by construction the things the fill just declined to invent — so they wait a
-# day before becoming a chore.
+# updating as far as I can tell"). A quiet period was tried first and only
+# moved the same nag a day later; on a real store it came back as 203 rows
+# that nothing could clear in bulk.
+#
+# So `verify` does not exist. A note is what the AI DECLINED to invent — no
+# pass will ever answer it — so it stays on the listing where the person
+# holding the item can settle it, and Enrich all retires the leftovers on
+# every listing it fills. These tests hold that line at every age: freshly
+# filled, filled long ago, and never filled at all.
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
@@ -87,23 +93,24 @@ def test_a_fill_that_just_ran_does_not_come_straight_back_as_a_chore():
     assert "verify" not in _types(item)      # and is not re-flagged as a list
 
 
-def test_the_note_comes_back_once_the_seller_has_had_a_day_with_it():
+def test_the_note_does_not_come_back_a_day_later_either():
+    """The whole failure, one day on. A quiet period only postponed it."""
     item = _live(missing_info=["Measurements — I can't measure from photos"],
-                 enriched_at=_ago(recommender.VERIFY_QUIET_DAYS + 0.5))
-    assert "verify" in _types(item)
+                 enriched_at=_ago(30))
+    assert "verify" not in _types(item)
 
 
-def test_a_listing_the_fill_never_ran_on_still_nudges_immediately():
-    """The quiet period is about the minutes AFTER a fill, not about notes in
-    general: a listing carrying notes that nothing has ever looked at is a
-    real to-do and always was."""
+def test_a_listing_the_fill_never_ran_on_is_not_nudged_for_its_notes():
+    """A note is not a suggestion at any age, filled or not. This listing's
+    specifics are healthy; all it carries is something only a person can
+    settle, and that is not a row on the dashboard."""
     item = _live(missing_info=["Authentication for this designer piece"])
-    assert "verify" in _types(item)
+    assert "verify" not in _types(item)
 
 
-def test_the_fill_itself_is_never_delayed_by_the_quiet_period():
-    """Only the follow-up nudge waits. A listing whose specifics are actually
-    blank is still offered the button, whatever it carries."""
+def test_the_fill_itself_is_never_held_back_by_a_note():
+    """A listing whose specifics are actually blank is still offered the
+    button, whatever notes it carries."""
     item = {"id": "L2", "status": "published", "title": "Blank",
             "listing": {"title": "Blank", "item_specifics": [],
                         "missing_info": ["Measurements"]}}

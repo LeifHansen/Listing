@@ -1,7 +1,7 @@
-"""One press finishes the list — both halves of it, all of it, to eBay.
+"""One press finishes the list — all of it, to eBay.
 
 The seller's report, looking at "Fill in details · 131" above "Check details ·
-177": "I want all of this to be done and submitted to eBay with one click, not
+203": "I want all of this to be done and submitted to eBay with one click, not
 individually, and not broken out into multiple steps."
 
 Every word of that named something real.
@@ -9,23 +9,25 @@ Every word of that named something real.
 ONE CLICK. There was no button that spanned both groups, so clearing the list
 meant two different motions.
 
-NOT INDIVIDUALLY. "Check details" had no bulk verb at all — 177 rows, each
+NOT INDIVIDUALLY. "Check details" had no bulk verb at all — 203 rows, each
 with a link that opens one listing. It could only shrink one hand-checked
 listing at a time, which on that scale is not a to-do list.
 
 NOT BROKEN OUT INTO MULTIPLE STEPS. "Enrich all" ran BULK_ENRICH_CAP listings
 and deferred the rest, so 131 of them was six presses.
 
-So: one route, no cap, and the notes the AI declined to invent become
-something the seller can answer in bulk — by saying they are fine, which is a
-real answer and the only honest one available. Nothing is deleted and nothing
-false reaches eBay: `missing_info` is a note to the seller, never listing
-content.
+The answer was one route with no cap. The second group is now gone as well:
+a note the AI declined to invent is one no press can settle, so putting it on
+the dashboard could only ever pad a count the button could not clear. It is
+left on the listing, where the editor shows it to the person holding the item.
+What the press still does with notes is retire the ones that survive a fill,
+on the listings it just filled — free, and nothing false reaches eBay, since
+`missing_info` is a note to the seller and never listing content.
 
 What this must NOT do is charge twice. A listing the AI has already read
 (`enriched_at`) gains nothing from reading it again — that is the loop
-test_fill_in_details_stops_asking exists for — so the fill runs only on the
-listings that have never had it, and the rest are accepted for free.
+test_fill_in_details_stops_asking exists for — so the press reaches exactly
+the listings that have never had the fill.
 """
 from __future__ import annotations
 
@@ -73,7 +75,8 @@ def _listing(rid: str, **over) -> dict:
 
 def _already_read(rid: str, **over) -> dict:
     """A listing the fill has run on, still carrying a note it could not
-    answer — the "Check details" half."""
+    answer. It is finished as far as the dashboard is concerned: no group
+    claims it, and no press is charged for it."""
     return _listing(rid, enriched_at="2026-09-04T12:00:00+00:00",
                     item_specifics=[
                         {"name": "Brand", "value": "Nike"},
@@ -126,9 +129,13 @@ def _groups(client) -> dict:
 
 # --------------------------------------------------------------- the press
 
-def test_one_press_clears_both_groups(seller, monkeypatch):
-    """The screenshot, in miniature: a "Fill in details" pile and a "Check
-    details" pile, and one press that empties both."""
+def test_one_press_clears_the_list(seller, monkeypatch):
+    """The screenshot, in miniature: a "Fill in details" pile, and one press
+    that empties it.
+
+    The nine listings the AI has already read are the ones that used to make
+    the second pile. They are not on the list at all now — not as a group, not
+    as a row, and not as nine listings the press has to be charged for."""
     client, dbmod, uid = seller
     fresh = [f"NEW{i:03d}" for i in range(6)]
     read = [f"OLD{i:03d}" for i in range(9)]
@@ -148,17 +155,18 @@ def test_one_press_clears_both_groups(seller, monkeypatch):
     monkeypatch.setattr(main.marketplaces, "get", lambda name: ebay)
 
     before = _groups(client)
-    assert before == {"specifics": 6, "verify": 9}
+    assert before == {"specifics": 6}, "the nine already-read listings are not a group"
 
     started = client.post("/api/listings/finish-all")
     body = started.json()
     # No cap: one press reaches every listing on the list, not a slice of it.
-    assert body["total"] == 15
+    assert body["total"] == 6
     assert body["deferred"] == 0
     result = _finish(client, body["job_id"])
 
     assert result["changed"] == 6
-    assert result["accepted"] == 15
+    # The notes that survived each fill, retired in the same press.
+    assert result["accepted"] == 6
     assert _groups(client) == {}, "the list the seller was looking at is gone"
 
 
@@ -203,10 +211,15 @@ def test_a_listing_the_ai_has_read_is_not_charged_again(seller, monkeypatch):
 
 
 def test_the_notes_are_kept_not_deleted(seller, monkeypatch):
-    """Accepting a note is the seller answering, not the app forgetting. The
-    editor still shows what the AI flagged; only the nagging stops."""
+    """Retiring a note is not the app forgetting it. The editor still shows
+    what the AI flagged on the listing it flagged; only the nagging stops."""
     client, dbmod, uid = seller
-    _stock(dbmod, uid, ["keep"], factory=_already_read)
+    _stock(dbmod, uid, ["keep"])
+    monkeypatch.setattr(
+        main, "_enrich_listing_v2",
+        lambda listing, paths, tags, progress=None: (
+            listing.item_specifics.append(
+                ItemSpecific(name="Size", value="M", confidence="high")) or 1))
     monkeypatch.setattr(main.marketplaces, "get",
                         lambda name: _AcceptingEbay(dbmod, uid))
 
@@ -214,20 +227,27 @@ def test_the_notes_are_kept_not_deleted(seller, monkeypatch):
 
     stored = dbmod.get_listing("keep")["listing"]
     assert stored["missing_info"] == ["exact measurements"]
-    assert stored["notes_accepted_at"], "the seller's answer was not written down"
+    assert stored["notes_accepted_at"], "the note the fill left was not retired"
 
 
 def test_nothing_is_pushed_to_ebay_just_to_accept_a_note(seller, monkeypatch):
-    """`missing_info` is a note to the seller, never listing content. Accepting
+    """`missing_info` is a note to the seller, never listing content. Retiring
     one changes nothing a buyer can see, so it must not spend an eBay revise
-    on 177 listings to say so."""
+    to say so.
+
+    Shown on the listings whose fill could not run (no photos on the server):
+    their notes are still retired, and not one revise is spent doing it."""
     client, dbmod, uid = seller
-    _stock(dbmod, uid, [f"R{i}" for i in range(4)], factory=_already_read)
+    for rid in [f"R{i}" for i in range(4)]:   # no _with_photo: the fill skips
+        assert dbmod.upsert_listing(rid, _listing(rid), status="published",
+                                    user_id=uid)
     ebay = _AcceptingEbay(dbmod, uid)
     monkeypatch.setattr(main.marketplaces, "get", lambda name: ebay)
 
-    _finish(client, client.post("/api/listings/finish-all").json()["job_id"])
+    result = _finish(client,
+                     client.post("/api/listings/finish-all").json()["job_id"])
 
+    assert result["accepted"] == 4
     assert ebay.revised == []
 
 
@@ -242,9 +262,8 @@ def test_a_listing_the_fill_could_not_run_on_says_so_and_stays(seller,
     and the run says why in the seller's own words rather than silently
     leaving it there.
 
-    Its NOTES are still accepted: that answer holds whether or not the fill
-    ever runs, and it is what stops the listing moving to "Check details" the
-    moment it does.
+    Its NOTES are still retired: that costs nothing and asks nothing of eBay,
+    so there is no reason to make the seller press again for it.
     """
     client, dbmod, uid = seller
     # No photo file on disk: _enrich_one skips it before it charges anything.
@@ -294,7 +313,9 @@ def test_the_plan_prices_only_what_it_charges_for(seller):
     _stock(dbmod, uid, [f"OLD{i}" for i in range(7)], factory=_already_read)
 
     plan = client.get("/api/insights").json()["finish_all"]
-    assert plan == {"total": 10, "enrich": 3, "accept": 7}
+    # The seven the AI has already read are not on the list and are not
+    # priced: the press reaches the three it has never read.
+    assert plan == {"total": 3, "enrich": 3, "accept": 0}
 
 
 def test_a_logged_out_caller_gets_nothing(dbmod, monkeypatch):
@@ -317,11 +338,13 @@ def test_an_accepted_note_stops_the_group_asking():
     assert "verify" not in [r["type"] for r in recommender.recommend_for(item)]
 
 
-def test_an_unanswered_note_still_asks():
+def test_an_unanswered_note_asks_nothing_either():
+    """The same listing with its note NOT retired. It used to be the whole
+    "Check details" group; it is nobody's chore now."""
     item = {"id": "L1", "status": "published",
             "created_at": "2020-01-01T00:00:00+00:00",
             "listing": {"title": "Bowling trophy",
                         "images": ["1.jpg", "2.jpg", "3.jpg"],
                         "missing_info": ["exact measurements"],
                         "enriched_at": "2026-09-04T12:00:00+00:00"}}
-    assert "verify" in [r["type"] for r in recommender.recommend_for(item)]
+    assert "verify" not in [r["type"] for r in recommender.recommend_for(item)]

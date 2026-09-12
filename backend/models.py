@@ -328,12 +328,12 @@ class Listing(BaseModel):
     #
     # `missing_info` is what the AI declined to invent -- a measurement, a
     # signature to confirm, an exact model number. It is right to leave those
-    # to a person, and it is right that "Check details" says so. What was
-    # missing is any way for the person to ANSWER: the group is rebuilt from
-    # the listing on every load, so a seller with 177 of them faced a list
-    # that could only shrink one hand-checked listing at a time and would not
-    # otherwise move. Their reply: "I want all of this done and submitted to
-    # eBay with one click, not individually."
+    # to a person. It was NOT right to make a dashboard group out of them:
+    # "Check details" was rebuilt from the listing on every load, so a seller
+    # with 203 of them faced a list that could only shrink one hand-checked
+    # listing at a time and would not otherwise move. Their reply: "I want all
+    # of this done and submitted to eBay with one click, not individually."
+    # The group is gone; this field is how the one press settles its half.
     #
     # So this is that reply, written down. The notes STAY on the listing --
     # nothing is deleted, and the editor still shows them -- but the chore

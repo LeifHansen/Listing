@@ -17,11 +17,17 @@
  * The seller, on a list of 70: "make the Enrich All button actually enrich
  * them all."
  *
- * So: the two halves of finishing a listing's details are ONE group with one
- * count, its button takes the whole list with no cap and no ids of its own,
- * and the rows are behind the chevron for a seller who would rather go
- * through them one at a time. None of the hiding machinery is left, because
- * the only reason for it was that the work could not be done.
+ * So: finishing a listing's details is ONE group with one count, its button
+ * takes the whole list with no cap and no ids of its own, and the rows are
+ * behind the chevron for a seller who would rather go through them one at a
+ * time. None of the hiding machinery is left, because the only reason for it
+ * was that the work could not be done.
+ *
+ * "Check details" is gone outright. Merging it into this group was better
+ * than stacking it above and still wrong: it was a note only the person
+ * holding the item can settle, so no press could clear it, and on a real
+ * store it padded this badge by 203. It lives on the listing now, in the
+ * editor, and Enrich all retires the ones that survive a fill.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -42,16 +48,15 @@ const RECS = [
     action: "open", priority: 45, rate: null },
 ];
 
-// The other half: read already, with notes left that only a person can
-// settle. A different question per listing, which is why the merged group
-// keeps its rows.
-const VERIFY_RECS = [
-  { listing_id: "c", listing_title: "Hokusai print", type: "verify",
-    label: "Check details", reason: "2 things the AI left for you to check.",
-    action: "open", priority: 40, rate: null },
-  { listing_id: "d", listing_title: "Levi's 501", type: "verify",
-    label: "Check details", reason: "1 thing the AI left for you to check.",
-    action: "open", priority: 40, rate: null },
+// More of the same group. It keeps its rows because a seller may want to work
+// through them one at a time — the group is a pile of listings, not one edit.
+const MORE_RECS = [
+  { listing_id: "c", listing_title: "Hokusai print", type: "specifics",
+    label: "Fill in details", reason: "Some fields buyers filter by are still blank.",
+    action: "open", priority: 45, rate: null },
+  { listing_id: "d", listing_title: "Levi's 501", type: "specifics",
+    label: "Fill in details", reason: "Some fields buyers filter by are still blank.",
+    action: "open", priority: 45, rate: null },
 ];
 
 // A group with its own capped bulk verb — the price drop still runs a capped
@@ -176,55 +181,50 @@ async function expand(label) {
   await click(toggle);
 }
 
-/* The two halves, as one group.
+/* One group, and nothing stacked beside it.
  *
  * The seller was looking at "Fill in details · 70" stacked on "Check details
  * · 149": two headers, two counts, a button on one of them, and the same
- * sentence in both — this listing's details aren't finished. The split is
- * real to the engine and is not a decision the seller has to make.
+ * sentence in both — this listing's details aren't finished. The second one
+ * is gone from the engine entirely, so what the screen must never show again
+ * is a second header of any kind under Suggested actions for this work.
  */
 describe("finishing a listing's details is one group", () => {
-  const BOTH = { recs: [...RECS, ...VERIFY_RECS],
-                 groupTotals: { specifics: 70, verify: 149 },
-                 finishAll: { total: 219, enrich: 70, accept: 149 } };
+  const PILE = { recs: [...RECS, ...MORE_RECS],
+                 groupTotals: { specifics: 70 },
+                 finishAll: { total: 70, enrich: 70, accept: 0 } };
 
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
-  it("shows one row for both halves, not one each", async () => {
-    const { root, text } = await mount([], BOTH);
+  it("shows one row, and no second list beside it", async () => {
+    const { root, text } = await mount([], PILE);
     expect(text()).toContain("Finish details");
     // The two old headers are gone from the screen — the rows still carry
     // their own per-listing labels, which is where that wording belongs.
     expect(buttons().some((b) => (b.textContent || "").includes("Fill in details")
                                  && b.getAttribute("aria-expanded") !== null))
       .toBe(false);
-    expect(buttons().some((b) => (b.textContent || "").includes("Check details")
-                                 && b.getAttribute("aria-expanded") !== null))
-      .toBe(false);
+    expect(text()).not.toContain("Check details");
     await act(async () => { root.unmount(); });
   });
 
-  it("counts both halves in one badge", async () => {
-    // 70 + 149. The server counts per type and has no idea they render as
-    // one row, so a badge showing either number alone would undercount the
-    // thing the button is about to do.
-    const { root, host } = await mount([], BOTH);
+  it("shows the group's own count in one badge", async () => {
+    const { root, host } = await mount([], PILE);
     const badge = [...host.querySelectorAll("span")].find(
-      (el) => (el.textContent || "").trim() === "219");
+      (el) => (el.textContent || "").trim() === "70");
     expect(badge).toBeTruthy();
     await act(async () => { root.unmount(); });
   });
 
-  it("opens to the line items, from both halves", async () => {
-    // The reason the merged group kept a list: half of it is notes only a
-    // person can settle, one listing at a time.
-    const { root, text } = await mount([], BOTH);
+  it("opens to the line items", async () => {
+    // The group keeps a list: a seller may want to work through the pile one
+    // listing at a time rather than hand all of it to the button.
+    const { root, text } = await mount([], PILE);
     expect(text()).not.toContain("Nike hoodie");
     await expand("Finish details");
-    expect(text()).toContain("Nike hoodie");          // a fill
-    expect(text()).toContain("Hokusai print");        // a check
-    expect(text()).toContain("2 things the AI left for you to check.");
+    expect(text()).toContain("Nike hoodie");
+    expect(text()).toContain("Hokusai print");
     await act(async () => { root.unmount(); });
   });
 
@@ -250,9 +250,9 @@ describe("finishing a listing's details is one group", () => {
  * server works the set out from the same ranking the screen renders.
  */
 describe("the group's button takes the whole list", () => {
-  const PLAN = { recs: [...RECS, ...VERIFY_RECS],
-                 finishAll: { total: 308, enrich: 131, accept: 177 },
-                 groupTotals: { specifics: 131, verify: 177 } };
+  const PLAN = { recs: [...RECS, ...MORE_RECS],
+                 finishAll: { total: 131, enrich: 131, accept: 0 },
+                 groupTotals: { specifics: 131 } };
 
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
@@ -269,33 +269,34 @@ describe("the group's button takes the whole list", () => {
   it("promises the whole list, with no remainder to run again", async () => {
     const { root, text } = await mount([], PLAN);
     await click(byText("Enrich all"));
-    expect(text()).toContain("Finish all 308 listings?");
+    expect(text()).toContain("Finish all 131 listings?");
     // The words that belonged to a capped run. There is nothing left over
     // now, so claiming there is would be inventing a second press.
     expect(text()).not.toContain("second run");
-    expect(text()).not.toContain("of 308 listings?");
+    expect(text()).not.toContain("of 131 listings?");
     await act(async () => { root.unmount(); });
   });
 
-  it("prices only the listings it will actually charge for", async () => {
-    // 308 listings do not cost 308 fills: the AI has already read 177 of
-    // them, and re-reading buys nothing.
+  it("prices every listing it reaches, because it charges for every one", async () => {
+    // The set is exactly the listings the AI has never read, so the quote is
+    // the whole of it. Listings it HAS read are not on this list at all.
     const { root, text } = await mount([], {
       ...PLAN,
       tokens: { enabled: true, total: 900, packs: [], costs: { specifics: 2 } },
     });
     await click(byText("Enrich all"));
-    expect(text()).toContain("262 AI tokens");   // 131 x 2, not 308 x 2
+    expect(text()).toContain("262 AI tokens");   // 131 x 2
     await act(async () => { root.unmount(); });
   });
 
-  it("says what happens to each half before it happens", async () => {
+  it("says what happens before it happens", async () => {
     const { root, text } = await mount([], PLAN);
     await click(byText("Enrich all"));
     expect(text()).toContain("131 listings it hasn't read yet");
     expect(text()).toContain("pushes them straight to the live listing");
-    expect(text()).toContain("On the other 177");
-    expect(text()).toContain("nothing about them goes to eBay");
+    // No second promise about notes: there is no second half to explain, and
+    // the leftovers it retires afterwards cost the seller nothing.
+    expect(text()).not.toContain("On the other");
     await act(async () => { root.unmount(); });
   });
 
@@ -400,7 +401,7 @@ describe("a group bigger than the rows it was sent", () => {
     // most of what made the number hard to trust. Nothing hides now, so the
     // count on screen is the server's answer, unedited, open or closed.
     const { root, host } = await mount([], {
-      recs: VERIFY_RECS, groupTotals: { verify: 9 },
+      recs: MORE_RECS, groupTotals: { specifics: 9 },
     });
     const badge = () => [...host.querySelectorAll("span")].find(
       (el) => (el.textContent || "").trim() === "9");
@@ -464,7 +465,7 @@ describe("nothing on the list is hidden any more", () => {
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
   it("gives a row no way to be waved away", async () => {
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
+    const { root, text } = await mount([], { recs: MORE_RECS });
     await expand("Finish details");
     expect(text()).toContain("Hokusai print");
     // The row is there to be opened, and that is the only thing on it.
@@ -477,10 +478,10 @@ describe("nothing on the list is hidden any more", () => {
   it("keeps the section header free of controls", async () => {
     // The press that finishes the work sits on the group it finishes. It was
     // in the header while it spanned two groups nothing else could reach;
-    // now that they are one row with a button of their own, a second copy
+    // now that there is one group with a button of its own, a second copy
     // naming the same number is how a seller comes to distrust both.
     const { root } = await mount([], {
-      recs: VERIFY_RECS, finishAll: { total: 12, enrich: 5, accept: 7 },
+      recs: MORE_RECS, finishAll: { total: 12, enrich: 12, accept: 0 },
     });
     expect(byText("Finish all 12")).toBeFalsy();
     expect(byText("Clear all")).toBeFalsy();
@@ -496,8 +497,8 @@ describe("nothing on the list is hidden any more", () => {
     // localStorage. It is nobody's reader now, and a row it names must not
     // go on being hidden by a feature that no longer exists.
     localStorage.setItem("thryft-dismissed-recs",
-      JSON.stringify(["c|verify", "d|verify"]));
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
+      JSON.stringify(["c|specifics", "d|specifics"]));
+    const { root, text } = await mount([], { recs: MORE_RECS });
     await expand("Finish details");
     expect(text()).toContain("Hokusai print");
     expect(text()).toContain("Levi's 501");
