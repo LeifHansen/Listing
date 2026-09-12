@@ -1,8 +1,8 @@
 import { memo, useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  ImageOff, ArrowRight, Trash2, Eye, Heart, Check, RotateCcw, RotateCw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban, PenLine, HandCoins, Gavel,
+  ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import {
@@ -264,8 +264,10 @@ function turnStyle(spin, square) {
 // focusable HTML — in list layout it sits beside the row instead of over it.
 // `metrics` (optional) shows eBay views/watchers for a live listing, and
 // lights the card green when it carries a bid or a pending offer.
-// In select mode (`selectable`), clicking toggles `selected` via `onSelect`
-// instead of opening — powers mass actions like delete-selected in Drafts.
+// `selectable` puts a checkbox on the card: ticking it reports through
+// `onSelect` and shows through `selected`, which is what powers the bulk
+// actions in Drafts (publish / merge / delete selected). It is a tick box,
+// not a mode — the card goes on opening when the card is clicked.
 // `onRotate(id, name)` puts a rotate button on the photo: one tap turns the
 // listing's main photo 90° clockwise on the server, so a photo that is
 // visibly sideways on the grid is fixed there rather than in the full editor.
@@ -425,12 +427,11 @@ export const ListingCard = memo(function ListingCard({
 
   // Rotate: turn the photo the card is showing, right here. Only where there
   // is a photo of the listing's own to turn and it is actually on screen (a
-  // turn applied to the placeholder is a turn applied blind), and never
-  // while selecting — that mode turns the whole card into a tick box. In the
-  // grid it sits on the photo itself, in the corner a draft leaves free; in a
-  // list row the thumbnail is too small to carry it, so it joins the row's
+  // turn applied to the placeholder is a turn applied blind). In the grid it
+  // sits on the photo itself, in the corner a draft leaves free; in a list
+  // row the thumbnail is too small to carry it, so it joins the row's
   // controls beside the skip and start-over buttons.
-  const rotatable = !!onRotate && !!photoName && !!thumb && !imgFailed && !selectable;
+  const rotatable = !!onRotate && !!photoName && !!thumb && !imgFailed;
   const rotateButton = rotatable && (
     <button
       type="button"
@@ -553,7 +554,7 @@ export const ListingCard = memo(function ListingCard({
     "w-full h-full text-left bg-card rounded-card border shadow-card overflow-hidden",
     "flex cursor-pointer",
     list ? "flex-row items-center gap-3 p-2.5 sm:p-3" : "flex-col",
-    selectable && selected ? "border-blue ring-2 ring-blue/60" : "border-line",
+    selected ? "border-blue ring-2 ring-blue/60" : "border-line",
     // A listing eBay won't take, or has already refused, over something the
     // seller has to fill in. The warning line under the card says WHICH
     // field, but that line is one small row among many on a grid of twenty
@@ -574,13 +575,12 @@ export const ListingCard = memo(function ListingCard({
     // ever did the money on the table is the thing to see.
     lit && "card-buyer-glow border-green/60",
     // A skipped draft stays fully usable — just visibly set aside.
-    skipped && !selectable && "opacity-60",
+    skipped && "opacity-60",
   );
 
   const motionProps = {
     type: "button",
-    onClick: () => (selectable ? onSelect?.() : onOpen(item.id)),
-    "aria-pressed": selectable ? !!selected : undefined,
+    onClick: () => onOpen?.(item.id),
     // Colour alone is never the whole message: it can't be read by a screen
     // reader and it isn't there for anyone who can't tell amber from cream.
     // The same fact reaches the accessible name and the hover tooltip.
@@ -671,7 +671,12 @@ export const ListingCard = memo(function ListingCard({
             the opposite corner (which is what the pr-* allowance is for).
             The bottom-left corner keeps stale/needs-info: a live listing can
             be all three at once. */}
-        <div className="absolute top-3 left-3 right-3 flex flex-wrap items-start gap-1.5 pr-16">
+        <div className={cn(
+          "absolute top-3 left-3 right-3 flex flex-wrap items-start gap-1.5 pr-16",
+          // The tick sits in this corner (see the checkbox below), so the
+          // badges start after it rather than under it.
+          selectable && "pl-8",
+        )}>
           <StatusBadge status={item.status} className="shadow-card" />
           {showFormat && <FormatBadge listing={l} className="shadow-card bg-card/95" />}
           {offers > 0 && (
@@ -737,43 +742,35 @@ export const ListingCard = memo(function ListingCard({
           {rotateButton}
         </div>
       )}
-      {selectable ? (
-        // Select mode still lets one listing be opened. Ticking is what the
-        // card itself does here, so without this the ONE thing a seller
-        // cannot do while sorting a grid of drafts is fix the draft they just
-        // spotted the problem on — they had to leave select mode, open it,
-        // come back, and tick everything again. A sibling of the card button
-        // (never nested: a button inside a button is invalid HTML and stops
-        // being reachable by keyboard), so its click is its own.
-        <div className={cn(
-          "z-10 flex items-center gap-1.5",
-          list ? "shrink-0 order-first" : "absolute top-3 right-3",
-        )}>
-          <button
-            type="button"
-            onClick={() => onOpen?.(item.id)}
-            aria-label="Open this listing to edit it"
-            title="Open this listing to edit it — your ticks are kept"
-            className={cn(
-              "grid place-items-center size-7 rounded-full border-2 shadow-card",
-              "bg-card/90 border-line-strong text-ink-secondary cursor-pointer",
-              "transition-colors hover:text-blue hover:border-blue",
-            )}
-          >
-            <PenLine size={14} aria-hidden />
-          </button>
-          <span
-            aria-hidden
-            className={cn(
-              "grid place-items-center size-7 rounded-full",
-              "border-2 shadow-card pointer-events-none transition-colors",
-              selected ? "bg-blue border-blue text-on-accent" : "bg-card/90 border-line-strong text-transparent",
-            )}
-          >
-            <Check size={15} strokeWidth={3} />
-          </span>
-        </div>
-      ) : actions && (
+      {/* The tick that puts this listing into a bulk action. Standing, not a
+          mode: it is on the card from the moment the grid offers bulk
+          actions, so picking three drafts to merge costs three clicks rather
+          than a button press, three clicks and a way back out. A sibling of
+          the card button (never nested — a button inside a button is invalid
+          HTML and drops out of the tab order), so ticking and opening are
+          separate actions and neither is ever an accident: the checkbox
+          ticks, the card opens. Opposite corner from the card's own buttons,
+          which it shares the tile with. */}
+      {selectable && (
+        <label
+          title="Select this listing for a bulk action"
+          className={cn(
+            "z-10 flex items-center cursor-pointer",
+            list
+              ? "shrink-0 order-first pl-0.5"
+              : "absolute top-2.5 left-2.5 rounded-md p-1 bg-card/90 backdrop-blur border border-line shadow-card",
+          )}
+        >
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={() => onSelect?.()}
+            aria-label={`Select "${l.title || item.title || "this listing"}"`}
+            className="size-4 accent-(--brand-blue) cursor-pointer"
+          />
+        </label>
+      )}
+      {actions && (
         <div className={cn(
           "z-10 flex items-center gap-1.5",
           list ? "shrink-0" : "absolute top-3 right-3",

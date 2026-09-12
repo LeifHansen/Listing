@@ -497,13 +497,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           <Card className="py-3.5 border-warning/40 bg-warning-soft">
             <p className="text-sm text-ink flex items-start gap-2">
               <Combine size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-              <span title="If they're the same item, hit Select, tick one of them and choose Merge into one — the dialog asks which draft it merges with before anything is written.">
+              <span title="If they're the same item, tick one of them on its card and choose Merge into one — the dialog asks which draft it merges with before anything is written.">
                 <strong>Possible duplicate{dupes.length > 1 ? "s" : ""}:</strong>{" "}
                 "{(a.listing?.title || a.title || "").slice(0, 40)}…" &amp;{" "}
                 "{(b.listing?.title || b.title || "").slice(0, 40)}…"
-                {dupes.length > 1 ? ` (+${dupes.length - 1} more)` : ""} — hit{" "}
-                <strong>Select</strong>, tick one, then{" "}
-                <strong>Merge into one</strong>.
+                {dupes.length > 1 ? ` (+${dupes.length - 1} more)` : ""} — tick
+                one below, then <strong>Merge into one</strong>.
               </span>
             </p>
           </Card>

@@ -8,7 +8,7 @@
  * Sell screen where the drafts actually live, had no way to reach it: the
  * select bar there offered publish and delete and nothing in between.
  *
- * So: the select bar carries Merge into one, armed by a single tick exactly
+ * So: the bulk bar carries Merge into one, armed by a single tick exactly
  * as the queue's is, opening the same dialog on the same questions, and the
  * merge's result lands back in the grid.
  */
@@ -127,18 +127,15 @@ function button(text) {
     .find((b) => (b.textContent || "").trim().startsWith(text));
 }
 
-/** The card shells: the one button per card carrying the card classes. */
-function cards() {
-  return [...host.querySelectorAll("button")]
-    .filter((b) => b.className.includes("rounded-card"));
+/** The tick box on each card — what picks a draft for a bulk action. The
+ *  bar's own "Select all" is a different checkbox: it carries no aria-label,
+ *  its name comes from the <label> around it. */
+function ticks() {
+  return [...host.querySelectorAll('input[type="checkbox"][aria-label^="Select "]')];
 }
 
 function dialog() {
   return document.querySelector('[role="dialog"]');
-}
-
-async function enterSelectMode() {
-  await click(button("Select"));
 }
 
 beforeEach(() => { localStorage.clear(); });
@@ -153,29 +150,27 @@ afterEach(async () => {
 });
 
 describe("merging duplicate drafts from the grid", () => {
-  it("puts Merge into one on the select bar, armed by a single tick", async () => {
+  it("puts Merge into one on the bulk bar, armed by a single tick", async () => {
     await mount([draft("d1", "Amber Blenko Bud Vase"),
                  draft("d2", "Amber Blenko Vase (second photo set)")]);
-    expect(button("Merge into one")).toBeFalsy();   // select mode's, like the rest
+    // The bar — and every bulk action on it — belongs to the ticks: nothing
+    // ticked, nothing to act on.
+    expect(button("Merge into one")).toBeFalsy();
 
-    await enterSelectMode();
-    const merge = button("Merge into one");
-    expect(merge).toBeTruthy();
-    expect(merge.disabled).toBe(true);              // nothing ticked yet
-
-    await click(cards()[0]);
+    await click(ticks()[0]);
     // One tick arms it — the dialog asks what it merges with. Requiring two
     // ticks here when the queue asks for one would be the same button with
     // two rules.
-    expect(button("Merge into one").disabled).toBe(false);
+    const merge = button("Merge into one");
+    expect(merge).toBeTruthy();
+    expect(merge.disabled).toBe(false);
   });
 
   it("with one draft ticked, asks which other draft it merges with", async () => {
     await mount([draft("d1", "Amber Blenko Bud Vase"),
                  draft("d2", "Amber Blenko Vase (second photo set)"),
                  draft("d3", "Cobalt Studio Pottery Vase")]);
-    await enterSelectMode();
-    await click(cards()[0]);
+    await click(ticks()[0]);
     await click(button("Merge into one"));
 
     const d = dialog();
@@ -191,9 +186,8 @@ describe("merging duplicate drafts from the grid", () => {
   it("with two ticked, opens straight on the master question", async () => {
     await mount([draft("d1", "Amber Blenko Bud Vase"),
                  draft("d2", "Amber Blenko Vase (second photo set)")]);
-    await enterSelectMode();
-    await click(cards()[0]);
-    await click(cards()[1]);
+    await click(ticks()[0]);
+    await click(ticks()[1]);
     await click(button("Merge into one"));
 
     expect(dialog()?.textContent).toContain("Which draft is the master?");
@@ -202,9 +196,8 @@ describe("merging duplicate drafts from the grid", () => {
   it("merges by listing id and takes the result back into the grid", async () => {
     await mount([draft("d1", "Amber Blenko Bud Vase"),
                  draft("d2", "Amber Blenko Vase (second photo set)")]);
-    await enterSelectMode();
-    await click(cards()[0]);
-    await click(cards()[1]);
+    await click(ticks()[0]);
+    await click(ticks()[1]);
     await click(button("Merge into one"));
     // The first ticked draft is the master by default; the review step asks
     // the server, which here finds nothing clashing.
@@ -231,8 +224,7 @@ describe("merging duplicate drafts from the grid", () => {
 
   it("says so when there is nothing to merge with", async () => {
     await mount([draft("d1", "Amber Blenko Bud Vase")]);
-    await enterSelectMode();
-    await click(cards()[0]);
+    await click(ticks()[0]);
     await click(button("Merge into one"));
 
     expect(dialog()).toBeFalsy();

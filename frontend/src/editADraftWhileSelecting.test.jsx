@@ -1,17 +1,17 @@
-/* A draft can be opened and edited while the grid is in select mode.
+/* A draft can be opened and edited while others are ticked for a bulk action.
  *
  * Asked for as: "allow users to edit individual items from this view."
  *
- * Select mode turns every card into a tick box — which is the whole point,
- * and which took away the one thing a seller sorting thirteen drafts most
- * needs when they spot a wrong price on one of them: opening it. They had to
- * leave select mode, open the draft, come back, and tick everything again,
- * because the ticks lived inside the grid component and opening a draft
- * unmounts it.
+ * Selecting used to be a mode that turned every card into a tick box, which
+ * took away the one thing a seller sorting thirteen drafts most needs when
+ * they spot a wrong price on one of them: opening it. They had to leave
+ * select mode, open the draft, come back, and tick everything again, because
+ * the ticks lived inside the grid component and opening a draft unmounts it.
  *
- * So: every card carries its own edit control while selecting, ticking and
- * editing stay separate actions, and the ticks are held in the app store so
- * they are still there when the seller comes back.
+ * So: ticking is its own control on the card (see tickToSelectDrafts) and
+ * the card itself still opens, ticking and editing stay separate actions,
+ * and the ticks are held in the app store so they are still there when the
+ * seller comes back.
  */
 import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -107,7 +107,7 @@ async function leaveAndComeBack() {
   await act(async () => { root.render(<Tree onValue={observe} grid={false} />); });
   // Proven, not assumed: if the grid were still mounted its state would
   // survive for the boring reason, and the test would pass vacuously.
-  expect(host.textContent).not.toContain("Select all");
+  expect(host.textContent).not.toContain("Amber Blenko");
   await act(async () => { root.render(<Tree onValue={observe} />); });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 }
@@ -118,20 +118,16 @@ function cards() {
     .filter((b) => b.className.includes("rounded-card"));
 }
 
-function editButtons() {
-  return [...host.querySelectorAll('button[aria-label="Open this listing to edit it"]')];
+/** The tick box on each card, which picks a draft for a bulk action without
+ *  going anywhere near the editor. */
+function ticks() {
+  return [...host.querySelectorAll('input[type="checkbox"][aria-label^="Select "]')];
 }
 
 async function click(el) {
+  expect(el, "tried to click something that isn't on screen").toBeTruthy();
   await act(async () => { el.click(); });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-}
-
-async function enterSelectMode() {
-  const select = [...host.querySelectorAll("button")]
-    .find((b) => (b.textContent || "").trim() === "Select");
-  expect(select, "no Select button on the drafts grid").toBeTruthy();
-  await click(select);
 }
 
 beforeEach(() => { localStorage.clear(); });
@@ -147,36 +143,28 @@ afterEach(async () => {
 });
 
 describe("editing one draft out of a selection", () => {
-  it("gives every card its own edit control while selecting", async () => {
+  it("opens the draft when its card is clicked, ticked or not", async () => {
     await mount([draft("d1", "Amber Blenko Bud Vase"),
                  draft("d2", "Cobalt Studio Pottery Vase")]);
-    expect(editButtons()).toHaveLength(0);   // not in the way when not selecting
-
-    await enterSelectMode();
-    expect(editButtons()).toHaveLength(2);
-  });
-
-  it("opens the draft it belongs to, without ticking it", async () => {
-    await mount([draft("d1", "Amber Blenko Bud Vase"),
-                 draft("d2", "Cobalt Studio Pottery Vase")]);
-    await enterSelectMode();
-    await click(editButtons()[1]);
+    await click(ticks()[0]);
+    await click(cards()[1]);
 
     // The editor is open on the SECOND card...
     expect(app.session?.sessionId).toBe("d2");
-    // ...and nothing was selected by opening it: ticking and editing are
-    // separate actions, or one of them is always an accident.
-    expect(app.draftSelection.ids).toEqual({});
+    // ...and opening it neither ticked it nor disturbed the tick already on
+    // the first: ticking and editing are separate actions, or one of them is
+    // always an accident.
+    expect(app.draftSelection).toEqual({ d1: true });
   });
 
-  it("still ticks the card when the card itself is clicked", async () => {
-    await mount([draft("d1", "Amber Blenko Bud Vase")]);
-    await enterSelectMode();
-    await click(cards()[0]);
+  it("ticks the card without opening it when the tick box is clicked",
+    async () => {
+      await mount([draft("d1", "Amber Blenko Bud Vase")]);
+      await click(ticks()[0]);
 
-    expect(app.draftSelection.ids).toEqual({ d1: true });
-    expect(app.session).toBeFalsy();
-  });
+      expect(app.draftSelection).toEqual({ d1: true });
+      expect(app.session).toBeFalsy();
+    });
 
   it("keeps the ticks while the seller is away editing one", async () => {
     // The reason this was impossible: opening a draft unmounts the grid, and
@@ -184,14 +172,13 @@ describe("editing one draft out of a selection", () => {
     // to fix, and the other eleven were gone.
     await mount([draft("d1", "Amber Blenko Bud Vase"),
                  draft("d2", "Cobalt Studio Pottery Vase")]);
-    await enterSelectMode();
-    await click(cards()[0]);
-    expect(app.draftSelection.ids).toEqual({ d1: true });
+    await click(ticks()[0]);
+    expect(app.draftSelection).toEqual({ d1: true });
 
     await leaveAndComeBack();
 
-    expect(app.draftSelection.on).toBe(true);
-    expect(app.draftSelection.ids).toEqual({ d1: true });
+    expect(app.draftSelection).toEqual({ d1: true });
+    expect(ticks()[0].checked).toBe(true);
     expect(host.textContent).toContain("(1 of 2)");
   });
 });
