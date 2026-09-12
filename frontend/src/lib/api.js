@@ -400,6 +400,24 @@ export function isPhotoFile(file) {
     || IMAGE_EXT_RE.test(file?.name || "");
 }
 
+// A LISTING video, which is a different thing from the clip Shop Mode samples
+// frames out of below. eBay takes exactly one per listing and only MP4
+// (MPEG-4 Part 10 / AVC) — not .mov, not .webm, not a YouTube link — so the
+// picker says so rather than letting the server be the one to refuse.
+//
+// The extension rides alongside the MIME type for the same reason it does on
+// PHOTO_ACCEPT: a file dragged in from a phone or an odd desktop can arrive
+// with an empty type, and a MIME-only filter throws away a perfectly good
+// video. The server re-checks the file's own ftyp brand either way — a .mov
+// renamed to .mp4 is the common way to fail eBay's rule, and no client-side
+// check can see that.
+export const VIDEO_ACCEPT = "video/mp4,.mp4";
+
+export function isVideoFile(file) {
+  return (file?.type || "").toLowerCase() === "video/mp4"
+    || /\.mp4$/i.test(file?.name || "");
+}
+
 // Sample up to `maxFrames` evenly-spaced JPEG frames from a recorded video,
 // scaled down so the upload stays small. Runs entirely in the browser.
 export async function extractFrames(file, maxFrames = 6) {

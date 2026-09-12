@@ -36,6 +36,13 @@ TRACKED = (
     "package_weight_lb", "package_weight_oz", "package_length_in",
     "package_width_in", "package_height_in", "fulfillment_policy_id",
     "item_specifics", "images", "image_urls",
+    # The listing's video. Tracked because a revise CAN carry it -- eBay takes
+    # <VideoDetails> on ReviseItem -- and because without it the one edit that
+    # adds a video to a live listing would be the one edit that never reached
+    # eBay. Its entries carry eBay's moderation status, which changes under
+    # us; `comparable_field` below drops that so a video moving from
+    # PROCESSING to LIVE is not read as the seller having edited anything.
+    "videos",
 )
 
 
@@ -65,6 +72,30 @@ def comparable_field(name: str, value: Any) -> Any:
     fills them in, and that must not read as the seller re-grading the card
     -- it would put the condition into every revise and into every sync
     conflict. So descriptors compare on ids and text alone."""
+    if name == "videos":
+        # A video is the seller's edit only in WHICH video it is, so it
+        # compares on identity alone -- eBay's id when there is one, the
+        # local filename until there is.
+        #
+        # Everything else in the entry moves without the seller touching it.
+        # The moderation status and eBay's message arrive minutes to days
+        # after the save, and comparing those would mark the field edited on
+        # every status poll: <VideoDetails> into every unrelated revise, and
+        # a listing showing unsaved changes nobody made.
+        #
+        # The id is preferred over the file because the two sides of a sync
+        # describe the same video differently -- this app holds a file, a
+        # size and a status; eBay reports an id -- and the id is the only
+        # thing both can say. Comparing the whole entry made every record
+        # with a video permanently "locally edited" against its own shadow.
+        out = []
+        for entry in (value or []):
+            d = entry.model_dump() if hasattr(entry, "model_dump") else entry
+            if not isinstance(d, dict):
+                continue
+            out.append(str(d.get("ebay_video_id") or "").strip()
+                       or str(d.get("file") or "").strip())
+        return [v for v in out if v]
     if name == "condition_descriptors":
         out = []
         for entry in (value or []):

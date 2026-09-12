@@ -740,6 +740,9 @@ is *no verdict*, not "medium".
 | `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
 | `POST` | `/api/refine` | Refine the draft from a prompt |
 | `POST` | `/api/save/{session_id}` | Persist manual edits |
+| `POST` | `/api/listings/{id}/video` | Attach the listing's video (multipart, one `.mp4`). Streamed to disk, checked against eBay's size/duration/container rules, then pushed to eBay's Media API behind the request. Refuses a second video — eBay allows one |
+| `GET`  | `/api/listings/{id}/video` | The listing's video and where eBay's moderation got to, with a sentence for the seller. Asks eBay only about videos eBay has not finished with |
+| `DELETE` | `/api/listings/{id}/video/{name}` | Take the video off the listing, the volume and the bucket |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
 | `GET`  | `/api/ebay/store-categories` | The seller's OWN eBay Store shelves, flattened with their paths. Answers `store: false` for an account without a Store and `checked: false` when eBay could not be asked — different things, and the picker treats them differently |
 | `POST` | `/api/publish` | Publish (draft/live). Add `marketplaces: ["ebay","etsy","depop"]` to fan out; omit for the legacy eBay-only behavior |
@@ -1083,6 +1086,72 @@ grid to show). The cards read the SAVED drafts rather than the job's own copy
 of them, so an edit made anywhere shows up on the batch card; a clean draft
 save closes the editor back onto the screen it was opened from; and
 `Publish all` is the one thing the grid grew for this screen.
+
+## Listing video
+
+A listing can carry a **video** — one of them, because that is what eBay
+allows. Upload only: pick an `.mp4`, it goes up, eBay reviews it. There is no
+trimming, no thumbnail picking and no re-encode, deliberately — eBay builds
+its own renditions (240p/360p/480p/720p) from whatever it is handed, so a pass
+here would cost the seller quality and produce something eBay throws away.
+
+**A video is not a photo, and almost nothing about the photo pipeline
+applies.** Photos are *pulled*: the publish hands eBay a `<PictureURL>` and
+eBay fetches it from R2 or `/media`. There is no `<VideoURL>`. A video is
+*pushed* through eBay's Media API — `apim.ebay.com/commerce/media/v1_beta`,
+which is the one eBay API that does not live on `api.ebay.com` — and the
+listing then names it by the id eBay minted:
+
+```
+POST {media}/video                   -> 201, Location: …/video/{id}
+POST {media}/video/{id}/upload       -> 200   (application/octet-stream)
+GET  {media}/video/{id}              -> PENDING_UPLOAD | PROCESSING
+                                        | LIVE | BLOCKED | PROCESSING_FAILED
+<Item><VideoDetails><VideoID>{id}</VideoID></VideoDetails></Item>
+```
+
+It runs on the `sell.inventory` scope, which every connected seller already
+granted — **nobody has to reconnect**.
+
+Three consequences, and they are what the code is shaped around:
+
+- **The upload does not wait for eBay.** The file is streamed to disk a
+  megabyte at a time (150MB awaited into a `bytes` on a 4GB box that is also
+  holding a 176MB cutout model is an OOM waiting for two sellers at once), the
+  listing gains the video, and the request returns. The push to eBay and the
+  R2 offload run behind it — the same rule "Add photos" follows for its
+  optimize pass.
+- **eBay moderates it, in hours to 48 of them.** Nothing waits for `LIVE`: a
+  publish goes out with a `PROCESSING` video exactly as eBay intends, and the
+  status is polled and shown on the card. A seller who publishes and sees no
+  video on their listing has done nothing wrong, and the card is the only
+  place that can say so before they start again.
+- **A rejection lands days after the seller stopped looking.** So the three
+  things a local read can be *sure* of are checked before the file is
+  accepted: the size, the duration, and the container — read from the file's
+  own `ftyp` brand rather than its extension, because a `.mov` renamed to
+  `.mp4` is the usual way to fail eBay's format rule. Anything the reader
+  cannot parse is left to eBay: refusing a video eBay would have taken is the
+  worse of the two errors.
+
+eBay's limits, each a named constant (`models.MAX_VIDEOS`,
+`services/ebay_video`): **1 per listing**, **150MB**, **MP4 (MPEG-4 Part 10 /
+AVC)**, about **a minute**, and never on a multi-variation listing. The
+plumbing either side carries a *list* — the Trading schema repeats
+`<VideoID>` — so the day eBay raises the ceiling is a one-line change. Past
+the limit eBay does not refuse the extras, it **ignores** them, which is why
+the app refuses them itself: an upload that succeeds onto a listing with no
+video is the worst way to learn the rule.
+
+Storage mirrors the photo path: `sessions/<id>/video/` on the volume and under
+the same R2 prefix, so the erasure and the orphan sweep already reach it, and
+the reclaim pass frees the local copy once the bucket has it (one video is a
+sixth of the 1GB volume — a pass that walked only `optimized/` could sweep
+every photo on the box and still leave it full). A publish re-checks that the
+video reached eBay and uploads it if it did not — for a video added before
+eBay was connected, or an upload that failed — and **never fails the publish
+over it**: a listing with no video sells, a listing that will not publish is
+the seller's afternoon.
 
 ## Bi-directional eBay sync
 
