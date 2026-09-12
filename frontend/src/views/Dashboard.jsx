@@ -4,7 +4,7 @@ import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
   Tags, Coins, Lightbulb, TrendingDown,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
-  ChevronDown, DollarSign, AlertTriangle, Sparkles, ClipboardCheck,
+  ChevronDown, DollarSign, AlertTriangle, Sparkles,
 } from "lucide-react";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -62,34 +62,32 @@ const runCount = (n, total, noun) =>
 // make a group claim to be smaller than what it is showing.
 const groupSize = (group) => Math.max(group.total || 0, group.recs.length);
 
-/* "Fill in details" and "Check details", as ONE group.
+/* Finishing a listing's details is ONE group, and there is no second half.
    
-   They were two, stacked, and the seller read them as one thing twice:
-   "Fill in details · 70" over "Check details · 149", each with its own
-   header, its own count and — on only one of them — its own button. The
-   split is real to the ENGINE (`specifics` is a fill the AI can make;
-   `verify` is a note only a person can settle) and it is not a decision the
-   seller has to make: both are "this listing's details aren't finished", and
-   the one press that finishes them has always covered both (finish-all).
-   So the dashboard groups them: one row, one count, one button, and the rows
-   behind it when the seller wants to work through them one at a time. */
-const DETAILS = "details";
-const DETAILS_TYPES = ["specifics", "verify"];
+   It was two, stacked, and the seller read them as one thing twice:
+   "Fill in details · 131" over "Check details · 203", each with its own
+   header, its own count and — on only one of them — its own button. Then
+   they were merged into one row, which was better and still wrong: the
+   second half is a note only the person holding the item can settle, so it
+   could only ever shrink one hand-checked listing at a time and it padded
+   the count of a button that could not clear it.
+   
+   So `verify` is gone from the engine altogether (see services/recommender),
+   and what it asked for happens inside Enrich all instead: the same press
+   that fills a listing in retires the notes that survived the fill. One row,
+   one count, one button, and the count is what the button clears. */
+const DETAILS = "specifics";
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
   lower_price: TrendingDown,
   finish: PlusCircle, photos: Camera, specifics: ListChecks,
-  verify: ClipboardCheck,
-  [DETAILS]: ListChecks,
 };
 const REC_TONE = {
   lower_price: "bg-yellow-soft text-warning",
   finish: "bg-blue-soft text-blue",
   photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
-  verify: "bg-yellow-soft text-warning",
-  [DETAILS]: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
 // imperative for one listing ("Lower the price"); groups need the noun form.
@@ -97,9 +95,7 @@ const REC_GROUP_LABEL = {
   lower_price: "Lower prices",
   finish: "Finish & list",
   photos: "Add more photos",
-  // "Fill in details" and "Check details" arrive as two types and render as
-  // one group (see DETAILS): two halves of finishing a listing's details,
-  // with one button that does both.
+  // The noun form of "Fill in details", and the group Enrich all clears.
   [DETAILS]: "Finish details",
 };
 
@@ -648,15 +644,16 @@ export function Dashboard() {
   // FINISH_ALL for the press that spans them.
   const [bulkProgress, setBulkProgress] = useState(null);
 
-  // "Finish everything" — the whole suggestions list, in one press.
+  // "Enrich all" — the whole suggestions list, in one press.
   //
   // The seller was looking at "Fill in details · 131" above "Check details ·
-  // 177" and said: "I want all of this to be done and submitted to eBay with
+  // 203" and said: "I want all of this to be done and submitted to eBay with
   // one click, not individually, and not broken out into multiple steps."
   // Every word of that named something real. There was no button spanning
-  // both groups; "Check details" had no bulk verb at all, only 177 rows each
+  // both groups; "Check details" had no bulk verb at all, only 203 rows each
   // opening one listing; and "Enrich all" ran a capped 25 and deferred the
-  // rest, so 131 was six presses.
+  // rest, so 131 was six presses. "Check details" is now gone entirely and
+  // its half runs inside this press (see services/recommender).
   //
   // So this one sends NO ids. Every other bulk action here hands the server
   // the group's membership, which is right when the client is naming a
@@ -683,23 +680,17 @@ export function Dashboard() {
     const cost = tokens.enabled && tokens.costs?.specifics && plan.enrich
       ? ` It uses ${tokens.costs.specifics * plan.enrich} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
       : "";
-    // Said plainly, because the two halves are not the same promise and the
-    // seller is agreeing to both: one spends money and changes the live
-    // listing, the other retires a nag.
+    // Said plainly, because it spends money and changes the live listing.
+    // Every listing in the set is one the AI has never read — the leftover
+    // notes it retires afterwards are free and ride along unannounced.
     const fills = plan.enrich
       ? `The AI reads the photos on ${plan.enrich} listing${plan.enrich === 1 ? "" : "s"} `
         + "it hasn't read yet, fills in eBay's recommended item specifics, and "
         + "pushes them straight to the live listing. "
       : "";
-    const accepts = plan.accept
-      ? `On the other ${plan.accept}, it has already looked and left notes only `
-        + "you can settle — a measurement, a signature. Those get marked as "
-        + "checked so they stop asking. The notes stay on the listing and "
-        + "nothing about them goes to eBay. "
-      : "";
     if (!(await confirm({
       title: `Finish all ${plan.total} listing${plan.total === 1 ? "" : "s"}?`,
-      message: `${fills}${accepts}Anything you've already written is left `
+      message: `${fills}Anything you've already written is left `
         + "exactly as it is. This runs in the background — you can keep "
         + `working while it does.${cost}`,
       confirmLabel: "Finish them",
@@ -1040,21 +1031,15 @@ export function Dashboard() {
           <Card className="p-0 divide-y divide-line overflow-hidden">
             {(() => {
               // Group by type, preserving arrival order: the API sorts by
-              // priority desc, so groups order by their strongest rec. The
-              // two halves of finishing a listing's details answer to one
-              // key (see DETAILS), which is what makes them one row — and
-              // they keep the place of whichever of them ranked highest.
-              const keyOf = (type) =>
-                (DETAILS_TYPES.includes(type) ? DETAILS : type);
+              // priority desc, so groups order by their strongest rec.
               const groups = [];
               const byType = {};
               for (const rec of insights) {
-                const key = keyOf(rec.type);
-                if (!byType[key]) {
-                  byType[key] = { type: key, recs: [], total: 0 };
-                  groups.push(byType[key]);
+                if (!byType[rec.type]) {
+                  byType[rec.type] = { type: rec.type, recs: [], total: 0 };
+                  groups.push(byType[rec.type]);
                 }
-                byType[key].recs.push(rec);
+                byType[rec.type].recs.push(rec);
               }
               // The server's count, straight through. It used to have this
               // browser's hidden rows netted off it, which is what a count
@@ -1063,14 +1048,8 @@ export function Dashboard() {
               // hides now, so the number on screen is the server's answer to
               // "how much is left", with nothing done to it here.
               for (const group of groups) {
-                // The merged group's count is both halves added up — the
-                // server counts per type and has no idea they render as one,
-                // and a badge that showed only one half would be the same
-                // undercount the per-type slice used to cause.
-                const counted = group.type === DETAILS
-                  ? DETAILS_TYPES.reduce((n, t) => n + (groupTotals[t] || 0), 0)
-                  : (groupTotals[group.type] || 0);
-                group.total = Math.max(counted, group.recs.length);
+                group.total = Math.max(groupTotals[group.type] || 0,
+                                       group.recs.length);
               }
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}

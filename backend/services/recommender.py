@@ -37,31 +37,26 @@ FEW_PHOTOS = 3    # fewer than this → suggest adding photos
 # birthday.
 PRICE_QUIET_DAYS = STALE_DAYS
 
-# How long a listing gets left alone after the AI fill has run on it, before
-# "Check details" is allowed to nudge about the notes the fill could not
-# answer.
+# There is no "Check details" group, and deliberately none. The notes the
+# fill could not answer — "exact measurements", "confirm the signature" — used
+# to be their own suggestion type, and it was wallpaper: 203 rows on a real
+# store, each opening one listing, with no bulk verb on the group at all.
 #
-# This exists because of what the seller actually sees. They open Home, find
-# "Fill in details · 12" with a button on it, press the button, and wait
+# What it looked like from the outside is why it is gone. The seller opens
+# Home, finds "Fill in details · 12" with a button on it, presses it, waits
 # several minutes while the AI reads twelve listings' photos and pushes the
-# new specifics to eBay. It works. And the group they just cleared is
-# replaced, in the same slot, by "Check details · 12" — the same twelve
-# listings, still flagged, and this time with NO button on the group at all:
-# just a list to open one at a time.
+# new specifics to eBay — and the group they just cleared is replaced, in the
+# same slot, by "Check details · 12": the same twelve listings, still flagged.
+# That is indistinguishable from the button having done nothing, and it was
+# reported as exactly that ("it should fill in all possible missing fields...
+# I don't know why you keep showing me a list view").
 #
-# Read from the outside that is indistinguishable from the button having done
-# nothing, which is exactly how it was reported ("it should fill in all
-# possible missing fields... I don't know why you keep showing me a list
-# view... they are not updating as far as I can tell"). The notes behind it
-# are real — "exact measurements", "confirm the signature" — but they are, by
-# construction, the things the fill just declined to invent, and turning them
-# into a fresh chore in the same minute asks the seller to finish work they
-# have this second asked the app to finish for them.
-#
-# So the nudge waits a day. Nothing is lost: these notes have been on the
-# listing since it was drafted and are not urgent, and after the quiet period
-# they come back exactly as before.
-VERIFY_QUIET_DAYS = 1
+# A quiet period was tried first and only delayed the same nag by a day. So
+# the nudge is gone and the work lives in Enrich all instead: it accepts
+# whatever notes survive the fill on every listing it touches, in the same
+# press, for free (see main._accept_remaining_notes). The notes themselves are
+# untouched — the editor still shows them on the listing they belong to, which
+# is where someone holding the item can actually settle them.
 
 
 def _age_days(iso: Optional[str]) -> Optional[int]:
@@ -222,8 +217,6 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
         n = len(images)
         add("photos", "Add more photos",
             f"Only {n} photo{'' if n == 1 else 's'} — more angles mean more sales.", 50)
-    notes = [n for n in (listing.get("missing_info") or [])
-             if str(n or "").strip()]
     # Two signals decide this, and they answer the same question at different
     # prices.
     #
@@ -251,13 +244,6 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     # count not at all: the loop a seller reads, correctly, as the button not
     # working. What is left for them then is to LOOK, which is the other rec.
     enriched = str(listing.get("enriched_at") or "").strip()
-    # ...and `notes_accepted_at` is what ends the OTHER half of it. The notes
-    # below are the ones the AI declined to invent, so no pass will ever
-    # answer them and the group could only shrink one hand-checked listing at
-    # a time -- which on a store of 177 is not a to-do list, it is wallpaper.
-    # A seller who has said "these are fine" has answered the question, and
-    # the list has to take the answer. See Listing.notes_accepted_at.
-    accepted = str(listing.get("notes_accepted_at") or "").strip()
     have = filled_specifics(listing)
     if blank_specifics is None:
         worth_filling = have < MIN_SPECIFICS
@@ -270,22 +256,8 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
         worth_filling = blank_specifics >= MIN_BLANK_SPECIFICS
         reason = (f"{blank_specifics} of eBay's item specifics are still blank "
                   "— buyers filter by these.")
-    # How long ago the fill last ran on this listing, in days — None when it
-    # never has. The quiet period below is the only thing that reads it.
-    since_filled = _age_days(enriched) if enriched else None
     if not enriched and worth_filling:
         add("specifics", "Fill in details", reason, 45)
-    elif (notes and not accepted
-            and (since_filled is None or since_filled >= VERIFY_QUIET_DAYS)):
-        # Notes on a listing whose specifics are filled are what the fill
-        # could NOT answer: a measurement, an authentication, a flaw only the
-        # person holding it can see. They earn a nudge to LOOK, never a button
-        # that would charge for the same empty pass again — and never in the
-        # minutes right after the fill ran, which is the whole point of
-        # VERIFY_QUIET_DAYS above.
-        n = len(notes)
-        add("verify", "Check details",
-            f"{n} thing{'' if n == 1 else 's'} the AI left for you to check.", 40)
     return recs
 
 

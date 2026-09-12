@@ -114,14 +114,17 @@ def test_a_listing_the_fill_has_run_on_is_not_asked_again():
     assert "specifics" not in _types(recs)
 
 
-def test_what_is_left_after_the_fill_is_a_nudge_to_look():
-    """The notes the fill could not answer are still real. They just want the
-    seller's eyes, not another vision pass."""
+def test_what_is_left_after_the_fill_is_not_a_second_chore():
+    """The notes the fill could not answer are still real, and they want the
+    seller's eyes rather than another vision pass — but wanting eyes is not
+    the same as earning a row on the dashboard. It used to earn one ("Check
+    details"), which put the listing the seller had just paid to finish
+    straight back on a list nothing could clear."""
     recs = recommender.recommend_for(
         _item(missing_info=["exact measurements"],
               enriched_at="2026-09-04T12:00:00+00:00"),
         blank_specifics=14)
-    assert "verify" in _types(recs)
+    assert "verify" not in _types(recs)
 
 
 def test_a_fill_that_never_ran_leaves_the_offer_standing():
@@ -156,13 +159,13 @@ def test_a_real_count_overrides_the_proxy_in_both_directions():
 
 def test_the_notes_beside_it_decide_nothing():
     """A note is not evidence a specific is blank, and it is not evidence one
-    is filled. It earns a nudge to LOOK once the fill has nothing left."""
+    is filled. It decides nothing here and earns nothing of its own."""
     recs = recommender.recommend_for(
         _item(missing_info=["Measurements — I can't measure from photos"],
               enriched_at="2026-09-04T12:00:00+00:00"),
         blank_specifics=14)
     assert "specifics" not in _types(recs)
-    assert "verify" in _types(recs)
+    assert "verify" not in _types(recs)
 
 
 # ------------------------------------------------------------- across the store

@@ -7758,35 +7758,32 @@ def _blank_specifics_by_id(items: list[dict]) -> dict:
 INSIGHTS_GROUP_CAP = 50
 
 
-# The suggestion groups "Finish everything" clears. Both are the same job seen
-# from two ends -- "Fill in details" is what the AI has not read yet, "Check
-# details" is what it read and could not settle -- and a seller looking at
-# 131 of one and 177 of the other is looking at one chore, not two. Groups
-# that need a decision per listing stay out: a price cut needs a percentage,
-# photos need someone holding the item.
-FINISH_ALL_TYPES = ("specifics", "verify")
+# The suggestion groups "Finish everything" clears. One, now: "Fill in
+# details" -- the listings the AI has not read yet. It used to be two, the
+# other being "Check details" (the notes the fill could not settle), and that
+# group is gone; a seller looking at 131 of one and 203 of the other was
+# looking at one chore presented as two, and the second half had no bulk verb
+# at all. Its work did not go anywhere -- the job below still accepts whatever
+# notes survive the fill on every listing it touches, free and in the same
+# press (see recommender and _accept_remaining_notes). Groups that need a
+# decision per listing stay out: a price cut needs a percentage, photos need
+# someone holding the item.
+FINISH_ALL_TYPES = ("specifics",)
 
 
 def _finish_all_plan(recs: list[dict], items: list[dict]) -> dict:
     """What one press of "Finish everything" would do, before it is pressed.
 
     Split by what it COSTS, because that is the part the seller is agreeing
-    to: `enrich` listings get a vision pass and an eBay revise and are charged
-    for it; `accept` listings have been read already, so all that happens is
-    their outstanding notes are accepted, which is free. Quoting the total as
-    though every listing costs would price a 308-listing press at four times
-    what it actually spends.
+    to. Every listing in the set now costs the same thing -- a vision pass and
+    an eBay revise -- because the set is exactly the listings the AI has never
+    read (FINISH_ALL_TYPES). `accept` stays in the answer at zero: the free
+    half still happens, on these same listings, after their fill, and the
+    dashboard reads the key.
     """
     wanted = {r["listing_id"] for r in recs if r["type"] in FINISH_ALL_TYPES}
-    enrich = accept = 0
-    for it in items:
-        if it.get("id") not in wanted:
-            continue
-        if str((it.get("listing") or {}).get("enriched_at") or "").strip():
-            accept += 1
-        else:
-            enrich += 1
-    return {"total": enrich + accept, "enrich": enrich, "accept": accept}
+    enrich = sum(1 for it in items if it.get("id") in wanted)
+    return {"total": enrich, "enrich": enrich, "accept": 0}
 
 
 @app.get("/api/insights")
@@ -7817,8 +7814,7 @@ def insights(request: Request) -> dict:
                 # recommender.totals_by_type.
                 "group_totals": recommender.totals_by_type(recs),
                 # What one press of "Finish everything" reaches, and how much
-                # of it costs. The button spans two groups, so neither group's
-                # own total answers for it.
+                # of it costs.
                 "finish_all": _finish_all_plan(recs, items),
                 # What one tap on a group can actually reach in a single run —
                 # the group renders its button, so it has to know. See
@@ -8274,8 +8270,11 @@ def _accept_remaining_notes(rec: dict, uid: str) -> dict:
 
     `missing_info` is what the AI declined to invent — a measurement, a
     signature to confirm, an exact model number. No pass will ever answer
-    those, so "Check details" could only shrink one hand-checked listing at a
-    time; on a store of 177 that is not a to-do list, it is wallpaper.
+    those, so they used to sit on the dashboard as their own suggestion group
+    that could only shrink one hand-checked listing at a time; on a store of
+    203 that is not a to-do list, it is wallpaper. The group is gone and this
+    is where its work went: the same press that fills a listing in also
+    retires the notes that survived the fill.
 
     The notes are NOT deleted. The editor still shows them, and a buyer never
     saw them either way — `missing_info` is a note to the seller, never
@@ -8310,9 +8309,8 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
         eBay's recommended item specifics merged in, pushed to the live
         listing). This is the "Fill in details" half, and it is what costs;
       * always, afterwards -> whatever notes are still outstanding are
-        accepted. This is the "Check details" half, and it is free, because
-        re-reading a listing the AI has already read buys nothing and the
-        seller should not be charged twice to be told so again.
+        accepted. This is free, and it is the whole of what "Check details"
+        used to ask the seller to do by hand, one listing at a time.
 
     The record is re-read between the two: the fill writes to it (and drops
     the notes it managed to answer), so the notes to accept are whatever
@@ -8409,12 +8407,12 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
 
 def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
     """The records "Finish everything" acts on: every listing the dashboard is
-    currently offering "Fill in details" or "Check details" for.
+    currently offering "Fill in details" for.
 
     Read off the SAME ranking the screen is built from (recommender.ranked,
-    strongest rec per listing), so the button clears exactly the two groups
-    the seller is looking at — no more, and nothing the screen isn't showing.
-    A set assembled from its own rules would drift from the badges the moment
+    strongest rec per listing), so the button clears exactly the group the
+    seller is looking at — no more, and nothing the screen isn't showing. A
+    set assembled from its own rules would drift from the badge the moment
     either side changed.
     """
     recs = recommender.ranked(
@@ -8427,8 +8425,8 @@ def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
 @app.post("/api/listings/finish-all")
 def finish_all(request: Request) -> dict:
     """Clear the whole "what to do next" list in one press: fill in every
-    listing the AI has never read, push each to eBay, and accept the notes it
-    left for a person on the rest.
+    listing the AI has never read, push each to eBay, and accept whatever
+    notes it left for a person on the ones it just read.
 
     Takes NO ids. Every other bulk route is handed the group's membership by
     the client, which is right when the client is naming a selection and
