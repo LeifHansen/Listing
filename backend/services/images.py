@@ -45,6 +45,7 @@ from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
 
 from ..config import log
 from ..storage import natural_key
+from . import artwork
 
 # Phone uploads over flaky connections arrive missing their last few bytes
 # surprisingly often ("image file is truncated (N bytes not processed)").
@@ -821,6 +822,50 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     return canvas
 
 
+# What a photo of ART gets instead of a cutout when its border cannot be
+# found. Same shape as DETAIL_KEPT_AS_SHOT: not an error and not a refusal,
+# just nothing attempted, reported in `bg_error` so the seller is told and the
+# charge comes back.
+ART_NO_BORDER_KEPT_AS_SHOT = (
+    "This is a picture, and its outer edge isn't clearly in the frame — "
+    "cutting to a guessed border would crop the artwork, so it was kept as "
+    "shot.")
+
+
+def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
+    """A PICTURE on white: everything inside its outer border, kept whole.
+
+    The separate path for paintings, prints, posters, drawings, photographs
+    and anything else whose own front surface is an image. It does not call
+    the model at all, and that is the entire point — see services/artwork. A
+    salient-object model handed a photograph OF A PICTURE finds the subject
+    the picture depicts and deletes the artwork around it, which is how a
+    Marcia Alpert gouache reached a listing as the baby out of it, floating on
+    white, with the water and the quilt she painted it on gone.
+
+    None of the guards in this file could have caught that, and none of them
+    is wrong: they read the matte, and the matte of a baby lifted out of a
+    painting is one connected, solid, box-filling region — arithmetically a
+    perfect cutout. The thing that separates it from one is not in the matte.
+
+    So the matte here is a FILLED RECTANGLE, and nothing inside the border is
+    ever examined, let alone removed. None means the border could not be found
+    and the photo must be kept exactly as shot; it never means "try the model
+    instead", which is the failure this exists to prevent.
+    """
+    box = artwork.border(rgb)
+    if box is None:
+        return None
+    alpha = artwork.mask(rgb.size, box)
+    canvas = Image.new("RGB", rgb.size, WHITE)
+    canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
+                 _contact_shadow(alpha))
+    canvas.paste(rgb, (0, 0), alpha)
+    log.info("art cutout: kept the picture whole inside %s of a %dx%d photo",
+             box, rgb.width, rgb.height)
+    return canvas
+
+
 def _flatten(img: Image.Image) -> Image.Image:
     """Any transparency composited onto WHITE, as opaque RGB.
 
@@ -958,7 +1003,7 @@ def as_shot(path: Path) -> Path:
 
 
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
-             rotate: int = 0, detail: bool = False) -> dict:
+             rotate: int = 0, detail: bool = False, art: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that finds nothing keeps the photo as shot
     and says so in `bg_error`, so the caller can give the charge back.
@@ -980,7 +1025,15 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     deletes the garment behind it. The three guards below cannot catch that —
     the matte of a torn-out label is one opaque region that fills its own box,
     which is what a GOOD cutout looks like — so the photo has to be spared
-    before the model is asked, not after. See orient._details."""
+    before the model is asked, not after. See orient._details.
+
+    `art` says the item in this photo IS A PICTURE — a painting, print,
+    poster, drawing or photograph — decided by that same pass. It takes the
+    art path (art_cutout), which keeps everything inside the picture's outer
+    border and never asks the model which part of a painting is interesting.
+    Same reason as `detail`, one step further: on a picture the model's answer
+    is not merely useless, it is confidently wrong in a way no guard reading
+    the matte can see. See orient._art and services/artwork."""
     img, shot = _load(src)
     turn = int(rotate or 0) % 360
     turn = turn if turn in CW_TRANSPOSE else 0
@@ -992,7 +1045,13 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         bg_error = DETAIL_KEPT_AS_SHOT
     elif remove_bg:
         try:
-            out = cutout(img)
+            # A picture never reaches the model. Its border decides the
+            # matte, or nothing happens at all — art_cutout returning None
+            # means "keep as shot", never "try the model", because the model
+            # is what cuts the baby out of the painting.
+            out = art_cutout(img) if art else cutout(img)
+            if out is None and art:
+                bg_error = ART_NO_BORDER_KEPT_AS_SHOT
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
             log.warning("bg-removal: keeping %s as shot (%s)", src.name, exc)
             out, bg_error = None, f"Background removal failed: {exc}"
@@ -1135,20 +1194,23 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     results = []
     if jobs and should_stop is not None and should_stop():
         raise Stopped()
-    # One batched look at every photo still to do, up front. It answers two
+    # One batched look at every photo still to do, up front. It answers three
     # things: which photos have their ITEM lying sideways or on its head, so
-    # each is turned before its cutout rather than after, and which are
-    # close-ups of PART of an item, so the cutout is not run on them at all.
+    # each is turned before its cutout rather than after; which are close-ups
+    # of PART of an item, so the cutout is not run on them at all; and which
+    # are PICTURES, so the cutout keeps everything inside their own border
+    # instead of asking a model which part of a painting matters.
     # Best-effort and bounded: a photo the pass cannot answer for is left as
     # shot and cut out as usual.
-    turns, details = _screen_for([src for src, _dst in jobs], should_stop)
+    turns, details, art = _screen_for([src for src, _dst in jobs], should_stop)
     for src, dst in jobs:
         if should_stop is not None and should_stop():
             raise Stopped()
         try:
             result = optimize(src, dst, remove_bg,
                               rotate=turns.get(src.name, 0),
-                              detail=src.name in details)
+                              detail=src.name in details,
+                              art=src.name in art)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         results.append(result)
@@ -1161,29 +1223,36 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     return results
 
 
-def _screen_for(sources: list[Path],
-                should_stop=None) -> tuple[dict[str, int], frozenset[str]]:
-    """({filename: clockwise degrees}, {filenames that are close-ups}) for the
-    photos in `sources`, per services/orient. Never raises and never costs a
-    photo: with the API off, over budget, or on any failure the answer is "as
-    shot, and cut out as usual" — an empty turn map and no close-ups, which is
-    exactly this file's behaviour before either answer existed. Keyed by name,
+def _screen_for(sources: list[Path], should_stop=None) -> tuple[
+        dict[str, int], frozenset[str], frozenset[str]]:
+    """({filename: clockwise degrees}, {filenames that are close-ups},
+    {filenames whose item is a picture}) for the photos in `sources`, per
+    services/orient. Never raises and never costs a photo: with the API off,
+    over budget, or on any failure the answer is "as shot, and cut out as
+    usual" — an empty turn map, no close-ups and no pictures, which is exactly
+    this file's behaviour before any of those answers existed. Keyed by name,
     which is unique within a batch (one directory) and is how optimize_batch
     looks a photo up.
+
+    NOTE what the empty answer means for art: a picture the screen never got
+    to see goes to the model, and the model cuts the baby out of the painting.
+    That is not a new risk — it is precisely today's behaviour, and the shape
+    guards in cutout() are what stand behind it — but it is the reason this
+    answer is worth having a whole pass for rather than a heuristic here.
 
     Imported here, not at module scope: orient reaches the Anthropic SDK, and
     everything else in this file is Pillow. Keeping the AI dependency inside
     the one function that needs it is what lets the photo gate in CI prove
     the pass on Pillow alone."""
     if not sources:
-        return {}, frozenset()
+        return {}, frozenset(), frozenset()
     try:
         from . import orient
         found = orient.screen(sources, should_stop=should_stop)
-        return found.rotations, found.details
+        return found.rotations, found.details, found.art
     except Exception as exc:  # noqa: BLE001 - the screen is an enhancement
         log.warning("auto-orient: skipped (%s)", exc)
-        return {}, frozenset()
+        return {}, frozenset(), frozenset()
 
 
 def warm() -> None:

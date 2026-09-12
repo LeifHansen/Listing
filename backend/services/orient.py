@@ -122,13 +122,16 @@ class Screened(NamedTuple):
 
     `rotations` is {filename: clockwise degrees} for the items lying sideways
     or on their head. `details` is the filenames that are close-ups of part of
-    an item, which the cutout must leave alone -- see _details.
+    an item, which the cutout must leave alone -- see _details. `art` is the
+    filenames whose item IS A PICTURE, which take the cutout's rectangle path
+    instead of the model -- see _art.
     """
     rotations: dict[str, int]
     details: frozenset[str]
+    art: frozenset[str]
 
 
-_NOTHING = Screened({}, frozenset())
+_NOTHING = Screened({}, frozenset(), frozenset())
 
 _SCREEN_RULES = """
 These are photos 1 to {n} of secondhand items being listed for sale. The
@@ -149,10 +152,20 @@ For EVERY photo, in this order:
      lying on a table;
    "detail": a close-up of part of an item — a label, a tag, a stitch, a
      mark, a texture, a logo without the rest of the item in view.
-3. "text": whether there is readable printed text or a logo, and which way it
+3. "art": true when the ITEM BEING SOLD is a picture — a painting, print,
+   poster, drawing, watercolour, gouache, etching, lithograph, photograph,
+   canvas, framed or unframed, hanging or laid flat. The test is whether the
+   thing's own front surface IS an image: a painting of a boat is art; a mug
+   with a boat printed on it is a mug. Say true for the FRONT of one, and for
+   a close-up of part of one (a signature, a corner, an edition number) —
+   false for its BACK, its packaging, or a bare stretched canvas.
+   When in doubt about a flat rectangular thing whose face is a picture,
+   answer true: the only thing this changes is that the photo keeps
+   everything inside the picture's edge.
+4. "text": whether there is readable printed text or a logo, and which way it
    reads as the photo stands now: "none", "upright" (reads left to right,
    the right way up), "sideways" or "upside_down".
-4. "rotate": the CLOCKWISE turn, 0, 90, 180 or 270, that makes the photo
+5. "rotate": the CLOCKWISE turn, 0, 90, 180 or 270, that makes the photo
    upright, and "sure": true only when the evidence is unmistakable.
 
 Which way is up:
@@ -183,8 +196,8 @@ Which way is up:
   nothing. A photo turned wrongly is a listing that looks broken.
 
 Return ONLY a JSON object, no markdown fences, one entry per photo:
-{{"photos": [{{"photo": 1, "item": "...", "sits": "standing", "text": "none",
-             "rotate": 0, "sure": false}}]}}
+{{"photos": [{{"photo": 1, "item": "...", "sits": "standing", "art": false,
+             "text": "none", "rotate": 0, "sure": false}}]}}
 """
 
 _CONFIRM_RULES = """
@@ -222,6 +235,18 @@ def _model() -> str:
 
 def _is_true(value) -> bool:
     return value is True or str(value).strip().lower() == "true"
+
+
+# The affirmatives a model writes when it means yes. Deliberately NOT folded
+# into _is_true, which reads the "sure" flag on a proposed TURN: there a loose
+# reading applies a rotation nobody vouched for, and a photo turned wrongly is
+# a listing that looks broken. Here the asymmetry runs the other way — see
+# _art — so "yes" and 1 have to count.
+_AFFIRMATIVE = frozenset({"true", "yes", "y", "1"})
+
+
+def _says_yes(value) -> bool:
+    return value is True or str(value).strip().lower() in _AFFIRMATIVE
 
 
 def _image_block(data: bytes) -> dict:
@@ -277,7 +302,8 @@ def _screen_batch(batch: list[Path]) -> Screened:
     except Exception as exc:  # noqa: BLE001 - orientation is an enhancement
         log.info("auto-orient: screen batch skipped (%s)", exc)
         return _NOTHING
-    return Screened(_proposals(answer, sent), _details(answer, sent))
+    return Screened(_proposals(answer, sent), _details(answer, sent),
+                    _art(answer, sent))
 
 
 def _proposals(data: dict, batch: list[Path]) -> dict[str, int]:
@@ -370,6 +396,63 @@ def _details(data: dict, batch: list[Path]) -> frozenset[str]:
         out.add(batch[idx].name)
         log.info("auto-orient: %s — a close-up of %s; the cutout will be "
                  "skipped for it", batch[idx].name, entry.get("item", "?"))
+    return frozenset(out)
+
+
+def _art(data: dict, batch: list[Path]) -> frozenset[str]:
+    """The photos in the batch whose ITEM IS A PICTURE.
+
+    The report, with a screenshot: a Marcia Alpert gouache, "Baby in a
+    Basket". The listing came back with the baby cut out of the painting --
+    lifted off the teal water and the patchwork quilt it is painted on,
+    floating on white. Another photo kept the turtle and the signature and
+    deleted everything else. The seller's word for it was "horrifically bad",
+    and it is: the item they are selling had been erased from the photos of
+    it.
+
+    That is the same failure as a close-up of a tag (see _details), one step
+    worse. A salient-object model handed a photograph OF A PICTURE answers the
+    only question it knows -- which part of this is the subject -- and for a
+    painting there is no honest answer. It finds the baby, or the tree, or the
+    boat, and deletes the artwork around it.
+
+    And nothing downstream can catch it. Every guard in services/images reads
+    the ALPHA: is it one connected region, does it fill its own bounding box,
+    is it solid through the middle. A baby lifted out of a painting is all
+    three. It is arithmetically indistinguishable from a perfect cutout of a
+    figurine, because the thing that separates them is not in the matte -- it
+    is the fact that the item is itself an image. The only pass that ever
+    looks at the photo before the cutout runs is this one.
+
+    So it is answered here, in the call already being made and already paid
+    for, and the cutout takes a different path entirely: the picture's outer
+    border, kept whole, with the model never asked (services/artwork,
+    images.art_cutout).
+
+    Unconfirmed, like the close-ups and for the same reason -- the two errors
+    are wildly unequal. Something wrongly called a picture is cut to its own
+    outer rectangle instead of to its silhouette, so it keeps a margin of
+    background: a slightly worse cutout of an intact item. A picture MISSED
+    here is a painting with a hole in it, on a listing, silently. Nothing
+    about that trade is close, which is also why the rule above tells the
+    model to answer true when it is torn.
+    """
+    out = set()
+    for entry in (data.get("photos") or []) if isinstance(data, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            idx = int(entry.get("photo", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < len(batch)):
+            continue
+        if not _says_yes(entry.get("art")):
+            continue
+        out.add(batch[idx].name)
+        log.info("auto-orient: %s — a picture (%s); it will be cut to its own "
+                 "border, not by the model", batch[idx].name,
+                 entry.get("item", "?"))
     return frozenset(out)
 
 
@@ -485,18 +568,23 @@ def screen(paths: list[Path],
                for i in range(0, len(files), _SCREEN_BATCH)]
     proposed: dict[str, int] = {}
     details: set[str] = set()
+    art: set[str] = set()
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(batches))) as pool:
         for part in pool.map(_guarded(_screen_batch, _NOTHING), batches):
             proposed.update(part.rotations)
             details.update(part.details)
+            art.update(part.art)
     if details:
         log.info("auto-orient: %d of %d photo(s) are close-ups — those keep "
                  "their background", len(details), len(files))
-    # The turns still have to survive the second look; the close-ups are
-    # already final and are carried through whatever the confirm says.
+    if art:
+        log.info("auto-orient: %d of %d photo(s) are pictures — those are cut "
+                 "to their own border, never by the model", len(art), len(files))
+    # The turns still have to survive the second look; the close-ups and the
+    # pictures are already final and are carried through whatever it says.
     if not proposed:
         log.info("auto-orient: nothing to turn (of %d photos)", len(files))
-        return Screened({}, frozenset(details))
+        return Screened({}, frozenset(details), frozenset(art))
     by_name = {p.name: p for p in files}
     items = [(by_name[n], deg) for n, deg in proposed.items() if n in by_name]
     chunks = [items[i:i + _CONFIRM_BATCH]
@@ -508,4 +596,4 @@ def screen(paths: list[Path],
     log.info("auto-orient: %d proposed, %d confirmed, %d cancelled by the "
              "second look (of %d photos)", len(proposed), len(rotations),
              len(proposed) - len(rotations), len(files))
-    return Screened(rotations, frozenset(details))
+    return Screened(rotations, frozenset(details), frozenset(art))

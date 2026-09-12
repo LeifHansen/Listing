@@ -24,7 +24,7 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
-| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
+| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off, and never by the model on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
 | Identify | Photos sent to Claude vision — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
@@ -1064,6 +1064,64 @@ quarter-turns, and the model must pick the proposal. Best-effort and bounded
 wrong turn is one tap of the rotate button on the tile or the card, and
 Restore original goes back to the photo as shot. `AUTO_ORIENT=off` disables
 it.
+
+### A picture is never cut into: the artwork path
+
+A Marcia Alpert gouache, "Baby in a Basket", came back from the pass with the
+**baby cut out of the painting** — lifted off the teal water and the patchwork
+quilt she painted it on, floating on white. Another photo kept the turtle and
+the signature and deleted the rest. The item the listing was for had been
+erased from the photos of it.
+
+Every guard above passed, and each was right to. They read the **alpha** and
+ask whether what survived looks like a product: one connected piece, filling
+its own bounding box, solid through the middle. A baby lifted out of a
+painting is all three — arithmetically indistinguishable from a perfect cutout
+of a figurine. The fact that separates them is not in the matte at all: it is
+that the item **is itself an image**, and a salient-object model handed a
+picture answers the only question it knows, *which part of this is the
+subject*. For a painting there is no honest answer to that question.
+
+So a picture does not go to the model. `services/orient` — the only pass that
+looks at a photo before the cutout runs, and one already being made and paid
+for — is asked one more question per photo: is the item a painting, print,
+poster, drawing or photograph? The test it is given is whether the thing's own
+front surface *is* an image, which is what keeps a mug with a boat printed on
+it a mug. A yes routes the photo to `services/artwork` and `images.art_cutout`
+instead, where the rule is geometric:
+
+> **Find the outer border. Keep everything inside it, whole. Never ask what is
+> interesting within it.**
+
+That makes the guarantee structural rather than statistical: `artwork.mask`
+returns a **filled rectangle**, so no code path on the art side can remove a
+pixel from the middle of a painting.
+
+Finding the border is two steps, both Pillow-only. A content mask (colour
+distance from the surround, ORed with local contrast) locates the picture and
+proves it is one — a picture **fills its own bounding box**, which is what
+still refuses the tree-at-one-edge-and-boat-at-the-other shape. Then each side
+is scanned **inward from the edge of the photo** to the first line that is not
+surround. Inward, because a white-mounted print leaves eighty pixels of blank
+paper between the printed area and the sheet's own edge, and a scan starting
+at the artwork has nothing in that gap to grow along; one starting at the wall
+crosses it without ever standing on it.
+
+**And when there is no clear border, nothing happens.** A picture bleeding off
+the frame, a shape that is not a rectangle, something too small to be the
+piece — each returns None, and None means *keep the photo exactly as shot*,
+reported in `bg_error` so the seller is told and the charge comes back. It
+never means "fall back to the model", because the model is the bug. The error
+directions are not close: a cutout wrongly refused costs one photo an opt-in
+feature, and a cutout wrongly shipped destroys the item the listing is for —
+which is also why the prompt tells the model to answer **true** when it is
+torn about whether something is a picture.
+
+One limit, stated plainly: a print with a blank white mount, on a white
+surface, under flat light with no shadow, has no detectable outer edge — there
+is nothing in the photo that distinguishes the paper from the table. The
+border then lands on the printed area and trims blank mount. The painted or
+printed image itself is never cut into, which is the property the tests hold.
 
 Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,
 baked into the image; needs the 4GB VM). `u2netp` is the 4MB fallback for a

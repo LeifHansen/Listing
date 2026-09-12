@@ -102,6 +102,7 @@ jobs:
                  backend/tests/test_a_transparent_photo_does_not_go_black.py \
                  backend/tests/test_photo_resume.py \
                  backend/tests/test_the_cutout_does_not_eat_the_artwork.py \
+                 backend/tests/test_a_painting_is_never_cut_into.py \
                  backend/tests/test_the_cutout_does_not_leave_a_ghost.py \
                  backend/tests/test_a_close_up_of_a_tag_keeps_its_background.py \
                  backend/tests/test_the_ai_reads_the_photo_the_camera_saw.py \
