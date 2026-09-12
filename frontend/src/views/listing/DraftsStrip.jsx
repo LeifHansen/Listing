@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import {
   FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
@@ -159,20 +159,29 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   const [merge, setMerge] = useState({ open: false, drafts: [], candidates: [], key: 0 });
 
   const q = search.trim().toLowerCase();
-  // The batch screen's scope. A Set of ids rather than the batch's own copies
-  // of the listings: the rows here are the SAVED drafts, so a title fixed in
-  // the editor (or a category picked on another screen) is on the card the
-  // moment the listings refresh lands, instead of the copy the batch job
-  // happened to hand back.
-  const scope = only ? new Set(only.map(String)) : null;
-  const drafts = listingsState.items
-    .filter(isDraft)
-    .filter((i) => !scope || scope.has(String(i.id)))
-    .filter((i) => !q
-      || (i.listing?.title || i.title || "").toLowerCase().includes(q)
-      || (i.listing?.brand || "").toLowerCase().includes(q)
-      || (i.listing?.description || "").toLowerCase().includes(q))
-    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  // Memoized because this is three passes and a sort over the seller's whole
+  // store, and it used to run on EVERY render of this screen — which the app
+  // context makes frequent whether or not anything here changed: the 60s
+  // notification poll, the 60s message poll and each visibility refresh all
+  // produce a new context value, and this component reads it. Typing in the
+  // search box was the worst of it (now debounced in TopBar as well).
+  //
+  // The batch screen's scope is built inside, from `only`: it is a Set of
+  // ids rather than the batch's own copies of the listings, because the rows
+  // here are the SAVED drafts — so a title fixed in the editor (or a
+  // category picked on another screen) is on the card the moment the
+  // listings refresh lands, instead of the copy the batch job handed back.
+  const drafts = useMemo(() => {
+    const scope = only ? new Set(only.map(String)) : null;
+    return listingsState.items
+      .filter(isDraft)
+      .filter((i) => !scope || scope.has(String(i.id)))
+      .filter((i) => !q
+        || (i.listing?.title || i.title || "").toLowerCase().includes(q)
+        || (i.listing?.brand || "").toLowerCase().includes(q)
+        || (i.listing?.description || "").toLowerCase().includes(q))
+      .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  }, [listingsState.items, only, q]);
 
   // What the grid actually renders. A published card is out of `drafts` the
   // instant the server confirms it (publishItem patches the record), so its

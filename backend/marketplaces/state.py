@@ -239,14 +239,21 @@ def restore_video_state(listing, stored: dict) -> bool:
     return restored
 
 
-def derive_top_status(prev_status: str, outcomes: dict[str, PublishOutcome],
-                      mode: str) -> str:
+def derive_top_status(prev_status: str,
+                      outcomes: dict[str, PublishOutcome]) -> str:
     """The top-level status column after a multi-marketplace publish.
 
     Existing single-eBay semantics, generalized: any marketplace going live
     makes the record 'published'; sticky statuses are never demoted by a
     failed or partial attempt; an all-dry-run pass records 'dry_run'; and a
     draft save stays 'draft'.
+
+    The publish MODE is deliberately not an argument. It was one, and was
+    never read: the outcomes already carry what the mode produced, so a draft
+    save reaches the last line through its outcomes rather than by being
+    named. Taking it meant the call site read as though passing "draft" is
+    what makes a draft stay one, which is the kind of signature somebody
+    later edits the wrong half of.
     """
     if any(o.ok and o.status == "published" for o in outcomes.values()):
         return "published"

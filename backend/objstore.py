@@ -392,9 +392,28 @@ def delete_prefix_strict(prefix: str) -> int:
     the number and the truth has one call to make.
     """
     client = _get_client()
-    # No bucket configured is a configuration, not a failure: there is
-    # genuinely nothing in object storage to erase.
     if client is None:
+        # No bucket CONFIGURED is a configuration, not a failure: there is
+        # genuinely nothing in object storage to erase.
+        #
+        # A bucket that IS configured and merely unreachable is the opposite
+        # answer, and `_get_client` returns None for both. That is the hole
+        # this function was written to close, re-opened one layer down: the
+        # latch above flips the module off for ten minutes after a single
+        # failed init — a DNS blip at boot, which this app takes often
+        # because the background remover is memory-hungry and gets
+        # restarted — and every erasure landing in that window returned 0.
+        # Zero reads as "nothing there", `finish_media_purge` drops the
+        # debt, and the photos stay in R2 for ever with the account that
+        # owned them already deleted.
+        #
+        # `r2_configured` is the honest question here, not `enabled`:
+        # `enabled` is false while latched, which is precisely the case that
+        # must raise.
+        if config.r2_configured():
+            raise ObjectStoreUnavailable(
+                f"could not erase objects under {prefix}: object storage is "
+                f"not reachable ({_error or 'no client'})")
         return 0
     try:
         removed = 0

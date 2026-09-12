@@ -43,6 +43,13 @@ export function PhotoTile({
       <img
         src={`${mediaUrl(sessionId, name)}?v=${version}`}
         alt=""
+        // A listing may carry up to MAX_PHOTOS (24) of these, and the Photos
+        // card mounts them all at once. Without this the editor opens by
+        // fetching and decoding every one, on a phone, before the seller has
+        // scrolled to the second row. The two other photo grids in this app
+        // (cards.jsx's EbayPhotos and ListingCard) already set it; this tile
+        // was the one that did not.
+        loading="lazy"
         draggable={false}
         onLoad={settle}
         onError={settle}

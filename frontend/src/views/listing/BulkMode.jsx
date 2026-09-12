@@ -344,7 +344,13 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // what the grid below renders and what the seller's last save wrote. Two
   // sources for that used to disagree the moment anything was edited
   // anywhere else, and the batch screen was always the stale one.
-  const batchIds = items.map((it) => it.session_id);
+  //
+  // Memoized because it is handed to DraftsStrip as `only`, where it is a
+  // dependency of that grid's own filter-and-sort memo. A fresh array here on
+  // every render is a new identity there, which would miss that memo every
+  // time and leave it re-filtering the whole store on each background poll —
+  // the exact cost the memo was added to remove.
+  const batchIds = useMemo(() => items.map((it) => it.session_id), [items]);
   const rows = new Map(
     (listingsState.items || []).map((it) => [String(it.id), it]));
   const batchRows = batchIds

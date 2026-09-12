@@ -240,12 +240,26 @@ export function ShippingDialog() {
   }
 
   // Load the order(s) for the session opened above; remember the saved ship-from.
+  //
+  // `alive` is the same guard TokensDialog and useAdminRead use, and here it
+  // guards a purchase rather than a panel. Ship item A on a slow connection,
+  // close the dialog, ship item B: the reset above correctly clears the
+  // screen for B and a second request goes out, but A's reply was still in
+  // the air. Landing second it called pickOrder with A's order — so the
+  // dialog showed B's seller A's buyer, and `order.order_id` (what getRates
+  // quotes and buy() pays for) was A's. A label bought for the wrong buyer
+  // is money spent and a parcel going to the wrong address.
+  //
+  // Every setter below is behind it, setLoading included: a stale reply
+  // clearing the spinner is how B's still-loading dialog reads as empty.
   useEffect(() => {
-    if (!open) return;
+    if (!open) return undefined;
+    let alive = true;
     (async () => {
       try {
         if (listingId) {
           const res = await api(`/api/ebay/orders/for-listing/${listingId}`);
+          if (!alive) return;
           if (res.order) pickOrder(res.order);
           else {
             const done = (res.labels || []).find((l) => l.status === "bought");
@@ -254,6 +268,7 @@ export function ShippingDialog() {
           }
         } else {
           const res = await api("/api/ebay/orders");
+          if (!alive) return;
           const list = res.orders || [];
           setOrders(list);
           if (list.length === 1) pickOrder(list[0]);
@@ -267,16 +282,17 @@ export function ShippingDialog() {
           }
         }
       } catch (e) {
-        setLoadError(e.message);
+        if (alive) setLoadError(e.message);
       } finally {
-        setLoading(false);
+        if (alive) setLoading(false);
       }
       try {
         const p = await api("/api/prefs");
         const saved = p.prefs?.ship_from;
-        if (saved) setShipFrom((f) => ({ ...f, ...saved }));
+        if (alive && saved) setShipFrom((f) => ({ ...f, ...saved }));
       } catch (e) { /* logged out or no prefs — the form stays blank */ }
     })();
+    return () => { alive = false; };
   }, [open, listingId, easypost.connected, pickOrder]);
 
   const getRates = async () => {

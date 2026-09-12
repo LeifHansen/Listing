@@ -808,9 +808,6 @@ def return_policy_name(days: int = DEFAULT_RETURN_DAYS) -> str:
     return f"{int(days)}-day returns (Thryft Shop)"
 
 
-RETURN_POLICY_NAME = return_policy_name()
-
-
 def _create_policy(kind: str, access_token: str, body: dict) -> dict:
     """POST one business policy, returning {id, name}. Raises AccountApiError
     with eBay's own words, which for policy writes is the whole story — "name

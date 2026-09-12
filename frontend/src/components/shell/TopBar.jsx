@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Search, Plus, Link2, CheckCircle2, Coins } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { startConnect } from "@/lib/api";
@@ -15,6 +15,20 @@ export function TopBar({ onSearch, onManageEbay }) {
   } = useApp();
   const { toast } = useToast();
   const [q, setQ] = useState("");
+
+  // Debounced, the same 300ms AdminUsers already uses for its own box.
+  // `search` is Main's state and is handed to whichever screen is mounted,
+  // and both screens that read it re-filter and re-sort the seller's WHOLE
+  // store on every render (drafts and listings, plus the eBay-blocker check
+  // for every draft card). Calling onSearch per keystroke made typing
+  // "vintage" seven of those passes on the app's busiest screen, on a phone.
+  // The box itself stays uncontrolled-feeling — `q` updates immediately, so
+  // the characters appear as fast as they are typed; only the filtering
+  // waits for a pause.
+  useEffect(() => {
+    const t = setTimeout(() => onSearch(q), 300);
+    return () => clearTimeout(t);
+  }, [q, onSearch]);
 
   const connectEbay = () => {
     if (!user) { openAuth(); return; }
@@ -41,7 +55,7 @@ export function TopBar({ onSearch, onManageEbay }) {
           value={q}
           placeholder="Search your listings…"
           aria-label="Search your listings"
-          onChange={(e) => { setQ(e.target.value); onSearch(e.target.value); }}
+          onChange={(e) => setQ(e.target.value)}
           // Searching filters the merged Sell screen — but never close an
           // open editor out from under the user; the filter applies once
           // they close it themselves.

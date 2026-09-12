@@ -12,8 +12,6 @@
    authority; keep the two in step). This copy is what lets the editor and the
    editor show the right choices while the seller is still typing. */
 
-import { postJson } from "@/lib/api";
-
 // Every grade the app can hold, best first. The dropdown's fallback list for
 // a listing with no category yet — once there is one, eBay's own answer for
 // that category replaces it.
@@ -85,25 +83,6 @@ export function nearestCondition(current, allowed) {
     // Closer wins; on a tie the lower grade does.
     return d < bd || (d === bd && QUALITY[c] < QUALITY[best]) ? c : best;
   });
-}
-
-/* eBay's condition list for one category, fetched once per category per page
-   load. The bulk queue renders forty cards that between them hold a handful of
-   categories, and each card asking for its own copy is forty requests for four
-   answers. The server caches these for a day; this stops the browser asking
-   again in the same session. */
-const _cache = new Map();
-
-export function conditionsFor(categoryId) {
-  const cid = String(categoryId || "").trim();
-  if (!/^\d+$/.test(cid)) return Promise.resolve(null);
-  if (!_cache.has(cid)) {
-    _cache.set(cid, postJson("/api/item-conditions", { category_id: cid })
-      .then((r) => (r.checked === false ? null : (r.conditions || [])))
-      // A lookup we couldn't make is null — the generic list, and no blocker.
-      .catch(() => null));
-  }
-  return _cache.get(cid);
 }
 
 /* --- the second step: eBay's condition DESCRIPTORS ---------------------------
