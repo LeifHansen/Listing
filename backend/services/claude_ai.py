@@ -32,6 +32,7 @@ from .listing_prompt import (
     EBAY_CONDITIONS,
     LISTING_SCHEMA,
     REFINE_ORDER_RULE,
+    RETAIL_TAG_RULE,
     STICKER_AND_BARCODE_RULE,
     VINTAGE_DENIM_RULE,
     expected_item_count,
@@ -355,6 +356,88 @@ def _text(value) -> str:
     return ""
 
 
+def _money_or_none(value) -> Optional[float]:
+    """A price the model returned, as cents-rounded money — or None when it is
+    missing, unreadable or not a positive amount."""
+    try:
+        amount = round(float(value), 2) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return amount if amount is not None and amount > 0 else None
+
+
+# What the model writes when it means a condition, mapped onto the enum eBay
+# actually takes. This exists because the fallback for an unrecognised grade
+# used to be USED_EXCELLENT — which eBay labels "Pre-owned - Good" in apparel —
+# so a shirt with its hang tag still on, correctly read and correctly reported
+# as NEW_WITH_TAGS, reached the seller as "Good". eBay's enum for new-with-tags
+# is the bare "NEW" (condition id 1000); nothing in the model's answer was
+# wrong, and the listing was.
+#
+# Only unambiguous wordings are here. "EXCELLENT" is deliberately absent: it
+# means PRE_OWNED_EXCELLENT to an apparel seller and USED_EXCELLENT elsewhere,
+# and the difference is eBay's to settle per category (taxonomy fits the grade
+# to the category straight after this) — guessing it here would be the same
+# class of silent mistake in the other direction.
+_CONDITION_ALIASES = {
+    "NEW_WITH_TAGS": "NEW", "NEWWITHTAGS": "NEW", "NWT": "NEW",
+    "NEW_IN_BOX": "NEW", "NIB": "NEW", "NEW_IN_PACKAGE": "NEW",
+    "NEW_SEALED": "NEW", "SEALED": "NEW", "BRAND_NEW": "NEW",
+    "NEW_WITH_BOX": "NEW", "NEW_WITH_TAG": "NEW",
+    "NEW_WITHOUT_TAGS": "NEW_OTHER", "NEW_WITHOUT_TAG": "NEW_OTHER",
+    "NWOT": "NEW_OTHER", "NEW_NO_TAGS": "NEW_OTHER",
+    "NEW_OPEN_BOX": "NEW_OTHER", "OPEN_BOX": "NEW_OTHER",
+    "DEADSTOCK": "NEW_OTHER", "NOS": "NEW_OTHER", "UNWORN": "NEW_OTHER",
+    "NEW_WITH_FLAWS": "NEW_WITH_DEFECTS", "NEW_WITH_DEFECT": "NEW_WITH_DEFECTS",
+    "REFURBISHED": "SELLER_REFURBISHED",
+    "USED": "USED_EXCELLENT", "PRE_OWNED": "USED_EXCELLENT",
+    "PREOWNED": "USED_EXCELLENT", "SECONDHAND": "USED_EXCELLENT",
+    "FOR_PARTS": "FOR_PARTS_OR_NOT_WORKING",
+    "NOT_WORKING": "FOR_PARTS_OR_NOT_WORKING",
+    "PARTS_OR_REPAIR": "FOR_PARTS_OR_NOT_WORKING",
+}
+
+# The default for an answer nothing above recognises. A used grade, because
+# most secondhand items are used and calling a worn item new is a return —
+# but see _condition_enum: it is never reached by an answer that SAYS new.
+_CONDITION_FALLBACK = "USED_EXCELLENT"
+
+
+def _condition_enum(value) -> str:
+    """The eBay condition enum for whatever the model called the condition.
+
+    An unrecognised answer falls back to a used grade, with one hard rule: the
+    fallback NEVER crosses the new/used line. An answer that plainly says new
+    ("new with tags", "brand new in sealed box") but is not on eBay's list
+    lands on NEW rather than being flattened into "Pre-owned - Good", because
+    a new item quietly relabelled used sells at a used price within the hour
+    and the seller cannot get it back. Nothing here invents "new" out of an
+    answer that does not claim it — a blank, a hedge or a used grade all still
+    land on the used fallback.
+    """
+    raw = _text(value).strip().upper()
+    if not raw:
+        return _CONDITION_FALLBACK
+    key = re.sub(r"[^A-Z0-9]+", "_", raw).strip("_")
+    if key in EBAY_CONDITIONS:
+        return key
+    if key in _CONDITION_ALIASES:
+        return _CONDITION_ALIASES[key]
+    # Not a wording we know. Read it for a new/used claim before defaulting:
+    # "NEW WITH ORIGINAL TAGS ATTACHED" is not in the table above and is not a
+    # used item either. Anything qualifying it as used ("like new", "new-ish",
+    # "appears new but worn") stays on the used ladder.
+    words = key.split("_")
+    if "NEW" in words and not ({"LIKE", "NEAR", "AS", "ALMOST", "LOOKS",
+                                "APPEARS", "WORN", "USED"} & set(words)):
+        if {"WITHOUT", "NO", "OFF", "MISSING"} & set(words):
+            return "NEW_OTHER"
+        if {"DEFECT", "DEFECTS", "FLAW", "FLAWS", "DAMAGED"} & set(words):
+            return "NEW_WITH_DEFECTS"
+        return "NEW"
+    return _CONDITION_FALLBACK
+
+
 def _to_listing(data: dict, image_names: list[str]) -> Listing:
     # The model sometimes returns null (not []) for these, or entries that
     # aren't dicts — coerce defensively so a stray shape can't crash identify.
@@ -372,25 +455,22 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
     raw_missing = data.get("missing_info") or []
     if not isinstance(raw_missing, list):
         raw_missing = []
-    cond = _text(data.get("condition")).upper()
-    if cond not in EBAY_CONDITIONS:
-        cond = "USED_EXCELLENT"
+    cond = _condition_enum(data.get("condition"))
     title = _text(data.get("title"))[:TITLE_MAX_CHARS]
     # Every price this app chooses ends in .99 (money.charm_price): an item the
     # AI values at about $25 lists at $24.99, the way a seller would have
     # written it themselves. `refine` puts back a price the seller set, so this
     # only ever shapes a number the AI picked.
     price = charm_price(data.get("price"))
-    # Price read off a store sticker in the photos (what the seller would PAY,
-    # not the resale suggestion). Optional; feeds profit-per-item once sold.
-    purchase_price = data.get("purchase_price")
-    try:
-        purchase_price = (round(float(purchase_price), 2)
-                          if purchase_price is not None else None)
-        if purchase_price is not None and purchase_price <= 0:
-            purchase_price = None
-    except (TypeError, ValueError):
-        purchase_price = None
+    # Two different prices can be printed on one item and they mean opposite
+    # things: a RESALE sticker is what the seller pays (purchase_price, feeds
+    # profit-per-item once sold), the brand's own hang tag is the MSRP
+    # (retail_price, the anchor under what a still-new item should list for).
+    # They were one field until a $130 Scotch & Soda swing ticket went into
+    # purchase_price, which both threw the anchor away and told the profit
+    # report the seller had spent $130 on a shirt they were listing at $49.
+    purchase_price = _money_or_none(data.get("purchase_price"))
+    retail_price = _money_or_none(data.get("retail_price"))
     try:
         quantity = max(1, int(float(data.get("quantity") or 1)))
     except (TypeError, ValueError):
@@ -426,6 +506,7 @@ def _to_listing(data: dict, image_names: list[str]) -> Listing:
         description=_text(data.get("description")),
         price=price,
         purchase_price=purchase_price,
+        retail_price=retail_price,
         currency=config.EBAY_CURRENCY,
         quantity=quantity,
         package_weight_lb=weight_lb,
@@ -1175,10 +1256,13 @@ def refine(listing: Listing, prompt: str) -> Listing:
     updated = _to_listing(data, listing.images)
     # Preserve images explicitly.
     updated.images = listing.images
-    # What the seller PAID is a fact, not listing copy — a refine must never
-    # rewrite or drop it (the model may not echo the field back).
+    # What the seller PAID, and what the tag says the item retailed for, are
+    # facts about the item rather than listing copy — a refine must never
+    # rewrite or drop either (the model may not echo the fields back).
     if listing.purchase_price is not None:
         updated.purchase_price = listing.purchase_price
+    if listing.retail_price is not None:
+        updated.retail_price = listing.retail_price
     # Nor may it move a price the seller set. A refine echoes the WHOLE draft
     # back, so without this an instruction about the title would take a $25.00
     # they typed and hand it back as $24.99 — the charm rule reaching a number
@@ -1307,8 +1391,14 @@ _TAG_TRANSCRIBE_ASK = (
     "readable): SIZE (the exact marking, e.g. 'L', 'W32 L34', 'EU 42', "
     "'US 10.5 M', and the size system), BRAND (in the Latin alphabet AND as "
     "printed), MATERIAL percentages, COUNTRY of manufacture, MODEL/STYLE "
-    "number, RN number, LICENCE/COPYRIGHT line with its year, and PRICE if a "
-    "retail or thrift price sticker is legible.\n\n"
+    "number, RN number, LICENCE/COPYRIGHT line with its year.\n\n"
+    "PRICES — say WHICH KIND each one is, they mean opposite things. Write "
+    "'RETAIL PRICE: <amount>' for a price printed on the BRAND'S OWN hang "
+    "tag, swing ticket, box or blister card (the MSRP), and "
+    "'RESALE STICKER: <amount>' for a thrift, charity, consignment, outlet, "
+    "price-gun or handwritten label. If a tag is still ATTACHED to the item "
+    "say so on its own line ('HANG TAG: attached') — that is what makes the "
+    "item new with tags rather than merely clean.\n\n"
     "BARCODE lines matter most: for each barcode, write "
     "'BARCODE <type>: <digits>' on its own line with the digits exactly as "
     "printed, left to right, leading zero included, and nothing else on the "
@@ -1321,7 +1411,7 @@ _TAG_TRANSCRIBE_ASK = (
     "If a crop is unreadable, say so — never fill in what you can't see. "
     "Plain text only.\n\nThe rules these crops are read under:\n"
     + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE
-    + BLANK_CANVAS_RULE)
+    + BLANK_CANVAS_RULE + RETAIL_TAG_RULE)
 
 
 def read_tag_text(image_paths: list[Path]) -> str:

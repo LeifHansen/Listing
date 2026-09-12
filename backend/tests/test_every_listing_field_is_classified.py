@@ -38,8 +38,12 @@ SELLER_FIELDS = {
     # its label have.
     "store_category_id", "store_category_name",
     "item_specifics", "missing_info",
-    # what they price and stock
-    "price", "purchase_price", "currency", "quantity", "listing_format",
+    # what they price and stock. `retail_price` is the MSRP read off the
+    # item's own hang tag: the AI fills it, and it is the seller's to correct
+    # in the editor exactly as `purchase_price` is — a mis-read tag is a
+    # number they can see is wrong and nothing on the server can.
+    "price", "purchase_price", "retail_price", "currency", "quantity",
+    "listing_format",
     "auction_start_price", "auction_duration",
     # what they ship in
     "package_weight_lb", "package_weight_oz", "package_length_in",

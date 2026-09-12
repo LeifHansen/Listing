@@ -74,8 +74,11 @@ STICKER_AND_BARCODE_RULE = """
     "\u65e5\u672c\u88fd", "\u4e2d\u56fd\u88fd", "\u0421\u0434\u0435\u043b\u0430\u043d\u043e \u0432 \u0421\u0421\u0421\u0420";
   * model, style, lot, part and serial plates; union and RN/CA numbers;
     care/content labels; QC and warranty stickers;
-  * retail PRICE stickers and thrift price tags (these fill purchase_price,
-    never the resale price).
+  * PRICE tags and stickers — and WHICH KIND it is decides everything, so
+    read the retail-tag rule below before you write a number anywhere: the
+    price printed on the BRAND'S OWN hang tag is this item's retail price and
+    it anchors what the item LISTS for; a thrift, consignment, outlet or
+    garage-sale sticker is what the item COSTS TO BUY and anchors nothing.
   MULTIPLE LANGUAGES AND NON-LATIN SCRIPTS ARE NOT NOISE — THEY ARE THE CLUE.
   Japanese (kanji/kana), Korean (hangul), Chinese (simplified or traditional),
   Cyrillic, Greek, Arabic, Hebrew, Thai, Devanagari, and accented Latin
@@ -621,18 +624,130 @@ BLANK_CANVAS_RULE = """
 """
 
 
+# --- the hang tag still on it: new, and what new is worth -------------------
+#
+# A Scotch & Soda shirt with the brand's own $130 swing ticket still attached
+# was drafted as "Pre-owned - Good" at $49. Nothing in this file was wrong
+# about that item in isolation; three rules were each right on their own and
+# catastrophic together, and all three are fixed here.
+#
+#   * The condition instruction is "grade the WEAR you can see". Run against a
+#     garment that has never been worn, that finds no wear and returns the
+#     middle of the used ladder — the honest answer is not a used grade at all.
+#     Nothing above told the model that an attached tag ENDS the wear question.
+#   * eBay's enum for "New with tags" is plain NEW (condition id 1000). A model
+#     asked for a condition and looking at a tagged shirt writes the words
+#     everybody uses — NEW_WITH_TAGS, NWT — which is not on the list, and the
+#     server's fallback for an unrecognised grade landed on USED_EXCELLENT,
+#     which eBay labels "Pre-owned - Good" in apparel. That is where the word
+#     "good" in the report came from, and it was silent.
+#   * The sticker rule sent every printed price to purchase_price and said
+#     "never the resale price". A thrift sticker is what the seller PAID and
+#     genuinely must not price the listing. A brand's own hang tag is the
+#     MSRP — the single strongest price anchor a secondhand item ever carries,
+#     and the one number in the photo that says this shirt is not a $12 shirt.
+#     Sending it to purchase_price threw the anchor away AND told the profit
+#     report the seller had paid $130 for it.
+#
+# The cost is asymmetric in the direction sellers feel. A new item listed as
+# used sells at a used price, within the hour, and cannot be got back; a used
+# item listed as new is a return and a defect. So this rule is precise about
+# which evidence supports which grade rather than nudging everything upward:
+# the tag has to be ATTACHED, the seal has to be INTACT, and an item with
+# neither is graded on wear exactly as before.
+RETAIL_TAG_RULE = """
+- AN ATTACHED TAG OR AN INTACT SEAL SETTLES THE CONDITION — DO NOT GRADE WEAR
+  ON AN ITEM THAT HAS NONE. Before you grade anything, ask one question: is
+  this item still in the state the shop sold it in? Look for a hang tag or
+  swing ticket still attached by its plastic barb, loop or string; a price
+  ticket sewn or pinned to a seam; the spare-button or spare-yarn packet still
+  bagged; shoes with their box, tissue and unmarked soles; a factory poly bag,
+  shrink-wrap, blister pack or unbroken seal; a sticker reading "sample",
+  "deadstock" or "NOS". Any one of those is direct evidence the item is NEW,
+  and it OUTRANKS the absence of visible wear as a reason to say so — a fresh
+  garment and a gently worn one look identical at photo resolution, and the
+  tag is the thing that tells them apart. Grade it:
+  * "NEW" — the item is unused AND still carries its retail tag or its unbroken
+    seal. THIS IS EBAY'S "NEW WITH TAGS" (condition 1000) FOR CLOTHING, SHOES
+    AND ACCESSORIES, and it is also the grade for a sealed, boxed or
+    shrink-wrapped item of any other kind. Write the enum "NEW" — never
+    "NEW_WITH_TAGS", "NWT", "BRAND_NEW" or "MINT", none of which are on the
+    list you were given, all of which get thrown away.
+  * "NEW_OTHER" — unused and unworn, but the tags are off, the seal is broken,
+    or it is out of its box. eBay calls this "New without tags" (1500) in
+    apparel and "New (other)" elsewhere. This is the grade for the tagless
+    deadstock piece, not a used one.
+  * "NEW_WITH_DEFECTS" — never worn or used, tag usually still on, but with a
+    factory second's flaw or a shop-floor mark: a pull, a missing button, a
+    small stain, an outlet slash through the tag.
+  * Anything else — worn, washed, used, no tag, no seal — is graded on the wear
+    you can see, exactly as the rest of these rules say. Never call an item new
+    because it merely looks clean; "NEW" is a claim about the tag, and a used
+    item sent as new is a return and a defect.
+  Say WHICH of those you saw in condition_description and in raw_observations
+  ("brand hang tag still attached at the side seam"), so the grade can be
+  checked against the photo rather than taken on trust. When the item looks
+  unworn but no tag or seal is in frame, grade it NEW_OTHER only if the photos
+  really support unworn, and put "confirm whether the tags are still attached"
+  in missing_info rather than guessing either way.
+  Then put the wording in the TITLE, where buyers filter and search on it:
+  "NWT" for NEW on apparel, "New Without Tags" or "NWOT" for NEW_OTHER,
+  "Sealed" / "New In Box" / "NIB" / "Deadstock" where those are what you saw.
+  A tagged item whose title does not say so is invisible to every buyer
+  searching for one.
+- THE PRICE PRINTED ON A BRAND'S OWN TAG IS THE RETAIL PRICE, AND IT IS THE
+  BEST PRICE EVIDENCE IN THE PHOTOS. There are two completely different kinds
+  of printed price on secondhand goods and they go to two different fields.
+  Read which one you are looking at:
+  * THE BRAND'S OWN RETAIL PRICE — printed or embossed on the maker's hang
+    tag, swing ticket, box end, blister card or the manufacturer's own sticker,
+    in the brand's own typography, usually beside the style number and the
+    barcode, often in several currencies. This is the MSRP: what the item cost
+    NEW AT RETAIL. Put it in "retail_price". Never in purchase_price — the
+    seller did not pay it.
+  * A RESALE STICKER — a thrift, charity, consignment, estate-sale, garage-sale
+    or outlet label, a price-gun sticker, a handwritten price, a coloured dot,
+    usually stuck OVER or beside the brand's tag and in a different, cheaper
+    print. This is what the item COSTS TO BUY right now. Put it in
+    "purchase_price". Never in retail_price.
+  When both are visible, return both — that pair is exactly the margin the
+  seller is working on. When you cannot tell which kind a price is, put it in
+  retail_price ONLY if it is printed on the brand's own tag; otherwise leave
+  both null and say so in missing_info. Transcribe the currency and the number
+  as printed, and if the tag shows several currencies use the USD one.
+- PRICING AN ITEM THAT IS STILL NEW. A retail price you can read is a floor
+  under your reasoning, not a decoration. An unworn, tagged, in-season branded
+  garment does not resell for a fifth of what the tag says, and a draft that
+  prices it there is the single most expensive mistake in this whole file: it
+  sells inside the hour and the seller cannot get it back. So when you have a
+  retail_price AND the item is NEW or NEW_OTHER, price it as a fraction OF
+  THAT NUMBER and say in raw_observations which fraction you used and why:
+  a desirable brand in current or recent season, tags on, sits around
+  half to three-quarters of retail; a tagless-but-unworn piece, or an older
+  season, sits lower; a commodity basic or a brand with no secondhand demand
+  sits lower still. Below about a third of retail you are no longer pricing a
+  new item — if that is genuinely where this one belongs, say WHY in
+  raw_observations (no demand for the brand, a badly dated piece, a flaw).
+  And if you cannot judge the brand's secondhand demand at all, that is
+  exactly what "price": null is for: return null with "confidence": "low" and
+  let the app look up what comparable listings actually ask. A null costs
+  nothing; a number a fifth of the tag costs the seller the item.
+"""
+
+
 LISTING_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this exact shape:
 {
   "title": "string, <= 80 chars, keyword-rich eBay title",
   "subtitle": "always the empty string \\"\\" (eBay charges an extra fee for subtitles; the seller adds one manually if they want)",
   "brand": "string",
-  "condition": "one of: %s",
-  "condition_description": "string describing visible wear/flaws",
+  "condition": "one of: %s — and ONLY one of those. NEW is eBay's \"New with tags\" for clothing/shoes/accessories and \"New (sealed/boxed)\" elsewhere; NEW_OTHER is \"New without tags\"; the USED_* and PRE_OWNED_* grades are for items that have actually been worn or used. Words that are not on this list (NEW_WITH_TAGS, NWT, BRAND_NEW, MINT, EXCELLENT, GOOD) are thrown away — see the retail-tag rule below",
+  "condition_description": "string describing visible wear/flaws — and, when the item is new, WHAT SAYS SO (\"brand hang tag still attached at the side seam\", \"factory poly bag unopened\")",
   "category_suggestion": "human-readable eBay category path",
   "description": "string, LONG. The full listing body: no character limit, aim 1800-3500 characters (~300-600 words) across the labelled sections in the description rule below. Buyer-friendly, keyword-rich, no false claims, opening on the item itself",
   "price": number or null (suggested USD price based on item & condition),
-  "purchase_price": number or null (ONLY the price on a store/thrift PRICE STICKER or price tag visible in the photos — what it costs to buy this item right now. null when no price sticker is legible. Never estimate; never confuse with the resale price above),
+  "retail_price": number or null (the RETAIL price — MSRP — printed on the BRAND'S OWN hang tag, swing ticket, box or blister card: what this item cost new at retail. Read it off the tag; never estimate it, and never put a thrift sticker here. This is the price anchor for an item that is still new — see the retail-tag rule below),
+  "purchase_price": number or null (ONLY a RESALE sticker — thrift, charity, consignment, estate-sale, outlet, price-gun or handwritten — what it costs to BUY this item right now. null when no such sticker is legible. Never estimate; never put a brand's own retail tag here, and never confuse either with the resale price above),
   "quantity": integer (default 1),
   "package_weight_oz": number (estimated TOTAL shipping weight in ounces, packed; best-effort estimate the seller can correct),
   "package_length_in": number (estimated SHIPPING BOX length in inches, packed),
@@ -861,7 +976,7 @@ Rules:
   off. Include a tag even when you can't read it at this size — it will be
   zoomed in on later. At most 6 entries, best candidates first; no tags at
   all -> [].
-""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE
+""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE + RETAIL_TAG_RULE
 # Appended rather than interpolated so each rule's text is one string with one
 # home: the tag-scan, tag-transcribe and specifics passes in claude_ai read the
 # same constants, and a rule that exists twice is a rule that agrees with
