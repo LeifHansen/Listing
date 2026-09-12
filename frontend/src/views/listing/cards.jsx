@@ -1287,6 +1287,14 @@ export function SpecificsCard({ w }) {
   );
 }
 
+// The server's RETAIL_FLOOR_RATIO (backend/main.py): the fraction of an item's
+// own printed retail price below which a NEW listing is raised and the seller
+// is told. Mirrored here so the warning colour on the ratio line means the
+// same thing as the note the draft arrives carrying, rather than being a
+// second, quieter opinion at a different number.
+const RETAIL_FLOOR = 0.45;
+
+
 export function PricingCard({ w }) {
   const p = w.priceData;
   // Taking a number off the market makes it THIS listing's price, so it lands
@@ -1407,8 +1415,9 @@ export function PricingCard({ w }) {
               />
             </Field>
           )}
-          {/* Optional cost basis — auto-read from a price sticker when Shop
-              Mode could see one. Never required; powers profit once sold. */}
+          {/* Optional cost basis — auto-read from a RESALE sticker (thrift,
+              consignment) when the photos showed one, or typed in Shop Mode.
+              Never required; powers profit once sold. */}
           <Field
             label={`You paid (${currency})`}
             help="What it cost you — used to show your profit when it sells."
@@ -1420,7 +1429,43 @@ export function PricingCard({ w }) {
               onChange={(e) => w.set("purchase_price", e.target.value)}
             />
           </Field>
+          {/* The MSRP off the item's OWN hang tag — a different fact from what
+              the seller paid, and the reason it is on this screen: a shirt
+              whose tag says $130 is not a $49 shirt. Read from the photos when
+              a brand tag was legible, and editable because a mis-read tag is
+              something only the person holding it can see is wrong. */}
+          <Field
+            label={`Retail on tag (${currency})`}
+            help="The brand's own price, read off the tag — the anchor for
+                  something still new. Not what you paid."
+          >
+            <Input
+              type="number" step="0.01" min="0" inputMode="decimal"
+              placeholder="optional"
+              value={w.form.retail_price}
+              onChange={(e) => w.set("retail_price", e.target.value)}
+            />
+          </Field>
         </div>
+        {/* What fraction of retail this is listed at. Shown only when both
+            numbers exist, because that ratio is the whole judgment on a new
+            item and it is the one nobody was making: a tagged piece drafted
+            at a third of its tag reads as a bargain until you see the 38%.
+            RETAIL_FLOOR is the server's own RETAIL_FLOOR_RATIO (main.py) —
+            the line under which it raises a new item's price and says so, so
+            the colour here means the same thing the note there does. */}
+        {w.form.retail_price !== "" && Number(w.form.retail_price) > 0
+          && Number(w.form.price) > 0 && (
+          <p className="text-[13px] text-ink-secondary -mt-1">
+            That is{" "}
+            <strong className={Number(w.form.price)
+              < Number(w.form.retail_price) * RETAIL_FLOOR
+              ? "text-warning" : "text-ink"}>
+              {Math.round(Number(w.form.price) / Number(w.form.retail_price) * 100)}%
+            </strong>{" "}
+            of the ${Number(w.form.retail_price).toFixed(2)} on the tag.
+          </p>
+        )}
         {/* Only ever a FORECAST here: a sold listing opens as an archive
             (SoldArchive), which does the same sum against what it actually
             went for. */}

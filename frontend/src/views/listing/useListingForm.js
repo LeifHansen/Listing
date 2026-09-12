@@ -21,7 +21,8 @@ import {
    both the free-form rows and the category-required aspect fields. */
 
 const EMPTY = {
-  title: "", subtitle: "", brand: "", price: "", purchase_price: "", quantity: 1,
+  title: "", subtitle: "", brand: "", price: "", purchase_price: "",
+  retail_price: "", quantity: 1,
   // What it ACTUALLY sold for (see models.Listing.sold_price) — eBay fills
   // this in from the transaction; the seller can correct it in the editor
   // when eBay never reported one. "" = unknown, not free.
@@ -89,6 +90,7 @@ function fromListing(l) {
     marketplaces: l.marketplaces || {},
     price: l.price != null ? l.price : "",
     purchase_price: l.purchase_price != null ? l.purchase_price : "",
+    retail_price: l.retail_price != null ? l.retail_price : "",
     sold_price: l.sold_price != null ? l.sold_price : "",
     auction_start_price: l.auction_start_price != null ? l.auction_start_price : "",
     quantity: l.quantity || 1,
@@ -204,6 +206,7 @@ export function useListingForm() {
       ...form,
       price: form.price === "" ? null : parseFloat(form.price),
       purchase_price: form.purchase_price === "" ? null : parseFloat(form.purchase_price),
+      retail_price: form.retail_price === "" ? null : parseFloat(form.retail_price),
       sold_price: form.sold_price === "" ? null : parseFloat(form.sold_price),
       auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
       quantity: parseInt(form.quantity || "1", 10),
