@@ -1,16 +1,18 @@
-/* Suggested actions is a list the seller can act on and a list they own.
+/* Suggested actions is a list the seller can finish.
  *
- * Two things it was not. "Fill in details" was a prompt to go and do it by
- * hand — open a listing, wait for the AI to read its photos, save, push,
- * repeat — for an edit that is identical every time and needs no human. And
- * nothing on the list could be waved away: the engine rebuilds it from
- * scratch on every load, so advice the seller had already considered and
- * decided against came straight back, and a to-do list that will not shrink
- * stops being read at all.
+ * What it was not. "Fill in details" was a prompt to go and do it by hand —
+ * open a listing, wait for the AI to read its photos, save, push, repeat —
+ * for an edit that is identical every time and needs no human. Nothing
+ * spanned both it and "Check details", so clearing the list meant two
+ * motions and a dozen presses. And because the engine rebuilds the list from
+ * scratch on every load, a list that could not be finished could only be
+ * made to shrink by hiding it: a dismiss on every row, a Clear all, and a
+ * "Restore N dismissed" parked in the header so a mis-tap was not a one-way
+ * door.
  *
- * So: the group carries one button that fills every listing in it, and every
- * row carries a dismiss — with a way back, because a mis-tapped X on a
- * one-way door is worse than the nag it removed.
+ * So: one press finishes the whole list, each group still carries the bulk
+ * verb that fits it — and none of the hiding machinery is left, because the
+ * only reason for it was that the work could not be done.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -377,20 +379,19 @@ describe("a group bigger than the rows it was sent", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("takes a dismissed row off the count the server gave", async () => {
-    // Dismissals live in this browser (lib/dismissedRecs) and /api/insights
-    // has never heard of them, so they have to come off here — otherwise a
-    // suggestion the seller waved away stays in the number that says how
-    // much is left.
+  it("shows the server's count with nothing taken off it here", async () => {
+    // The badge used to have this browser's hidden rows subtracted from it,
+    // which a count has to do while suggestions can be hidden — and which is
+    // most of what made the number hard to trust. Nothing hides now, so the
+    // count on screen is the server's answer, unedited, open or closed.
     const { root, host } = await mount([], {
       recs: VERIFY_RECS, groupTotals: { verify: 9 },
     });
+    const badge = () => [...host.querySelectorAll("span")].find(
+      (el) => (el.textContent || "").trim() === "9");
+    expect(badge()).toBeTruthy();
     await expand("Check details");
-    await click(buttons().find(
-      (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
-    const badge = [...host.querySelectorAll("span")].find(
-      (el) => (el.textContent || "").trim() === "8");
-    expect(badge).toBeTruthy();
+    expect(badge()).toBeTruthy();
     await act(async () => { root.unmount(); });
   });
 });
@@ -509,75 +510,64 @@ describe("finishing the whole list in one press", () => {
   });
 });
 
-describe("dismissing a suggestion", () => {
+/* The list is finished now, not hidden.
+ *
+ * Every row used to carry an X, the header a "Clear all" beside a "Restore N
+ * dismissed" whose N climbed into the hundreds. None of that was really about
+ * these suggestions: the engine rebuilds the list from scratch on every load,
+ * so a list that could not be finished could only be made to shrink by hiding
+ * it, and the way back had to sit on screen forever so a mis-tap was not a
+ * one-way door. "Finish all" does the work instead, so all of it goes — and
+ * the count stops being a number with silent subtractions in it.
+ */
+describe("nothing on the list is hidden any more", () => {
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
-  it("takes that row off the list", async () => {
+  it("gives a row no way to be waved away", async () => {
     const { root, text } = await mount([], { recs: VERIFY_RECS });
     await expand("Check details");
     expect(text()).toContain("Nike hoodie");
-
-    await click(buttons().find(
-      (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
-
-    expect(text()).not.toContain("Nike hoodie");
-    expect(text()).toContain("Canon AE-1");   // its neighbour is untouched
+    // The row is there to be opened, and that is the only thing on it.
+    expect(buttons().find(
+      (b) => (b.getAttribute("aria-label") || "").includes("Dismiss")))
+      .toBeFalsy();
     await act(async () => { root.unmount(); });
   });
 
-  it("stays dismissed when the list is rebuilt", async () => {
-    // The whole point: /api/insights has no idea and returns both every time.
-    const first = await mount([], { recs: VERIFY_RECS });
-    await expand("Check details");
-    await click(buttons().find(
-      (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
-    await act(async () => { first.root.unmount(); });
-
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await expand("Check details");
-    expect(text()).not.toContain("Nike hoodie");
+  it("carries one control, and it is the one that finishes the work", async () => {
+    const { root } = await mount([], {
+      recs: VERIFY_RECS, finishAll: { total: 12, enrich: 5, accept: 7 },
+    });
+    expect(byText("Finish all 12")).toBeTruthy();
+    expect(byText("Clear all")).toBeFalsy();
+    expect(buttons().find(
+      (b) => (b.textContent || "").includes("dismissed"))).toBeFalsy();
     await act(async () => { root.unmount(); });
   });
 
-  it("can be undone — an X is not a one-way door", async () => {
+  it("ignores what an older build left in this browser", async () => {
+    // Sellers who used the dismiss control still have its list in
+    // localStorage. It is nobody's reader now, and a row it names must not
+    // go on being hidden by a feature that no longer exists.
+    localStorage.setItem("thryft-dismissed-recs",
+      JSON.stringify(["a|verify", "b|verify"]));
     const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await expand("Check details");
-    await click(buttons().find(
-      (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
-    expect(text()).toContain("Restore 1 dismissed");
-
-    await click(byText("Restore 1 dismissed"));
     await expand("Check details");
     expect(text()).toContain("Nike hoodie");
+    expect(text()).toContain("Canon AE-1");
     await act(async () => { root.unmount(); });
   });
 
-  it("keeps the way back when the last suggestion goes", async () => {
-    // Gating the section on the VISIBLE list would take the undo away with
-    // the thing it undoes, and the seller could never get the list back.
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await expand("Check details");
-    for (const title of ["Nike hoodie", "Canon AE-1"]) {
-      await click(buttons().find(
-        (b) => (b.getAttribute("aria-label") || "").includes(title)));
-    }
-    expect(text()).toContain("every suggestion is dismissed");
-    expect(byText("Restore 2 dismissed")).toBeTruthy();
-    await act(async () => { root.unmount(); });
-  });
-
-  it("leaves the group action pointed at what is still on the list", async () => {
+  it("points a group's own button at the whole group", async () => {
+    // Nothing narrows the set behind a group verb any more, so what the
+    // button sends is simply what the group holds.
     const calls = [];
     const { root } = await mount(calls, { recs: PRICE_RECS });
-    await expand("Lower prices");
-    await click(buttons().find(
-      (b) => (b.getAttribute("aria-label") || "").includes("Nike hoodie")));
-
     await click(byText("Lower all…"));
     await click(buttons().find(
-      (b) => (b.textContent || "").startsWith("Lower 1 price")));
-    expect(calls[0].body.listing_ids).toEqual(["b"]);
+      (b) => (b.textContent || "").startsWith("Lower 2 prices")));
+    expect(calls[0].body.listing_ids).toEqual(["a", "b"]);
     await act(async () => { root.unmount(); });
   });
 });
@@ -598,67 +588,6 @@ describe("the fill is one button, not a list to pick from", () => {
       .toBeFalsy();
     // ...and the names are not on screen.
     expect(text()).not.toContain("Nike hoodie");
-    await act(async () => { root.unmount(); });
-  });
-});
-
-
-describe("clearing the whole list", () => {
-  beforeEach(() => { localStorage.clear(); });
-  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
-
-  it("empties the section in one tap", async () => {
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await click(byText("Clear all"));
-
-    expect(text()).toContain("every suggestion is dismissed");
-    expect(text()).not.toContain("Nike hoodie");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("reaches a group that has no row to dismiss", async () => {
-    // "Fill in details" is a header and a button — no rows, so no per-row X.
-    // Before this control there was no way to stop it asking at all.
-    const { root, text } = await mount();
-    expect(text()).toContain("Fill in details");
-
-    await click(byText("Clear all"));
-    expect(text()).not.toContain("Fill in details");
-    expect(text()).toContain("every suggestion is dismissed");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("is not a one-way door either", async () => {
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
-    await click(byText("Clear all"));
-    expect(byText("Restore 2 dismissed")).toBeTruthy();
-
-    await click(byText("Restore 2 dismissed"));
-    await expand("Check details");
-    expect(text()).toContain("Nike hoodie");
-    expect(text()).toContain("Canon AE-1");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("stays cleared when the engine rebuilds the list", async () => {
-    const first = await mount([], { recs: VERIFY_RECS });
-    await click(byText("Clear all"));
-    await act(async () => { first.root.unmount(); });
-
-    const { root, text } = await mount([], { recs: VERIFY_RECS });
-    expect(text()).not.toContain("Nike hoodie");
-    expect(text()).toContain("every suggestion is dismissed");
-    await act(async () => { root.unmount(); });
-  });
-
-  it("goes away once there is nothing left to clear", async () => {
-    // A control that would do nothing is not offered — but the way back
-    // stays, because that is the one thing still worth tapping.
-    const { root } = await mount([], { recs: VERIFY_RECS });
-    await click(byText("Clear all"));
-
-    expect(byText("Clear all")).toBeFalsy();
-    expect(byText("Restore 2 dismissed")).toBeTruthy();
     await act(async () => { root.unmount(); });
   });
 });
