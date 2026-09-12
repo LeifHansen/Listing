@@ -1204,7 +1204,9 @@ list: finish a draft, drop a stale price, add photos, fill in specifics. An
 ended listing earns nothing: relisting is done by hand, and the ended bucket
 picks up sold items. Suggestions are grouped
 by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
-listing so the list spans the portfolio instead of piling onto one item.
+listing so the list spans the portfolio instead of piling onto one item — with
+the two kinds that both mean "this listing's details aren't finished" grouped
+as one row (see **Finish details** below).
 
 A group whose edit makes sense across every listing in it gets a **bulk action**
 in its header, because repeating one edit twelve times by hand is the whole
@@ -1244,7 +1246,7 @@ problem:
   `SERVER_OWNED_FIELDS`, whose rule is that the **stored** value wins: under
   that rule the stamp could never move forward on the one write entitled to
   move it.
-- **Fill in details → "Enrich all"** fills every listing in the group in one
+- **Finish details → "Enrich all"** fills every listing on the list in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft
   gets, `_enrich_listing`), merged in **without** overwriting anything the
@@ -1252,11 +1254,37 @@ problem:
   the fill actually answered are dropped; a note nothing filled is kept, and
   that listing is reported as one that still needs a human. Because a vision
   pass per listing takes minutes, this one runs as a **background job**
-  (`POST /api/listings/enrich` → `job_id`, polled on `/api/bulk/status/{id}`),
-  one per account at a time, capped at `BULK_ENRICH_CAP` (default 25) per run.
-  It spends AI tokens per listing, so the button confirms the count and the
-  cost first, and a listing it can't reach (no category, photos gone, eBay not
-  connected) is skipped **before** it is charged for.
+  (`POST /api/listings/finish-all` → `job_id`, polled on
+  `/api/bulk/status/{id}`), one per account at a time. It spends AI tokens per
+  listing, so the button confirms the count and the cost first, and a listing
+  it can't reach (no category, photos gone, eBay not connected) is skipped
+  **before** it is charged for.
+
+  **"All" means all of them.** It used to mean "up to `BULK_ENRICH_CAP` of the
+  rows this screen happens to be holding": the client named the ids and
+  `/api/insights` ships at most 50 per type, so a list of 70 was three presses
+  — and in an environment where that cap was set to **1**, the progress line
+  read *"1 of 1 · 69 more after this run"*, which is a button that does one
+  listing per tap while calling itself Enrich all. The press sends no ids and
+  has no cap now: the server works the set out from the same ranking the
+  screen is rendered from (`_finish_all_set`), so the number on the badge is
+  the number that runs. `POST /api/listings/enrich` is still there — ids in,
+  capped, deferring the rest — for a caller that genuinely means a selection.
+  Nothing in the app does.
+
+  **It is one group, not two.** "Fill in details" and "Check details" are two
+  rec types (`specifics` is a fill the AI can make; `verify` is a note only a
+  person can settle) and they rendered as two stacked groups with two counts
+  and a button on one of them. The seller, looking at *"Fill in details · 70"*
+  over *"Check details · 149"*, asked for one. The split is real to the engine
+  and is not a decision anyone has to make at the top of a dashboard: both say
+  *this listing's details aren't finished*, and the press that finishes them
+  has always covered both. So the two collapse into **Finish details**, one
+  badge adding both halves up, one button — and the rows behind the chevron,
+  each keeping its own verb, for a seller who would rather work through them
+  one at a time. The section header carries nothing: a second copy of the
+  button, naming the same number as the group beneath it, is how a seller
+  comes to distrust both.
 
   **What decides the group** is item specifics, never the free-text
   `missing_info` notes beside them — a note is evidence the fill has *already*
@@ -1288,8 +1316,9 @@ problem:
   pressed "Enrich all" on twelve listings, waited several minutes while the AI
   read their photos and pushed the new specifics to eBay, and the group they
   had just cleared was replaced *in the same slot* by "Check details · 12" —
-  the same twelve listings, still flagged, and this time with no button on the
-  group at all, just a list to open one at a time. From outside, that is
+  the same twelve listings, still flagged, and (back when it was its own
+  group) with no button on it at all, just a list to open one at a time. From
+  outside, that is
   indistinguishable from the button having done nothing, and it was reported
   as exactly that. The notes behind it are real, but they are by construction
   the things the fill has just declined to invent, so they are not a chore to
@@ -1305,10 +1334,12 @@ a single button. The rules bulk runs follow — `services/bulk_actions.py`:
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
   listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
-- **The run is bounded** (`BULK_PRICE_CAP`, default 40; `BULK_ENRICH_CAP`,
-  default 25) because each listing is its own serial eBay revise; the remainder
-  comes back as `deferred` for another pass instead of the request outliving
-  the gateway.
+- **A run that names ids is bounded** (`BULK_PRICE_CAP`, default 40;
+  `BULK_ENRICH_CAP`, default 25) because each listing is its own serial eBay
+  revise; the remainder comes back as `deferred` for another pass instead of
+  the request outliving the gateway. The press that finishes the details list
+  names none, so it has no remainder to defer — it is a job from the first
+  moment, and the client polls it rather than holding a request open.
 
 Every row also carries a **dismiss** (×). The engine rebuilds this list from
 scratch on every load, so advice the seller has already considered and decided

@@ -44,12 +44,6 @@ const NO_TOTALS = Object.freeze({});
 // The "Finish everything" plan before /api/insights has answered. Zero total
 // hides the button rather than offering one that cannot say what it will do.
 const NO_PLAN = Object.freeze({ total: 0, enrich: 0, accept: 0 });
-// `bulkBusy` / `bulkProgress` are keyed by rec type, because until now every
-// bulk action belonged to exactly one group. The whole-list press belongs to
-// none of them, so it needs a key of its own that no rec type can collide
-// with.
-const FINISH_ALL = "__all__";
-
 // How many of a group ONE tap actually reaches. Both bulk actions fill a
 // capped number of listings per run and defer the rest, so the group must not
 // promise the whole badge: it asked to confirm 46, quoted the AI cost of 46,
@@ -68,11 +62,26 @@ const runCount = (n, total, noun) =>
 // make a group claim to be smaller than what it is showing.
 const groupSize = (group) => Math.max(group.total || 0, group.recs.length);
 
+/* "Fill in details" and "Check details", as ONE group.
+   
+   They were two, stacked, and the seller read them as one thing twice:
+   "Fill in details · 70" over "Check details · 149", each with its own
+   header, its own count and — on only one of them — its own button. The
+   split is real to the ENGINE (`specifics` is a fill the AI can make;
+   `verify` is a note only a person can settle) and it is not a decision the
+   seller has to make: both are "this listing's details aren't finished", and
+   the one press that finishes them has always covered both (finish-all).
+   So the dashboard groups them: one row, one count, one button, and the rows
+   behind it when the seller wants to work through them one at a time. */
+const DETAILS = "details";
+const DETAILS_TYPES = ["specifics", "verify"];
+
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
   lower_price: TrendingDown,
   finish: PlusCircle, photos: Camera, specifics: ListChecks,
   verify: ClipboardCheck,
+  [DETAILS]: ListChecks,
 };
 const REC_TONE = {
   lower_price: "bg-yellow-soft text-warning",
@@ -80,6 +89,7 @@ const REC_TONE = {
   photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
   verify: "bg-yellow-soft text-warning",
+  [DETAILS]: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
 // imperative for one listing ("Lower the price"); groups need the noun form.
@@ -87,11 +97,10 @@ const REC_GROUP_LABEL = {
   lower_price: "Lower prices",
   finish: "Finish & list",
   photos: "Add more photos",
-  specifics: "Fill in details",
-  // What the AI left for a person: a price it changed, a title it suggests,
-  // an edition to check. No group verb -- nothing here is an edit the AI can
-  // make, which is exactly why it is not under "Fill in details".
-  verify: "Check details",
+  // "Fill in details" and "Check details" arrive as two types and render as
+  // one group (see DETAILS): two halves of finishing a listing's details,
+  // with one button that does both.
+  [DETAILS]: "Finish details",
 };
 
 // One suggestion row: what the listing is, why it is here, and the way in.
@@ -135,22 +144,23 @@ function RecRow({ rec, openListing }) {
 // item, and finishing a draft creates a listing, which is not something to hand
 // a single button.
 const BULK_ACTIONS = {
-  // "Fill in details" used to be a prompt to go and do it: open each listing,
-  // wait for the AI to read its photos, save, repeat. It is the same edit
-  // every time and the AI already knows how to make it, so it is a button —
-  // one pass over the whole group, filling eBay's recommended item specifics
-  // on each listing from its own photos and pushing them to the live listing.
-  specifics: {
+  // Finishing a listing's details used to be a prompt to go and do it: open
+  // each one, wait for the AI to read its photos, save, repeat. It is the
+  // same edit every time and the AI already knows how to make it, so it is a
+  // button — eBay's recommended item specifics filled from each listing's own
+  // photos and pushed to the live listing, and the notes the AI left for a
+  // person marked as checked on the rest.
+  //
+  // ALL of them. The verb said "all" and meant "a capped 25 of the 50 rows
+  // this screen happens to be holding", which on a list of 70 was three
+  // presses that each reported what was left — and with BULK_ENRICH_CAP set
+  // to 1 in an environment, one listing per press. This run names no ids and
+  // has no cap: the server works the set out from the same ranking the
+  // screen is rendered from, so "all" is the badge's own number.
+  [DETAILS]: {
     verb: "Enrich all",
     icon: Sparkles,
-    // No row list behind this one. Every other group asks the seller to pick
-    // (which price, which listing to open); this one has nothing to choose
-    // between -- filling a blank item specific is the same wanted edit on
-    // every listing in the group -- so the expanding list of names was a
-    // decision it was pretending the seller had to make. Header, count,
-    // button.
-    soloButton: true,
-    run: (ctx) => ctx.enrichAll(ctx.group, ctx.cap),
+    run: (ctx) => ctx.finishEverything(),
   },
   lower_price: {
     verb: "Lower all…",
@@ -266,14 +276,13 @@ function GroupHead({ group, Icon }) {
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
+function RecGroup({ group, cap, openListing, lowerAll, finishEverything,
                     busy, progress }) {
   const [open, setOpen] = useState(false);
   const [amountOpen, setAmountOpen] = useState(false);
   const Icon = REC_ICON[group.type] || Lightbulb;
   const action = BULK_ACTIONS[group.type];
   const ActionIcon = action?.icon;
-  const solo = !!action?.soloButton;
   // What one tap on this group's button reaches. The badge above it is the
   // whole group; this is the part of it a single run touches.
   const total = groupSize(group);
@@ -281,30 +290,27 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
-        {/* A group whose button is the whole point renders its header as
-            plain text: there is no list to open, so a toggle (and a chevron
-            promising one) would be a control that does nothing. */}
-        {solo ? (
-          <div className="flex-1 min-w-0 flex items-center gap-3.5 p-4">
-            <GroupHead group={group} Icon={Icon} />
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setOpen((o) => !o)}
-            aria-expanded={open}
-            className="flex-1 min-w-0 flex items-center gap-3.5 p-4 text-left cursor-pointer"
+        {/* Every group opens. The fill used to render its header as plain
+            text — its button was the whole point, and there was nothing to
+            choose between — but the two groups it is now one half of pull in
+            opposite directions there: the other half is a list of notes only
+            a person can settle, one listing at a time. So the button is for
+            all of it and the chevron is for going through it. */}
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="flex-1 min-w-0 flex items-center gap-3.5 p-4 text-left cursor-pointer"
+        >
+          <GroupHead group={group} Icon={Icon} />
+          <motion.span
+            animate={{ rotate: open ? 180 : 0 }}
+            transition={{ duration: 0.18 }}
+            className="ml-auto text-ink-faint shrink-0"
           >
-            <GroupHead group={group} Icon={Icon} />
-            <motion.span
-              animate={{ rotate: open ? 180 : 0 }}
-              transition={{ duration: 0.18 }}
-              className="ml-auto text-ink-faint shrink-0"
-            >
-              <ChevronDown size={17} aria-hidden />
-            </motion.span>
-          </button>
-        )}
+            <ChevronDown size={17} aria-hidden />
+          </motion.span>
+        </button>
         {/* Sibling of the toggle, never nested inside it (invalid HTML). */}
         {action && (
           <Button variant="soft" size="sm" className="shrink-0"
@@ -312,7 +318,7 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
             aria-expanded={action.amount ? amountOpen : undefined}
             onClick={() => (action.amount
               ? setAmountOpen((o) => !o)
-              : action.run({ group, cap, lowerAll, enrichAll }))}>
+              : action.run({ group, cap, lowerAll, finishEverything }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
@@ -327,9 +333,10 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
           <span className="truncate">
             {progress.title ? `“${progress.title}” · ` : ""}
             {Math.min(progress.done + 1, progress.total)} of {progress.total}
-            {/* One run is capped, so "2 of 25" under a badge reading 46 is a
-                contradiction unless the rest of the group is accounted for
-                right here. */}
+            {/* A capped run has to account for its remainder right here, or
+                "2 of 25" under a badge reading 46 reads as a contradiction.
+                The fill no longer has one — it takes the whole list — and
+                the price drop still does. */}
             {progress.deferred > 0
               ? ` · ${progress.deferred} more after this run` : ""}
           </span>
@@ -343,12 +350,12 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
             onCancel={() => setAmountOpen(false)}
             onSubmit={(value) => {
               setAmountOpen(false);
-              action.run({ group, cap, lowerAll, enrichAll }, value);
+              action.run({ group, cap, lowerAll, finishEverything }, value);
             }} />
         )}
       </AnimatePresence>
       <AnimatePresence initial={false}>
-        {open && !solo && (
+        {open && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
@@ -356,6 +363,10 @@ function RecGroup({ group, cap, openListing, lowerAll, enrichAll,
             transition={{ duration: 0.2, ease: "easeOut" }}
             className="overflow-hidden"
           >
+            {/* One row per listing, so a seller who would rather go through
+                them one at a time can — which is the whole reason the merged
+                group kept its list instead of inheriting the fill's
+                button-only header. */}
             <div className="divide-y divide-line border-t border-line">
               {group.recs.map((rec) => (
                 <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
@@ -693,15 +704,15 @@ export function Dashboard() {
         + `working while it does.${cost}`,
       confirmLabel: "Finish them",
     }))) return;
-    setBulkBusy(FINISH_ALL);
-    setBulkProgress({ type: FINISH_ALL, done: 0, total: plan.total,
+    setBulkBusy(DETAILS);
+    setBulkProgress({ type: DETAILS, done: 0, total: plan.total,
                       deferred: 0, title: "" });
     try {
       const start = await postJson("/api/listings/finish-all", {});
       const total = start.total || plan.total;
       const res = await pollJob(start.job_id, {
         onUpdate: (j) => setBulkProgress({
-          type: FINISH_ALL, done: j.current || 0,
+          type: DETAILS, done: j.current || 0,
           total: j.total_items || total, deferred: 0,
           title: j.current_title || "",
         }),
@@ -740,141 +751,16 @@ export function Dashboard() {
     }
   };
 
-  // "Enrich all" — the whole "Fill in details" group filled in at once.
-  //
-  // This is what the suggestion used to ask the seller to do by hand: open a
-  // listing, wait for the AI to read its photos, let it fill eBay's
-  // recommended item specifics, save, push, repeat. The edit is the same one
-  // every time and nothing about it needs a human, so the group does it.
-  //
-  // It runs as a background JOB rather than one long request: a vision pass
-  // per listing over a dozen listings is minutes of work, which no browser
-  // (or the proxy in front of the server) will hold a connection open for.
-  const enrichAll = async (group, cap) => {
-    // Every listing in this group is LIVE on eBay (the recommender only
-    // offers the fill for published ones), and filling a live listing means
-    // revising it there. Without a connection the server refuses each one in
-    // turn and the run comes back "12 need you" — minutes of waiting, a toast
-    // carrying the same sentence twelve times, and nothing changed. Ask for
-    // the connection instead of spending the trip finding out.
-    //
-    // Asked of the SERVER, not of the cached flag: `ebay` starts out as the
-    // signed-out shape and fills in from /api/ebay/status a moment later, so
-    // reading the cache would bounce a perfectly well connected seller to
-    // Settings for pressing the button early.
-    if (!ebay.connected) {
-      const fresh = await loadEbayStatus();
-      // A lookup that FAILED is not an answer, and refusing on it would be
-      // this check making up the same blocker it exists to report. Only a
-      // status that actually came back saying "not connected" stops the run;
-      // otherwise carry on and let the server give its own reason.
-      if (fresh && !fresh.connected) {
-        toast("Connect eBay first — these listings are live there, so filling "
-          + "them in means updating them on eBay.", { kind: "warning" });
-        setView("settings");
-        return;
-      }
-    }
-    // Every id the group HOLDS is sent: the server enriches up to its own cap
-    // and counts the remainder for us (a client that pre-trimmed the list
-    // would be told nothing was left over). The cap it publishes on
-    // /api/insights is only for what this dialog SAYS — which is the bug it
-    // fixes. The group used to ask for 46 and quote the AI cost of 46, then
-    // fill 25.
-    const ids = group.recs.map((r) => r.listing_id);
-    // ...but the group is usually bigger than the ids it holds, because the
-    // recommendations payload is a capped slice per type. Those extras are
-    // still listings this button has to finish, so they count towards what is
-    // left over — a run that reports "0 left" on a group of 80 is the reason
-    // the badge looked stuck.
-    const total = groupSize(group);
-    const unsent = Math.max(total - ids.length, 0);
-    let run = runSize(ids.length, cap);
-    let left = unsent + (ids.length - run);
-    // Every listing this touches spends AI credits, and this button reaches a
-    // whole group from one tap. Say what it will do — and what it will cost —
-    // before it does it, the same way the bulk price drop does.
-    const cost = tokens.enabled && tokens.costs?.specifics
-      ? ` It uses ${tokens.costs.specifics * run} AI tokens (${tokens.costs.specifics} per listing); you have ${tokens.total}.`
-      : "";
-    const rest = left
-      ? ` One run fills in ${run} of them; the other ${left} ${left === 1 ? "stays" : "stay"} on the list for a second run.`
-      : "";
-    if (!(await confirm({
-      title: `Fill in details on ${runCount(run, total, "listing")}?`,
-      message: "The AI reads each listing's own photos and fills in eBay's "
-        + "recommended item specifics — the fields buyers filter by — then "
-        + "pushes them straight to the live listing on eBay. No second step, "
-        + "and anything you've already written is left exactly as it is. "
-        + "Some listings will still have a note or two afterwards — those are "
-        + "the things only you can settle, like a measurement, and they wait "
-        + `for you under "Check details".${rest}${cost}`,
-      confirmLabel: "Fill them in",
-    }))) return;
-    setBulkBusy(group.type);
-    setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
-    try {
-      const start = await postJson("/api/listings/enrich", { listing_ids: ids });
-      // The server's own split is the authoritative one — ids that have since
-      // been deleted never make the run, and the cap is its to enforce. A
-      // handed-back job that is already running reports total 0; that one
-      // keeps the estimate above, and the poll below corrects it.
-      if (start.total) {
-        run = start.total;
-        left = unsent + (start.deferred || 0);
-        setBulkProgress({ type: group.type, done: 0, total: run, deferred: left, title: "" });
-      }
-      const res = await pollJob(start.job_id, {
-        onUpdate: (j) => setBulkProgress({
-          type: group.type, done: j.current || 0,
-          total: j.total_items || run, deferred: left,
-          title: j.current_title || "",
-        }),
-      });
-      const parts = [];
-      if (res.changed) {
-        parts.push(`Filled in ${res.changed} listing${res.changed === 1 ? "" : "s"}`
-          + (res.filled ? ` · ${res.filled} detail${res.filled === 1 ? "" : "s"} added` : ""));
-      }
-      // Skipped is the honest half: a listing with no category, no photos left
-      // on the server, or nothing its photos could answer is not a failure and
-      // is not done either.
-      if (res.skipped) parts.push(`${res.skipped} need you`);
-      if (res.failed) parts.push(`${res.failed} failed`);
-      // The job's own deferred count PLUS the group members it was never
-      // sent: it only ever knew about the ids it was handed, and the group
-      // can be bigger than those. Reporting its number alone is how a run
-      // over 25 of 80 listings came back saying nothing was left.
-      const over = unsent + (res.deferred || 0);
-      if (over) parts.push(`${over} left — run it again to finish`);
-      if (res.stopped) parts.push(res.stopped);
-      // The counts say how many. What the seller actually asks afterwards is
-      // "did it do anything?", and for a listing it could not finish the
-      // answer is the reason it gave -- which the job reports per listing
-      // and which a bare "1 need you" hid.
-      const results = res.results || {};
-      const named = (results.changed || []).filter((r) => (r.filled || []).length);
-      const lines = named.slice(0, 3).map((r) => {
-        const got = r.filled.map((f) => `${f.name}: ${f.value}`);
-        const rest = got.length > 3 ? ` +${got.length - 3}` : "";
-        return `✓ ${r.title || "A listing"}: ${got.slice(0, 3).join(", ")}${rest}`;
-      });
-      const undone = [...(results.skipped || []), ...(results.failed || [])];
-      lines.push(...undone.slice(0, 3).map(
-        (r) => `• ${r.title || "A listing"}: ${r.message}`));
-      const more = (named.length + undone.length) - lines.length;
-      if (more > 0) lines.push(`• …and ${more} more`);
-      toast([parts.join(" · ") || "Nothing to fill in.", ...lines].join("\n"), {
-        kind: res.changed ? "success" : res.failed ? "error" : "info",
-        ttl: lines.length ? 12000 : undefined,
-      });
-      refreshInsights();
-      loadListings({ quiet: true });
-      loadTokens();
-    } catch (e) {
-      toast(`Couldn't fill these in: ${e.message}`, { kind: "error" });
-    } finally { setBulkBusy(null); setBulkProgress(null); }
-  };
+  /* The capped, client-named fill that used to sit on "Fill in details" is
+     gone from this screen. It handed the server the ids the recommendations
+     payload happened to carry (50 per type at most) and the server filled a
+     capped 25 of those, so the button could not finish a list bigger than
+     itself — and with BULK_ENRICH_CAP set to 1 in an environment it filled
+     exactly one listing per press while reporting "69 more after this run".
+     `finishEverything` above is what the group runs now: no ids, no cap, the
+     set worked out server-side from the same ranking this screen renders.
+     POST /api/listings/enrich is still there for a caller that genuinely
+     means "these ids, capped" — nothing in the app does. */
 
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
@@ -1142,50 +1028,33 @@ export function Dashboard() {
       {/* Suggested actions — the recommendation engine's picks, one collapsed
           group per category (expand for the per-listing rows).
 
-          One control, and it is the one that finishes the work. The header
-          used to carry two more beside it — Clear all, and a "Restore N
-          dismissed" that climbed into the hundreds and sat there naming
-          every suggestion the seller had already waved away. Both existed
-          only because the list could not be finished; hiding it was the
-          nearest thing to done available. "Finish all" is done, so they
-          go. */}
+          No control in the header. It used to carry the press that finishes
+          the work, which was the right place for it while that press spanned
+          two groups nothing else could reach — and the wrong place the
+          moment those two became one row with a button of its own. Two
+          buttons doing the same thing, one of them naming a number the group
+          under it also named, is how a seller comes to distrust both. */}
       {insights.length > 0 && (
         <motion.div variants={rise}>
-          <SectionHeader icon={Lightbulb} title="Suggested actions"
-            action={finishPlan.total > 0 && (
-              <Button variant="primary" size="sm" className="shrink-0"
-                loading={bulkBusy === FINISH_ALL}
-                disabled={!!bulkBusy}
-                onClick={finishEverything}>
-                <Sparkles aria-hidden /> Finish all {finishPlan.total}
-              </Button>
-            )} />
-          {/* Which listing the press is on, and how far through. Sits above
-              the Card rather than inside a group, because the run spans
-              them — and by the end the groups it was working through are
-              gone from the list underneath it. */}
-          {bulkProgress?.type === FINISH_ALL && (
-            <p className="mb-2 text-[13px] text-ink-secondary flex items-center gap-1.5">
-              <Loader2 size={14} className="animate-spin shrink-0" aria-hidden />
-              <span className="truncate">
-                {bulkProgress.title ? `“${bulkProgress.title}” · ` : ""}
-                {Math.min(bulkProgress.done + 1, bulkProgress.total)} of{" "}
-                {bulkProgress.total}
-              </span>
-            </p>
-          )}
+          <SectionHeader icon={Lightbulb} title="Suggested actions" />
           <Card className="p-0 divide-y divide-line overflow-hidden">
             {(() => {
               // Group by type, preserving arrival order: the API sorts by
-              // priority desc, so groups order by their strongest rec.
+              // priority desc, so groups order by their strongest rec. The
+              // two halves of finishing a listing's details answer to one
+              // key (see DETAILS), which is what makes them one row — and
+              // they keep the place of whichever of them ranked highest.
+              const keyOf = (type) =>
+                (DETAILS_TYPES.includes(type) ? DETAILS : type);
               const groups = [];
               const byType = {};
               for (const rec of insights) {
-                if (!byType[rec.type]) {
-                  byType[rec.type] = { type: rec.type, recs: [], total: 0 };
-                  groups.push(byType[rec.type]);
+                const key = keyOf(rec.type);
+                if (!byType[key]) {
+                  byType[key] = { type: key, recs: [], total: 0 };
+                  groups.push(byType[key]);
                 }
-                byType[rec.type].recs.push(rec);
+                byType[key].recs.push(rec);
               }
               // The server's count, straight through. It used to have this
               // browser's hidden rows netted off it, which is what a count
@@ -1194,14 +1063,19 @@ export function Dashboard() {
               // hides now, so the number on screen is the server's answer to
               // "how much is left", with nothing done to it here.
               for (const group of groups) {
-                group.total = Math.max(
-                  groupTotals[group.type] || group.recs.length,
-                  group.recs.length);
+                // The merged group's count is both halves added up — the
+                // server counts per type and has no idea they render as one,
+                // and a badge that showed only one half would be the same
+                // undercount the per-type slice used to cause.
+                const counted = group.type === DETAILS
+                  ? DETAILS_TYPES.reduce((n, t) => n + (groupTotals[t] || 0), 0)
+                  : (groupTotals[group.type] || 0);
+                group.total = Math.max(counted, group.recs.length);
               }
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
                   openListing={openListing} lowerAll={lowerAll}
-                  enrichAll={enrichAll}
+                  finishEverything={finishEverything}
                   busy={bulkBusy === g.type}
                   progress={bulkProgress?.type === g.type ? bulkProgress : null} />
               ));
