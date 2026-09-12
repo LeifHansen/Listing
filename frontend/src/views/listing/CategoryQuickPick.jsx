@@ -5,8 +5,9 @@ import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 
-/* Compact category display + changer for draft cards (drafts strip + bulk
-   queue). A wrong AI category pick is easy to miss on a card that only shows
+/* Compact category display + changer for draft cards (the drafts grid, the
+   dashboard's recent strip, the listings manager). A wrong AI category pick
+   is easy to miss on a card that only shows
    title and price, and expensive once published — so the category sits on
    the card face, one tap from being fixed. Suggestions come from the same
    /api/category-suggestions endpoint as the editor's picker; choosing one
@@ -124,9 +125,9 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
 
    A wrong category is the AI misfire that costs most once it is published,
    and it is invisible on a card that shows a title and a price. So it sits on
-   the face of every draft card there is: the drafts strip, the bulk queue,
-   the dashboard's recent cards and the listings manager. One component, so
-   the four cannot drift.
+   the face of every draft card there is: the drafts grid (which is also how
+   a bulk batch is reviewed), the dashboard's recent cards and the listings
+   manager. One component, so they cannot drift.
 */
 export function DraftCategoryEdit({ item, className }) {
   const { loadListings } = useApp();

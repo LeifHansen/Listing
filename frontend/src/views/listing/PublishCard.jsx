@@ -303,10 +303,10 @@ export function PublishCard({ w }) {
 }
 
 // Where this publish goes: one toggle chip per connected marketplace. The
-// chips themselves are MarketTargetChips in publishShared — the drafts strip
-// and bulk queue already render that exact component, and this file used to
-// carry a byte-identical second copy. Both read the same remembered
-// selection, so a divergence between them could only ever be a bug.
+// chips themselves are MarketTargetChips in publishShared — the drafts grid
+// already renders that exact component, and this file used to carry a
+// byte-identical second copy. Both read the same remembered selection — one
+// value, shared, so a divergence between them could only ever be a bug.
 function MarketplaceChips({ w }) {
   const { otherConnected } = usePublishTargets();
   if (!w.chipTargets) return null;

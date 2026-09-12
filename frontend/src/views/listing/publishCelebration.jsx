@@ -17,9 +17,10 @@ import { PartyPopper, Rocket } from "lucide-react";
  * the server confirms it, exactly as before, so nothing here can leave a live
  * listing sitting in Drafts if the animation is interrupted.
  *
- * Shared by the drafts strip and the bulk queue: both publish batches, and a
- * seller who learns the animation on one screen must not have to learn a
- * different ending on the other. */
+ * One send-off, wherever the publish was pressed: the drafts grid carries it,
+ * and a batch is reviewed in that same grid (see BulkMode), so a seller who
+ * learns the animation on one screen never meets a different ending on the
+ * other. */
 
 // How long the burst holds before the card lifts away, and how long the
 // lift-off itself takes. Both are read by the hook's timers AND by the
@@ -47,13 +48,13 @@ const CONFETTI = Array.from({ length: 14 }, (_, i) => {
 });
 
 /**
- * The cards that are mid-celebration, and the ones that have finished it.
+ * The cards that are mid-celebration.
  *
  * `celebrate(id, item, index)` starts the two-phase send-off for one card:
  * "burst" while the confetti plays, then "leaving" while it lifts off, then
- * gone. Callers read `celebrating[id]` to know which phase a card is in and
- * `departed` to know it is finished with (the bulk queue keeps its items
- * forever, so that set is what takes a published one off the screen).
+ * gone. Callers read `celebrating[id]` to know which phase a card is in; the
+ * record itself is already "published" by then, so the grid drops the card
+ * the moment the send-off ends (see withCelebrating).
  *
  * Every timer is tracked and cleared on unmount — a batch publish whose
  * screen is closed part-way must not set state on a dead component.
@@ -61,7 +62,6 @@ const CONFETTI = Array.from({ length: 14 }, (_, i) => {
 export function usePublishCelebration() {
   // id -> { id, item, index, phase }
   const [celebrating, setCelebrating] = useState({});
-  const [departed, setDeparted] = useState(() => new Set());
   const timers = useRef(new Map());
 
   useEffect(() => {
@@ -83,11 +83,6 @@ export function usePublishCelebration() {
     }, CELEBRATE_HOLD_MS);
     const gone = setTimeout(() => {
       timers.current.delete(id);
-      setDeparted((cur) => {
-        const next = new Set(cur);
-        next.add(id);
-        return next;
-      });
       setCelebrating((cur) => {
         if (!cur[id]) return cur;
         const next = { ...cur };
@@ -98,7 +93,7 @@ export function usePublishCelebration() {
     timers.current.set(id, [lift, gone]);
   }, []);
 
-  return { celebrating, departed, celebrate };
+  return { celebrating, celebrate };
 }
 
 /**

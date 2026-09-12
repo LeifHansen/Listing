@@ -30,10 +30,17 @@ import { isDraft, lastRefusal } from "@/lib/listingsView";
 /* The drafts experience on the merged Sell screen: every draft one click
    from Publish or Review & List, plus select-mode bulk publish/merge/delete.
    Renders nothing when there are no (matching) drafts — the upload box
-   directly above is the empty-state CTA. */
+   directly above is the empty-state CTA.
+
+   THE ONLY grid of draft cards in the app. The bulk queue used to draw its
+   own — its own tile, its own columns, its own buttons — so a seller who
+   imported a batch, opened one item and saved it was handed back a different
+   grid of the same drafts than the one they had been working in. The batch
+   screen renders THIS component now, scoped to the batch with `only`, which
+   is what makes the two impossible to tell apart (see BulkMode). */
 
 // Shipping policy right on a draft's card — the same one control the editor
-// and the bulk queue use (see ShippingPolicySelect). Saves on change.
+// uses (see ShippingPolicySelect). Saves on change.
 function DraftShipping({ item, className }) {
   const { loadListings } = useApp();
   const { toast } = useToast();
@@ -83,7 +90,20 @@ function resultSummary(res) {
     .join(" · ");
 }
 
-export function DraftsStrip({ search = "" }) {
+/**
+ * @param search    the Sell screen's search box, narrowing the grid.
+ * @param only      listing ids this grid is limited to, or null for every
+ *                  draft. The batch review screen passes the ids ONE batch
+ *                  drafted, so the seller reviews a batch through the same
+ *                  cards, in the same columns, with the same buttons as the
+ *                  drafts they already know.
+ * @param publishAll adds "Publish all" beside the layout toggle — the batch
+ *                  screen's one-tap ending, which ticking nothing should not
+ *                  stand in the way of. It runs the same publish as
+ *                  "Publish selected" (one confirm, a counted progress, the
+ *                  send-off on every card that goes live).
+ */
+export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   const {
     listingsState, openListing, loadListings, patchListing, deleteListing,
     bulkDeleteListings, rotateListingPhoto,
@@ -128,19 +148,26 @@ export function DraftsStrip({ search = "" }) {
   // Bulk publish runs one listing at a time (eBay's API is per-item), which on
   // a big selection is a long wait — so the button counts it off out loud.
   const [bulkProgress, setBulkProgress] = useState(null); // { done, total }
-  // The merge review dialog — the same one the bulk queue opens (see
-  // MergeListingsDialog). Duplicates don't only turn up inside one batch: a
-  // seller who photographed the same vase on two different days has two
-  // drafts sitting here, and until this existed the only Merge button in the
-  // app was on the queue screen, which this view has no way back to. `key`
-  // bumps on every open so the dialog remounts with fresh answers (what
-  // merges in, which draft is master, whose entries win) rather than the
-  // last merge's.
+  // The merge review dialog (see MergeListingsDialog). Duplicates don't only
+  // turn up inside one batch: a seller who photographed the same vase on two
+  // different days has two drafts sitting here, and the batch screen — where
+  // the only Merge button in the app used to live — is a screen this view has
+  // no way back to. It reviews a batch through this grid now, so there is one
+  // Merge either way. `key` bumps on every open so the dialog remounts with
+  // fresh answers (what merges in, which draft is master, whose entries win)
+  // rather than the last merge's.
   const [merge, setMerge] = useState({ open: false, drafts: [], candidates: [], key: 0 });
 
   const q = search.trim().toLowerCase();
+  // The batch screen's scope. A Set of ids rather than the batch's own copies
+  // of the listings: the rows here are the SAVED drafts, so a title fixed in
+  // the editor (or a category picked on another screen) is on the card the
+  // moment the listings refresh lands, instead of the copy the batch job
+  // happened to hand back.
+  const scope = only ? new Set(only.map(String)) : null;
   const drafts = listingsState.items
     .filter(isDraft)
+    .filter((i) => !scope || scope.has(String(i.id)))
     .filter((i) => !q
       || (i.listing?.title || i.title || "").toLowerCase().includes(q)
       || (i.listing?.brand || "").toLowerCase().includes(q)
@@ -161,7 +188,7 @@ export function DraftsStrip({ search = "" }) {
   const selectedDrafts = drafts.filter((d) => sel[d.id]);
   // A draft eBay would refuse can't be published from here — the per-card
   // Publish button is disabled and says which field is holding it (see
-  // blockers.js, the same rules the editor and the bulk queue use). Bulk
+  // blockers.js, the same rules the editor uses). Bulk
   // publish holds the same line: those drafts are left selected and counted,
   // not fired off to fail one at a time.
   const readyToPublish = selectedDrafts.filter(
@@ -267,30 +294,42 @@ export function DraftsStrip({ search = "" }) {
     return published;
   };
 
-  const publishSelected = async () => {
-    if (!selectedDrafts.length) {
-      toast("Nothing selected to publish.", { kind: "warning" });
+  /* Publish a set of drafts: one request each (eBay's API is per-item),
+     behind ONE confirm for the whole set — the point of a batch is not
+     answering the same question twenty times.
+
+     Shared by "Publish selected" (the ticked ones) and the batch screen's
+     "Publish all", which used to be a second copy of this loop over in the
+     bulk queue: same job, its own confirm, its own counting, its own wording
+     for a refusal, and no send-off on the cards that went live. */
+  const publishRun = async (picked, { all = false } = {}) => {
+    if (!picked.length) {
+      toast(all ? "No drafts to publish." : "Nothing selected to publish.",
+        { kind: "warning" });
       return;
     }
-    const notReady = selectedDrafts.length - readyToPublish.length;
-    if (!readyToPublish.length) {
-      toast(`${notReady === 1 ? "That draft has" : `All ${notReady} selected drafts have`} fields eBay won't accept without — open them to see which.`,
+    const ready = picked.filter(
+      (d) => ebayBlockers(d.listing || {}, { targets: effectiveTargets }).length === 0);
+    const notReady = picked.length - ready.length;
+    const these = all ? "drafts" : "selected drafts";
+    if (!ready.length) {
+      toast(`${notReady === 1 ? "That draft has" : `All ${notReady} ${these} have`} fields eBay won't accept without — open them to see which.`,
         { kind: "warning" });
       return;
     }
     if (!(await confirm({
-      title: `Publish ${readyToPublish.length} draft${readyToPublish.length === 1 ? "" : "s"} live?`,
+      title: `Publish ${all ? "all " : ""}${ready.length} draft${ready.length === 1 ? "" : "s"} live?`,
       message: `Each goes straight to ${targetNames}.`
         + (notReady
-          ? ` ${notReady} of the ${selectedDrafts.length} selected ${notReady === 1 ? "is" : "are"} still blocked by a field eBay requires, and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
+          ? ` ${notReady} of the ${picked.length}${all ? "" : " selected"} ${notReady === 1 ? "is" : "are"} still blocked by a field eBay requires, and will stay ${notReady === 1 ? "a draft" : "drafts"}.`
           : ""),
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0, unconfirmed = 0;
     const reasons = [];
-    setBulkProgress({ done: 0, total: readyToPublish.length });
+    setBulkProgress({ done: 0, total: ready.length });
     try {
-      for (const item of readyToPublish) {
+      for (const item of ready) {
         const out = await publishItem(item);
         if (out.published) ok++;
         // A publish nobody got an answer to is its own outcome. Counting it
@@ -328,6 +367,13 @@ export function DraftsStrip({ search = "" }) {
       + (notReady ? ` ${notReady} skipped — blocked by a field eBay requires.` : ""),
       { kind: failed || unconfirmed || notReady ? "warning" : "success" });
   };
+
+  const publishSelected = () => publishRun(selectedDrafts);
+  // Every draft the grid is SHOWING — scoped to the batch on the batch
+  // screen, narrowed by the search box on the Sell screen. Same rule as
+  // publish-selected and delete-selected: a button here never acts on a
+  // draft that is off screen.
+  const publishEvery = () => publishRun(drafts, { all: true });
 
   const deleteSelected = async () => {
     if (!selectedDrafts.length) return;
@@ -444,6 +490,19 @@ export function DraftsStrip({ search = "" }) {
             {!selecting && (
               <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
                 <CheckSquare aria-hidden /> Select
+              </Button>
+            )}
+            {/* The batch screen's ending: everything it drafted, live, on one
+                tap. Off on the Sell screen, where "every draft you have" is
+                not a set anybody means to publish in one go. */}
+            {publishAll && !selecting && (
+              <Button variant="primary" size="sm" onClick={publishEvery}
+                disabled={!!bulkProgress} loading={!!bulkProgress}
+                title="Publish every draft shown here — no ticking required.">
+                <Rocket aria-hidden />
+                {bulkProgress
+                  ? `Publishing ${Math.min(bulkProgress.done + 1, bulkProgress.total)} of ${bulkProgress.total}…`
+                  : `Publish all (${drafts.length})`}
               </Button>
             )}
           </div>

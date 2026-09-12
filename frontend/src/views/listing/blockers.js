@@ -3,7 +3,7 @@
    A seller looking at a listing that won't publish has exactly one question:
    which field do I go fix? Every readiness surface in the app used to answer
    it from its own local heuristic — the editor's per-card completion map, the
-   drafts strip's `missingRequired`, the bulk queue's "Needs info" pill — and
+   drafts grid's `missingRequired` and its amber "needs info" card — and
    they disagreed. A draft could show three cards "needing attention" and
    publish fine, or show none and be rejected by eBay for a title one
    character over. Answering the question well starts with answering it in one
