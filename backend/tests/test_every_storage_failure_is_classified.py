@@ -246,6 +246,12 @@ WHY_A_BLANK_IS_SAFE = {
         "None means not uploaded, and the offload verifies presence before unlinking",
     "restore":
         "False falls back to the local copy or a re-upload, never to 'no photo'",
+    "download":
+        "the streamed twin of restore, for a video too big to hold in memory. "
+        "Its one caller (listing_sync.video_file_for) answers None, and the "
+        "one caller of THAT records 'add it again' on the video rather than "
+        "dropping it: a video that cannot be fetched back is never read as a "
+        "listing that has none, and the publish goes ahead without it",
     "exists":
         "False only ever causes another attempt; nothing reads it as 'deleted'",
     "delete":

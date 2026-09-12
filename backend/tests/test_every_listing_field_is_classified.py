@@ -61,7 +61,14 @@ SELLER_FIELDS = {
     #     mint one to silence the "Lower prices" group. Deliberately NOT
     #     server-owned, whose rule is that the STORED value wins — that would
     #     stop the stamp moving on the one write entitled to move it.
+    #   videos -> state.restore_video_state. The seller owns exactly one thing
+    #     about a video: WHICH file it is, which is why removing one has to be
+    #     a save that omits it and why the field cannot be server-owned. What
+    #     they do not own is anything inside an entry they kept — the id eBay
+    #     minted, where moderation got to — so the merge is per video and
+    #     keyed on the file rather than all-or-nothing on the field.
     "marketplaces", "ebay_listing_id", "dirty_fields", "price_lowered_at",
+    "videos",
 }
 
 

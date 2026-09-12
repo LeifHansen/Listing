@@ -434,6 +434,15 @@ if EBAY_ENV not in ("sandbox", "production"):
 _SANDBOX = EBAY_ENV != "production"
 EBAY_API_BASE = "https://api.sandbox.ebay.com" if _SANDBOX else "https://api.ebay.com"
 EBAY_AUTH_BASE = "https://auth.sandbox.ebay.com" if _SANDBOX else "https://auth.ebay.com"
+# The Media API — the one eBay API that does NOT live on api.ebay.com. Videos
+# are uploaded through apim.ebay.com/commerce/media/v1_beta, and pointing the
+# calls at EBAY_API_BASE above gets a 404 that reads exactly like a bad path.
+# It is the same OAuth token and the same sell.inventory scope; only the host
+# differs, which is why it is written down here rather than guessed at the
+# call site (see services/ebay_video.py).
+EBAY_MEDIA_BASE = ("https://apim.sandbox.ebay.com/commerce/media/v1_beta"
+                   if _SANDBOX else
+                   "https://apim.ebay.com/commerce/media/v1_beta")
 
 # Scopes needed to create listings, read/fetch business policies, run Promoted
 # Listings, and read the connected seller's identity (so we can show WHICH eBay

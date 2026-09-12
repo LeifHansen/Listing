@@ -50,6 +50,29 @@ REMOTE_OWNED = ("watch_count", "sold_quantity", "view_url", "sold_price",
                 "has_variations")
 
 
+# TRACKED fields this merge deliberately does not reconcile.
+#
+# `videos` is the only one, and it is here because eBay's answer about a
+# listing's video is INCOMPLETE BY DESIGN for up to 48 hours: GetItem reports
+# a video only once moderation has passed it. Reconciling against that costs
+# something in both directions and gains nothing:
+#
+#   * Treated as eBay's answer while a video is still in review, an empty
+#     remote reads as "the seller removed it" and deletes the record of a
+#     video that is on its way up -- the id, the local file, and any chance of
+#     the next publish naming it.
+#   * When both sides do agree, the merge takes eBay's copy of the field --
+#     which is an id and a status, with no `file` and no `size`. The video
+#     stays on the listing and the seller's own preview of it disappears.
+#
+# Nothing is lost by staying out. The local record already carries eBay's id
+# and eBay's status (the upload records one, the status poll refreshes the
+# other), so the two sides do not need a merge to agree; and a revise carries
+# <VideoDetails> only when the seller actually edited it, so eBay's copy is
+# never overwritten by staying quiet. See listing_sync._LIVE_FIELDS, which
+# leaves it out for the same reason.
+NOT_RECONCILED = frozenset({"videos"})
+
 # The description is the one TRACKED field the two sides hold in different
 # FORMS. This app keeps it as plain text — the AI drafts it that way and the
 # editor is a textarea — while eBay renders <Description> as HTML, so the
@@ -163,6 +186,8 @@ def three_way(local: Listing, shadow: Optional[dict], remote: dict,
         return out
 
     for name in TRACKED:
+        if name in NOT_RECONCILED:
+            continue
         if name not in remote:
             # eBay did not report this field, so it says nothing about it.
             continue
@@ -206,9 +231,12 @@ def shadow_from(remote: dict) -> dict:
 
     Only the reconcilable fields: the shadow exists to answer "did this
     change since we last agreed", and carrying live counters in it would make
-    every watch-count tick look like an edit.
+    every watch-count tick look like an edit. NOT_RECONCILED is left out for
+    the matching reason -- a base nothing compares against is noise that the
+    next reader has to work out is unused.
     """
-    return {name: remote[name] for name in TRACKED if name in remote}
+    return {name: remote[name] for name in TRACKED
+            if name in remote and name not in NOT_RECONCILED}
 
 
 # Field names as a seller would say them. `package_weight_lb` is a column

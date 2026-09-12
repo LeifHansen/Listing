@@ -58,6 +58,17 @@ EXEMPT = {
         "The public photo URL. eBay's own ingestion fetches it with no "
         "cookie, so it cannot require a session; `name` is contained "
         "against traversal and nothing else is read.",
+    "media_video":
+        "The listing's video, played by a <video> tag. Same constraint as "
+        "`media` above and a DIFFERENT reason, so it is written out rather "
+        "than borrowed: eBay never fetches this URL (a video is PUSHED "
+        "through the Media API and referenced by the id eBay mints, not "
+        "pulled from a link), but the native shell authenticates with a "
+        "bearer token and a <video src> carries no header — so requiring a "
+        "session would leave every video unplayable in the app. It exposes "
+        "nothing a session id did not already expose: the same id serves "
+        "that listing's photos from `media`, and `name` is checked against "
+        "storage.safe_video_name before any path is built from it.",
     "tokens_confirm":
         "`session_id` is a Stripe Checkout session, not a listing session — "
         "a different namespace. It requires a login and confirms against "
