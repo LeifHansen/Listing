@@ -627,9 +627,16 @@ def _condition_descriptors_from(item: ET.Element) -> list[dict]:
     return out
 
 
-def _listing_format(listing_type: str, has_bin: bool) -> str:
+def _is_auction_type(listing_type: str) -> bool:
+    """eBay's own name for a listing that takes bids. "Chinese" is the
+    standard auction, with or without a Buy It Now riding on top of it;
+    everything else on a seller's active list is fixed price."""
     lt = (listing_type or "").lower()
-    if lt.startswith("chinese") or lt == "auction":
+    return lt.startswith("chinese") or lt == "auction"
+
+
+def _listing_format(listing_type: str, has_bin: bool) -> str:
+    if _is_auction_type(listing_type):
         return "AUCTION_BIN" if has_bin else "AUCTION"
     return "FIXED_PRICE"
 
@@ -882,6 +889,27 @@ def sold_sales(token: str, limit: Optional[int] = None,
     return out
 
 
+def _auction_ends_at(item: ET.Element) -> str:
+    """When this listing stops taking bids, as eBay's ISO-8601 UTC instant —
+    "" for anything that is not an auction.
+
+    The type test is the whole point. eBay reports ListingDetails/EndTime for
+    every active listing, and on a fixed-price one it is the Good 'Til
+    Cancelled renewal date: a month out, moved by eBay itself, and nothing
+    anybody is racing. A countdown drawn from that would be a deadline the
+    app invented. An auction's EndTime is the real thing — the second the
+    highest bid wins — so it is the only one carried.
+
+    The instant, not eBay's TimeLeft duration ("P1DT5H12M30S"), which is only
+    true as of the moment the response left eBay: a clock started from it
+    runs slow by however long the sweep, the cache and the page load took,
+    and this one is read again by a browser minutes later.
+    """
+    if not _is_auction_type(_text(item, "ListingType")):
+        return ""
+    return _text(item, "ListingDetails/EndTime")
+
+
 # One sweep of the active list wants the whole list and nothing else from it,
 # so it takes eBay's maximum page size rather than the gentler _PAGE_SIZE the
 # id walks use: 25 pages of 200 reaches 5,000 live listings instead of 2,500.
@@ -891,15 +919,15 @@ _SWEEP_PAGE_SIZE = 200
 def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
                           status: Optional[dict] = None) -> dict[str, dict]:
     """{item_id: {"watchers": n, "offers_received": n, "bids": n,
-    "high_bid": float|None, "bid_currency": str}} for every active listing on
-    the account. Backs the metrics overlay — the Sell APIs expose none of
-    these numbers, and routing the call through here keeps the endpoint
-    env-aware (sandbox vs production) with the shared error handling.
+    "high_bid": float|None, "bid_currency": str, "ends_at": str}} for every
+    active listing on the account. Backs the metrics overlay — the Sell APIs
+    expose none of these numbers, and routing the call through here keeps the
+    endpoint env-aware (sandbox vs production) with the shared error handling.
 
     ONE walk carries all of them, because one response already does:
-    WatchCount, BestOfferDetails/BestOfferCount and SellingStatus/BidCount
-    sit on the same <Item>. Asking twice would spend two of the account's
-    Trading calls on a response we already had.
+    WatchCount, BestOfferDetails/BestOfferCount, SellingStatus/BidCount and
+    ListingDetails/EndTime sit on the same <Item>. Asking twice would spend
+    two of the account's Trading calls on a response we already had.
 
     `bids` is eBay's BidCount — how many bids an AUCTION has taken, which is
     the auction's own version of "a buyer is waiting": unlike a Best Offer a
@@ -910,6 +938,10 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
     is only read once there IS a bid: on an auction with none CurrentPrice
     is the starting price, and on a fixed-price listing it is the price — a
     number a card would otherwise show as money somebody put down.
+
+    `ends_at` is when the bidding stops, and it is what the card counts down
+    to. Auctions only — see _auction_ends_at for why a fixed-price listing's
+    EndTime is not a deadline.
 
     Pass a `status` dict to learn whether the walk finished: it gets
     {'complete': bool}, false when eBay says there are more pages of active
@@ -956,6 +988,7 @@ def active_listing_counts(token: str, max_pages: int = _MAX_PAGES,
                     "high_bid": _float(item, "SellingStatus/CurrentPrice") if bids else None,
                     "bid_currency": ((price_el.get("currencyID") or "")
                                      if price_el is not None else ""),
+                    "ends_at": _auction_ends_at(item),
                 }
         total_pages = _int(cont, "PaginationResult/TotalNumberOfPages", 1)
         if page >= max(1, total_pages) or not items:
