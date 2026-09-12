@@ -488,7 +488,12 @@ ART_TAG_SCAN_RULE = """
   grey scrawl a few pixels tall at this size and the single most valuable
   thing in the photo -- box it anyway, generously, with the whole bottom
   margin if you cannot tell where in it the writing is; that is what the zoom
-  is for.
+  is for. When a photo shows the BACK of a canvas or a frame, that side is
+  all marks and each is worth a box: any writing on the fabric or the bars
+  -- an artist's inscription, a title, a date, a number, an old price -- as
+  "signature" when it reads as a name and "label" otherwise; the mill's
+  stamp on a stretcher bar or along the canvas selvedge as "stamp"; and
+  every gallery, exhibition, framer or auction label as "label".
 """
 
 # What the zoom-and-transcribe pass writes for art, one mark per line, so the
@@ -506,6 +511,11 @@ ART_TRANSCRIBE_LINES = (
     "printed credit, copyright or publisher line verbatim, with its "
     "year>', 'LABEL: <each gallery, framer, publisher, auction or "
     "certificate label, verbatim>', 'PLATE MARK: <present / not visible>', "
+    "'SUPPORT: <a mill or grade stamp on a stretcher bar or a canvas "
+    "selvedge, verbatim -- it names who made the canvas, never who painted "
+    "it>', 'VERSO: <which side of the piece this crop shows, and every "
+    "inscription, label, stencil, inventory or lot number on the back, "
+    "verbatim>', "
     "'SURFACE: <brushstrokes and canvas weave / flat ink layers / grainy "
     "crayon texture / inkjet spray / halftone dots / cannot tell>'. A mark "
     "you looked for and could not see is a line too ('EDITION: not visible "
@@ -513,6 +523,102 @@ ART_TRANSCRIBE_LINES = (
     "it into a name the letters do not spell; when it points to a known "
     "artist, say so on the same line, as a reading to confirm.\n\n"
 )
+
+
+# --- the blank canvas that is the back of a painting ------------------------
+#
+# A seller photographed a stretched canvas from behind -- pale fabric, wooden
+# stretcher bars around it, the fabric folded and stapled over the edges,
+# "Gronda" stamped along the bottom bar -- and the app drafted "Gronda Blank
+# Stretched Artist Canvas on Wood Frame Fabric Wrapped Edges", $17.99, with
+# the canvas mill as the brand. Every word of it was read off the photo
+# correctly and the listing was still worthless, because the photo was THE
+# BACK OF A PAINTING and the picture was on the other side.
+#
+# Nobody lists one used blank canvas. They are a few dollars new, they sell
+# in shrink-wrapped multipacks, and a second-hand one costs more to ship than
+# it fetches -- so a listing for one is never the right answer, and "blank
+# canvas" is not a draft this app has any business writing. What people
+# photograph is the thing they own and mean to sell, and when that thing is a
+# painting the back of it is in the set: the back is where the artist wrote
+# the title, where the gallery stapled its label, and where every guide tells
+# a seller to look. The back of a stretched painting looks exactly like a
+# blank canvas, because that is what it is -- unpainted fabric -- and the
+# mill's stamp is on the bar of a canvas whether or not anyone ever painted
+# on the front of it.
+#
+# So the judgement this rule asks for is not "is the canvas blank", which
+# from behind it always is, but WHICH SIDE AM I LOOKING AT -- and that is
+# written plainly in the photo: stretcher bars standing proud around a
+# recessed field of fabric, staples and folded corners, a cross-brace, a
+# hanging wire. All of those are the back. A front is flush, and a front has
+# a picture.
+#
+# The remedy is the one ART_RULE already uses for a margin hidden under a
+# mat: read what the back does say -- inscription, title, date, labels,
+# numbers, all of which are worth more than the fabric -- claim nothing about
+# a picture nobody has photographed, and ask for the front by name. The same
+# error has a framed twin (the back of a framed picture drafted as an empty
+# frame), and it is refused here on the same terms.
+BLANK_CANVAS_RULE = """
+- A BLANK CANVAS IS THE BACK OF A PAINTING. When the photos show stretched
+  fabric with no picture on it -- bare canvas or linen over wooden stretcher
+  bars -- YOU ARE LOOKING AT THE BACK OF A WORK OF ART. You are not looking
+  at an unpainted canvas for sale, and "blank canvas", "unused canvas",
+  "artist canvas" or "canvas panel" is NEVER the item. A blank canvas is a
+  few dollars of art supply that nobody photographs one at a time to sell;
+  a painting photographed from behind is an everyday thing, because the back
+  is where the artist wrote the title and the gallery put its label. If you
+  find yourself about to draft a blank canvas, you have the piece BACK TO
+  FRONT -- say so and treat it as art.
+  * YOU ARE LOOKING AT THE BACK when you can see any of these, and one is
+    enough: four wooden STRETCHER BARS standing proud around a field of
+    fabric that is RECESSED behind them (from the front a canvas is flush
+    and carries a picture); the fabric FOLDED, STAPLED or TACKED over the
+    edges and pleated at the corners; a CROSS-BRACE or centre strut across
+    the opening; keys or wedges in the corners; HANGING HARDWARE -- wire,
+    D-rings, screw eyes, sawtooth hanger, bumper pads; a mill's stamp or
+    grade label on a bar or on the fabric; paint that has WRAPPED OVER the
+    tacking edge, or a faint bloom of the picture pushing through the weave
+    from the other side; dust, toning, foxing or a grubby edge that no new
+    canvas has.
+  * THE MILL IS NOT THE BRAND AND NOT THE ARTIST. Gronda, Fredrix, Winsor &
+    Newton, Masterpiece, Belle Arti, Claessens, Utrecht, Blick, Art
+    Alternatives and the rest stamp the bar or the selvedge of EVERY
+    stretched canvas they sell, painted or not. That stamp names who made
+    the SUPPORT the artist bought. Never lead a title with it, never put it
+    in brand, and never let it become the maker of the work. Record it as
+    the support ("stretched canvas, Gronda mill stamp on the stretcher") --
+    it dates and places the canvas, which is worth having, and it is not who
+    painted it.
+  * READ THE BACK, IT IS THE MOST INFORMATIVE SIDE. Transcribe verbatim
+    every inscription in pencil, ink, paint or chalk (artists title, date,
+    sign, number and price their work on the verso), every gallery,
+    exhibition, framer, auction or supplier label, every inventory or lot
+    number, any stencil, customs mark or old price. Hand-written on the back
+    of a canvas is exactly where a painting's title and artist usually are
+    when the front is unsigned, so this is a close look, not a glance.
+  * THE FRONT IS THE ITEM AND YOU HAVE NOT SEEN IT. Draft nothing about the
+    picture -- not the subject, not the palette, not the medium, not
+    "abstract", not "original" and not "print" -- from a photo of the back.
+    Say in raw_observations which side each photo shows. If NO photo shows
+    the front, say so plainly, keep confidence low, and ask for it in
+    missing_info by name: "photograph the FRONT of the painting, the whole
+    picture, straight on", "photograph the lower corners of the front close
+    up for a signature", "photograph any writing or labels on the back".
+  * THE SAME ERROR WEARS A FRAME. The back of a framed piece -- brown paper
+    dust cover, hanging wire, turn buttons or points, framer's label -- is
+    NOT an empty picture frame, and a mat with nothing visible in the window
+    is not an empty mat. An empty frame is a frame photographed from the
+    FRONT with nothing in it. Same rule: read the back, ask for the front.
+  * THE ONE REAL EXCEPTION is a canvas that is plainly RETAIL STOCK, and it
+    announces itself: still in shrink-wrap, a barcode or price sticker, a
+    printed size label, a corner protector, a multipack or several identical
+    canvases in the frame, photographed face-on with an unmistakably blank
+    white primed front. Only then is a blank canvas the item, and it is a
+    low-value art supply -- list it as one, by its mill and size, and never
+    at the price a painting would fetch.
+"""
 
 
 LISTING_SCHEMA = """
@@ -755,7 +861,7 @@ Rules:
   off. Include a tag even when you can't read it at this size — it will be
   zoomed in on later. At most 6 entries, best candidates first; no tags at
   all -> [].
-""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE
+""" % ", ".join(EBAY_CONDITIONS) + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE
 # Appended rather than interpolated so each rule's text is one string with one
 # home: the tag-scan, tag-transcribe and specifics passes in claude_ai read the
 # same constants, and a rule that exists twice is a rule that agrees with
