@@ -18,9 +18,14 @@ made the group smaller without breaking the loop.
 
 Membership is now the count of filled item specifics -- what the button
 actually fills. A listing whose specifics are blank earns the fill; one whose
-specifics are filled earns a nudge to LOOK ("Check details"), whatever notes
-it still carries. The fill still drops the notes it answers, so a draft never
-asks for what its own draft-time fill settled.
+specifics are filled earns NOTHING, whatever notes it still carries. The
+nudge to LOOK ("Check details") that used to stand in that second slot is
+gone too, for the same reason one step on: a note is what the AI declined to
+invent, so no press can clear it and the group could only ever be wallpaper
+-- 203 rows on the store that reported it. Enrich all retires the leftovers
+on the listings it fills; the rest stay on the listing, in the editor, where
+the person holding the item can settle them. The fill still drops the notes
+it answers, so a draft never asks for what its own draft-time fill settled.
 """
 from __future__ import annotations
 
@@ -86,16 +91,15 @@ def test_a_thin_set_of_specifics_still_earns_the_fill():
 
 
 @pytest.mark.parametrize("note", ADVICE + FOR_A_PERSON)
-def test_a_filled_listing_earns_a_look_not_a_button(note):
+def test_a_filled_listing_is_left_alone_whatever_it_carries(note):
     """The loop, closed. Whatever the note says, a listing whose specifics
     are filled has nothing for the fill to add -- so it is never offered a
-    button that would charge for an empty pass and leave the note in place."""
+    button that would charge for an empty pass and leave the note in place,
+    and it is not put on a second list either."""
     recs = _recs({"title": "Print", "item_specifics": _filled(),
                   "missing_info": [note]})
     assert "specifics" not in recs, note
-    assert recs["verify"]["label"] == "Check details"
-    assert recs["verify"]["action"] == "open"
-    assert "1 thing the AI left" in recs["verify"]["reason"]
+    assert "verify" not in recs, note
 
 
 def test_a_filled_listing_with_no_notes_is_no_nudge():
@@ -120,10 +124,12 @@ def test_a_specific_with_no_value_does_not_count_as_filled():
     assert "specifics" in recs
 
 
-def test_the_wording_counts():
+def test_a_pile_of_notes_is_still_not_a_suggestion():
+    """Three notes are no more of a chore list than one. The count of them
+    used to be the group's badge; now nothing counts them."""
     recs = _recs({"title": "Print", "item_specifics": _filled(),
                   "missing_info": ADVICE[:3]})
-    assert "3 things the AI left" in recs["verify"]["reason"]
+    assert "verify" not in recs and "specifics" not in recs
 
 
 # ------------------------------------------------- the notes the fill drops

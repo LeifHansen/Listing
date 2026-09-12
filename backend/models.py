@@ -244,10 +244,17 @@ class Listing(BaseModel):
     description: str = ""  # HTML-safe plain text / light HTML
     price: Optional[float] = None
     # What the seller PAID for the item (Shop Mode "Buy", or typed in later).
-    # Auto-filled from a visible price sticker when the AI can read one;
-    # optional — profit reporting works only for items that have it.
-    # Profit (once sold) = sale price − purchase_price − fees.
+    # Auto-filled from a visible RESALE sticker — thrift, consignment, outlet —
+    # when the AI can read one; optional: profit reporting works only for items
+    # that have it. Profit (once sold) = sale price − purchase_price − fees.
     purchase_price: Optional[float] = None
+    # MSRP: the price printed on the BRAND'S OWN hang tag, swing ticket or box,
+    # read off the photos. A different fact from purchase_price and it must
+    # stay one — the seller did not pay it. It is the price anchor under an
+    # item that is still new, which is the whole reason it is stored: a shirt
+    # whose tag says $130 is not a $49 shirt, and the draft that said it was
+    # had thrown that number into purchase_price and stopped looking at it.
+    retail_price: Optional[float] = None
     currency: str = "USD"
     quantity: int = 1
     # Listing format: FIXED_PRICE (Buy It Now, default), AUCTION, or AUCTION_BIN
@@ -328,12 +335,12 @@ class Listing(BaseModel):
     #
     # `missing_info` is what the AI declined to invent -- a measurement, a
     # signature to confirm, an exact model number. It is right to leave those
-    # to a person, and it is right that "Check details" says so. What was
-    # missing is any way for the person to ANSWER: the group is rebuilt from
-    # the listing on every load, so a seller with 177 of them faced a list
-    # that could only shrink one hand-checked listing at a time and would not
-    # otherwise move. Their reply: "I want all of this done and submitted to
-    # eBay with one click, not individually."
+    # to a person. It was NOT right to make a dashboard group out of them:
+    # "Check details" was rebuilt from the listing on every load, so a seller
+    # with 203 of them faced a list that could only shrink one hand-checked
+    # listing at a time and would not otherwise move. Their reply: "I want all
+    # of this done and submitted to eBay with one click, not individually."
+    # The group is gone; this field is how the one press settles its half.
     #
     # So this is that reply, written down. The notes STAY on the listing --
     # nothing is deleted, and the editor still shows them -- but the chore

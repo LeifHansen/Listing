@@ -45,6 +45,7 @@ from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
 
 from ..config import log
 from ..storage import natural_key
+from . import artwork
 
 # Phone uploads over flaky connections arrive missing their last few bytes
 # surprisingly often ("image file is truncated (N bytes not processed)").
@@ -95,7 +96,15 @@ _ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "192") or 192)
 # A matte that keeps less than this share of the frame found no item — a
 # close-up texture, a dark item on a dark table — and shipping it would ship
 # a white square. The photo is kept as shot instead, and says so.
-_MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
+#
+# It sat at 0.02 and refused a necklace. A thin product covers very little of
+# the frame it is laid out in and is still perfectly obviously an item: run
+# through the real model, a chain on a sweep scores 0.015, a belt 0.052, a
+# bangle 0.065. What "found nothing" actually scores is not near those — an
+# empty backdrop is 0.0000, a close-up of fabric 0.0009, a speck of dust
+# 0.0017. The two populations are an order of magnitude apart and the floor
+# was sitting on the wrong side of the gap; it now sits in the middle of it.
+_MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.005") or 0.005)
 
 # --- and whether what it kept is an OBJECT ----------------------------------
 #
@@ -133,6 +142,15 @@ _MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.02") or 0.02)
 # comment is about.
 _MIN_LARGEST_REGION = float(os.getenv("REMBG_MIN_LARGEST_REGION", "0.6") or 0.6)
 _MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
+# The same question asked of a matte that IS one object, where it is not about
+# scatter — one object cannot be scattered — but about whether the object has
+# any substance at all. See _kept_is_the_product for why the two cannot share
+# a number: at 0.3 a necklace (0.20), a belt (0.12) and a guitar (0.20) are
+# all refused, and what deserves refusing is the wisp the model traces across
+# a close-up of fabric, which fills 0.01 of its box. The floor sits between
+# them, nearer the wisp.
+_MIN_BBOX_FILL_ONE_OBJECT = float(
+    os.getenv("REMBG_MIN_BBOX_FILL_ONE", "0.05") or 0.05)
 
 # --- ...but one PRODUCT is not always one object ----------------------------
 #
@@ -401,18 +419,48 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
 def _kept_is_the_product(total: int, regions: list, box_fill: float) -> bool:
     """Whether what the matte kept looks like the thing being sold.
 
-    One solid blob filling its own box is the common case and answers yes
-    immediately. Otherwise the pair-or-set question above — a few compact
-    objects, together accounting for nearly everything kept.
+    One solid blob is the common case and answers yes immediately. Otherwise
+    the pair-or-set question above — a few compact objects, together
+    accounting for nearly everything kept, and each filling its own box.
     """
     if not total or not regions:
         return False
-    # Whatever it is, it has to fill the box it sits in. See above: this is
-    # the clause that refuses a matte spread thinly across the frame, and it
-    # is unchanged.
-    if box_fill < _MIN_BBOX_FILL:
+    one_object = regions[0][0] / total >= _MIN_LARGEST_REGION
+    # Box fill is the SCATTER question, and it is asked where scatter is
+    # possible — which is not everywhere.
+    #
+    # It was asked of every matte, as a precondition on the lot, and what that
+    # refuses is not only scatter: it refuses any product that is THIN. A
+    # necklace laid out in a curve fills 0.20 of the box around it, a belt
+    # laid diagonally 0.12, a guitar 0.20, a bangle 0.29 against a floor of
+    # 0.30 — every one of them a perfect matte of one connected object,
+    # correctly found, and every one of them thrown away with "the matte kept
+    # is not the product". Chains, straps, cables, tools, instruments, hoops
+    # and anything photographed at an angle are all that shape, and they are
+    # a large part of what resells. The seller is told no item was found.
+    #
+    # Which is not what the measure was written for. Read its own case back:
+    # a tree at one edge and a boat at the other span nearly the whole photo
+    # while covering little of it. That is a statement about PIECES lying far
+    # apart, and every fixture in test_the_cutout_does_not_eat_the_artwork
+    # that it exists to refuse — the brushstrokes, the tree and the boat, the
+    # tree and boat and sketch, two fragments in opposite corners — is two or
+    # more pieces. A matte that is one object cannot be spread across the
+    # frame; it can only be long, and long is a shape products come in.
+    #
+    # So the precondition holds exactly where it always did the work: on a
+    # matte that is NOT one object, where it is what keeps the pair-or-set
+    # rule below from letting a painting's pieces through.
+    #
+    # One object still has to be an OBJECT, though, and the floor for that is
+    # a different number rather than no number. Handed a close-up of fabric
+    # the model traces a wisp across the frame — one region holding 99% of
+    # what was kept, filling 0.01 of the box around it, and about half a
+    # percent of the photo. That is the "white square" case this file refuses
+    # on principle, and it is one object by every measure here.
+    if box_fill < (_MIN_BBOX_FILL_ONE_OBJECT if one_object else _MIN_BBOX_FILL):
         return False
-    if regions[0][0] / total >= _MIN_LARGEST_REGION:
+    if one_object:
         return True
     objects = [r for r in regions if r[0] >= regions[0][0] * _COMPANION_SHARE]
     return (len(objects) <= _MAX_OBJECTS
@@ -578,6 +626,55 @@ def _fill_interior(alpha: Image.Image) -> Image.Image:
 # the noise across one seamless backdrop is a handful.
 _HOLE_COLOUR_DIST = float(os.getenv("REMBG_HOLE_COLOUR_DIST", "40") or 40)
 
+# --- ...and when the colour cannot tell them apart --------------------------
+#
+# The colour question above compares two MEAN colours, and there is one case
+# where that is not enough — the case this whole file's shape guards were
+# written for, arriving by a different door.
+#
+# A framed watercolour on a neutral backdrop. The model keeps the frame and
+# deletes everything inside it; the interior is one enclosed region, 61% as
+# large as the entire matte. Averaged, a white mount plus a pale sky plus a
+# green tree comes to (203, 219, 225), which is 27 from the backdrop's
+# (211, 208, 201) — inside _HOLE_COLOUR_DIST, so it is read as the backdrop
+# showing through and thrown away. What ships is an EMPTY PICTURE FRAME on
+# white, and it ships silently: coverage 0.19, solidity 0.95, one region
+# holding 99% of what was kept, box fill 0.54. Every gate in this file passes
+# a ring, because a ring is a perfectly respectable shape.
+#
+# Size alone cannot rescue it — measured on this file's own fixtures, the
+# artwork's hole is 0.61 of the matte while a wreath's is 0.76 and an empty
+# frame's 1.14, and those two are real holes that must stay holes.
+#
+# What separates them is that a backdrop seen through a gap IS the backdrop:
+# the same seamless sweep, the same paper, the same table, and therefore the
+# same flatness. Artwork is not flat, and neither is anything else that gets
+# photographed inside a border — a print, a poster, a book cover, a trading
+# card, a label on a box. So the second question is asked of SPREAD rather
+# than of colour: how varied is this region, against how varied the backdrop
+# is in this same photo. As a ratio, so that a photo shot on grass or a rug
+# answers it on its own terms rather than against a number picked here.
+#
+# The same fixtures: mug handle 0.50, wreath 0.39, empty frame 0.06 — every
+# genuine hole at or below half the backdrop's own spread — against the
+# watercolour's 3.37. The floor sits at 1.5, which is well clear of both.
+_HOLE_FLAT_RATIO = float(os.getenv("REMBG_HOLE_FLAT_RATIO", "1.5") or 1.5)
+# ...and a ratio needs a floor under the thing it divides by, or it says
+# nothing at all. A backdrop drawn as one flat colour has a spread of zero, so
+# ANY region beats any multiple of it — the anti-aliased rim of a ring's hole
+# scored 2.8x and the ring filled in. A photograph's backdrop is never that
+# flat, but a guard that only holds on photographs is not a guard, so the
+# region must also carry enough detail to be a picture in its own right.
+# Measured: every genuine hole 4.4 or below (mug handle 4.4, wreath 3.7, a
+# ring's hole 2.8, an empty frame 0.6), the artwork 31.5.
+_HOLE_DETAIL_FLOOR = float(os.getenv("REMBG_HOLE_DETAIL", "10") or 10)
+# ...asked only of a hole big enough to BE the item's face. A mug's handle is
+# 0.04 of its matte and a basket's weave smaller still; asking this of them
+# would trade a well-understood rule for a statistic taken over a handful of
+# cells. Everything below this share keeps the colour answer it has always
+# had, so openwork stays openwork.
+_HOLE_BIG_SHARE = float(os.getenv("REMBG_HOLE_BIG_SHARE", "0.12") or 0.12)
+
 
 def _mean_rgb(rgb: Image.Image, mask: Image.Image) -> Optional[tuple]:
     """Mean colour of `rgb` over the non-zero pixels of `mask`, or None when
@@ -594,6 +691,18 @@ def _apart(a: Optional[tuple], b: Optional[tuple]) -> float:
     if a is None or b is None:
         return 0.0
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _spread(rgb: Image.Image, mask: Image.Image) -> Optional[float]:
+    """How VARIED `rgb` is over the non-zero pixels of `mask` — the mean of
+    the per-channel standard deviations — or None when the mask is empty.
+
+    A seamless backdrop answers a few units whatever colour it is; anything
+    with a picture on it answers many. See _HOLE_FLAT_RATIO.
+    """
+    if not mask.getbbox():
+        return None
+    return sum(ImageStat.Stat(rgb, mask).stddev[:3]) / 3
 
 
 def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
@@ -688,12 +797,43 @@ def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
         # would paint over a photo on a guess.
         return alpha
 
+    # How varied the backdrop is in THIS photo, and how much of the frame the
+    # matte kept — the two things the big-hole question below is asked
+    # against. Both are measured once, on the same grid as everything else.
+    backdrop_spread = _spread(photo, outside)
+    kept_cells = sum(1 for i in range(sw * sh) if not labels[i])
+
     give_back = bytearray(sw * sh)
+    face = False
     for tag in enclosed:
         patch = Image.frombytes(
             "L", size, bytes(255 if labels[i] == tag else 0
                              for i in range(sw * sh)))
         here = _mean_rgb(photo, patch)
+        # A hole big enough to be the item's own face, carrying more detail
+        # than the backdrop does anywhere in this photo, is not the backdrop
+        # showing through — it is a picture, and the thing it is a picture of
+        # is what the seller is selling. Asked BEFORE the colour tests
+        # because it is the case they cannot answer: a pale artwork inside a
+        # frame averages out to something that reads as a pale backdrop, and
+        # no comparison of means will ever separate those two. See
+        # _HOLE_FLAT_RATIO.
+        cells = regions[tag - 1][0]
+        here_spread = _spread(photo, patch)
+        if (kept_cells and cells >= kept_cells * _HOLE_BIG_SHARE
+                and backdrop_spread is not None and here_spread is not None
+                and here_spread >= _HOLE_DETAIL_FLOOR
+                and here_spread >= backdrop_spread * _HOLE_FLAT_RATIO):
+            log.info("bg-removal: an enclosed region worth %.0f%% of the matte "
+                     "carries %.1fx the backdrop's detail — keeping it as the "
+                     "item's own face, not a hole",
+                     100 * cells / kept_cells,
+                     here_spread / max(backdrop_spread, 0.01))
+            face = True
+            for i in range(sw * sh):
+                if labels[i] == tag:
+                    give_back[i] = 255
+            continue
         if _apart(here, backdrop) <= _HOLE_COLOUR_DIST:
             continue                       # looks like the backdrop: a real hole
         if _apart(here, item) >= _apart(here, backdrop):
@@ -701,6 +841,38 @@ def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
         for i in range(sw * sh):
             if labels[i] == tag:
                 give_back[i] = 255
+    if face:
+        # A picture has no edge in the middle of it.
+        #
+        # Giving the region back is not the whole repair, because the band
+        # around it is not empty — it is hedged. On the watercolour the model
+        # answers about 70 across the inside of the mount: over _ALPHA_LOW, so
+        # those cells are "seen" and belong to no enclosed region at all, and
+        # too ragged for _fill_interior's wholly-covered test to promote. What
+        # _harden then makes of a 70 is a 53, and an eighth of the artwork
+        # ships at a fifth of its opacity — the same white smear the region
+        # itself would have been, in a thinner band.
+        #
+        # Once the photo has said this is a picture inside a border, there is
+        # nothing inside that border for a soft alpha to mean. So the whole
+        # silhouette is made solid: every cell that is not background with a
+        # way out to the frame edge, which is the item's outline FILLED.
+        #
+        # Eroded by the same _INTERIOR_ERODE as everywhere else, so this
+        # reaches the inside and never the outer rim. The rim is where soft
+        # alpha is the matte doing its job, and hardening it would trade a
+        # white smear for a jagged edge.
+        outline = Image.frombytes(
+            "L", size, bytes(0 if labels[i] and regions[labels[i] - 1][1] else 255
+                             for i in range(sw * sh)))
+        for _ in range(_INTERIOR_ERODE):
+            outline = outline.filter(ImageFilter.MinFilter(3))
+        inside = outline.load()
+        for y in range(sh):
+            for x in range(sw):
+                if inside[x, y]:
+                    give_back[y * sw + x] = 255
+
     if not any(give_back):
         return alpha
 
@@ -818,6 +990,50 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
                  _contact_shadow(alpha))
     canvas.paste(rgb, (0, 0), alpha)
+    return canvas
+
+
+# What a photo of ART gets instead of a cutout when its border cannot be
+# found. Same shape as DETAIL_KEPT_AS_SHOT: not an error and not a refusal,
+# just nothing attempted, reported in `bg_error` so the seller is told and the
+# charge comes back.
+ART_NO_BORDER_KEPT_AS_SHOT = (
+    "This is a picture, and its outer edge isn't clearly in the frame — "
+    "cutting to a guessed border would crop the artwork, so it was kept as "
+    "shot.")
+
+
+def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
+    """A PICTURE on white: everything inside its outer border, kept whole.
+
+    The separate path for paintings, prints, posters, drawings, photographs
+    and anything else whose own front surface is an image. It does not call
+    the model at all, and that is the entire point — see services/artwork. A
+    salient-object model handed a photograph OF A PICTURE finds the subject
+    the picture depicts and deletes the artwork around it, which is how a
+    Marcia Alpert gouache reached a listing as the baby out of it, floating on
+    white, with the water and the quilt she painted it on gone.
+
+    None of the guards in this file could have caught that, and none of them
+    is wrong: they read the matte, and the matte of a baby lifted out of a
+    painting is one connected, solid, box-filling region — arithmetically a
+    perfect cutout. The thing that separates it from one is not in the matte.
+
+    So the matte here is a FILLED RECTANGLE, and nothing inside the border is
+    ever examined, let alone removed. None means the border could not be found
+    and the photo must be kept exactly as shot; it never means "try the model
+    instead", which is the failure this exists to prevent.
+    """
+    box = artwork.border(rgb)
+    if box is None:
+        return None
+    alpha = artwork.mask(rgb.size, box)
+    canvas = Image.new("RGB", rgb.size, WHITE)
+    canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
+                 _contact_shadow(alpha))
+    canvas.paste(rgb, (0, 0), alpha)
+    log.info("art cutout: kept the picture whole inside %s of a %dx%d photo",
+             box, rgb.width, rgb.height)
     return canvas
 
 
@@ -958,7 +1174,7 @@ def as_shot(path: Path) -> Path:
 
 
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
-             rotate: int = 0, detail: bool = False) -> dict:
+             rotate: int = 0, detail: bool = False, art: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that finds nothing keeps the photo as shot
     and says so in `bg_error`, so the caller can give the charge back.
@@ -980,7 +1196,15 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     deletes the garment behind it. The three guards below cannot catch that —
     the matte of a torn-out label is one opaque region that fills its own box,
     which is what a GOOD cutout looks like — so the photo has to be spared
-    before the model is asked, not after. See orient._details."""
+    before the model is asked, not after. See orient._details.
+
+    `art` says the item in this photo IS A PICTURE — a painting, print,
+    poster, drawing or photograph — decided by that same pass. It takes the
+    art path (art_cutout), which keeps everything inside the picture's outer
+    border and never asks the model which part of a painting is interesting.
+    Same reason as `detail`, one step further: on a picture the model's answer
+    is not merely useless, it is confidently wrong in a way no guard reading
+    the matte can see. See orient._art and services/artwork."""
     img, shot = _load(src)
     turn = int(rotate or 0) % 360
     turn = turn if turn in CW_TRANSPOSE else 0
@@ -992,7 +1216,13 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         bg_error = DETAIL_KEPT_AS_SHOT
     elif remove_bg:
         try:
-            out = cutout(img)
+            # A picture never reaches the model. Its border decides the
+            # matte, or nothing happens at all — art_cutout returning None
+            # means "keep as shot", never "try the model", because the model
+            # is what cuts the baby out of the painting.
+            out = art_cutout(img) if art else cutout(img)
+            if out is None and art:
+                bg_error = ART_NO_BORDER_KEPT_AS_SHOT
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
             log.warning("bg-removal: keeping %s as shot (%s)", src.name, exc)
             out, bg_error = None, f"Background removal failed: {exc}"
@@ -1135,20 +1365,23 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     results = []
     if jobs and should_stop is not None and should_stop():
         raise Stopped()
-    # One batched look at every photo still to do, up front. It answers two
+    # One batched look at every photo still to do, up front. It answers three
     # things: which photos have their ITEM lying sideways or on its head, so
-    # each is turned before its cutout rather than after, and which are
-    # close-ups of PART of an item, so the cutout is not run on them at all.
+    # each is turned before its cutout rather than after; which are close-ups
+    # of PART of an item, so the cutout is not run on them at all; and which
+    # are PICTURES, so the cutout keeps everything inside their own border
+    # instead of asking a model which part of a painting matters.
     # Best-effort and bounded: a photo the pass cannot answer for is left as
     # shot and cut out as usual.
-    turns, details = _screen_for([src for src, _dst in jobs], should_stop)
+    turns, details, art = _screen_for([src for src, _dst in jobs], should_stop)
     for src, dst in jobs:
         if should_stop is not None and should_stop():
             raise Stopped()
         try:
             result = optimize(src, dst, remove_bg,
                               rotate=turns.get(src.name, 0),
-                              detail=src.name in details)
+                              detail=src.name in details,
+                              art=src.name in art)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
         results.append(result)
@@ -1161,29 +1394,36 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
     return results
 
 
-def _screen_for(sources: list[Path],
-                should_stop=None) -> tuple[dict[str, int], frozenset[str]]:
-    """({filename: clockwise degrees}, {filenames that are close-ups}) for the
-    photos in `sources`, per services/orient. Never raises and never costs a
-    photo: with the API off, over budget, or on any failure the answer is "as
-    shot, and cut out as usual" — an empty turn map and no close-ups, which is
-    exactly this file's behaviour before either answer existed. Keyed by name,
+def _screen_for(sources: list[Path], should_stop=None) -> tuple[
+        dict[str, int], frozenset[str], frozenset[str]]:
+    """({filename: clockwise degrees}, {filenames that are close-ups},
+    {filenames whose item is a picture}) for the photos in `sources`, per
+    services/orient. Never raises and never costs a photo: with the API off,
+    over budget, or on any failure the answer is "as shot, and cut out as
+    usual" — an empty turn map, no close-ups and no pictures, which is exactly
+    this file's behaviour before any of those answers existed. Keyed by name,
     which is unique within a batch (one directory) and is how optimize_batch
     looks a photo up.
+
+    NOTE what the empty answer means for art: a picture the screen never got
+    to see goes to the model, and the model cuts the baby out of the painting.
+    That is not a new risk — it is precisely today's behaviour, and the shape
+    guards in cutout() are what stand behind it — but it is the reason this
+    answer is worth having a whole pass for rather than a heuristic here.
 
     Imported here, not at module scope: orient reaches the Anthropic SDK, and
     everything else in this file is Pillow. Keeping the AI dependency inside
     the one function that needs it is what lets the photo gate in CI prove
     the pass on Pillow alone."""
     if not sources:
-        return {}, frozenset()
+        return {}, frozenset(), frozenset()
     try:
         from . import orient
         found = orient.screen(sources, should_stop=should_stop)
-        return found.rotations, found.details
+        return found.rotations, found.details, found.art
     except Exception as exc:  # noqa: BLE001 - the screen is an enhancement
         log.warning("auto-orient: skipped (%s)", exc)
-        return {}, frozenset()
+        return {}, frozenset(), frozenset()
 
 
 def warm() -> None:

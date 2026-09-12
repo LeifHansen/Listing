@@ -2,9 +2,10 @@ import { memo, useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel, Timer,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
+import { auctionEndLabel, useAuctionCountdown } from "@/lib/auctionClock";
 import {
   ConfidenceChip, FormatBadge, OriginBadge, PriceBadge, StatusBadge,
 } from "@/components/ui/badges";
@@ -141,6 +142,52 @@ function BidChip({ count, high, currency, className }) {
       title={`${worth} It sells to the highest bidder when the auction ends.`}
     >
       <Gavel size={11} aria-hidden /> {label}
+    </span>
+  );
+}
+
+// How long this auction has left, counting itself down.
+//
+// An auction is the one listing in the app with a DEADLINE, and until now the
+// grid never mentioned it: a card with a bid on it looked the same three days
+// out as it did four minutes out, which are not the same listing to a seller.
+// The bid chip above says the auction is worth something; this says how long
+// that is still true for.
+//
+// Quiet until it matters. For most of an auction's life the clock is a fact
+// alongside the views and watchers it sits with — "82 views, 10 watchers, 2d
+// 4h left" is one sentence about how the listing is doing. Inside the final
+// hour it becomes a chip, turns amber, and starts counting seconds: the same
+// threshold does all three, so the colour never needs explaining, and a grid
+// of twenty auctions highlights the one that is actually happening rather
+// than shouting about all of them.
+//
+// Past the deadline it says so plainly rather than vanishing. The auction is
+// over, the app finds out on the next sweep of eBay, and in between "Ended"
+// is the true thing to say — a clock that disappeared would leave the card
+// looking like the auction had simply never had one.
+function AuctionClock({ endsAt, className }) {
+  const left = useAuctionCountdown(endsAt);
+  // No readable deadline, so no clock: on this card an absent number always
+  // means the app could not ask, never that the answer is nothing.
+  if (!left) return null;
+  const when = auctionEndLabel(endsAt);
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 text-[12px] tabular-nums",
+        left.ended
+          ? "font-medium text-ink-faint"
+          : left.endingSoon
+            ? "rounded-full bg-yellow-soft px-2 py-0.5 font-bold text-warning"
+            : "font-medium text-ink-secondary",
+        className)}
+      title={left.ended
+        ? `This auction ended ${when}. The next sync with eBay will say whether it sold.`
+        : `This auction ends ${when} — it sells to the highest bidder then.`}
+    >
+      <Timer size={13} aria-hidden />
+      {left.ended ? "Auction ended" : `${left.text} left`}
     </span>
   );
 }
@@ -308,6 +355,12 @@ export const ListingCard = memo(function ListingCard({
   const offers = isLive && metrics && metrics.offers > 0 ? metrics.offers : 0;
   // Bids on an auction, on the same terms: live only, and absent-is-unknown.
   const bids = isLive && metrics && metrics.bids > 0 ? metrics.bids : 0;
+  // When that auction stops taking them, from the same read — so the same
+  // rule again: live only, and a card with no answer shows no clock rather
+  // than a deadline it made up. eBay reports this for auctions and nothing
+  // else (backend/services/ebay_trading._auction_ends_at), which is what
+  // keeps a Buy It Now from counting down to its own renewal date.
+  const endsAt = (isLive && metrics && metrics.ends_at) || "";
   // Either one lights the card: a buyer has put money on this listing. The
   // same test decides its place in the grid (lib/listingsView.orderListings),
   // so the card that glows is always the card that was lifted.
@@ -646,6 +699,10 @@ export const ListingCard = memo(function ListingCard({
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
           )}
+          {/* Last on the line, beside the traffic it belongs with — and the
+              one thing here that turns amber on its own when the auction is
+              nearly over, which is what finds it in a row of chips. */}
+          {endsAt ? <AuctionClock endsAt={endsAt} /> : null}
         </span>
         {sold && (
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount} />
@@ -705,9 +762,15 @@ export const ListingCard = memo(function ListingCard({
         <p className="font-semibold text-sm text-ink line-clamp-2">
           {l.title || item.title || "(untitled)"}
         </p>
-        {(hasMetrics || watchers != null) && (
-          <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
-        )}
+        {/* Traffic and the auction clock on one line: "82 views, 10 watchers,
+            2d 4h left" is one sentence about how this listing is doing, and
+            the deadline is the half of it that decides what to do next. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 empty:hidden">
+          {(hasMetrics || watchers != null) && (
+            <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
+          )}
+          {endsAt ? <AuctionClock endsAt={endsAt} /> : null}
+        </div>
         <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
           {/* In the body, not on the photo: the photo's corners already
               hold the status and the needs-info / review chip, and on a

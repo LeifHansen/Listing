@@ -103,6 +103,7 @@ SPECS: tuple[Spec, ...] = (
     Spec("description", "Description", ("description",), "long"),
     Spec("price", "Price", ("price",), "money"),
     Spec("purchase_price", "What you paid", ("purchase_price",), "money"),
+    Spec("retail_price", "Retail on tag", ("retail_price",), "money"),
     Spec("quantity", "Quantity", ("quantity",), "number"),
     Spec("listing_format", "Selling format", ("listing_format",), "choice"),
     Spec("auction_start_price", "Starting bid", ("auction_start_price",), "money"),

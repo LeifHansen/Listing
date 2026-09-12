@@ -143,8 +143,9 @@ class _Cutout:
 @pytest.fixture()
 def never_screened(monkeypatch):
     """No screen by default, so each test below says its own answer."""
-    monkeypatch.setattr(images, "_screen_for",
-                        lambda sources, should_stop=None: ({}, frozenset()))
+    monkeypatch.setattr(
+        images, "_screen_for",
+        lambda sources, should_stop=None: ({}, frozenset(), frozenset()))
 
 
 def test_a_close_up_is_never_handed_to_the_model(tmp_path, monkeypatch,
@@ -202,8 +203,8 @@ def test_the_batch_spares_only_the_close_ups(tmp_path, monkeypatch):
     srcs = [_photo(tmp_path, n) for n in names]
     monkeypatch.setattr(
         images, "_screen_for",
-        lambda sources, should_stop=None: ({}, frozenset(
-            {"src_001.jpg", "src_002.jpg"})))
+        lambda sources, should_stop=None: (
+            {}, frozenset({"src_001.jpg", "src_002.jpg"}), frozenset()))
 
     results = images.optimize_batch(
         [(src, tmp_path / f"img_{i:03d}.jpg") for i, src in enumerate(srcs)],

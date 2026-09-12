@@ -24,7 +24,7 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
-| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
+| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off, and never by the model on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
 | Identify | Photos sent to Claude vision — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
@@ -576,6 +576,54 @@ item's price. An EAN or ISBN searches as digits instead (Browse documents
 `gtin` as taking a UPC), with an ISBN-10 converted to its ISBN-13 form first,
 because everything printed since 2007 carries the 13-digit one.
 
+### The tag that is still on it: new, and what new is worth
+
+A Scotch & Soda shirt was photographed with the brand's own swing ticket still
+attached, **$130** printed on it. The draft came back **"Pre-owned - Good", $49**.
+
+Nothing had misread the photo. Three rules that were each defensible alone
+produced it between them, and `listing_prompt.RETAIL_TAG_RULE` and its server
+side now hold each one:
+
+| What went wrong | The fix |
+|-----------------|---------|
+| The condition instruction was "grade the **wear** you can see" — which against a garment nobody has worn finds none, and returns the middle of the used ladder. Nothing said an attached tag *ends* that question. | An attached hang tag, a sewn price ticket, a bagged spare-button packet, an unbroken seal or a factory poly bag is direct evidence of **NEW**, and it **outranks** the absence of visible wear: a fresh garment and a gently worn one look identical at photo resolution, and the tag is the thing that tells them apart. |
+| eBay's enum for "new with tags" is the bare `NEW` (condition id **1000**). A model looking at a tagged shirt writes the words everyone uses — `NEW_WITH_TAGS`, `NWT` — which is not on eBay's list, and the server's fallback for an unrecognised grade was `USED_EXCELLENT`: id **3000**, which eBay labels **"Pre-owned - Good"** in apparel. That is where the word "good" came from, and it was silent. | `claude_ai._condition_enum` maps the wordings onto the enum, and its fallback **never crosses the new/used line**: an answer that plainly says new lands on `NEW`, `NEW_OTHER` or `NEW_WITH_DEFECTS` instead of being flattened into a used grade. It stays one-way — `like new`, `near new`, `looks new but worn` and anything unreadable all stay on the used ladder, because a used item relabelled new is a return and a defect. |
+| The $130 was defined as `purchase_price` ("what it costs to buy this item right now") and the sticker rule said a price tag fills that field *"never the resale price"*. So the best price evidence on the item was thrown away — **and** the profit report was told the seller had spent $130 on it. | Two fields, because they are opposite facts. `retail_price` is the MSRP off the **brand's own** tag, box or blister card; `purchase_price` is a **resale** sticker — thrift, consignment, outlet, price-gun, handwritten — which is what the seller actually paid. Both are read, both are shown in the price card, and the editor says what percentage of the tag the listing price is. |
+
+**And the price gets a floor.** `_price_against_comps` only overrules a draft
+an order of magnitude under the comps (`UNDERPRICE_RATIO`, 0.6) — the right bar
+when the gap could be honest: a rough item, a quick-flip strategy. None of
+those excuses survives a tag that is still attached, and comps are frequently
+silent anyway (no eBay credentials, no comparable listings, a keyword query
+that matched nothing). So `_price_against_retail` runs after it: a **NEW**-family
+item priced under `RETAIL_FLOOR_RATIO` (0.45) of its own printed retail price
+is raised to that floor, and the seller is told in `missing_info` rather than
+handed a different confident-looking number in silence.
+
+It cannot become a machine for inflating listings. The floor is **capped at
+what comparable listings actually ask** (the comps' 75th percentile, passed out
+of `_price_against_comps` via `market_out` — which reports the market even when
+the draft's own number stood, a fact the return value cannot express). Real
+listings for the real item beat arithmetic on an MSRP; the tag only gets to say
+the draft was under them. And a **used** item is never touched: a worn shirt
+genuinely does sell for a fifth of its tag, and the tag is not evidence about it.
+
+**The brand gets a second reading too.** The identify pass reads a hang tag at
+whole-photo resolution, where a brand is a smudge it half-recognises — and once
+it wrote *anything* into `brand`, nothing downstream looked again: the maker
+hunt ran only on a blank. A wrong brand was permanent, in the field eBay's
+search weights most heavily, while a zoomed and readable crop of that same tag
+was already being passed to the very next call for something else. The maker is
+now asked for whenever there are tag crops in the call (the same call — it costs
+the tail of a prompt), and a reading that **disagrees** with the drafted brand
+goes to the adversarial verifier. Confirmed at **high** confidence, it replaces
+the brand and is carried into the title and the Brand specific; `_same_maker`
+folds away `&`/`and`, apostrophes, legal suffixes and the city a brand prints on
+its own tag, so "Scotch & Soda Amsterdam" and "Scotch and Soda" are one answer
+rather than a dispute. Medium confidence still only fills a blank, and a brand
+the **seller** entered is never overwritten.
+
 ### Vintage denim: the selvedge edge, the red tab, the patch and the lot code
 
 A pair of Levi's 501s is a $30 listing or a $3,000 one, and the same handful
@@ -1019,6 +1067,64 @@ quarter-turns, and the model must pick the proposal. Best-effort and bounded
 wrong turn is one tap of the rotate button on the tile or the card, and
 Restore original goes back to the photo as shot. `AUTO_ORIENT=off` disables
 it.
+
+### A picture is never cut into: the artwork path
+
+A Marcia Alpert gouache, "Baby in a Basket", came back from the pass with the
+**baby cut out of the painting** — lifted off the teal water and the patchwork
+quilt she painted it on, floating on white. Another photo kept the turtle and
+the signature and deleted the rest. The item the listing was for had been
+erased from the photos of it.
+
+Every guard above passed, and each was right to. They read the **alpha** and
+ask whether what survived looks like a product: one connected piece, filling
+its own bounding box, solid through the middle. A baby lifted out of a
+painting is all three — arithmetically indistinguishable from a perfect cutout
+of a figurine. The fact that separates them is not in the matte at all: it is
+that the item **is itself an image**, and a salient-object model handed a
+picture answers the only question it knows, *which part of this is the
+subject*. For a painting there is no honest answer to that question.
+
+So a picture does not go to the model. `services/orient` — the only pass that
+looks at a photo before the cutout runs, and one already being made and paid
+for — is asked one more question per photo: is the item a painting, print,
+poster, drawing or photograph? The test it is given is whether the thing's own
+front surface *is* an image, which is what keeps a mug with a boat printed on
+it a mug. A yes routes the photo to `services/artwork` and `images.art_cutout`
+instead, where the rule is geometric:
+
+> **Find the outer border. Keep everything inside it, whole. Never ask what is
+> interesting within it.**
+
+That makes the guarantee structural rather than statistical: `artwork.mask`
+returns a **filled rectangle**, so no code path on the art side can remove a
+pixel from the middle of a painting.
+
+Finding the border is two steps, both Pillow-only. A content mask (colour
+distance from the surround, ORed with local contrast) locates the picture and
+proves it is one — a picture **fills its own bounding box**, which is what
+still refuses the tree-at-one-edge-and-boat-at-the-other shape. Then each side
+is scanned **inward from the edge of the photo** to the first line that is not
+surround. Inward, because a white-mounted print leaves eighty pixels of blank
+paper between the printed area and the sheet's own edge, and a scan starting
+at the artwork has nothing in that gap to grow along; one starting at the wall
+crosses it without ever standing on it.
+
+**And when there is no clear border, nothing happens.** A picture bleeding off
+the frame, a shape that is not a rectangle, something too small to be the
+piece — each returns None, and None means *keep the photo exactly as shot*,
+reported in `bg_error` so the seller is told and the charge comes back. It
+never means "fall back to the model", because the model is the bug. The error
+directions are not close: a cutout wrongly refused costs one photo an opt-in
+feature, and a cutout wrongly shipped destroys the item the listing is for —
+which is also why the prompt tells the model to answer **true** when it is
+torn about whether something is a picture.
+
+One limit, stated plainly: a print with a blank white mount, on a white
+surface, under flat light with no shadow, has no detectable outer edge — there
+is nothing in the photo that distinguishes the paper from the table. The
+border then lands on the printed area and trims blank mount. The painted or
+printed image itself is never cut into, which is the property the tests hold.
 
 Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,
 baked into the image; needs the 4GB VM). `u2netp` is the 4MB fallback for a
@@ -1747,7 +1853,8 @@ deliberately omits `scope` — so rolling back is an env change, not a deploy.
   — $25.00 → $24.99, $22.50 → $22.99 — so it is never more than half a dollar
   either way, and it is floored at $0.99. What the seller TYPES is theirs and
   is never rewritten; neither is what they paid (`purchase_price`, read off a
-  price sticker) nor the measured market range shown beside a suggestion.
+  resale sticker), what the tag says it retailed for (`retail_price`), nor the
+  measured market range shown beside a suggestion.
 - Image optimization never zooms. A photo that keeps its background is framed
   with the largest square the frame holds, slid over the item, so the backdrop
   you composed stays in the shot and nothing gets clipped in the gallery

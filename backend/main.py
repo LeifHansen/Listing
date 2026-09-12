@@ -1967,6 +1967,69 @@ _GENERIC_MAKERS = {"", "unbranded", "unknown", "generic", "n/a", "none",
                    "unidentified", "unknown maker"}
 
 
+# Words that ride along with a brand on a tag without being part of it, so
+# "Scotch & Soda Amsterdam" and "Scotch and Soda" are recognised as one answer
+# rather than two — a disagreement worth a verify call and a rewritten brand
+# has to be a real one.
+_MAKER_NOISE = {"the", "co", "company", "inc", "ltd", "llc", "gmbh", "bv",
+                "sa", "srl", "brand", "brands", "clothing", "apparel",
+                "collection", "couture", "amsterdam", "paris", "london",
+                "milano", "new", "york", "usa", "official"}
+
+
+def _maker_key(name: str) -> str:
+    """A maker name reduced to what identifies it: case, punctuation, "&"/"and"
+    and the place and legal-form words that trail a brand on its own tag all
+    folded away."""
+    text = (name or "").lower().replace("&", " and ")
+    text = re.sub(r"[\u2018\u2019']", "", text)      # Levi's == Levis
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    words = [w for w in text.split() if w not in _MAKER_NOISE]
+    return " ".join(words or text.split())
+
+
+def _same_maker(a: str, b: str) -> bool:
+    """Whether two maker names are the same answer. One containing the other
+    counts — a tag read as "Scotch & Soda" and a draft saying "Scotch & Soda
+    Amsterdam Couture" are not a disagreement about who made the shirt."""
+    ka, kb = _maker_key(a), _maker_key(b)
+    if not ka or not kb:
+        return False
+    return ka == kb or ka.startswith(kb) or kb.startswith(ka)
+
+
+def _retitle_for_brand(listing: Listing, maker: str) -> None:
+    """Carry a corrected brand into the title and the Brand specific.
+
+    Fixing `listing.brand` alone would leave the draft contradicting itself in
+    the two places a buyer and eBay's search actually read: a title still
+    leading with the wrong maker (the title rule puts it in the first, most
+    heavily weighted position) and a Brand item specific still filtering the
+    listing under it.
+
+    The title is edited only where the old brand LITERALLY appears in it —
+    never rebuilt, never prepended to. A title that does not name the old
+    brand is one this function cannot edit without inventing word order, so it
+    says so in missing_info and leaves the seller's text alone.
+    """
+    was = (listing.brand or "").strip()
+    title = listing.title or ""
+    if was and was.lower() in title.lower():
+        pattern = re.compile(re.escape(was), re.IGNORECASE)
+        listing.title = pattern.sub(maker, title, count=1)[:TITLE_MAX_CHARS]
+    else:
+        listing.missing_info = [*(listing.missing_info or []),
+                                f"Check the title — the tag reads {maker}, "
+                                f"not {was or 'the brand first drafted'}."]
+    for spec in listing.item_specifics:
+        if spec.name.strip().lower() in _MAKER_ASPECT_NAMES \
+                and (spec.value or "").strip() \
+                and not _same_maker(spec.value, maker) \
+                and (spec.confidence or "").strip():   # never the seller's own
+            spec.value = maker
+            spec.confidence = "medium"
+
+
 def _maker_targets(listing: Listing) -> tuple[bool, list[str]]:
     """(brand is effectively blank, maker-ish aspects still unfilled) — the
     two things the maker hunt exists to fill. Both empty = skip the hunt."""
@@ -2065,9 +2128,18 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
         brand_missing, unfilled = _maker_targets(listing)
         if progress:
             progress("specifics")
+        # Ask for the maker whenever there is a zoomed tag in the call, not
+        # only when the brand came back blank. The identify pass reads a neck
+        # label or a hang tag at whole-photo resolution, where a brand is a
+        # smudge it half-recognises; these crops are that same label at
+        # readable size. A brand it guessed wrong was previously unreachable
+        # for the rest of the run — nothing downstream ever looked at Brand
+        # again once it held anything at all — and it rides the SAME call, so
+        # a second reading of the one field the buyer searches on costs
+        # nothing but the tail of a prompt.
         filled, candidate = claude_ai.fill_aspects_combined(
             paths, listing, aspects, tag_crop_blocks=crops,
-            want_maker=brand_missing or bool(unfilled))
+            want_maker=brand_missing or bool(unfilled) or bool(crops))
     except Exception as exc:  # noqa: BLE001 - enrichment is optional
         log.info("specifics enrich skipped (cat=%s): %s", listing.category_id, exc)
         return None
@@ -2088,7 +2160,15 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
         # aspect, so the fill above may have just answered it, and the verify
         # call (and a duplicate Brand entry) would be wasted.
         brand_missing, unfilled = _maker_targets(listing)
-        if brand_missing or unfilled:
+        # A brand already on the draft that the tag pass read DIFFERENTLY is
+        # the third thing worth a verify. Not a rewording — _same_maker folds
+        # away "&"/"and", "Amsterdam", "Co" — an actually different maker.
+        # Whichever of the two is wrong, it is wrong in the field eBay's
+        # search weights most heavily, and until now the first guess simply
+        # stood.
+        disputed = (not brand_missing
+                    and not _same_maker(candidate["maker"], listing.brand))
+        if brand_missing or unfilled or disputed:
             if progress:
                 progress("maker")
             try:
@@ -2099,7 +2179,25 @@ def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
                 log.info("maker verify skipped: %s", exc)
                 found = None
             if found:
-                _apply_maker(listing, found, brand_missing, unfilled)
+                if brand_missing or unfilled:
+                    _apply_maker(listing, found, brand_missing, unfilled)
+                # Overwriting a brand the draft already had is a bigger claim
+                # than filling a blank one, so it takes the stronger verdict:
+                # the adversarial layer confirming at HIGH confidence, having
+                # re-derived the maker from the photos itself. Medium is
+                # enough to fill a blank and not enough to overrule — and a
+                # medium verdict on a DISPUTE must not reach _apply_maker at
+                # all, whose parting act is to drop "confirm the brand" notes:
+                # silencing that nag while leaving the disputed brand in place
+                # is the one outcome worse than either name.
+                elif disputed and found.get("confidence") == "high":
+                    log.info("maker id: brand '%s' -> '%s' (tag reading "
+                             "confirmed high) — evidence: %s", listing.brand,
+                             found["maker"], (found.get("evidence") or "")[:120])
+                    # Before the assignment, not after: the title is edited by
+                    # finding the OLD brand in it.
+                    _retitle_for_brand(listing, found["maker"])
+                    listing.brand = found["maker"]
     return added
 
 
@@ -3672,6 +3770,20 @@ DRAFT_PRICE_COMPS = (os.getenv("DRAFT_PRICE_COMPS", "1").strip().lower()
 # first (brand/artist, model or work, what the thing is) without the specifics
 # that make a search return zero.
 _COMP_QUERY_WORDS = 5
+# The floor under a still-new item, as a fraction of the retail price printed
+# on its own tag. A NWT branded garment does not resell for a third of its
+# MSRP, and a draft that says it does has not read a soft market — it has
+# misread the item. Below where such a piece really trades (the prompt tells
+# the model half to three-quarters of retail), because this is the "that
+# cannot be right" line and not a second opinion on a keen price — but not so
+# far below that it misses what it exists for: the shirt that prompted it was
+# tagged $130 and drafted at $49, which is 38%, and a floor tuned to catch
+# only a fifth would have watched it go out.
+#
+# It is never applied on its own judgment alone: _price_against_retail caps it
+# at what comparable listings actually ask, so a fraction of a tag can never
+# price an item above the market that is really there.
+RETAIL_FLOOR_RATIO = float(os.getenv("RETAIL_FLOOR_RATIO", "0.45") or 0.45)
 
 
 # --- research: what the item IS, looked up rather than remembered ----------
@@ -4266,7 +4378,8 @@ def _research_draft(listing: Listing, image_paths: list,
 
 
 def _price_against_comps(listing: Listing, uid: Optional[str] = None,
-                         prefs: Optional[dict] = None) -> Optional[dict]:
+                         prefs: Optional[dict] = None,
+                         market_out: Optional[dict] = None) -> Optional[dict]:
     """Check a fresh AI draft's price against live eBay comps, in place.
 
     Two things this fixes, both of them the same bug from opposite ends:
@@ -4286,6 +4399,12 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
     Best-effort and silent on failure: no eBay credentials, no comparable
     listings, or a lookup that errors all leave the draft exactly as drafted.
     Returns the comp suggestion it used, or None when nothing changed.
+
+    `market_out`, when given, is filled with whatever the market said —
+    INCLUDING the case where the draft's own number stood, which the return
+    value cannot express and which is exactly when the retail floor runs next.
+    Nothing may price an item above the market that is actually there, so the
+    floor needs to see the comps even when the comps changed nothing.
     """
     if not (DRAFT_PRICE_COMPS and config.taxonomy_ready()):
         return None
@@ -4338,6 +4457,8 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
     low = best.get("low")
     if not market or market <= 0:
         return None
+    if market_out is not None:
+        market_out.update(best)
     was = listing.price
     if was is None:
         note = (f"Confirm the price — the AI wouldn't put a number on this one. "
@@ -4357,6 +4478,73 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
              "none" if was is None else f"{float(was):.2f}",
              listing.price, best.get("count") or 0, best.get("basis") or "")
     return best
+
+
+def _price_against_retail(listing: Listing,
+                          market: Optional[dict] = None) -> Optional[float]:
+    """Hold a still-new item's price above a fraction of its own printed MSRP.
+
+    The last line of defence for the failure this whole path exists for: a
+    Scotch & Soda shirt with the brand's $130 swing ticket still attached,
+    drafted at $49. The tag was in the photo, in focus, and the app had
+    nothing that could act on it — the number went into "what the seller
+    paid" and was never looked at again.
+
+    It runs AFTER the comp check, and it is the half the comp check cannot do.
+    Comps only overrule a draft that is an order of magnitude under them
+    (UNDERPRICE_RATIO), which is the right bar when the gap could be honest —
+    a rough item, a quick-flip strategy. None of those excuses survives a tag
+    that is still attached: a NEW item is like-for-like with the new comps it
+    was matched against, and $49 against a $130 tag is not a reading of a soft
+    market. Comps are also frequently silent here — no eBay credentials, no
+    comparable listings, or a keyword query that matched nothing — and then
+    the price printed on the item is the only evidence anyone has.
+
+    `market`, when the comp lookup produced one, CAPS the floor: a fraction of
+    a tag must never price an item above what comparable listings actually
+    ask, because real listings for the real item beat any arithmetic on an
+    MSRP. Where the market answered, it decides the ceiling and the tag only
+    decides whether the draft was under it.
+
+    Like the comp check it only ever raises, and a used item is not its
+    business: a worn shirt genuinely does sell for a fifth of its tag, and the
+    tag is not evidence about it. Whatever it changes is said in missing_info,
+    so the seller reads it rather than being handed a different
+    confident-looking number in silence. Returns the price it set, or None
+    when it left the draft alone.
+    """
+    retail = listing.retail_price
+    if not retail or float(retail) <= 0:
+        return None
+    # New only. taxonomy.CONDITION_FAMILY is the same table that stops a used
+    # item being relabelled new, read here from the other side.
+    if taxonomy.CONDITION_FAMILY.get(
+            (listing.condition or "").strip().upper()) != "new":
+        return None
+    floor = float(retail) * RETAIL_FLOOR_RATIO
+    # The market's ceiling, when there was a market. `high` is the comps' 75th
+    # percentile — the top of where this item is actually being asked for, and
+    # the most the tag is allowed to argue for.
+    ceiling = (market or {}).get("high") or (market or {}).get("price")
+    try:
+        if ceiling and float(ceiling) > 0:
+            floor = min(floor, float(ceiling))
+    except (TypeError, ValueError):
+        pass
+    was = listing.price
+    if was is not None and float(was) >= floor:
+        return None
+    listing.price = charm_price(floor)
+    note = (f"Confirm the price — this is listed as new and its tag reads "
+            f"${_money(retail)} retail, so "
+            + ("the AI wouldn't put a number on it"
+               if was is None else f"${_money(was)} looked too low")
+            + f". Priced at ${_money(listing.price)} for now.")
+    listing.missing_info = [*(listing.missing_info or []), note]
+    log.info("draft price: retail floor %s -> %.2f (tag %.2f, cond %s, "
+             "market ceiling %s)", "none" if was is None else f"{float(was):.2f}",
+             listing.price, float(retail), listing.condition, ceiling or "none")
+    return listing.price
 
 
 def _money(value) -> str:
@@ -5486,7 +5674,12 @@ def identify(session_id: str, request: Request) -> dict:
     _resolve_category_after_research(result.listing)
     # After the category: comps are sharper filtered to it. See
     # _price_against_comps — the photos alone never see a comparable listing.
-    _price_against_comps(result.listing, _uid(request))
+    market: dict = {}
+    _price_against_comps(result.listing, _uid(request), market_out=market)
+    # ...and then the item's own tag, which the comps' order-of-magnitude bar
+    # cannot act on and which is the only evidence at all when they were
+    # silent. Capped by what that same market said it is worth.
+    _price_against_retail(result.listing, market)
     storage.save_listing(session_id, result.listing)
     db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
     return result.model_dump()
@@ -7110,7 +7303,9 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         # first attempt left this draft without a category NUMBER, the better
         # title gets it one now.
         _resolve_category_after_research(listing)
-        _price_against_comps(listing, ctx.uid, ctx.prefs)
+        market: dict = {}
+        _price_against_comps(listing, ctx.uid, ctx.prefs, market_out=market)
+        _price_against_retail(listing, market)
         storage.save_listing(sid, listing)
         db.upsert_listing(sid, listing.model_dump(), status="draft",
                           user_id=ctx.uid)
@@ -7633,7 +7828,9 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # first attempt left this draft without a category NUMBER, the better
         # title gets it one now.
         _resolve_category_after_research(result.listing)
-        _price_against_comps(result.listing, uid, prefs)
+        market: dict = {}
+        _price_against_comps(result.listing, uid, prefs, market_out=market)
+        _price_against_retail(result.listing, market)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
@@ -8140,35 +8337,32 @@ def _blank_specifics_by_id(items: list[dict]) -> dict:
 INSIGHTS_GROUP_CAP = 50
 
 
-# The suggestion groups "Finish everything" clears. Both are the same job seen
-# from two ends -- "Fill in details" is what the AI has not read yet, "Check
-# details" is what it read and could not settle -- and a seller looking at
-# 131 of one and 177 of the other is looking at one chore, not two. Groups
-# that need a decision per listing stay out: a price cut needs a percentage,
-# photos need someone holding the item.
-FINISH_ALL_TYPES = ("specifics", "verify")
+# The suggestion groups "Finish everything" clears. One, now: "Fill in
+# details" -- the listings the AI has not read yet. It used to be two, the
+# other being "Check details" (the notes the fill could not settle), and that
+# group is gone; a seller looking at 131 of one and 203 of the other was
+# looking at one chore presented as two, and the second half had no bulk verb
+# at all. Its work did not go anywhere -- the job below still accepts whatever
+# notes survive the fill on every listing it touches, free and in the same
+# press (see recommender and _accept_remaining_notes). Groups that need a
+# decision per listing stay out: a price cut needs a percentage, photos need
+# someone holding the item.
+FINISH_ALL_TYPES = ("specifics",)
 
 
 def _finish_all_plan(recs: list[dict], items: list[dict]) -> dict:
     """What one press of "Finish everything" would do, before it is pressed.
 
     Split by what it COSTS, because that is the part the seller is agreeing
-    to: `enrich` listings get a vision pass and an eBay revise and are charged
-    for it; `accept` listings have been read already, so all that happens is
-    their outstanding notes are accepted, which is free. Quoting the total as
-    though every listing costs would price a 308-listing press at four times
-    what it actually spends.
+    to. Every listing in the set now costs the same thing -- a vision pass and
+    an eBay revise -- because the set is exactly the listings the AI has never
+    read (FINISH_ALL_TYPES). `accept` stays in the answer at zero: the free
+    half still happens, on these same listings, after their fill, and the
+    dashboard reads the key.
     """
     wanted = {r["listing_id"] for r in recs if r["type"] in FINISH_ALL_TYPES}
-    enrich = accept = 0
-    for it in items:
-        if it.get("id") not in wanted:
-            continue
-        if str((it.get("listing") or {}).get("enriched_at") or "").strip():
-            accept += 1
-        else:
-            enrich += 1
-    return {"total": enrich + accept, "enrich": enrich, "accept": accept}
+    enrich = sum(1 for it in items if it.get("id") in wanted)
+    return {"total": enrich, "enrich": enrich, "accept": 0}
 
 
 @app.get("/api/insights")
@@ -8199,8 +8393,7 @@ def insights(request: Request) -> dict:
                 # recommender.totals_by_type.
                 "group_totals": recommender.totals_by_type(recs),
                 # What one press of "Finish everything" reaches, and how much
-                # of it costs. The button spans two groups, so neither group's
-                # own total answers for it.
+                # of it costs.
                 "finish_all": _finish_all_plan(recs, items),
                 # What one tap on a group can actually reach in a single run —
                 # the group renders its button, so it has to know. See
@@ -8656,8 +8849,11 @@ def _accept_remaining_notes(rec: dict, uid: str) -> dict:
 
     `missing_info` is what the AI declined to invent — a measurement, a
     signature to confirm, an exact model number. No pass will ever answer
-    those, so "Check details" could only shrink one hand-checked listing at a
-    time; on a store of 177 that is not a to-do list, it is wallpaper.
+    those, so they used to sit on the dashboard as their own suggestion group
+    that could only shrink one hand-checked listing at a time; on a store of
+    203 that is not a to-do list, it is wallpaper. The group is gone and this
+    is where its work went: the same press that fills a listing in also
+    retires the notes that survived the fill.
 
     The notes are NOT deleted. The editor still shows them, and a buyer never
     saw them either way — `missing_info` is a note to the seller, never
@@ -8692,9 +8888,8 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
         eBay's recommended item specifics merged in, pushed to the live
         listing). This is the "Fill in details" half, and it is what costs;
       * always, afterwards -> whatever notes are still outstanding are
-        accepted. This is the "Check details" half, and it is free, because
-        re-reading a listing the AI has already read buys nothing and the
-        seller should not be charged twice to be told so again.
+        accepted. This is free, and it is the whole of what "Check details"
+        used to ask the seller to do by hand, one listing at a time.
 
     The record is re-read between the two: the fill writes to it (and drops
     the notes it managed to answer), so the notes to accept are whatever
@@ -8791,12 +8986,12 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
 
 def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
     """The records "Finish everything" acts on: every listing the dashboard is
-    currently offering "Fill in details" or "Check details" for.
+    currently offering "Fill in details" for.
 
     Read off the SAME ranking the screen is built from (recommender.ranked,
-    strongest rec per listing), so the button clears exactly the two groups
-    the seller is looking at — no more, and nothing the screen isn't showing.
-    A set assembled from its own rules would drift from the badges the moment
+    strongest rec per listing), so the button clears exactly the group the
+    seller is looking at — no more, and nothing the screen isn't showing. A
+    set assembled from its own rules would drift from the badge the moment
     either side changed.
     """
     recs = recommender.ranked(
@@ -8809,8 +9004,8 @@ def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
 @app.post("/api/listings/finish-all")
 def finish_all(request: Request) -> dict:
     """Clear the whole "what to do next" list in one press: fill in every
-    listing the AI has never read, push each to eBay, and accept the notes it
-    left for a person on the rest.
+    listing the AI has never read, push each to eBay, and accept whatever
+    notes it left for a person on the ones it just read.
 
     Takes NO ids. Every other bulk route is handed the group's membership by
     the client, which is right when the client is naming a selection and
