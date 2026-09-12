@@ -411,6 +411,11 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
     auction-side twin of `offers`: both say a buyer has acted on a live
     listing, and the grid draws and orders the card on either.
 
+    `ends_at` rides along on an auction: the instant the bidding stops, which
+    the card turns into a clock. It is the deadline itself and not a duration
+    on purpose — this answer is cached, then read by a browser minutes later,
+    and "2 hours left" would still be saying two hours by then.
+
     Pass a `status` dict to also learn whether the traffic report itself came
     back — it gets {'traffic_ok': bool, 'needs_reconnect': bool}, which is how
     the UI tells "nobody has viewed these yet" apart from "we couldn't ask".
@@ -479,6 +484,15 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
                 if bids:
                     m["high_bid"] = entry.get("high_bid")
                     m["bid_currency"] = entry.get("bid_currency") or ""
+                # Same sweep, fourth question: when this auction stops taking
+                # bids, so the card can count down to it. Carried only where
+                # eBay gave one -- it is an auction-only field (see
+                # ebay_trading._auction_ends_at), and an empty string would
+                # have every Buy It Now on the grid claiming a deadline of
+                # the epoch.
+                ends_at = str(entry.get("ends_at") or "")
+                if ends_at:
+                    m["ends_at"] = ends_at
         # Same sweep, second question — see _offers. Its own failure is its
         # own: a Best Offer lookup that times out must not blank the watch
         # counts that already came back in the call above.

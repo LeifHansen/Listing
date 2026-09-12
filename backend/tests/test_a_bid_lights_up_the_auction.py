@@ -109,8 +109,12 @@ def test_the_sweep_carries_the_bid_count_and_the_high_bid(ebay):
 
     counts = ebay_trading.active_listing_counts("tok")
 
+    # "" for ends_at: this fixture's <Item> carries no ListingDetails, so
+    # eBay named no deadline. When the auction ends is the same sweep's
+    # fourth question -- see test_the_auction_clock_reaches_the_card.
     assert counts[AUCTION] == {"watchers": 4, "offers_received": 0, "bids": 3,
-                               "high_bid": 12.5, "bid_currency": "USD"}
+                               "high_bid": 12.5, "bid_currency": "USD",
+                               "ends_at": ""}
     assert [c["call"] for c in ebay["sent"]] == ["GetMyeBaySelling"]
 
 

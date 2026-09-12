@@ -204,9 +204,9 @@ def test_a_sweep_that_reached_the_end_says_that_too(monkeypatch):
     status: dict = {}
     assert ebay_trading.active_listing_counts("tok", status=status) == {
         "9001": {"watchers": 1, "offers_received": 0, "bids": 0,
-                 "high_bid": None, "bid_currency": ""},
+                 "high_bid": None, "bid_currency": "", "ends_at": ""},
         "9002": {"watchers": 2, "offers_received": 0, "bids": 0,
-                 "high_bid": None, "bid_currency": ""}}
+                 "high_bid": None, "bid_currency": "", "ends_at": ""}}
     assert status["complete"] is True
 
 

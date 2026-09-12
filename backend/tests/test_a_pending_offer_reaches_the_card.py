@@ -130,10 +130,13 @@ def test_one_sweep_carries_both_watchers_and_the_offer_hint(ebay):
 
     counts = ebay_trading.active_listing_counts("tok")
 
+    # These items carry no ListingDetails, so eBay named no end time for
+    # either -- the sweep's fourth question, which only an auction answers
+    # (see test_the_auction_clock_reaches_the_card).
     assert counts == {ITEM: {"watchers": 4, "offers_received": 2, "bids": 0,
-                             "high_bid": None, "bid_currency": ""},
+                             "high_bid": None, "bid_currency": "", "ends_at": ""},
                       OTHER: {"watchers": 0, "offers_received": 0, "bids": 0,
-                              "high_bid": None, "bid_currency": ""}}
+                              "high_bid": None, "bid_currency": "", "ends_at": ""}}
     assert [c["call"] for c in ebay["sent"]] == ["GetMyeBaySelling"]
 
 
