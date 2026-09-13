@@ -36,6 +36,10 @@ PURE = [
     _SERVICES / "experts" / "registry.py",
     *sorted(_SERVICES.glob("experts/*/rules.py")),
     *sorted(_SERVICES.glob("experts/*/match.py")),
+    # The roster is not rule TEXT, but it is read at the same moment and by
+    # the same passes -- and it decides whether a name reaches a listing, so
+    # it must be assertable in the light job like everything else here.
+    *sorted(_SERVICES.glob("experts/*/roster.py")),
     *sorted(_SERVICES.glob("experts/*/__init__.py")),
 ]
 
@@ -45,6 +49,7 @@ PURE = [
 ALLOWED_STDLIB = {
     "__future__", "enum", "typing", "dataclasses", "re", "json", "os",
     "unicodedata", "functools", "itertools", "collections", "string", "math",
+    "pathlib",
 }
 
 
@@ -55,9 +60,10 @@ def _modules():
 def test_the_list_of_pure_modules_is_not_empty():
     """A glob that matches nothing passes every assertion below it."""
     found = _modules()
-    assert len(found) >= 6, f"only found {[p.name for p in found]}"
+    assert len(found) >= 7, f"only found {[p.name for p in found]}"
     names = {p.parent.name + "/" + p.name for p in found}
     assert "art/rules.py" in names and "denim/rules.py" in names
+    assert "art/roster.py" in names
 
 
 @pytest.mark.parametrize("path", _modules(), ids=lambda p: f"{p.parent.name}/{p.name}")
@@ -104,9 +110,12 @@ def test_the_rules_really_do_import_with_nothing_but_the_stdlib():
         "sys.meta_path.insert(0, Block())\n"
         "from backend.services import listing_prompt\n"
         "from backend.services.experts import registry\n"
+        "from backend.services.experts.art import roster\n"
         "from backend.services.experts.base import Stage\n"
         "assert len(listing_prompt.LISTING_SCHEMA) > 10000\n"
         "assert registry.rules_for(Stage.IDENTIFY)\n"
+        "assert roster.size() > 50\n"
+        "assert roster.resolve('Salvadore Dali')[1] == 'Salvador Dali'\n"
         "print('ok')\n"
     )
     repo = Path(__file__).resolve().parents[2]

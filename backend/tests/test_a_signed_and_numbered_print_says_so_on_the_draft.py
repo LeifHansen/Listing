@@ -67,9 +67,10 @@ def lookup(monkeypatch):
 
     def use(answer):
         def identify_artwork(paths, listing, leads=None, observations="",
-                             crops=None):
+                             crops=None, references=None):
             calls.append({"paths": paths, "leads": leads,
-                          "observations": observations, "crops": crops})
+                          "observations": observations, "crops": crops,
+                          "references": references})
             return answer
         monkeypatch.setattr(main.claude_ai, "identify_artwork", identify_artwork)
         return calls
@@ -337,3 +338,19 @@ def test_art_is_also_known_by_the_words_a_first_pass_writes_about_it():
     assert main._is_artwork(Listing(title="Bronze sculpture on marble base"))
     assert not main._is_artwork(Listing(title="Pastel pink cardigan size M",
                                         category_suggestion="Clothing > Women"))
+
+
+def test_the_lookup_is_handed_the_references_the_seller_saved(lookup, tmp_path):
+    """A reference link is only worth saving if it reaches the pass that uses
+    it. Pinned here, in the file about what the lookup is given, beside the
+    crops and the reverse-image leads -- because the failure mode is silent:
+    _lookup_artwork swallows every exception so a draft survives a broken
+    lookup, which also means a lookup called wrongly simply does nothing and
+    says nothing."""
+    calls = lookup({"artist": "Salvador Dali", "confidence": "high"})
+    listing = _draft()
+    main._lookup_artwork(listing, _photos(tmp_path), "sess", "", uid="alice")
+    assert calls, "the lookup did not run"
+    # None here rather than [] -- there is no database in this test, and the
+    # point is that the argument is PASSED, not what it happened to hold.
+    assert "references" in calls[0]

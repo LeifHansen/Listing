@@ -125,6 +125,21 @@ MUST_RAISE = {
 # Everything else that swallows, with why a blank answer cannot be mistaken
 # for a fact about the seller. One line each, and the line is the deliverable.
 WHY_A_BLANK_IS_SAFE = {
+    # --- reference links, which are an enrichment and never a fact ---------
+    "expert_knowledge_for":
+        "the references that teach an expert, read while drafting. No screen "
+        "reports this: a draft written without them is a draft written the "
+        "way it was before anyone saved one, which is the same contract every "
+        "other enrichment in the pipeline has (the art lookup, the reverse "
+        "image search). The settings screen reads expert_knowledge_list, "
+        "which RAISES — that one does report what is saved",
+    "expert_knowledge_count":
+        "the per-account cap, checked before saving one more. A blank reads "
+        "as nought, which lets a save through rather than refusing one — the "
+        "safe direction for a cap whose purpose is to stop a list growing "
+        "unboundedly, and the write itself still raises if the database is "
+        "actually down",
+
     # --- the best-effort halves of a strict pair -------------------------
     "list_listings_best_effort":
         "the tolerant twin of a strict read; the choice is made at the call site",

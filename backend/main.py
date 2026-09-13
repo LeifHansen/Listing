@@ -60,6 +60,11 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        recommender, store_category, sync_guard, sync_merge,
                        taxonomy, tokens)
 from .services.experts.art import presentation as art_presentation
+from .services import reference_fetch
+from .services.experts import registry as experts
+from .services.experts.base import Reference
+from .services.experts.art import comps as art_comps
+from .services.experts.art import roster as art_roster
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -1091,7 +1096,7 @@ def admin_grant_tokens(user_id: str, request: Request,
     if not 1 <= amount <= _ADMIN_GRANT_CAP:
         raise HTTPException(
             400, f"Grants are 1 to {_ADMIN_GRANT_CAP} tokens.")
-    note = str(body.get("note") or "").strip()[:200]
+    note = str(payload.get("note") or "").strip()[:200]
     target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
     if not target:
         raise HTTPException(404, "No such account.")
@@ -3629,6 +3634,212 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
     return {"ok": True, "selected": fields}
 
 
+# --- reference links: teaching an expert ------------------------------------
+#
+# The owner pastes a URL, writes a line about what it is for, and the expert
+# reads it on every draft it applies to. Two scopes, and the difference is a
+# security boundary rather than a convenience:
+#
+#   global   a superadmin's, and it reaches EVERY draft in the app.
+#   account  one seller's, and it must reach theirs and nobody else's.
+#
+# THE SCOPE IS DERIVED HERE AND NOWHERE ELSE. A caller may send whatever they
+# like; a superadmin may ask for "global" and everybody else gets "account"
+# regardless. db.expert_knowledge_add deliberately does not look at who is
+# asking, so that the rule lives in one place beside the auth check instead of
+# in two places that can disagree.
+
+# How many references one account may save per expert. A cap, because an
+# uncapped list both stuffs the prompt and turns the fetcher into an
+# amplifier -- and because experts/knowledge only ever reads the first few
+# anyway, so the twenty-first is a row nobody will see.
+KNOWLEDGE_PER_ACCOUNT = int(os.getenv("KNOWLEDGE_PER_ACCOUNT", "20") or 20)
+
+
+def _known_expert(name: str) -> str:
+    """`name` if an expert by that name exists, else "". Checked against the
+    registry rather than against a list here, so a new vertical is teachable
+    the day it lands."""
+    wanted = str(name or "").strip().lower()
+    return wanted if wanted in set(experts.names()) else ""
+
+
+def _owned_knowledge(record_id: str, uid: str) -> dict:
+    """The reference `uid` owns, or 404.
+
+    A global reference is NOT owned by a seller, however they found its id:
+    it is read-only to everyone but a superadmin, who has their own routes
+    below. 404 rather than 403 for the usual reason -- possession of an id
+    tells the holder nothing about whether it exists.
+    """
+    row = db.expert_knowledge_get(record_id)
+    if not row or row.get("scope") != "account" or \
+            not uid or row.get("account_id") != uid:
+        raise HTTPException(404, "Not found")
+    return row
+
+
+@app.get("/api/experts")
+def list_experts(request: Request) -> dict:
+    """The experts a reference can be filed under."""
+    _uid(request)
+    return {"experts": [{"name": name} for name in experts.names()]}
+
+
+@app.get("/api/expert-knowledge")
+def list_expert_knowledge(request: Request, expert: str = "") -> dict:
+    """This seller's references, plus the globals they inherit (read-only)."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Sign in to manage references.")
+    rows = db.expert_knowledge_list(uid, expert=_known_expert(expert))
+    return {"references": [{**r, "editable": r.get("scope") == "account"}
+                           for r in rows],
+            "cap": KNOWLEDGE_PER_ACCOUNT}
+
+
+@app.post("/api/expert-knowledge")
+def add_expert_knowledge(request: Request, payload: dict) -> dict:
+    """Save a reference link.
+
+    The URL is checked for safety BEFORE it is stored, not only before it is
+    fetched: a link that can never be read is a row that will sit in the
+    settings screen failing forever, and refusing it here is the only moment
+    the person who typed it is still looking.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Sign in to manage references.")
+    expert = _known_expert(payload.get("expert"))
+    if not expert:
+        raise HTTPException(400, "Choose which expert this reference is for.")
+
+    # SHAPE only, here. Resolving the name would mean a blocking DNS lookup
+    # on the request thread, with no timeout worth the name and a nameserver
+    # the URL's owner controls -- which is the same "do not hold a request
+    # open" problem the fetch itself is kept off this thread for. This catches
+    # every mistake a person actually makes (http://, a typo, a port) while
+    # they are still looking at the form; the address check happens in
+    # _distill_reference_row, before anything is fetched.
+    url = str(payload.get("url") or "").strip()
+    try:
+        safe_url = reference_fetch.check_shape(url)
+    except (reference_fetch.UnsafeURL, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    note = str(payload.get("note") or "").strip()
+    if not note:
+        raise HTTPException(
+            400, "Add a line about what this reference is for — it is the "
+                 "part the AI treats as your instruction.")
+
+    # The scope is the server's to decide. See the note above this section.
+    user = auth.current_user(request)
+    wants_global = str(payload.get("scope") or "").strip().lower() == "global"
+    is_admin = bool(user and str(user.get("role") or "") == "superadmin")
+    scope = "global" if (wants_global and is_admin) else "account"
+
+    if scope == "account" and \
+            db.expert_knowledge_count(uid, expert) >= KNOWLEDGE_PER_ACCOUNT:
+        raise HTTPException(
+            400, f"You can save {KNOWLEDGE_PER_ACCOUNT} references per expert. "
+                 f"Remove one first.")
+    if scope == "global":
+        _audit_admin(user, request, "add_global_reference",
+                     target_type="expert", target_id=expert,
+                     data={"url": safe_url[:300]})
+
+    record_id = db.expert_knowledge_add(expert, safe_url, note, scope=scope,
+                                        account_id=uid, added_by=uid)
+    # Fetched and summarised OFF the request. A slow or hostile host must not
+    # hold a request open, which is also what stops this being a denial of
+    # service amplifier pointed at somebody else's server.
+    run_in_background(_distill_reference_row, record_id)
+    return {"id": record_id, "scope": scope, "status": "fetching"}
+
+
+@app.patch("/api/expert-knowledge/{record_id}")
+def update_expert_knowledge(request: Request, record_id: str,
+                            payload: dict) -> dict:
+    """Turn a reference off, or reword the note. The URL is not editable —
+    a changed URL is a different reference and gets a fresh fetch."""
+    uid = _uid(request)
+    _owned_knowledge(record_id, uid)
+    changes: dict = {}
+    if "enabled" in payload:
+        changes["enabled"] = bool(payload.get("enabled"))
+    if "note" in payload:
+        note = str(payload.get("note") or "").strip()
+        if not note:
+            raise HTTPException(400, "The note is what the AI treats as your "
+                                     "instruction — it cannot be empty.")
+        changes["note"] = note[:2000]
+    if not changes:
+        raise HTTPException(400, "Nothing to change.")
+    db.expert_knowledge_update(record_id, **changes)
+    return {"ok": True, **changes}
+
+
+@app.delete("/api/expert-knowledge/{record_id}")
+def delete_expert_knowledge(request: Request, record_id: str) -> dict:
+    uid = _uid(request)
+    _owned_knowledge(record_id, uid)
+    db.expert_knowledge_delete(record_id)
+    return {"ok": True}
+
+
+@app.post("/api/expert-knowledge/{record_id}/refresh")
+def refresh_expert_knowledge(request: Request, record_id: str) -> dict:
+    """Read the page again. Rate limited: it is an outbound fetch somebody
+    else pays for."""
+    uid = _uid(request)
+    _owned_knowledge(record_id, uid)
+    if not ratelimit.check(f"reference:{_client_ip(request)}"):
+        raise HTTPException(429, "Too many refreshes. Try again in a few "
+                                 "minutes.")
+    run_in_background(_distill_reference_row, record_id)
+    return {"ok": True, "status": "fetching"}
+
+
+def _distill_reference_row(record_id: str) -> None:
+    """Fetch a saved reference and write down what it establishes.
+
+    Off the request thread, always. Never raises: a reference that cannot be
+    read is recorded as one -- `fetch_error` is shown in the settings screen,
+    because a reference that silently stopped working is worse than none.
+    """
+    row = db.expert_knowledge_get(record_id)
+    if not row:
+        return
+    now = datetime.now(timezone.utc)
+    try:
+        page = reference_fetch.fetch(row["url"])
+        text = reference_fetch.readable_text(page)
+        result = claude_ai.distill_reference(
+            text, note=row.get("note", ""), subject=row.get("expert", ""))
+    except (reference_fetch.UnsafeURL, ValueError) as exc:
+        db.expert_knowledge_update(record_id, last_fetched=now,
+                                   fetch_error=str(exc)[:500], enabled=False)
+        return
+    except Exception as exc:  # noqa: BLE001 - a reference is optional
+        log.info("reference distill failed for %s: %s", record_id,
+                 type(exc).__name__)
+        db.expert_knowledge_update(
+            record_id, last_fetched=now,
+            fetch_error=f"could not read the page ({type(exc).__name__})")
+        return
+    if not result or not result.get("usable"):
+        db.expert_knowledge_update(
+            record_id, last_fetched=now, distillate="", enabled=False,
+            fetch_error="that page had nothing usable on it — a login wall, "
+                        "a paywall, or a page about something else")
+        return
+    db.expert_knowledge_update(record_id, last_fetched=now, distilled_at=now,
+                               distillate=result["summary"], fetch_error="")
+    log.info("reference: %s distilled (%d chars)", record_id,
+             len(result["summary"]))
+
+
 @app.get("/api/profile")
 def get_profile(request: Request) -> dict:
     """The logged-in user's profile + eBay connection summary for Settings."""
@@ -3985,9 +4196,35 @@ def _reverse_image_leads(session_id: str, path) -> list[dict]:
     return imagesearch.reverse_image(url) if url else []
 
 
+def _expert_references(expert: str, uid: str = "") -> list:
+    """The reference links this account may read for `expert`.
+
+    Best-effort by contract, like every other enrichment: a reference is a
+    nice-to-have and a draft is worth more than one, so a database that is
+    unreachable means no references rather than no draft.
+
+    The rows come back as experts.base.Reference objects, which exist to keep
+    the owner's NOTE and the fetched page's DISTILLATE apart all the way to
+    the prompt -- see experts/knowledge.
+    """
+    if not db.enabled():
+        return []
+    try:
+        rows = db.expert_knowledge_for(expert, uid)
+    except Exception as exc:  # noqa: BLE001 - a draft beats a reference
+        log.info("references unavailable for %s: %s", expert, exc)
+        return []
+    return [Reference(expert=r.get("expert", expert), url=r.get("url", ""),
+                      note=r.get("note", ""),
+                      distillate=r.get("distillate", ""),
+                      scope=r.get("scope", "account"))
+            for r in rows]
+
+
 def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
                     observations: str = "",
-                    tags: Optional[list] = None) -> Optional[dict]:
+                    tags: Optional[list] = None,
+                    uid: str = "") -> Optional[dict]:
     """Name the artist and the work behind a drafted print, in place.
 
     Runs when the draft is artwork and does not yet lead with its artist.
@@ -4022,7 +4259,8 @@ def _lookup_artwork(listing: Listing, image_paths: list, session_id: str = "",
     try:
         found = claude_ai.identify_artwork(paths, listing, leads=leads,
                                           observations=observations,
-                                          crops=crops)
+                                          crops=crops,
+                                          references=_expert_references("art", uid))
     except Exception as exc:  # noqa: BLE001 - a draft is worth more than a lookup
         log.info("art lookup failed: %s", exc)
         return None
@@ -4313,6 +4551,37 @@ def _title_with_presentation(title: str, presentation) -> str:
     return out
 
 
+def _respell_artist(text: str, reading: str, canonical: str) -> str:
+    """`text` with the artist's name spelled the way the catalogues spell it.
+
+    The lookup writes its proposed title from what it READ off the signature,
+    so a title arrives saying "Salvadore Dali Lincoln in Dalivision" while the
+    roster has already corrected the brand to "Salvador Dalí". Leaving that is
+    the worst of both: the listing claims the right artist in the field nobody
+    searches and the wrong spelling in the field everybody does.
+
+    Case-insensitive and accent-insensitive on the way in, because the reading
+    differs from the canonical form in exactly those ways; literal on the way
+    out, because the canonical spelling is the point.
+    """
+    if not text or not reading or reading == canonical:
+        return text
+    pattern = re.compile(re.escape(reading), re.IGNORECASE)
+    if pattern.search(text):
+        return pattern.sub(canonical.replace("\\", "\\\\"), text, count=1)
+    # The reading and the title may differ by accents alone ("Dali" against
+    # "Dalí"), which re.IGNORECASE does not bridge.
+    folded = art_roster.normalise(reading)
+    for token in (folded, folded.split()[-1] if folded.split() else ""):
+        if not token:
+            continue
+        loose = re.compile(r"\b" + r"\s+".join(re.escape(w) for w in token.split())
+                           + r"\b", re.IGNORECASE)
+        if loose.search(text):
+            return loose.sub(canonical.replace("\\", "\\\\"), text, count=1)
+    return text
+
+
 def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
     """Fold a lookup's answer into the draft under _lookup_artwork's rules.
     Returns `found` when anything was applied or noted, else None."""
@@ -4320,6 +4589,35 @@ def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
     artist = str(found.get("artist") or "").strip()[:65]
     work = str(found.get("work") or "").strip()[:80]
     notes: list[str] = []
+    respelled = ""
+    # The roster's four answers about that name. It may fix a spelling and it
+    # may refuse a string that is not a name at all; it may NEVER be the
+    # reason a name is dropped, because a thousand artists is a rounding error
+    # against the long tail and most of what a reseller finds is by somebody
+    # no roster holds. See experts/art/roster.
+    if artist:
+        outcome, resolved, _entry = art_roster.resolve(artist)
+        if outcome in (art_roster.CORRECTED, art_roster.KNOWN):
+            if outcome == art_roster.CORRECTED:
+                log.info("art lookup: artist %r -> %r (roster)", artist, resolved)
+                notes.append(art_roster.correction_note(artist, resolved))
+            # The catalogued spelling -- in the TITLE as well as the brand,
+            # because the title is the field a search actually reads. Kept as
+            # a local rather than written back into `found`: this function
+            # RETURNS found, callers compare it by identity, and a lookup's
+            # own answer is not ours to rewrite.
+            respelled = _respell_artist(str(found.get("title") or ""),
+                                        artist, resolved)
+            artist = resolved
+        elif outcome == art_roster.UNVERIFIABLE:
+            # A date, an edition fraction, a copyright line -- read off the
+            # piece and handed back in the artist field. Not published as a
+            # person, and not silently dropped either: the seller is told
+            # what was read and where it probably belongs.
+            log.info("art lookup: %r is not a name, not used as the artist",
+                     artist)
+            notes.append(art_roster.unverifiable_note(artist))
+            artist = ""
     applied = False
     known = _artist_on(listing)
     contested = bool(artist and conf in ("medium", "high") and known
@@ -4347,7 +4645,8 @@ def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
         names_it = (artist.split()[-1].lower() in lower
                     and (not work or work.lower() in lower))
         hedged = any(h in lower for h in _RESEARCH_HEDGES)
-        proposed = str(found.get("title") or "").strip()[:TITLE_MAX_CHARS]
+        proposed = (respelled or str(found.get("title") or "")
+                    ).strip()[:TITLE_MAX_CHARS]
         if not proposed and work:
             proposed = f"{artist} {work}"[:TITLE_MAX_CHARS]
         if proposed and (hedged or not names_it) and proposed.lower() != lower:
@@ -4600,6 +4899,21 @@ def _price_against_comps(listing: Listing, uid: Optional[str] = None,
         best, query = _ask(code), code
     if not best.get("price"):
         best, query = _ask(title), title
+    if not best.get("price"):
+        # ART ASKS A BETTER QUESTION THAN THE HEAD OF ITS OWN TITLE.
+        #
+        # The rung below takes whatever the title happened to start with and
+        # hopes it is the artist. Sometimes it is "Marc Chagall Le Bouquet";
+        # sometimes it is "Vintage Framed Original". By the time pricing runs,
+        # a drafted piece of art has been through the lookup and the roster,
+        # so the artist, the medium and the edition are FIELDS -- and "what
+        # does a Chagall lithograph go for" is the question the seller is
+        # actually asking. Empty for everything that is not art, and then
+        # nothing changes. See experts/art/comps.
+        for rung in art_comps.comp_queries(listing):
+            best, query = _ask(rung), rung
+            if best.get("price"):
+                break
     if not best.get("price"):
         head = " ".join(title.split()[:_COMP_QUERY_WORDS])
         if head and head != title:
@@ -7447,7 +7761,7 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         # for a fill that then found nothing to do.
         _drop_answered_missing_info(listing)
         _lookup_artwork(listing, paths, sid, result.raw_observations,
-                        tags=result.tags)
+                        tags=result.tags, uid=ctx.uid or "")
         _research_draft(listing, paths, result.raw_observations,
                         result.confidence)
         # Research may have replaced a hedged title with the real one; if the
@@ -7971,7 +8285,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _drop_answered_missing_info(result.listing)
         _beat("artwork")
         _lookup_artwork(result.listing, [opt_dir / n for n in names],
-                        session_id, result.raw_observations, tags=result.tags)
+                        session_id, result.raw_observations, tags=result.tags,
+                        uid=uid or "")
         _beat("research")
         _research_draft(result.listing, [opt_dir / n for n in names],
                         result.raw_observations, result.confidence)

@@ -89,19 +89,29 @@ def surname(name: str) -> str:
 
 
 def _edits(a: str, b: str) -> int:
-    """Levenshtein distance, iterative, two rows. Short-circuits on a length
-    gap wider than the budget so a long name is not compared letter by letter
-    with a short one."""
+    """Edit distance counting a TRANSPOSITION as one change, not two.
+
+    Damerau-Levenshtein (optimal string alignment), because the commonest
+    typo in a name is two letters swapped -- "Mondrain" for "Mondrian",
+    "Chagalll" for "Chagall" -- and plain Levenshtein charges two for it,
+    which puts exactly the misspellings this is for outside the budget.
+
+    Short-circuits on a length gap wider than the budget, so a long name is
+    not compared letter by letter with a short one.
+    """
     if abs(len(a) - len(b)) > MAX_EDITS:
         return MAX_EDITS + 1
-    previous = list(range(len(b) + 1))
+    rows = [list(range(len(b) + 1))]
     for i, ca in enumerate(a, 1):
-        current = [i]
+        row = [i] + [0] * len(b)
         for j, cb in enumerate(b, 1):
-            current.append(min(previous[j] + 1, current[j - 1] + 1,
-                               previous[j - 1] + (ca != cb)))
-        previous = current
-    return previous[-1]
+            row[j] = min(rows[i - 1][j] + 1,        # deletion
+                         row[j - 1] + 1,            # insertion
+                         rows[i - 1][j - 1] + (ca != cb))   # substitution
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                row[j] = min(row[j], rows[i - 2][j - 2] + 1)   # transposition
+        rows.append(row)
+    return rows[-1][-1]
 
 
 # A name is one to four words of letters, with the hyphens, apostrophes and
@@ -149,6 +159,33 @@ def _load() -> dict:
         entries = raw.get("artists") if isinstance(raw, dict) else raw
     except Exception:  # noqa: BLE001 - no roster is a working roster
         entries = []
+    # A spelling that two artists answer to identifies NEITHER of them.
+    #
+    # The roster holds three Wyeths, and "Wyeth" is a perfectly good aka for
+    # each. Taking the first one and writing "Andrew Wyeth" onto a listing
+    # signed "N.C. Wyeth" is a worse error than the vagueness it replaced --
+    # it is a confident attribution to the wrong person, which is the one
+    # thing the art path exists to avoid. So a colliding key is dropped, and
+    # the reading is left exactly as it was read.
+    # A bare SURNAME shared by two artists on the roster is nobody's alias,
+    # however the data lists it.
+    #
+    # The collision check below only fires when two entries actually claim the
+    # same spelling -- and the roster holds three Wyeths of whom only one
+    # happens to list "Wyeth" as an alias. That is a data accident, and the
+    # cost of it is a listing signed "N.C. Wyeth" confidently attributed to
+    # Andrew. So the shared surnames are computed from the canonical names and
+    # struck out structurally, rather than trusted not to appear.
+    shared = {}
+    for entry in entries or []:
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip():
+            last = surname(entry["name"])
+            if last:
+                shared.setdefault(last, set()).add(entry["name"].strip())
+    ambiguous_surnames = {last for last, owners in shared.items()
+                          if len(owners) > 1}
+
+    claimed: dict = {}
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
@@ -157,8 +194,26 @@ def _load() -> dict:
             continue
         for spelling in [canonical, *(entry.get("aka") or [])]:
             key = normalise(spelling)
-            if key and key not in index:
+            if not key:
+                continue
+            if key in ambiguous_surnames and key != normalise(canonical):
+                # A one-word alias that is a surname two artists share.
+                continue
+            owner = claimed.get(key)
+            if owner is None:
+                claimed[key] = canonical
                 index[key] = entry
+            elif owner != canonical:
+                # Two different artists, one spelling. Neither gets it -- but
+                # a canonical NAME always beats an aka, because "Marc Chagall"
+                # in full is not ambiguous just because somebody else listed
+                # it as an alternate.
+                if spelling.strip() == canonical:
+                    claimed[key] = canonical
+                    index[key] = entry
+                else:
+                    index.pop(key, None)
+                    claimed[key] = "\x00ambiguous"
     _CACHE = {"index": index, "entries": [e for e in (entries or [])
                                           if isinstance(e, dict)]}
     return _CACHE
@@ -227,6 +282,33 @@ UNKNOWN = "unknown"        # absent but name-shaped; leave completely alone
 UNVERIFIABLE = "unverifiable"   # not a name at all; ask rather than publish
 
 
+def _match_script(reading: str, canonical: str) -> str:
+    """`canonical`, written in the alphabet the reading was written in.
+
+    "Salvador Dali" is not a misspelling of "Salvador Dalí". It is the same
+    name typed on a keyboard that has no í, which is every keyboard most
+    sellers and most buyers own -- and eBay folds diacritics in search, so the
+    accented form wins nothing there and can only lose: a title that renders
+    as "Salvador Dal?" somewhere downstream is worse than one that never had
+    the accent.
+
+    So the roster fixes SPELLING and leaves the alphabet alone. A reading that
+    arrived in plain ASCII goes back in plain ASCII, with the catalogued
+    capitalisation -- "Leroy Neiman" still becomes "LeRoy Neiman", because
+    case costs nothing and is how the artist writes it. A reading that already
+    carried the accents keeps them.
+    """
+    if not canonical:
+        return canonical
+    folded = _strip_accents(canonical)
+    if folded == canonical:
+        return canonical                    # nothing to decide
+    if _strip_accents(reading) == reading:
+        # The reading is ASCII; give back the ASCII form of the right name.
+        return folded
+    return canonical
+
+
 def resolve(name: str) -> tuple[str, str, Optional[dict]]:
     """(outcome, the name to use, the roster entry or None).
 
@@ -238,10 +320,12 @@ def resolve(name: str) -> tuple[str, str, Optional[dict]]:
         return (UNVERIFIABLE, "", None)
     entry = lookup(reading)
     if entry:
-        return (KNOWN, str(entry.get("name") or reading), entry)
+        return (KNOWN,
+                _match_script(reading, str(entry.get("name") or reading)), entry)
     entry = near_miss(reading)
     if entry:
-        return (CORRECTED, str(entry.get("name") or reading), entry)
+        return (CORRECTED,
+                _match_script(reading, str(entry.get("name") or reading)), entry)
     if is_name_shaped(reading):
         # The important branch. Absent from the roster is not absent from art
         # history, and the roster is in no position to say otherwise.

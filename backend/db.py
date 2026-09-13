@@ -452,6 +452,67 @@ class ErrorEvent(Base):
     data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
+class ExpertKnowledge(Base):
+    """One reference link somebody added to teach an expert.
+
+    The owner pastes a URL -- a catalogue raisonné, a Levi's dating chart, a
+    Fenton glass mark reference -- and writes a line about what it is for. The
+    expert reads it on every draft it applies to, with no deploy.
+
+    THE TWO TEXT COLUMNS ARE NOT THE SAME KIND OF THING, and keeping them
+    apart is the whole security design:
+
+      `note`       is the OWNER speaking. An instruction. Trusted.
+      `distillate` is a STRANGER speaking -- a summary written from somebody
+                   else's web page. Evidence, never an instruction.
+
+    They are two columns rather than one string because the layer that builds
+    the prompt has to be able to put them in different places with different
+    labels (services/experts/knowledge). A single field holding both could not
+    be fenced differently, and a page that could give instructions could write
+    "hand signed" onto every listing in the app.
+
+    `scope` is the other half. "global" affects every draft and only a
+    superadmin may write one; "account" is one seller's own, filtered by
+    `account_id` on every read, and must never reach anybody else's draft.
+    """
+
+    __tablename__ = "expert_knowledge"
+    # The read is always "the enabled references for THIS expert that this
+    # account may see", which is this index exactly.
+    __table_args__ = (Index("ix_expert_knowledge_lookup",
+                            "expert", "enabled", "scope", "account_id"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # Which expert this teaches: "art", "denim". Lowercase, stable.
+    expert: Mapped[str] = mapped_column(String(32), default="", index=True)
+    url: Mapped[str] = mapped_column(String(2000), default="")
+    # sha256 of the normalised URL, so the same page is not added twice to one
+    # scope. Not unique in the table: two accounts may each save the same
+    # reference, and one account's copy is not the other's.
+    url_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    # The owner's words. TRUSTED -- this is why the link is here.
+    note: Mapped[str] = mapped_column(String(2000), default="")
+    # Written from the fetched page. UNTRUSTED, always fenced as evidence.
+    distillate: Mapped[str] = mapped_column(String(8000), default="")
+    # "global" (superadmin, everyone's drafts) or "account" (this seller's).
+    scope: Mapped[str] = mapped_column(String(8), default="account")
+    # "" for a global reference. Never matched with an OR that could let ""
+    # stand in for "any" -- see expert_knowledge_for.
+    account_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    added_by: Mapped[str] = mapped_column(String(64), default="")
+    added_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    enabled: Mapped[bool] = mapped_column(default=True)
+    # When the page was last read, and what went wrong if it could not be. A
+    # reference that silently stopped fetching is worse than none, so the UI
+    # shows both.
+    last_fetched: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    distilled_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    fetch_error: Mapped[str] = mapped_column(String(500), default="")
+
+
 def enabled() -> bool:
     return bool(config.DATABASE_URL)
 
@@ -3468,3 +3529,215 @@ def admin_list_listings(limit: int = 50,
         raise StorageUnavailable(
             "Couldn't load the listings just now. Try again in a moment."
         ) from exc
+
+
+# --- expert knowledge (the reference links that teach an expert) ------------
+#
+# Two scopes, and keeping them apart is a security property rather than a
+# convenience. A "global" reference is a superadmin's and reaches every
+# draft in the app; an "account" reference is one seller's and must reach
+# theirs and nobody else's.
+#
+# Every read below therefore spells the predicate out as
+#
+#     enabled AND (scope = 'global' OR (scope = 'account' AND account_id = ?))
+#
+# rather than anything that could let an empty account_id stand in for "any".
+# A global row carries account_id = "", so `account_id = :uid OR account_id =
+# ""` would look correct, pass its tests, and hand one seller's private
+# references to a caller with no account.
+
+def expert_knowledge_add(expert: str, url: str, note: str, *, scope: str,
+                         account_id: str, added_by: str) -> str:
+    """Save a reference link. Returns its id.
+
+    `scope` is the CALLER'S to decide and the route's to police -- this
+    function does not look at who is asking. main derives it from the session
+    (a superadmin may ask for "global"; everybody else gets "account"
+    regardless of what they sent), so that the rule lives in one place next
+    to the auth check rather than in two places that can disagree.
+    """
+    import hashlib
+
+    eng = _get_engine()
+    if eng is None:
+        raise StorageUnavailable("no database configured")
+    scope = "global" if str(scope).strip().lower() == "global" else "account"
+    if scope == "account" and not account_id:
+        raise ValueError("an account-scoped reference needs an account")
+    row_id = _uuid.uuid4().hex
+    normalised = str(url or "").strip()
+    try:
+        with Session(eng) as s:
+            s.add(ExpertKnowledge(
+                id=row_id,
+                expert=str(expert or "").strip().lower()[:32],
+                url=normalised[:2000],
+                url_hash=hashlib.sha256(normalised.encode()).hexdigest(),
+                note=str(note or "").strip()[:2000],
+                distillate="",
+                scope=scope,
+                account_id="" if scope == "global" else str(account_id)[:64],
+                added_by=str(added_by or "")[:64],
+                added_at=_now(),
+                enabled=True))
+            s.commit()
+        return row_id
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: expert_knowledge_add failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't save that reference just now. Try again in a moment."
+        ) from exc
+
+
+def expert_knowledge_for(expert: str, account_id: str) -> list[dict]:
+    """The enabled references this account may read for `expert`.
+
+    The globals plus this account's own, and nothing else. Returns [] on a
+    read failure rather than raising: a reference is an enrichment, and a
+    draft is worth more than one -- the same contract every other
+    best-effort enrichment in this app has.
+    """
+    eng = _get_engine()
+    if eng is None:
+        return []
+    name = str(expert or "").strip().lower()
+    uid = str(account_id or "")
+    try:
+        with Session(eng) as s:
+            q = select(ExpertKnowledge).where(
+                ExpertKnowledge.expert == name,
+                ExpertKnowledge.enabled.is_(True),
+                # Spelled out. See the note above this section.
+                or_(ExpertKnowledge.scope == "global",
+                    and_(ExpertKnowledge.scope == "account",
+                         ExpertKnowledge.account_id == uid)
+                    if uid else ExpertKnowledge.scope == "global"),
+            ).order_by(ExpertKnowledge.added_at.desc()).limit(20)
+            return [_knowledge_dict(r) for r in s.scalars(q).all()]
+    except Exception as exc:  # noqa: BLE001 - a draft beats a reference
+        log.info("db: expert_knowledge_for failed: %s", exc)
+        return []
+
+
+def expert_knowledge_list(account_id: str, expert: str = "",
+                          include_global: bool = True) -> list[dict]:
+    """Everything this account may SEE in the settings screen -- enabled or
+    not, so a disabled reference can be turned back on."""
+    eng = _get_engine()
+    if eng is None:
+        return []
+    uid = str(account_id or "")
+    try:
+        with Session(eng) as s:
+            q = select(ExpertKnowledge)
+            if expert:
+                q = q.where(ExpertKnowledge.expert == expert.strip().lower())
+            own = and_(ExpertKnowledge.scope == "account",
+                       ExpertKnowledge.account_id == uid)
+            q = q.where(or_(ExpertKnowledge.scope == "global", own)
+                        if include_global and uid else
+                        (own if uid else ExpertKnowledge.scope == "global"))
+            q = q.order_by(ExpertKnowledge.added_at.desc()).limit(200)
+            return [_knowledge_dict(r) for r in s.scalars(q).all()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: expert_knowledge_list failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load your references just now. Try again in a moment."
+        ) from exc
+
+
+def expert_knowledge_get(record_id: str) -> Optional[dict]:
+    eng = _get_engine()
+    if eng is None:
+        return None
+    with Session(eng) as s:
+        row = s.get(ExpertKnowledge, str(record_id or ""))
+        return _knowledge_dict(row) if row else None
+
+
+def expert_knowledge_update(record_id: str, **fields) -> bool:
+    """Change a reference. Only the fields named are touched.
+
+    OWNERSHIP IS NOT CHECKED HERE -- the route checks it, because the route is
+    what test_every_scoped_route_checks_the_owner reads and what knows who is
+    asking. Returns whether a row was changed.
+    """
+    eng = _get_engine()
+    if eng is None:
+        raise StorageUnavailable("no database configured")
+    allowed = {"note", "distillate", "enabled", "last_fetched",
+               "distilled_at", "fetch_error"}
+    changes = {k: v for k, v in fields.items() if k in allowed}
+    if not changes:
+        return False
+    try:
+        with Session(eng) as s:
+            row = s.get(ExpertKnowledge, str(record_id or ""))
+            if row is None:
+                return False
+            for key, value in changes.items():
+                setattr(row, key, value)
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: expert_knowledge_update failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't save that change just now. Try again in a moment."
+        ) from exc
+
+
+def expert_knowledge_delete(record_id: str) -> bool:
+    """Remove a reference. Ownership is the route's to check."""
+    eng = _get_engine()
+    if eng is None:
+        raise StorageUnavailable("no database configured")
+    try:
+        with Session(eng) as s:
+            row = s.get(ExpertKnowledge, str(record_id or ""))
+            if row is None:
+                return False
+            s.delete(row)
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: expert_knowledge_delete failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't remove that reference just now. Try again in a moment."
+        ) from exc
+
+
+def expert_knowledge_count(account_id: str, expert: str) -> int:
+    """How many account-scoped references this account already has for an
+    expert -- the cap the route enforces, so one account cannot stuff the
+    prompt or turn the fetcher into an amplifier."""
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    try:
+        with Session(eng) as s:
+            q = select(func.count()).select_from(ExpertKnowledge).where(
+                ExpertKnowledge.scope == "account",
+                ExpertKnowledge.account_id == str(account_id or ""),
+                ExpertKnowledge.expert == str(expert or "").strip().lower())
+            return int(s.scalar(q) or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.info("db: expert_knowledge_count failed: %s", exc)
+        return 0
+
+
+def _knowledge_dict(row) -> dict:
+    return {
+        "id": row.id,
+        "expert": row.expert,
+        "url": row.url,
+        "note": row.note,
+        "distillate": row.distillate,
+        "scope": row.scope,
+        "account_id": row.account_id,
+        "added_by": row.added_by,
+        "added_at": row.added_at.isoformat() if row.added_at else "",
+        "enabled": bool(row.enabled),
+        "last_fetched": row.last_fetched.isoformat() if row.last_fetched else "",
+        "fetch_error": row.fetch_error,
+    }
