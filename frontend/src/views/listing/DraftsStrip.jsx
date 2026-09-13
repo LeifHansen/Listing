@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import {
-  FilePen, Rocket, PenLine, CheckSquare, Trash2, X, Truck, AlertTriangle,
-  Combine,
+  FilePen, Rocket, PenLine, Trash2, X, Truck, AlertTriangle, Combine,
 } from "lucide-react";
 import { patchJson, pollJob, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -28,7 +27,8 @@ import {
 import { isDraft, lastRefusal } from "@/lib/listingsView";
 
 /* The drafts experience on the merged Sell screen: every draft one click
-   from Publish or Review & List, plus select-mode bulk publish/merge/delete.
+   from Publish or Review & List, plus a tick box on every card for bulk
+   publish / merge / delete.
    Renders nothing when there are no (matching) drafts — the upload box
    directly above is the empty-state CTA.
 
@@ -117,16 +117,11 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   // below — one Sell screen, one layout.
   const list = listingsLayout === "list";
 
-  // Select mode lives in the app store (see store.jsx): opening a draft to
-  // edit it unmounts this component, and the ticks have to be there when the
-  // seller comes back. Read here as the two values every call site below
-  // already used.
-  const selecting = draftSelection.on;
-  const sel = draftSelection.ids;
-  const setSelecting = (on) => setDraftSelection((s) => ({ ...s, on }));
-  const setSel = (next) => setDraftSelection((s) => ({
-    ...s, ids: typeof next === "function" ? next(s.ids) : next,
-  }));
+  // The ticks live in the app store (see store.jsx): opening a draft to edit
+  // it unmounts this component, and they have to still be there when the
+  // seller comes back. Read here under the names every call site below uses.
+  const sel = draftSelection;
+  const setSel = setDraftSelection;
   const [publishing, setPublishing] = useState({});   // id -> bool
   // Drafts eBay REFUSED, and what it said. A refusal is the seller's to fix —
   // a field to fill in, an account hold to clear — and until this existed the
@@ -203,7 +198,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   const readyToPublish = selectedDrafts.filter(
     (d) => ebayBlockers(d.listing || {}, { targets: effectiveTargets }).length === 0);
   const allSelected = drafts.length > 0 && selectedDrafts.length === drafts.length;
-  const exitSelect = () => { setSelecting(false); setSel({}); };
+  const clearSelection = () => setSel({});
   const toggleAll = () => setSel(allSelected
     ? {}
     : Object.fromEntries(drafts.map((i) => [i.id, true])));
@@ -361,7 +356,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
       setBulkProgress(null);
     }
     await loadListings({ quiet: true });
-    exitSelect();
+    clearSelection();
     const shared = reasons.length && reasons.every((r) => r === reasons[0])
       ? reasons[0] : null;
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
@@ -392,7 +387,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
       confirmLabel: "Delete all selected",
       danger: true,
     }))) return;
-    if (await bulkDeleteListings(selectedDrafts.map((d) => d.id))) exitSelect();
+    if (await bulkDeleteListings(selectedDrafts.map((d) => d.id))) clearSelection();
   };
 
   // Merge duplicate drafts of the SAME item into one listing. One tick is
@@ -496,15 +491,12 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
             <MarketTargetChips selected={selected} toggle={toggle}
               otherConnected={otherConnected} />
             <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
-            {!selecting && (
-              <Button variant="ghost" size="sm" onClick={() => setSelecting(true)}>
-                <CheckSquare aria-hidden /> Select
-              </Button>
-            )}
             {/* The batch screen's ending: everything it drafted, live, on one
                 tap. Off on the Sell screen, where "every draft you have" is
-                not a set anybody means to publish in one go. */}
-            {publishAll && !selecting && (
+                not a set anybody means to publish in one go — and off once
+                anything is ticked, where "Publish selected" is the button
+                that means what the seller just said. */}
+            {publishAll && !selectedDrafts.length && (
               <Button variant="primary" size="sm" onClick={publishEvery}
                 disabled={!!bulkProgress} loading={!!bulkProgress}
                 title="Publish every draft shown here — no ticking required.">
@@ -518,10 +510,13 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
         }
       />
 
-      {/* Select mode gets its own bar rather than a row of buttons wedged into
-          the header: on a phone the bulk actions used to wrap behind the title,
-          which made "publish everything I just drafted" look impossible. */}
-      {selecting && (
+      {/* The bulk actions get their own bar rather than a row of buttons
+          wedged into the header: on a phone they used to wrap behind the
+          title, which made "publish everything I just drafted" look
+          impossible. It arrives with the first tick and leaves with the last
+          — there is no mode to be in, so an empty bar would be a row of
+          disabled buttons over every seller's drafts forever. */}
+      {selectedDrafts.length > 0 && (
         <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-card
           border border-blue/35 bg-blue-soft/90 backdrop-blur px-3 py-2.5 shadow-card">
           <label className="flex items-center gap-2 text-[13px] font-semibold text-ink cursor-pointer select-none mr-1">
@@ -539,9 +534,9 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
           </label>
           <div className="flex flex-wrap items-center gap-2 ml-auto">
             <Button variant="primary" size="sm" onClick={publishSelected}
-              disabled={!selectedDrafts.length || !!bulkProgress}
+              disabled={!!bulkProgress}
               loading={!!bulkProgress}
-              title={selectedDrafts.length && !readyToPublish.length
+              title={!readyToPublish.length
                 ? "Every selected draft is blocked by a field eBay requires — open them to finish"
                 : undefined}>
               <Rocket aria-hidden />
@@ -554,18 +549,18 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                 into another, or bin it. Armed by ONE tick, like the queue's —
                 the dialog asks what it merges with. */}
             <Button variant="secondary" size="sm" onClick={mergeSelected}
-              disabled={!selectedDrafts.length || !!bulkProgress}
-              title={selectedDrafts.length
-                ? "Same item split into duplicates? Pick what it merges with, which draft is the master, and whose entries win."
-                : "Tick a draft to merge it with another."}>
+              disabled={!!bulkProgress}
+              title="Same item split into duplicates? Pick what it merges with, which draft is the master, and whose entries win.">
               <Combine aria-hidden /> Merge into one
             </Button>
             <Button variant="danger" size="sm" onClick={deleteSelected}
-              disabled={!selectedDrafts.length || !!bulkProgress}>
+              disabled={!!bulkProgress}>
               <Trash2 aria-hidden /> Delete selected ({selectedDrafts.length})
             </Button>
-            <Button variant="ghost" size="sm" onClick={exitSelect} disabled={!!bulkProgress}>
-              <X aria-hidden /> Cancel
+            {/* Not "Cancel": there is nothing to come out of. It unticks
+                what is ticked, which is also what takes this bar away. */}
+            <Button variant="ghost" size="sm" onClick={clearSelection} disabled={!!bulkProgress}>
+              <X aria-hidden /> Clear
             </Button>
           </div>
         </div>
@@ -637,10 +632,10 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                 metrics={metricsById[item.id]}
                 needsInfo={needsInfo && !leaving}
                 needsInfoWhy={needsInfoWhy}
-                selectable={selecting && !leaving}
+                selectable={!leaving}
                 selected={!!sel[item.id]}
                 onSelect={() => setSel((s) => ({ ...s, [item.id]: !s[item.id] }))} />
-              {!selecting && !leaving && (
+              {!leaving && (
                 <div className={cn(list
                   ? "mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 pl-1"
                   : "contents")}>

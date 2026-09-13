@@ -96,10 +96,13 @@ describe("the rotate button on a card", () => {
     expect(rotateButton()).toBeNull();
   });
 
-  it("steps aside while the grid is in select mode", () => {
+  it("stays put on a card that offers a tick box", () => {
+    // Ticking is a checkbox in the card's own corner now, not a mode that
+    // takes the card's controls away — so a sideways photo on a draft the
+    // seller has picked for a bulk action is still one tap from straight.
     render({ onRotate: () => Promise.resolve(ROTATED_VERSION),
              selectable: true, onSelect: () => {} });
-    expect(rotateButton()).toBeNull();
+    expect(rotateButton()).toBeTruthy();
   });
 
   it("sits in the row's controls in list layout", () => {
