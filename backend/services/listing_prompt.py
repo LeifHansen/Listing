@@ -850,7 +850,7 @@ RETAIL_TAG_RULE = """
 LISTING_SCHEMA = """
 Return ONLY a JSON object (no markdown fences) with this exact shape:
 {
-  "title": "string, <= 80 chars, keyword-rich eBay title",
+  "title": "string, aim 70-80 chars and never over 80, keyword-rich eBay title — see the title rule below for the order the words go in and what may never appear in one",
   "subtitle": "always the empty string \\"\\" (eBay charges an extra fee for subtitles; the seller adds one manually if they want)",
   "brand": "string",
   "condition": "one of: %s — and ONLY one of those. NEW is eBay's \"New with tags\" for clothing/shoes/accessories and \"New (sealed/boxed)\" elsewhere; NEW_OTHER is \"New without tags\"; the USED_* and PRE_OWNED_* grades are for items that have actually been worn or used. Words that are not on this list (NEW_WITH_TAGS, NWT, BRAND_NEW, MINT, EXCELLENT, GOOD) are thrown away — see the retail-tag rule below",
@@ -952,9 +952,30 @@ Rules:
   position on nothing; "Royal Stafford Sweetpea teacup & saucer bone china
   vintage" reaches the buyer searching for that pattern by name. Keep those
   words — they earn their place at the end, not the front.
-  80 characters is a budget, not a target: when the title runs long, cut from
+  SPEND THE WHOLE BUDGET. 80 characters is the most heavily weighted field
+  eBay indexes, and every character left unused is a search this listing
+  cannot be found by. "Levi's 501 jeans" is sixteen characters and loses to
+  the same pair listed with its size, fit, colour and era. Aim for 70-80
+  characters: keep working DOWN the order above — size, colour, material,
+  fit, era, the other word a buyer might type for the thing ("jeans" and
+  "denim pants") — until the budget is spent.
+  Spend it only on words that are TRUE of this item and that a buyer would
+  really type. A short honest title beats a padded one, so when the true
+  words run out, stop: never repeat a word, never name a brand this item is
+  not, and never reach for filler. When the title runs long instead, cut from
   the BACK — the general words first, then the condition wording — never the
   brand, model or size at the front.
+  WRITE IT PLAINLY. No ALL-CAPS words (capitalise it the way a catalogue
+  would), no emoji, no asterisks, no runs of punctuation (!!, ***, L@@K):
+  eBay's search ignores those characters and a buyer reads them as spam. No
+  hype — WOW, LOOK, MUST SEE, BEST DEAL — and none of the seller's own
+  policies, which the account settles once and nobody searches for: FREE
+  SHIPPING, FAST DISPATCH, RETURNS ACCEPTED.
+  NEVER put an internal code in the title: a SKU, a bin, lot or inventory
+  number, or any reference only the seller understands. No buyer types it,
+  and it costs characters the item's own words needed. A number PRINTED ON
+  THE ITEM is the opposite and belongs there when you can read it — a model
+  or style number, an MPN, a pattern number, a card number.
 - Description: the longest field in the listing and the one that does the most
   SEO work. eBay indexes description text as well as the title, Google indexes
   the whole listing page, and a buyer still reading is a buyer close to
@@ -1038,7 +1059,9 @@ Rules:
 - item_specifics: be thorough. Fill EVERY standard eBay item specific you can
   see or confidently infer, using eBay's exact aspect names as "name" (these
   populate the listing's item specifics, so more accurate entries = far better
-  search visibility). Give ONE value per name; never guess. Common names by
+  search visibility). Use the names eBay itself offers, never one you invented:
+  a made-up aspect is not one the left-hand filters index, so it reads as a
+  line of text nobody can narrow by while the real aspect sits blank. Give ONE value per name; never guess. Common names by
   category:
   * Clothing: Department, Type, Style, Size, Size Type, Color, Material,
     Pattern, Sleeve Length, Fit, Neckline, Closure, Occasion, Season, Theme,
@@ -1095,6 +1118,28 @@ Rules:
 # itself only until someone edits one copy.
 
 
+# The title rules a SECOND pass has to keep. The whole rule lives in
+# LISTING_SCHEMA above, where the first draft reads it — but research and the
+# art lookup each return a REPLACEMENT title, and main applies it over a hedged
+# one outright (_apply_research_findings, _apply_art_markers). Those passes are
+# reading the web, not the listing rules, so without this the pass that
+# correctly turns "Fanch Ledan style lithograph" into the real artist's name
+# hands back sixteen honest characters where eighty were earned, or writes
+# HAND SIGNED!! in a field eBay's search reads as spam.
+TITLE_BUDGET_AND_BANS = (
+    "Spend 70-80 of the 80 characters on words that are TRUE of the item: "
+    "keep adding what a buyer filters on — size, colour, material, fit, era, "
+    "the other word for the thing — until the budget is spent, and never hand "
+    "back a title shorter than the draft's unless the draft was wrong. Stop "
+    "where the true words stop: no repeated words, no brand this item is not. "
+    "Write it plainly — no ALL-CAPS words, emoji, asterisks, runs of "
+    "punctuation (!!, ***, L@@K), hype (WOW, LOOK, MUST SEE, BEST DEAL), and "
+    "nothing about shipping or returns, which the seller's account settles. "
+    "Never a SKU, bin or inventory number; a model, style, pattern or card "
+    "number PRINTED ON THE ITEM is the opposite and belongs in the title."
+)
+
+
 # The title/description ordering has to survive a refine too: a rewrite there
 # reaches the same buyers and the same search snippet as the first draft, and
 # "shorten this" is exactly the instruction that would otherwise trade the
@@ -1108,7 +1153,13 @@ REFINE_ORDER_RULE = (
     "then the exact model or pattern name, then what the thing is, then "
     "the specifics a buyer filters on (size, colour, material), then any "
     "condition wording, and keep general words like Vintage, Antique, "
-    "Retro or Rare at the END. If you rewrite the description, its first "
+    "Retro or Rare at the END. It must also still SPEND the 80 characters: "
+    "aim for 70-80 of them on words that are true of the item, and never "
+    "trade an identifying word for a shorter title unless the seller asked "
+    "for one. And it must stay plain — no ALL-CAPS words, emoji, asterisks, "
+    "runs of punctuation, hype (WOW, LOOK, MUST SEE), the seller's own "
+    "shipping or returns policies, or a SKU, bin or inventory number. "
+    "If you rewrite the description, its first "
     "words must stay item-specific — brand, model, what the thing is — and "
     "must never open on one of those general words. Both hold unless the "
     "seller's instruction explicitly asks for that opening. "

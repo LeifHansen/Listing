@@ -35,6 +35,7 @@ from .listing_prompt import (
     REFINE_ORDER_RULE,
     RETAIL_TAG_RULE,
     STICKER_AND_BARCODE_RULE,
+    TITLE_BUDGET_AND_BANS,
     VINTAGE_DENIM_RULE,
     expected_item_count,
     group_notes_block,
@@ -2189,6 +2190,9 @@ Rules:
   never a placeholder number.
 - Cite what you used in sources. A finding with no source is a guess wearing a
   suit, and it will be treated as one.
+- The title you return REPLACES the draft's, so return a LISTING title, not a
+  caption for what you found: lead with the maker, then the work or model,
+  then what the thing is, then what a buyer filters on. """ + TITLE_BUDGET_AND_BANS + """
 """
 
 
@@ -2308,6 +2312,7 @@ Rules:
 - If nothing settled the artist, leave artist and work "" and say so with
   confidence "low". A guessed attribution is worse than a blank.
 - Cite what you used in sources. A name with no source is a guess.
+- The title you return REPLACES the draft's. """ + TITLE_BUDGET_AND_BANS + """
 The art rule every pass in this app reads the piece under:
 """ + ART_RULE + BLANK_CANVAS_RULE
 
