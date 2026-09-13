@@ -22,20 +22,16 @@ from anthropic import Anthropic
 from .. import config
 from ..config import log
 from . import barcodes, taxonomy
+from .experts import registry as _experts
+from .experts.base import Stage as _Stage
 from .listing_prompt import (
     ART_RULE,
-    ART_TAG_SCAN_RULE,
-    ART_TRANSCRIBE_LINES,
     BLANK_CANVAS_RULE,
-    DENIM_FRONT_AND_BACK_RULE,
-    DENIM_TAG_SCAN_RULE,
-    DENIM_TRANSCRIBE_LINES,
     EBAY_CONDITIONS,
-    LISTING_SCHEMA,
+    listing_schema,
     REFINE_ORDER_RULE,
     RETAIL_TAG_RULE,
     STICKER_AND_BARCODE_RULE,
-    VINTAGE_DENIM_RULE,
     expected_item_count,
     group_notes_block,
     identify_notes_block,
@@ -546,10 +542,29 @@ _PRICING_STRATEGY_HINTS = {
 # faster time-to-first-token) on every identify within the cache TTL — which is
 # every item of a bulk batch. Volatile content (the photos, the per-account
 # pricing strategy) rides in the user message, after the cached prefix.
-_IDENTIFY_SYSTEM = (
+_IDENTIFY_PREAMBLE = (
     "You are an expert eBay reseller and product cataloguer. Examine the "
-    "product photos and produce a complete, accurate eBay listing draft.\n\n"
-    + LISTING_SCHEMA)
+    "product photos and produce a complete, accurate eBay listing draft.\n\n")
+
+
+def _identify_system(subject=None) -> str:
+    """The identify system prompt, with the rules THIS pile is read under.
+
+    `subject` is what was known before the draft existed -- orient's answer to
+    "is the item a picture", the grouping pass's name for the group, the
+    seller's own notes. See experts.base.Subject for why routing has to work
+    off those rather than off a listing: this call is what produces the
+    listing.
+
+    With EXPERT_ROUTING off this returns the same string for every item, which
+    is the string that was here before experts.
+    """
+    return _IDENTIFY_PREAMBLE + listing_schema(subject)
+
+
+# The unrouted prompt. Still the default, still what warm_identify_cache
+# writes, and still what every item is drafted under until routing is on.
+_IDENTIFY_SYSTEM = _identify_system()
 
 
 def warm_identify_cache() -> bool:
@@ -690,7 +705,7 @@ Rules:
   rest in the order they were uploaded. That order is the seller's own
   sequence through the item, and shuffling it inside a group tells nobody
   anything while making the draft hard to check.
-""" + DENIM_FRONT_AND_BACK_RULE
+""" + _experts.rules_for(_Stage.GROUPING)
 
 
 _GROUP_VERIFY_SCHEMA = """
@@ -705,7 +720,7 @@ Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
   brand or artist. Two groups whose tags or patches read differently (a
   different size, lot or model number) are two items however alike they
   look; never merge look-alikes on looks alone.
-""" + DENIM_FRONT_AND_BACK_RULE + """
+""" + _experts.rules_for(_Stage.GROUPING) + """
 - Nothing to merge? Return {"merge": []}.
 """
 
@@ -739,7 +754,7 @@ Return ONLY a JSON object (no markdown fences):
 - Angles, lighting, a hanger vs laid flat, a close-up vs an overview, front
   vs back are NOT evidence of a second item. A close-up of a tag belongs
   with the overview shots taken around it.
-""" + DENIM_FRONT_AND_BACK_RULE + """
+""" + _experts.rules_for(_Stage.GROUPING) + """
 - Every photo index appears in exactly one item. One item: return a single
   entry with every index and evidence "".
 """
@@ -1357,7 +1372,7 @@ def refine(listing: Listing, prompt: str) -> Listing:
 # inferred.
 # ---------------------------------------------------------------------------
 
-_TAG_SCAN_SCHEMA = """
+_TAG_SCAN_SCHEMA_BODY = """
 Return ONLY a JSON object (no markdown fences):
 { "tags": [ {"photo": <1-based photo number>,
              "box": [x0, y0, x1, y1],
@@ -1382,7 +1397,21 @@ Rules:
   cut off.
 - At most 6 entries, best candidates first — a barcode outranks a care label
   when you have to choose. No tags at all -> {"tags": []}.
-""" + DENIM_TAG_SCAN_RULE + ART_TAG_SCAN_RULE
+"""
+
+
+def _tag_scan_ask(subject=None) -> str:
+    """What the box LOCATOR is told, for this item.
+
+    The locator draws boxes and does not read, so what it needs from a
+    vertical is where that vertical hides its facts -- a pencil signature in a
+    bottom margin, a lot code inside a waistband -- neither of which looks
+    like a tag.
+    """
+    return _TAG_SCAN_SCHEMA_BODY + _experts.rules_for(_Stage.TAG_SCAN, subject)
+
+
+_TAG_SCAN_SCHEMA = _tag_scan_ask()
 
 
 def _pil_block(img) -> dict:
@@ -1442,7 +1471,7 @@ def tag_crops(image_paths: list[Path], tags: list[dict]) -> list[dict]:
 # the multi-language, barcode, vintage-denim and art rules are the SAME text
 # the identify pass gets (STICKER_AND_BARCODE_RULE, VINTAGE_DENIM_RULE,
 # ART_RULE), not a paraphrase of them that drifts.
-_TAG_TRANSCRIBE_ASK = (
+_TAG_TRANSCRIBE_HEAD = (
     "These are zoomed-in crops of the tags, labels, stickers and barcodes on "
     "that same item. Transcribe ALL text you can read on them, exactly as "
     "printed — INCLUDING text in non-Latin scripts (Japanese, Korean, "
@@ -1471,11 +1500,28 @@ _TAG_TRANSCRIBE_ASK = (
     "position it is. The server checks every code's check digit, so a "
     "half-read code costs nothing and an invented one puts another company's "
     "product on this listing.\n\n"
-    + DENIM_TRANSCRIBE_LINES + ART_TRANSCRIBE_LINES +
-    "If a crop is unreadable, say so — never fill in what you can't see. "
-    "Plain text only.\n\nThe rules these crops are read under:\n"
-    + STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE
-    + BLANK_CANVAS_RULE + RETAIL_TAG_RULE)
+    )
+
+
+def _transcribe_ask(subject=None) -> str:
+    """The zoom pass's instructions, with this item's verticals in them.
+
+    Two injection points, not one: the per-mark LINES the pass writes (one per
+    thing it looked at) and the RULES those crops are read under. They are
+    separate stages because an expert can want a line without wanting its
+    whole rule repeated here.
+    """
+    return (_TAG_TRANSCRIBE_HEAD
+            + _experts.rules_for(_Stage.TRANSCRIBE_LINES, subject)
+            + "If a crop is unreadable, say so — never fill in what you can't "
+              "see. Plain text only.\n\nThe rules these crops are read "
+              "under:\n"
+            + STICKER_AND_BARCODE_RULE
+            + _experts.rules_for(_Stage.TRANSCRIBE_RULES, subject)
+            + RETAIL_TAG_RULE)
+
+
+_TAG_TRANSCRIBE_ASK = _transcribe_ask()
 
 
 def read_tag_text(image_paths: list[Path]) -> str:
@@ -1639,11 +1685,17 @@ Rules:
 # Static role text for the specifics fill, cached with _ASPECTS_FILL_SCHEMA as
 # one system block; the per-category aspect list gets a second cached block so
 # same-category listings (a bulk batch's common case) reuse both.
-_ASPECTS_SYSTEM = (
-    "You are cataloguing an item for eBay. Using the product photos and the "
-    "context provided, fill in the given eBay item specifics as accurately as "
-    "possible.\n\n" + _ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE + ART_RULE
-    + BLANK_CANVAS_RULE)
+def _aspects_system(subject=None) -> str:
+    """The specifics-fill system prompt. This is the one stage that has a real
+    drafted Listing to route on, because by now identify has run."""
+    return (
+        "You are cataloguing an item for eBay. Using the product photos and "
+        "the context provided, fill in the given eBay item specifics as "
+        "accurately as possible.\n\n" + _ASPECTS_FILL_SCHEMA
+        + _experts.rules_for(_Stage.ASPECTS, subject))
+
+
+_ASPECTS_SYSTEM = _aspects_system()
 
 
 # How many of a fixed-choice aspect's allowed values to show the model. The old

@@ -30,6 +30,7 @@ from __future__ import annotations
 import pytest
 
 from backend.services.listing_prompt import (
+    ART_RULE,
     ART_TAG_SCAN_RULE,
     ART_TRANSCRIBE_LINES,
     BLANK_CANVAS_RULE,
@@ -176,15 +177,30 @@ def test_the_zoom_pass_writes_a_support_line_and_a_verso_line():
 
 
 def test_the_rule_reaches_the_zoom_specifics_and_lookup_passes():
-    """The same text, appended the way ART_RULE is, so the pass that names
-    the piece and the pass that fills its specifics cannot disagree."""
-    from pathlib import Path
-    source = Path(__file__).resolve().parents[1] / "services" / "claude_ai.py"
-    text = source.read_text(encoding="utf-8")
-    assert "BLANK_CANVAS_RULE," in text           # imported, not paraphrased
-    assert "VINTAGE_DENIM_RULE + ART_RULE\n    + BLANK_CANVAS_RULE)" in text
-    assert "ART_RULE\n    + BLANK_CANVAS_RULE)" in text
-    assert '""" + ART_RULE + BLANK_CANVAS_RULE' in text
+    """The same text, so the pass that names the piece and the pass that
+    fills its specifics cannot disagree.
+
+    This used to grep claude_ai.py for the literal "+ ART_RULE +
+    BLANK_CANVAS_RULE" expressions, because that was how a rule reached a
+    pass and the source was the only thing readable without the SDK. The
+    rules now reach a pass through experts.registry, which is ALSO readable
+    without the SDK -- deliberately so -- and asking it what an item is read
+    under asserts the thing the expression was only evidence of. A paraphrase
+    still fails: the assertion is identity against the constant.
+    """
+    from backend.services.experts import registry
+    from backend.services.experts.base import Stage
+
+    # The two rules travel together, at every stage where either appears.
+    for stage in (Stage.IDENTIFY, Stage.TRANSCRIBE_RULES, Stage.ASPECTS):
+        text = registry.rules_for(stage)
+        assert ART_RULE in text, f"the art rule stopped reaching {stage.value}"
+        assert BLANK_CANVAS_RULE in text, \
+            f"the blank-canvas rule stopped reaching {stage.value}"
+
+    # ...and the art lookup, which appends them to its own schema.
+    from backend.services.experts import art
+    assert BLANK_CANVAS_RULE in art.rules(Stage.IDENTIFY)
 
 
 def test_a_canvas_draft_reaches_the_art_lookup():

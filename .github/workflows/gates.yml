@@ -40,10 +40,17 @@ jobs:
   # cannot quietly stop running by being left off a list.
   #
   # What this job proves on its own is that the modules with no heavy
-  # dependencies really have none: services/listing_prompt.py and
-  # services/barcodes.py hold rules (the prompt text; whether a barcode's
+  # dependencies really have none: services/listing_prompt.py, the whole of
+  # services/experts (every vertical's rules.py and match.py, plus base.py and
+  # registry.py -- the router that decides which rules an item is read under)
+  # and services/barcodes.py hold rules (the prompt text; whether a barcode's
   # check digit lets it reach a listing) that must stay testable without the
-  # SDK installed, and an import creeping into either would fail here.
+  # SDK installed, and an import creeping into any of them would fail here.
+  #
+  # That used to be enforced only incidentally -- by those tests SKIPPING,
+  # which is green. test_a_rule_can_be_read_without_the_sdk.py now states it
+  # outright: it walks the AST of every one of those modules and then imports
+  # them for real behind a hook that refuses the heavy packages by name.
   #
   # cryptography is not optional despite the name: backend/db.py imports
   # backend/crypto.py at module scope, so without it every test that touches

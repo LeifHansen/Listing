@@ -197,18 +197,41 @@ def test_the_transcribe_pass_writes_one_line_per_mark():
 
 
 def test_every_vision_pass_reads_the_same_art_text():
-    """The locator, the transcribe pass, the specifics fill and the art
-    lookup read the constants, not a paraphrase. Pinned on the source so it
-    holds without the SDK installed."""
+    """The locator, the transcribe pass and the specifics fill read the
+    constants, not a paraphrase -- and still without the SDK installed.
+
+    This used to grep claude_ai.py for the "+ ART_RULE" expressions, since
+    that was how a rule reached a pass and the source was the only thing
+    readable in the light CI job. A rule now reaches a pass through
+    experts.registry, which is import-free for exactly this reason, so the
+    property can be asserted rather than inferred from a "+".
+    """
+    from backend.services.experts import registry
+    from backend.services.experts.base import Stage
+
+    # Each pass, and the art text it must carry.
+    assert ART_TAG_SCAN_RULE in registry.rules_for(Stage.TAG_SCAN)
+    assert ART_TRANSCRIBE_LINES in registry.rules_for(Stage.TRANSCRIBE_LINES)
+    assert ART_RULE in registry.rules_for(Stage.TRANSCRIBE_RULES)
+    assert ART_RULE in registry.rules_for(Stage.ASPECTS)
+    assert ART_RULE in registry.rules_for(Stage.IDENTIFY)
+
+    # Denim's equivalents ride the same stages -- one expert's arrival must
+    # never be another's departure.
+    from backend.services.listing_prompt import (
+        DENIM_TAG_SCAN_RULE, DENIM_TRANSCRIBE_LINES, VINTAGE_DENIM_RULE)
+    assert DENIM_TAG_SCAN_RULE in registry.rules_for(Stage.TAG_SCAN)
+    assert DENIM_TRANSCRIBE_LINES in registry.rules_for(Stage.TRANSCRIBE_LINES)
+    assert VINTAGE_DENIM_RULE in registry.rules_for(Stage.ASPECTS)
+
+
+def test_the_art_lookup_asks_how_the_piece_is_signed_and_numbered():
+    """The other half of what the source grep above used to cover: the art
+    lookup's own schema. That one really is in claude_ai.py, so it is still
+    read as text -- the SDK is not installed in the light job."""
     from pathlib import Path
     source = Path(__file__).resolve().parents[1] / "services" / "claude_ai.py"
     text = source.read_text(encoding="utf-8")
-    assert "DENIM_TAG_SCAN_RULE + ART_TAG_SCAN_RULE" in text
-    assert "DENIM_TRANSCRIBE_LINES + ART_TRANSCRIBE_LINES" in text
-    assert "STICKER_AND_BARCODE_RULE + VINTAGE_DENIM_RULE + ART_RULE" in text
-    assert "_ASPECTS_FILL_SCHEMA + VINTAGE_DENIM_RULE + ART_RULE" in text
-    # The art lookup asks how the piece is signed and numbered, and reads
-    # under the same rule.
     assert '"signature":' in text and '"edition":' in text
     assert '""" + ART_RULE' in text
     assert "signature|edition|stamp|caption|label" in text

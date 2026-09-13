@@ -108,6 +108,11 @@ def test_identify_still_feeds_the_model_this_schema():
     assert re.search(r"from \.listing_prompt import\b", source)
     # The _IDENTIFY_SYSTEM assignment, up to the next line starting in
     # column 0 — however its continuation lines happen to be wrapped.
-    block = re.split(r"\n(?=\S)", source[source.index("_IDENTIFY_SYSTEM"):])[0]
-    assert "LISTING_SCHEMA" in block, "identify's prompt no longer carries the schema"
+    # The builder that composes the prompt, up to the next line starting in
+    # column 0. It reads `listing_schema(subject)` rather than the
+    # LISTING_SCHEMA constant now, because which VERTICAL rules go in the
+    # middle depends on the item -- but it is the same schema, and the same
+    # failure this guards against: a prompt that stopped carrying it.
+    block = re.split(r"\n(?=\S)", source[source.index("def _identify_system"):])[0]
+    assert "listing_schema" in block, "identify's prompt no longer carries the schema"
     assert "REFINE_ORDER_RULE" in source
