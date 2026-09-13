@@ -176,18 +176,54 @@ VINTAGE_DENIM_RULE = """
     is in frame. A hem that is not turned up shows nothing; "selvedge" is
     then a missing_info item ("turn up the hem and photograph the outseam
     edge"), not a claim.
-  * THE RED TAB on the right back pocket. Read the lettering exactly.
-    "LEVI'S" in ALL CAPITALS — the "BIG E" — was used until 1971; "Levi's"
-    with a lowercase e is 1971 onward and still current. Big E is the most
-    searched vintage Levi's term and carries a large premium: write it in the
-    title when you can read a capital E, and never when you cannot.
-    Lettering on BOTH faces of the tab is older than lettering on one face
-    (roughly before the mid-1950s). Transcribe any ® or © on the tab. A tab
-    with no lettering at all is a modern trademark-only tab. An ORANGE tab is
-    Levi's 1960s-1990s fashion line (bell bottoms, flares and boot cuts such
-    as the 646 and 517): a different line from red tab, not a lesser one, and
-    searched by name. A white, silver or black tab is a later line; read the
-    patch for the lot.
+  * THE RED TAB on the right back pocket, introduced in 1936: no tab at all
+    on a pair that should have one is either pre-1936 or a removed tab, and
+    the empty stitch holes cannot tell you which. Read the tab as THREE
+    separate facts, because each dates a pair on its own:
+    - THE LETTERING. "LEVI'S" in ALL CAPITALS — the "BIG E" — was used until
+      1971; "Levi's" with a lowercase e is 1971 onward and still current. Big
+      E is the most searched vintage Levi's term and carries a large premium.
+      But a capital E is NOT proof of a vintage pair on its own: Levi's
+      Vintage Clothing reproductions use it, and from 2018 so does the Levi's
+      Premium line. What separates them is the INSIDE of the garment — a
+      modern care tag, a four-digit MMYY date code, a "Made in Japan" or
+      post-2003 label all say the tab is a reproduction of a Big E and not
+      one. So write "Big E" in the title when you can read a capital E AND
+      nothing inside the pair contradicts it; when the inside says modern,
+      say "Big E tab (Levi's Premium/LVC reproduction)" instead, which is
+      still what that buyer searches. Never write it when you cannot read
+      the letter.
+    - WHICH FACES ARE LETTERED. The oldest tabs are lettered on ONE SIDE
+      ONLY: from 1936 until the early 1950s, "LEVI'S" was stitched on a
+      single face and the reverse is blank. Around 1951-1954 Levi's went to
+      a DOUBLE-SIDED tab, lettered on both faces, and that is what nearly
+      every pair since has. So a single-sided tab on an otherwise old pair
+      is the EARLIEST tab there is and worth saying — but check it against
+      the rest, because single-sided tabs came BACK in the mid-1980s: a
+      single-sided tab beside a lowercase e, or a care tag, is a 1980s pair
+      or later, not a 1940s one. Say which faces you can actually see, and
+      when only one face is in frame say exactly that rather than calling it
+      single-sided.
+    - THE ® MARK. The registered-trademark mark arrived on the tab with the
+      double-sided change in the early 1950s. "LEVI'S" with NO ® beside it
+      is earlier than "LEVI'S®". Transcribe any ®, ™ or © exactly where you
+      see it.
+    A tab with the ® AND NO NAME on it is a modern trademark-only tab —
+    Levi's makes a share of its tabs blank to keep the mark in use — so it
+    dates nothing and is never "Big E". It is also the one tab LVC does not
+    use, so a blank tab rules a reproduction OUT rather than in.
+    THE TAB'S COLOUR names the LINE, and the line is not the era:
+    - ORANGE tab: Levi's fashion line from the 1960s until 1999 (bell
+      bottoms, flares and boot cuts such as the 646 and 517). A different
+      line from red tab, not a lesser one, and searched by name.
+    - WHITE tab: corduroy jeans and jackets, and "Levi's for Gals", the
+      first women's line — 1960s and 1970s, so a white tab is NOT a sign of
+      a late pair and must not be described as one.
+    - SILVER tab: the loose and baggy line from the late 1980s through the
+      1990s, searched by name ("SilverTab") by buyers who want exactly that
+      cut.
+    - BLACK, and anything else: read the patch for the lot and say what you
+      see rather than assigning an era.
   * THE PATCH on the back waistband. Transcribe every word and number on it
     VERBATIM. Real LEATHER (creased, cracked, hair side) was used until the
     mid-1950s; after that the patch is "leather-look" card, which is what
@@ -286,8 +322,10 @@ DENIM_TAG_SCAN_RULE = """
 # ground truth the way it quotes a barcode.
 DENIM_TRANSCRIBE_LINES = (
     "For JEANS AND DENIM, add one line per marker you can see, exactly as "
-    "read: 'RED TAB: <the lettering as printed, and whether the E is a "
-    "capital (Big E) or lowercase>', 'PATCH: <every word and number>', "
+    "read: 'RED TAB: <the lettering as printed; whether the E is a capital "
+    "(Big E) or lowercase; whether an \u00ae, \u2122 or \u00a9 is beside it; and which "
+    "faces are lettered \u2014 one side only, both sides, or only one side "
+    "visible>', 'PATCH: <every word and number>', "
     "'LOT: <the lot-finish code as printed>', 'CARE TAG ROW: <the digits as "
     "printed>, read as <month / year / factory>', 'BUTTON BACK: <stamp>', "
     "'RIVETS: <stamp>', 'SELVEDGE: <redline, plain selvedge or overlocked, "
