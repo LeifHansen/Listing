@@ -29,6 +29,10 @@ from __future__ import annotations
 import pytest
 
 from backend.services.experts import registry
+from backend.services.experts.art.rules import (
+    ART_FRONT_AND_BACK_RULE,
+    ART_PRESENTATION_RULE,
+)
 from backend.services.experts.base import Stage
 from backend.services.listing_prompt import (
     ART_RULE,
@@ -65,17 +69,52 @@ def test_routing_is_off_until_somebody_turns_it_on():
 
 # --- the eight concatenations, one assertion each ---------------------------
 
+# What the experts have ADDED since the migration, per stage. Every entry is a
+# deliberate change with its own test file; anything arriving that is not on
+# this list fails the assertions below, which is the point -- a rule must not
+# be able to appear in the prompt that writes every listing without somebody
+# writing it down here first.
+ADDED = {
+    Stage.IDENTIFY: (ART_PRESENTATION_RULE,),
+    Stage.ASPECTS: (ART_PRESENTATION_RULE,),
+    Stage.GROUPING: (ART_FRONT_AND_BACK_RULE,),
+}
+
+
+def _without_additions(text: str, stage: Stage) -> str:
+    """`text` with this stage's deliberate additions removed, so what is left
+    can be compared against what the concatenations produced."""
+    for rule in ADDED.get(stage, ()):
+        text = text.replace(rule, "")
+    return text
+
+
 def test_the_identify_schema_is_the_string_it_always_was():
-    """The big one: 52,193 characters that decide what every listing says."""
-    assert listing_schema() == LISTING_SCHEMA
-    assert LISTING_SCHEMA == (
+    """The big one: the 52,193 characters that decide what every listing says.
+
+    Compared with the deliberate additions taken back out, because the promise
+    this file makes is about the REFACTOR -- that moving the rules into experts
+    moved not one word -- and not that art may never learn anything new. What
+    it has learned since is listed in ADDED above, each with its own test.
+    """
+    # The live constant is itself built by listing_schema(), so both carry
+    # whatever has been added since; the comparison is against the shape the
+    # concatenation had, with the additions taken back out of both.
+    schema = _without_additions(LISTING_SCHEMA, Stage.IDENTIFY)
+    assert schema == _without_additions(listing_schema(), Stage.IDENTIFY)
+    assert schema == (
         # head, then the verticals, then the universal hang-tag rule
-        LISTING_SCHEMA[:LISTING_SCHEMA.index(VINTAGE_DENIM_RULE)]
+        schema[:schema.index(VINTAGE_DENIM_RULE)]
         + VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE + RETAIL_TAG_RULE)
+    # ...and the head is still everything the schema had before the verticals,
+    # including the universal sticker rule. 52,193 characters of it originally.
+    assert len(schema) > 45000
+    assert STICKER_AND_BARCODE_RULE in schema[:schema.index(VINTAGE_DENIM_RULE)]
 
 
 def test_the_identify_stage_carries_denim_then_art_then_blank_canvas():
-    assert registry.rules_for(Stage.IDENTIFY) == (
+    assert _without_additions(registry.rules_for(Stage.IDENTIFY),
+                              Stage.IDENTIFY) == (
         VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE)
 
 
@@ -87,17 +126,34 @@ def test_the_box_locator_carries_denim_then_art():
 def test_the_zoom_pass_carries_denim_then_art():
     assert registry.rules_for(Stage.TRANSCRIBE_LINES) == (
         DENIM_TRANSCRIBE_LINES + ART_TRANSCRIBE_LINES)
-    assert registry.rules_for(Stage.TRANSCRIBE_RULES) == (
+    assert _without_additions(registry.rules_for(Stage.TRANSCRIBE_RULES),
+                              Stage.TRANSCRIBE_RULES) == (
         VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE)
 
 
 def test_the_specifics_fill_carries_denim_then_art():
-    assert registry.rules_for(Stage.ASPECTS) == (
+    assert _without_additions(registry.rules_for(Stage.ASPECTS),
+                              Stage.ASPECTS) == (
         VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE)
 
 
-def test_grouping_carries_the_front_and_back_rule():
-    assert registry.rules_for(Stage.GROUPING) == DENIM_FRONT_AND_BACK_RULE
+def test_grouping_carries_every_experts_front_and_back_rule():
+    """The one stage whose text is deliberately NOT what it was.
+
+    Grouping used to carry denim's front-and-back rule alone, because denim
+    was the only vertical that had one. Art has one now -- see
+    test_the_back_of_a_painting_is_not_a_second_listing.py for the failure it
+    is about -- and grouping is unroutable, so both ride every grouping call.
+
+    That is an addition rather than a change: denim's rule is still there,
+    still first, still byte-identical. Pinned here because the rest of this
+    file is the promise that nothing moved, and the one thing that did move
+    should be stated where a reader is looking for exactly that.
+    """
+    text = registry.rules_for(Stage.GROUPING)
+    assert _without_additions(text, Stage.GROUPING) == DENIM_FRONT_AND_BACK_RULE
+    assert DENIM_FRONT_AND_BACK_RULE in text
+    assert ART_FRONT_AND_BACK_RULE in text
 
 
 # --- the properties the order carries --------------------------------------
@@ -136,3 +192,26 @@ def test_the_experts_arrive_in_a_declared_order_not_an_accidental_one():
     they cannot share a prompt cache entry. The order is canonical -- declared
     in registry.EXPERTS -- rather than whatever the scores happened to be."""
     assert [e.name for e in registry.EXPERTS] == ["denim", "art"]
+
+
+def test_nothing_has_been_added_that_is_not_written_down():
+    """The list above is only worth having if an unlisted rule fails.
+
+    A vertical's rule text reaches every listing this app writes. Adding one
+    is a real decision and it should be impossible to make by accident -- so
+    a stage whose text, with its declared additions removed, is not what the
+    concatenation produced, fails here rather than shipping.
+    """
+    expected = {
+        Stage.IDENTIFY: VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE,
+        Stage.TAG_SCAN: DENIM_TAG_SCAN_RULE + ART_TAG_SCAN_RULE,
+        Stage.TRANSCRIBE_LINES: DENIM_TRANSCRIBE_LINES + ART_TRANSCRIBE_LINES,
+        Stage.TRANSCRIBE_RULES: VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE,
+        Stage.ASPECTS: VINTAGE_DENIM_RULE + ART_RULE + BLANK_CANVAS_RULE,
+        Stage.GROUPING: DENIM_FRONT_AND_BACK_RULE,
+    }
+    for stage, original in expected.items():
+        assert _without_additions(registry.rules_for(stage), stage) == original, (
+            f"{stage.value} carries rule text that is neither what it carried "
+            f"before experts nor listed in ADDED. If it is deliberate, add it "
+            f"to ADDED with a test; if it is not, this is the bug.")

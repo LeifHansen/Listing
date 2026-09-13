@@ -59,6 +59,7 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        owed_refunds, preflight, pricing,
                        recommender, store_category, sync_guard, sync_merge,
                        taxonomy, tokens)
+from .services.experts.art import presentation as art_presentation
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -4164,7 +4165,7 @@ def _title_with_markers(title: str, markers: dict) -> str:
 
 
 def _apply_art_markers(listing: Listing, found: dict, artist: str,
-                       notes: list[str]) -> bool:
+                       notes: list[str], margin_covered: bool = False) -> bool:
     """Write what the lookup read off the margin onto the draft: the
     Signed / Signed By / Edition Type / Edition Size specifics and a year
     written on the piece, each only where blank, and the title's "Hand
@@ -4204,7 +4205,12 @@ def _apply_art_markers(listing: Listing, found: dict, artist: str,
         log.info("art lookup: title %r -> %r (markers)", listing.title, titled)
         listing.title = titled
         written = True
-    if m["signature_unseen"] or m["edition_unseen"]:
+    if (m["signature_unseen"] or m["edition_unseen"]) and not margin_covered:
+        # ...unless something is KNOWN to be covering the margin, in which
+        # case _apply_presentation says the same thing and says it better:
+        # it names what is in the way and what to do about that specific
+        # thing. Two near-identical asks read as boilerplate, and a seller
+        # who skims the second one skims the one that mattered.
         what = " and ".join(w for w, unseen in (
             ("signature", m["signature_unseen"]),
             ("edition number", m["edition_unseen"])) if unseen)
@@ -4212,6 +4218,99 @@ def _apply_art_markers(listing: Listing, found: dict, artist: str,
                      "photos -- photograph the lower margin close up, both "
                      "corners, and the back of the piece.")
     return written
+
+
+# eBay's art categories carry these, and buyers filter on them. "Framing" is
+# the one that matters: Art > Art Prints offers Framed / Matted / Ready to
+# Hang / Unframed, and a print with no answer there is a print that does not
+# come back in the filtered search a buyer is actually using.
+_FRAMING_ASPECT = "Framing"
+_FRAME_MATERIAL_ASPECT = "Frame Material"
+_FEATURES_ASPECT = "Features"
+
+# mount -> the word eBay's Framing aspect takes. Not every mount has one:
+# rolled, shrink-wrapped and loose sheets are all "Unframed", and a stretched
+# canvas is not a framing question at all, so it gets no answer rather than a
+# wrong one.
+_FRAMING_VALUE = {
+    "framed": "Framed",
+    "float_mounted": "Framed",
+    "matted": "Matted",
+    "rolled": "Unframed",
+    "shrink_wrapped": "Unframed",
+    "loose_sheet": "Unframed",
+}
+
+
+def _apply_presentation(listing: Listing, found: dict,
+                        notes: list[str]) -> bool:
+    """Write how the piece is presented onto the draft, and say what a mat is
+    hiding.
+
+    Three things, in ascending order of how much they matter:
+
+    the structured field, which the editor shows and the packaging reads; the
+    Framing and Frame Material specifics and a "Framed"/"Matted" on the title,
+    which is what a buyer filters on; and THE CAVEAT, which is the reason the
+    field exists at all. A mat covers the lower margin, the lower margin is
+    where the signature and the edition number are, and a covered margin means
+    the piece is not unsigned -- it is unseen. That caution is derived from the
+    mat rather than from the model's phrasing, because a model that has
+    already written "unsigned" into a description is not something this pass
+    can retract.
+
+    Returns whether anything was written.
+    """
+    presentation = art_presentation.from_lookup(found)
+    if presentation is None:
+        return False
+    written = False
+    if listing.presentation is None:
+        listing.presentation = presentation
+        written = True
+    else:
+        # The seller has been in the editor, or an earlier pass filled it.
+        # Their answer stands: they are holding the frame and this is not.
+        presentation = listing.presentation
+
+    create = _artwork_category(listing)
+    framing = _FRAMING_VALUE.get(presentation.mount, "")
+    if framing:
+        written |= _fill_blank_specific(listing, _FRAMING_ASPECT, framing,
+                                        "high", create)
+    if presentation.frame_material:
+        written |= _fill_blank_specific(listing, _FRAME_MATERIAL_ASPECT,
+                                        presentation.frame_material[:50],
+                                        "medium", create)
+    titled = _title_with_presentation(listing.title, presentation)
+    if titled != (listing.title or ""):
+        log.info("art lookup: title %r -> %r (presentation)",
+                 listing.title, titled)
+        listing.title = titled
+        written = True
+
+    # ...and the part that is not decoration.
+    notes.extend(art_presentation.cautions(presentation))
+    return written
+
+
+def _title_with_presentation(title: str, presentation) -> str:
+    """"Framed" or "Matted" on the end of the title, when it is not already
+    there and the 80 characters allow.
+
+    The same shape and the same budget as _title_with_markers, and for the
+    same reason: the title rule puts the words that price a piece at the end,
+    and a title that cannot fit one is left alone rather than cut.
+    """
+    out = (title or "").strip()
+    lower = out.lower()
+    word = {"framed": "Framed", "float_mounted": "Framed",
+            "matted": "Matted"}.get(presentation.mount, "")
+    if not word or word.lower() in lower:
+        return out
+    if out and len(out) + 1 + len(word) <= TITLE_MAX_CHARS:
+        return f"{out} {word}"
+    return out
 
 
 def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
@@ -4271,7 +4370,15 @@ def _apply_artwork(listing: Listing, found: dict) -> Optional[dict]:
     # artist only when the draft or the lookup settled one.
     settled = "" if contested else (
         known or (artist if conf in ("medium", "high") else ""))
-    if _apply_art_markers(listing, found, settled, notes):
+    # Read the presentation BEFORE the markers, because whether a mat is
+    # covering the margin decides which of the two passes gets to ask for it.
+    presentation = listing.presentation or art_presentation.from_lookup(found)
+    covered = bool(presentation is not None and presentation.hides_the_margin())
+    if _apply_art_markers(listing, found, settled, notes, covered):
+        applied = True
+    # ...then written, after the markers, so the covered-margin caution sits
+    # beside the signature and edition lines it is about.
+    if _apply_presentation(listing, found, notes):
         applied = True
     for item in (found.get("verify") or [])[:3]:
         text = str(item or "").strip()

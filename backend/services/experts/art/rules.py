@@ -339,3 +339,169 @@ BLANK_CANVAS_RULE = """
     low-value art supply -- list it as one, by its mill and size, and never
     at the price a painting would fetch.
 """
+
+
+# --- art shot front and back: one piece, however many labels ---------------
+#
+# The grouping pass counts items before anything has been drafted, and the
+# rule it counts by is IDENTITY EVIDENCE OUTRANKS LOOKS: "Count the tags and
+# patches that READ DIFFERENTLY and expect at least that many items." That
+# rule is right, and it was written for a pile of clothes, where a second care
+# label really is a second garment.
+#
+# Art is the case it inverts. The BACK of one framed picture is a wall of
+# marks that all read differently -- the gallery's label, the framer's label,
+# an exhibition label, an auction house's lot sticker, a certificate in a
+# sleeve, an inventory number, an old price in grease pencil -- and every one
+# of them belongs to the SAME piece. Counted the general way, one painting is
+# four or five items. And the front and the back of a picture look less alike
+# than any two photos in a pile: one is a picture, the other is brown paper
+# and wire.
+#
+# Denim has had the rule that fixes this since a pile of 501s came back as
+# twelve listings for six pairs. It is the same shape of failure and it wants
+# the same shape of fix, with the axis turned over: denim counts pairs by
+# BACKS, because the markers are all on the back, and art counts pieces by
+# FRONTS, because the picture is the thing and the back is where the labels
+# pile up.
+#
+# BLANK_CANVAS_RULE already catches the narrow version of this -- a back
+# photographed alone, drafted as a blank canvas -- but it fires at IDENTIFY,
+# which is one pass too late. By then grouping has already decided that the
+# back is its own item, and identify is being asked to draft it. The only
+# place to stop an item from being invented is the pass that counts them.
+ART_FRONT_AND_BACK_RULE = """
+- A PICTURE IS SHOT FRONT AND BACK, AND BOTH SHOTS ARE ONE LISTING. A
+  painting, print, drawing or photograph is photographed face-on, then turned
+  over -- because the back is where the artist inscribed it, where the gallery
+  stapled its label and where every guide tells a seller to look. A piece is
+  therefore at least two photos, a FRONT and a BACK of one item, and a stack
+  of five prints is five listings, not ten.
+  * THE TWO SIDES OF ONE PIECE LOOK NOTHING ALIKE, AND THAT IS NORMAL. The
+    front is the picture. The back is stretcher bars around a recessed field
+    of bare fabric, staples and folded corners, a cross-brace, a hanging wire
+    -- or, on a framed piece, a sheet of brown dust paper, tape, bumpers and
+    a wire. Nothing about the back resembles the front, and it is NOT evidence
+    of a second item. It is the same object, turned over.
+  * COUNT PIECES BY FRONTS, NOT BY LABELS. The number of pieces is the number
+    of FRONTS -- distinct pictures -- never the number of labels, stamps and
+    numbers in frame. ONE piece's back routinely carries a gallery label AND a
+    framer's label AND an exhibition label AND an auction lot number AND a
+    certificate AND an old price, every one of them reading differently, and
+    it is still ONE piece. This is the one place the general rule about
+    identity evidence must not be applied: on art, several marks that read
+    differently are the NORMAL state of a single item's back.
+  * A SECOND PIECE IS A SECOND FRONT WHOSE PICTURE DIFFERS. Two pieces are two
+    listings when two FRONT views show different pictures -- a different
+    image, composition or subject -- or a plainly different size, frame or
+    medium. Say what differs as the evidence. Two backs, or two labels, are
+    never two pieces on their own: a seller can drag a spare photo out of a
+    draft in a second, and nobody can undo two live eBay listings for one
+    painting.
+  * A CLOSE-UP OF A MARGIN IS NEVER ITS OWN ITEM. The most valuable photos of
+    a print are close-ups of things that do not look like the item at all: a
+    pencil signature in a bottom corner, an edition fraction, an embossed
+    chop, a plate mark, a label on the back. Each shows a few square inches of
+    paper with some writing on it. Every one of them belongs to the piece it
+    was shot with.
+  * WHEN YOU ARE SHOWN ONE PHOTO PER GROUP, a group whose photo is a BACK -- a
+    stretched canvas seen from behind, a dust cover, a wall of labels -- or a
+    close-up of a margin or a label, belongs with the group holding the FRONT
+    it was shot with, which is almost always the group immediately before it.
+    The reverse is NOT true: several groups each showing a different PICTURE
+    are several pieces, and their backs are simply not in front of you.
+  * KEEP EACH PIECE'S OWN ORDER AND NEVER MOVE A PHOTO BETWEEN PIECES. The
+    back that follows a front is the back OF that front. List a piece's photos
+    in the order they were shot -- the front, then its back, then the close-ups
+    taken with them -- and never collect the fronts into one item and the backs
+    into another, or hand a piece the back of the piece beside it. A swapped
+    back puts one artist's signature, edition number and gallery label onto
+    another artist's picture, on two listings at once, and neither the seller
+    nor the buyer can see from the photos that it went wrong.
+"""
+
+
+# --- framed, matted, or a bare sheet ---------------------------------------
+#
+# "Framed" was a word the title might carry and nothing else. It is four
+# different facts and every one of them is worth money or costs it.
+#
+# It is PRICE: a decent frame is $40-$200 of the asking price, and comps for a
+# framed piece and a bare sheet are different markets.
+#
+# It is SHIPPING, and this is where the money actually goes. A framed picture
+# behind GLASS is the worst parcel in resale: heavy, oversized, rigid, and if
+# it breaks in transit the glass cuts the artwork on its way through. A seller
+# who ships one in a flat mailer at the unframed weight loses the item, the
+# postage and the sale at once. Acrylic glazing is none of those things, and
+# the two look identical in a photo -- but they do not SOUND identical, and a
+# seller can be asked.
+#
+# It is the SPECIFICS eBay's art categories actually carry -- Framing, Frame
+# Material, Frame Colour, and Features (Framed, Matted) -- which buyers filter
+# on.
+#
+# AND IT IS WHETHER THE FACTS CAN BE READ AT ALL, which is the one that
+# matters most and the reason this rule is not just a title word. A MAT COVERS
+# THE LOWER MARGIN. The lower margin is where the pencil signature and the
+# edition fraction are -- the two things that separate a $15 poster from a
+# $1,500 hand-signed limited edition. Under a mat they are not absent, they
+# are HIDDEN, and ART_RULE's central prohibition is exactly about the
+# difference: a mark that is not in the photos is never claimed and never
+# DENIED, because "unsigned" about a margin under a mat is the same false
+# claim in the cheaper direction, and it is the direction that costs the
+# seller the item's value rather than costing them a return.
+#
+# So a matted piece must produce a specific, physical instruction -- lift the
+# mat, photograph both lower corners -- rather than an "unsigned" nobody can
+# retract once it is in the description.
+ART_PRESENTATION_RULE = """
+- SAY HOW THE PIECE IS PRESENTED: FRAMED, MATTED, OR A BARE SHEET. It changes
+  the price, the parcel and what can honestly be said about the margins.
+  * WHICH ONE IT IS. Answer with one of: FRAMED (in a moulding, with or
+    without a mat); FLOAT MOUNTED (the sheet raised on a backing so its edges
+    show); MATTED (a window mount with no frame); SHRINK WRAPPED (sealed in
+    film, usually with a backing board); ROLLED (a poster in a tube); LOOSE
+    SHEET (a bare, flat, unmounted print or drawing); STRETCHED CANVAS (canvas
+    on wooden bars); CANVAS BOARD. Say which, and say what in the photo told
+    you -- a moulding at the edge, a bevelled window cut, a hanging wire, a
+    brown paper dust cover, staples over stretcher bars.
+  * THE GLAZING, AND IT IS A SHIPPING QUESTION, NOT A LOOKS ONE. Say GLASS,
+    ACRYLIC or NONE. Glass shows a hard mirror-sharp reflection, sits dead
+    flat, and chips at a corner; acrylic flexes, shows fine surface scratches
+    and a slightly warmer reflection. WHEN YOU CANNOT TELL, SAY SO AND ASK --
+    "cannot tell glass from acrylic in these photos; tap it, glass rings and
+    acrylic thuds" -- because a framed piece behind glass is a fragile,
+    oversized, double-boxed parcel and a seller who ships it as a flat one
+    arrives with broken glass lying on the artwork. Never guess ACRYLIC to be
+    optimistic and never guess GLASS to be safe: ask.
+  * THE OUTER SIZE, over the frame, not the picture inside it -- that is what
+    the piece has to be boxed to. Give it when a tape measure or a known
+    reference is in the photo, and say it is approximate otherwise.
+  * THE FRAME ITSELF: material (wood, gilt, metal, plastic), colour, and its
+    condition in its own right. A chipped or scuffed frame around a mint print
+    is a fact about the frame, and saying so is what stops it reading as a
+    fact about the artwork.
+  * AND WHETHER THE MARGIN IS VISIBLE, WHICH IS THE ONE THAT DECIDES WHAT MAY
+    BE CLAIMED. A mat covers the lower margin, and the lower margin is where
+    the pencil signature and the edition fraction are. When a mat or a frame
+    covers it, the piece is NOT unsigned and NOT an open edition -- it is a
+    piece whose margin has not been seen, and those are different listings at
+    very different prices. So when the margin is covered:
+      - never write "unsigned", "no signature", "open edition", "unnumbered"
+        or "reproduction" anywhere -- not in the title, not in the specifics,
+        not in the description. Absence of evidence under a mat is not
+        evidence of absence, and it is the cheap direction, which is the one
+        that costs the seller the piece's value.
+      - never write "hand signed" or a number either. The same photo shows
+        neither.
+      - say plainly in raw_observations which is the case: "MARGIN: covered by
+        the mat -- signature and edition number not visible".
+      - and ask for it in missing_info as a physical instruction, not a
+        wish: "The mat covers the lower margin, where the pencil signature
+        and the edition number are. Lift the mat at the lower corners -- or
+        take the piece out of the frame -- and photograph both corners close
+        up before listing this as unsigned."
+    When the margin IS visible, say so too, because that is what licenses
+    reading it.
+"""

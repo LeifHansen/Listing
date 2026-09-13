@@ -2325,6 +2325,12 @@ Return ONLY a JSON object (no markdown fences):
   "edition": "the edition fraction or annotation EXACTLY as written on the piece -- 84/250, A/P, H/C 5/20 -- or \"not visible in these photos\", or \"\"",
   "year": "the year or period of the work or of this edition, or \"\"",
   "publisher": "the publisher, printer or gallery named on the print, or \"\"",
+  "presentation": "how it is presented: framed | float_mounted | matted | shrink_wrapped | rolled | loose_sheet | stretched_canvas | canvas_board -- or \"\" if the photos cannot say",
+  "glazing": "glass | acrylic | none -- or \"\" when you cannot tell the first two apart, which is common and is a question for the seller, not a guess",
+  "frame": "the frame's material, colour and its own condition, or \"\"",
+  "outer_size": "the size OVER THE FRAME, what it must be boxed to, e.g. \"24 x 18 in\" -- or \"\"",
+  "matted": "yes | no | unknown -- is there a window mount over the sheet",
+  "margin_visible": "yes | no | unknown -- can the LOWER MARGIN, where the pencil signature and the edition fraction are, actually be seen in these photos",
   "read_from_print": "the text you could actually read ON the print -- signature, printed title, edition number, publisher or copyright line -- or \"\"",
   "evidence": "one or two sentences: what settled the artist and the work (text on the print, a reverse-image match, a composition you recognised) and which source confirmed it",
   "title": "an eBay title <= 80 chars that LEADS with the artist's name, then the work's title, then the medium (lithograph, serigraph, etching, oil on canvas), then the words the photos earn -- \"Hand Signed\", \"Signed & Numbered 84/250\", \"Artist Proof\", \"Original\" -- then Framed -- or \"\" if unresolved",
@@ -2357,6 +2363,17 @@ Rules:
   doubt downward: an unsigned print is not proof of a poster and a familiar
   image is not proof of a reproduction -- the seller is holding it and you
   are not.
+- SAY HOW IT IS PRESENTED, and treat a mat as a REASON YOU CANNOT SEE rather
+  than as a thing you have seen. A mat covers the lower margin; the lower
+  margin is where the signature and the edition number are. If it is covered,
+  margin_visible is "no", signature and edition say "not visible in these
+  photos", and neither "unsigned" nor "open edition" appears anywhere in what
+  you write -- they are the cheap direction of the same false claim, and the
+  cheap direction is the one that costs the seller the piece. Put the physical
+  fix in verify: lift the mat at the lower corners, or take it out of the
+  frame, and photograph both corners close up.
+- Glass and acrylic look alike in a photo and ship completely differently. Say
+  "" rather than guessing, and put the tap test in verify.
 - If nothing settled the artist, leave artist and work "" and say so with
   confidence "low". A guessed attribution is worse than a blank.
 - Cite what you used in sources. A name with no source is a guess.
