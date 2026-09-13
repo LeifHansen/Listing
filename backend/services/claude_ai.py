@@ -27,6 +27,7 @@ from .listing_prompt import (
     ART_TAG_SCAN_RULE,
     ART_TRANSCRIBE_LINES,
     BLANK_CANVAS_RULE,
+    DENIM_FRONT_AND_BACK_RULE,
     DENIM_TAG_SCAN_RULE,
     DENIM_TRANSCRIBE_LINES,
     EBAY_CONDITIONS,
@@ -673,18 +674,23 @@ Rules:
   (a Levi's leather patch with its lot number and W/L size), a model or serial
   number, a distinctive flaw: two photos showing DIFFERENT such marks are two
   items, even when the garments look identical. Two pairs of jeans in the
-  same wash are two listings. Count the tags and patches you can see and
-  expect at least that many items. A seller who shoots look-alikes shoots
-  each one's tag right after its overview: the tag belongs to the overview
-  before it, and the next overview starts the next item.
+  same wash are two listings. Count the tags and patches that READ
+  DIFFERENTLY and expect at least that many items -- several marks on ONE
+  item (the tab, the patch and the care tag of a single pair of jeans) are
+  one item, not three. A seller who shoots look-alikes shoots each one's tag
+  right after its overview: the tag belongs to the overview before it, and
+  the next overview starts the next item.
 - Split when two photos show different physical items (a different
   garment/object, a clearly different color or print, or different identity
   marks as above). When nothing tells two look-alikes apart -- no tag, patch
   or label reads differently -- KEEP THEM TOGETHER: a duplicate listing of
   one item is a worse mistake than one extra photo on a listing, and the
   seller can drag a photo out later.
-- Order each group's indices with the best overview shot first.
-"""
+- Order each group's indices with the best overview shot first and leave the
+  rest in the order they were uploaded. That order is the seller's own
+  sequence through the item, and shuffling it inside a group tells nobody
+  anything while making the draft hard to check.
+""" + DENIM_FRONT_AND_BACK_RULE
 
 
 _GROUP_VERIFY_SCHEMA = """
@@ -699,6 +705,7 @@ Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
   brand or artist. Two groups whose tags or patches read differently (a
   different size, lot or model number) are two items however alike they
   look; never merge look-alikes on looks alone.
+""" + DENIM_FRONT_AND_BACK_RULE + """
 - Nothing to merge? Return {"merge": []}.
 """
 
@@ -732,6 +739,7 @@ Return ONLY a JSON object (no markdown fences):
 - Angles, lighting, a hanger vs laid flat, a close-up vs an overview, front
   vs back are NOT evidence of a second item. A close-up of a tag belongs
   with the overview shots taken around it.
+""" + DENIM_FRONT_AND_BACK_RULE + """
 - Every photo index appears in exactly one item. One item: return a single
   entry with every index and evidence "".
 """
@@ -760,6 +768,21 @@ def _split_candidates(groups: list[dict], expected: int = 0) -> list[int]:
     return picked
 
 
+# The order a group's photos come back in. The grouping answer is free to list
+# a group's indices in any order and does: a pile of jeans shot front-then-back
+# came back with the fronts collected first and the backs after them, so a
+# pair's own back no longer followed its front and the seller checking the
+# draft could not tell which back belonged to which pair. Order carries no
+# meaning to any later pass -- identity is read off the photos, not their
+# sequence -- except the FIRST photo, which is the draft's lead image and the
+# one thing the model is asked to choose. So the lead is kept exactly where it
+# was put, and everything behind it goes back into the order the seller
+# uploaded it in.
+def _lead_then_upload_order(idxs: list[int]) -> list[int]:
+    """One group's photos: the model's lead photo first, the rest as shot."""
+    return idxs[:1] + sorted(idxs[1:])
+
+
 def _apply_split(group: dict, items) -> list[dict]:
     """The verifier's answer for one group, applied deterministically: the
     group is split only into items that partition its photos exactly and
@@ -785,7 +808,7 @@ def _apply_split(group: dict, items) -> list[dict]:
             idxs.append(i)
         if not idxs or not str(item.get("evidence") or "").strip():
             return [group]
-        parts.append({"indices": idxs,
+        parts.append({"indices": _lead_then_upload_order(idxs),
                       "name": str(item.get("name") or "").strip()})
     if seen != set(want):
         return [group]
@@ -1048,7 +1071,7 @@ def _parse_groups(data: dict, n: int) -> list[dict]:
                 placed.append(i)
         if placed:
             groups.append({"name": name or f"Item {len(groups) + 1}",
-                           "indices": placed})
+                           "indices": _lead_then_upload_order(placed)})
     if shift:
         log.info("bulk grouping: the answer numbered photos from 1; shifted")
     return groups
