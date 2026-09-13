@@ -135,8 +135,12 @@ def test_a_marker_that_is_not_in_the_photos_is_never_written():
     rule = _flat(VINTAGE_DENIM_RULE)
     assert 'Say "selvedge" ONLY when the edge is in frame' in rule
     assert "turn up the hem and photograph the outseam" in rule
-    assert ("write it in the title when you can read a capital E, "
-            "and never when you cannot") in rule
+    # The tab claim is now conditional on BOTH halves -- the letter you can
+    # read, and an inside that does not say "reproduction" (see
+    # test_the_red_tab_is_read_as_three_facts_not_one).
+    assert ('write "Big E" in the title when you can read a capital E AND '
+            "nothing inside the pair contradicts it") in rule
+    assert "Never write it when you cannot read the letter." in rule
     assert ('Never write "Big E", "selvedge", "XX", "hidden rivets" or '
             '"single stitch" about a detail that is not in the photos') in rule
     # And a marker looked for and not found is reported as exactly that.

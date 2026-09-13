@@ -1560,10 +1560,12 @@ Rules:
   four-digit finish code after the lot is the Wash (0000 rigid, 0115
   stonewash, 0660 black), never the Size; "MADE IN U.S.A." is
   Country/Region of Manufacture "United States"; and the red tab (Big E =
-  before 1971), the patch, the rivets and the care-tag production code date
-  the pair for Era / Decade / Vintage. Size is the TAG size from the patch
-  or care tag (Waist Size "32", Inseam "34") at "high"; the measured size is
-  a different fact and is never written as the tag size.
+  before 1971, unless a modern care tag inside says the pair is an LVC or
+  Levi's Premium reproduction of one), the patch, the rivets and the
+  care-tag production code date the pair for Era / Decade / Vintage. Size is
+  the TAG size from the patch or care tag (Waist Size "32", Inseam "34") at
+  "high"; the measured size is a different fact and is never written as the
+  tag size.
 - Clothing/shoe SIZE comes from the size tag, not from guessing: neck label,
   waistband tag, shoe tongue/heel label, or the care tag (the size often
   follows "SIZE" there). Report the marking in the aspect's expected form
