@@ -1176,7 +1176,17 @@ export function SpecificsCard({ w }) {
           <SpecGroup
             title="Recommended"
             count={`${recommendedFilled}/${recommendedAll.length}`}
-            note="optional — buyers filter by these, so more filled means more views"
+            // What an empty box here MEANS, which is the question the removed
+            // "Fill N with AI" button used to answer wrongly. It said the
+            // blanks were waiting for the AI; they are the AI's answer. The
+            // fill has already read these photos against this whole list, so
+            // a box still empty is one the photos could not settle — and the
+            // only thing that can fill it is the seller, who owns the item.
+            // Saying so is what stops a blank grid reading as a broken one.
+            note={recommendedFilled < recommendedAll.length
+              ? "optional — buyers filter by these. The AI filled what your "
+                + "photos showed; the blanks are ones only you can answer"
+              : "optional — buyers filter by these, and every one is filled"}
           >
             <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3.5">
               {recommended.map(renderAspect)}
@@ -1252,16 +1262,25 @@ export function SpecificsCard({ w }) {
 
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-0.5">
           <span className="inline-flex flex-wrap items-center gap-2">
-            {/* The AI fills these automatically once per listing, but only
-                when a REQUIRED aspect is empty — so a category change (a whole
-                new aspect set), a run that errored, or a listing that's merely
-                missing recommended fields all left the seller typing by hand
-                with no way to ask again. This is that way. */}
-            {catAspects.length > 0 && filledCount < catAspects.length && (
-              <Button variant="secondary" onClick={w.autofillSpecifics}>
-                <Sparkles aria-hidden /> Fill {catAspects.length - filledCount} with AI
-              </Button>
-            )}
+            {/* No "Fill N with AI" here. The AI reads this listing's photos
+                against eBay's whole aspect list at generation — required and
+                recommended alike (useListingForm's autofill effect, and the
+                server's own pass behind it) — so by the time this card is on
+                screen the fill has already happened and the fields it left
+                blank are the ones the photos could not answer. A button
+                offering to do it again read as "N fields are waiting for the
+                AI", which was never true: it charged a token to re-run the
+                same vision pass and came back "nothing new to add".
+                What IS left for the seller here is checking the guesses — the
+                ⚠ flags, "Looks right" on one, "I've read them all" for the
+                lot — and writing in what the photos couldn't answer.
+
+                A listing the fill genuinely hasn't run on (imported from eBay,
+                drafted before its category was settled, a run that errored) or
+                a category change that brings a whole new aspect set still has
+                a way back: "Finish up" runs the same pass over the listing and
+                says what it costs BEFORE spending it, which this button never
+                did. */}
             <Button
               variant="ghost"
               onClick={() => w.set("item_specifics", [...w.form.item_specifics, { name: "", value: "" }])}

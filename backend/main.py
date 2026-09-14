@@ -5769,6 +5769,16 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # (aspect-aware — MULTI aspects may take several values).
     added = _merge_filled_specifics(listing, filled, aspects)
     added += _cover_remaining_specifics(listing, paths, aspects)
+    # The AI has now read this listing's photos against eBay's aspect list for
+    # its category, which is precisely what `enriched_at` records -- INCLUDING
+    # the run that added nothing, the one that matters. This route was the one
+    # fill path that did the work and left no trace of it, so every reader of
+    # that flag went on believing the listing had never been looked at: the
+    # dashboard kept it in "Fill in details" and charged for the same empty
+    # answer on every press, and the bulk finisher re-ran it for the same
+    # reason. See Listing.enriched_at and _enrich_listing, which stamps it the
+    # same way for the identify-time pass.
+    listing.enriched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     storage.save_listing(session_id, listing)
     # _sticky_status, not a second hand-written copy of the rule. This was the
     # one status write that re-implemented it, and it listed only
@@ -5780,7 +5790,8 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
                       status=_sticky_status(db.get_listing_best_effort(session_id)),
                       user_id=_uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
-    return {"item_specifics": [s.model_dump() for s in listing.item_specifics], "added": added}
+    return {"item_specifics": [s.model_dump() for s in listing.item_specifics],
+            "added": added, "enriched_at": listing.enriched_at}
 
 
 @app.post("/api/enrich/{session_id}")
