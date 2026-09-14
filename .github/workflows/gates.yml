@@ -106,6 +106,7 @@ jobs:
           pytest backend/tests/test_the_photo_pass_does_three_things.py \
                  backend/tests/test_the_item_is_turned_upright_whatever_it_is.py \
                  backend/tests/test_export_pipeline.py \
+                 backend/tests/test_the_camera_tag_is_honoured_at_phone_size.py \
                  backend/tests/test_a_transparent_photo_does_not_go_black.py \
                  backend/tests/test_photo_resume.py \
                  backend/tests/test_the_cutout_does_not_eat_the_artwork.py \

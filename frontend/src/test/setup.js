@@ -39,6 +39,13 @@ class RecordingContext {
   fill() { this._log("fill", []); }
   stroke() { this._log("stroke", []); }
   drawImage(src, ...a) { this._log("drawImage", [src, ...a]); }
+  // The turn a photo is drawn under, when the uploader has to apply the
+  // camera's tag itself (lib/photoOrientation.drawOriented).
+  transform(...a) { this._log("transform", a); }
+  setTransform(...a) { this._log("setTransform", a); }
+  translate(...a) { this._log("translate", a); }
+  rotate(...a) { this._log("rotate", a); }
+  scale(...a) { this._log("scale", a); }
   getImageData(x, y, w, h) {
     return { data: new Uint8ClampedArray(Math.max(1, w * h * 4)), width: w, height: h };
   }
