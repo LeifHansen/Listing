@@ -2,7 +2,7 @@ import { memo, useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel, Timer,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { auctionEndLabel, useAuctionCountdown } from "@/lib/auctionClock";
@@ -119,75 +119,78 @@ function OfferChip({ count, top, currency, expiresAt, className }) {
   );
 }
 
-// Somebody has bid. The auction's own version of the offer above: the
-// listing has stopped being an item nobody wanted and become a sale in
-// progress, and the card glows green and rises to the top of the grid for
-// it. Unlike an offer a bid needs no answer from the seller, so the tooltip
-// says what happens next rather than sending them anywhere. Drawn filled in
-// the same green as the glow, so the chip is what NAMES the colour — the
-// glow alone reads to nobody who can't see it.
-function BidChip({ count, high, currency, className }) {
-  const money = formatMoney(high, currency || "USD");
-  const label = `${count} ${count === 1 ? "bid" : "bids"}` + (money ? ` · ${money}` : "");
-  const worth = count === 1
-    ? (money ? `A buyer has bid ${money} on this auction.` : "A buyer has bid on this auction.")
-    : (money
-      ? `${count} bids on this auction — the high bid is ${money}.`
-      : `${count} bids on this auction.`);
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full bg-green border border-green",
-        "px-2 py-0.5 text-[11px] font-bold text-on-accent tabular-nums", className)}
-      title={`${worth} It sells to the highest bidder when the auction ends.`}
-    >
-      <Gavel size={11} aria-hidden /> {label}
-    </span>
-  );
-}
-
-// How long this auction has left, counting itself down.
+// A live auction, on one chip.
 //
-// An auction is the one listing in the app with a DEADLINE, and until now the
-// grid never mentioned it: a card with a bid on it looked the same three days
-// out as it did four minutes out, which are not the same listing to a seller.
-// The bid chip above says the auction is worth something; this says how long
-// that is still true for.
+// It used to be three, and a clock. The status said "Live on eBay", the
+// format said "Auction" under a gavel, the bids said "6 bids · $17.50" under
+// another, and the countdown sat on a line of its own. Every one was true
+// and together they said one thing three times over: a listing taking bids
+// is live, is an auction, and is on eBay, because nothing else here runs
+// one. Asked for as one clean field, so this is the whole of what a live
+// auction says about itself:
 //
-// Quiet until it matters. For most of an auction's life the clock is a fact
-// alongside the views and watchers it sits with — "82 views, 10 watchers, 2d
-// 4h left" is one sentence about how the listing is doing. Inside the final
-// hour it becomes a chip, turns amber, and starts counting seconds: the same
-// threshold does all three, so the colour never needs explaining, and a grid
-// of twenty auctions highlights the one that is actually happening rather
-// than shouting about all of them.
+//     Auction · 6 bids · $17.50 · 2d 4h left
 //
-// Past the deadline it says so plainly rather than vanishing. The auction is
-// over, the app finds out on the next sweep of eBay, and in between "Ended"
-// is the true thing to say — a clock that disappeared would leave the card
-// looking like the auction had simply never had one.
-function AuctionClock({ endsAt, className }) {
+// Left to right in the order a seller wants it — what it is, what it is
+// worth, how long that is still true for — and never repeating itself. "No
+// bids" when eBay has counted none; nothing about bids at all before eBay
+// has been asked, on the same absent-is-unknown terms as the watchers beside
+// it; the clock only once eBay has reported a deadline, counting itself down
+// from there (lib/auctionClock). Past the deadline the chip stays, reading
+// "Auction ended" with the bids it closed on, until the next sweep of eBay
+// says whether it sold — a chip that vanished would leave the card looking
+// like the auction never happened.
+//
+// Its colour is the one thing here that is not words, and it keeps the
+// rules the separate chips had. Filled green while a bid is on it, the same
+// green as the card's glow, so the chip is what names the colour. Soft
+// green otherwise: the status badge's own "live". Amber inside the final
+// hour, when the clock starts counting seconds — that is where the bidding
+// lands, and a grid of twenty auctions should pick out the one that is
+// happening rather than shout about all of them. Grey once it is over.
+function AuctionChip({ bids, bidsKnown, high, currency, endsAt, className }) {
   const left = useAuctionCountdown(endsAt);
-  // No readable deadline, so no clock: on this card an absent number always
-  // means the app could not ask, never that the answer is nothing.
-  if (!left) return null;
+  const money = bids > 0 ? formatMoney(high, currency || "USD") : "";
+  const parts = [left && left.ended ? "Auction ended" : "Auction"];
+  if (bids > 0) {
+    parts.push(`${bids} ${bids === 1 ? "bid" : "bids"}` + (money ? ` · ${money}` : ""));
+  } else if (bidsKnown) {
+    parts.push("No bids");
+  }
+  if (left && !left.ended) parts.push(`${left.text} left`);
+
+  // The tooltip carries what the chip has no room for: the exact end time,
+  // in the reader's own timezone, and what happens then.
+  const worth = bids > 0
+    ? (bids === 1
+      ? (money ? `A buyer has bid ${money} on this auction.` : "A buyer has bid on this auction.")
+      : (money ? `${bids} bids on this auction — the high bid is ${money}.` : `${bids} bids on this auction.`))
+    : (bidsKnown ? "No bids yet." : "");
   const when = auctionEndLabel(endsAt);
+  const timing = !left
+    ? ("Live on eBay. It sells to the highest bidder when it ends — the next "
+       + "sync with eBay brings its bids and its deadline.")
+    : left.ended
+      ? `This auction ended ${when}. The next sync with eBay will say whether it sold.`
+      : `This auction ends ${when} — it sells to the highest bidder then.`;
+  const tone = left && left.ended
+    ? "bg-bg-sunken border-line text-ink-faint"
+    : left && left.endingSoon
+      ? "bg-yellow-soft border-warning/25 text-warning"
+      : bids > 0
+        ? "bg-green border-green text-on-accent"
+        : "bg-green-soft border-green/25 text-green";
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 text-[12px] tabular-nums",
-        left.ended
-          ? "font-medium text-ink-faint"
-          : left.endingSoon
-            ? "rounded-full bg-yellow-soft px-2 py-0.5 font-bold text-warning"
-            : "font-medium text-ink-secondary",
-        className)}
-      title={left.ended
-        ? `This auction ended ${when}. The next sync with eBay will say whether it sold.`
-        : `This auction ends ${when} — it sells to the highest bidder then.`}
+        // max-w-full so a narrow tile wraps the chip's words rather than
+        // running it off the photo's edge; the gavel holds its place.
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 max-w-full",
+        "text-[11px] font-bold tabular-nums", tone, className)}
+      title={[worth, timing].filter(Boolean).join(" ")}
     >
-      <Timer size={13} aria-hidden />
-      {left.ended ? "Auction ended" : `${left.text} left`}
+      <Gavel size={11} className="shrink-0" aria-hidden />
+      <span>{parts.join(" · ")}</span>
     </span>
   );
 }
@@ -361,6 +364,18 @@ export const ListingCard = memo(function ListingCard({
   // else (backend/services/ebay_trading._auction_ends_at), which is what
   // keeps a Buy It Now from counting down to its own renewal date.
   const endsAt = (isLive && metrics && metrics.ends_at) || "";
+  // Whether eBay has COUNTED the bids, as opposed to not having been asked:
+  // the chip says "No bids" for the first and nothing for the second.
+  const bidsKnown = isLive && !!metrics && metrics.bids != null;
+  // A live auction carries everything the status, format and bid chips said
+  // on one chip, with its clock (see AuctionChip). Its format is the usual
+  // sign; a bid count or a deadline is proof enough on its own, since eBay
+  // reports either for auctions and nothing else.
+  const liveAuction = isLive
+    && (isAuctionFormat(l.listing_format) || bids > 0 || !!endsAt);
+  // What that chip reads off the overlay -- which a live auction can be
+  // drawn without, before eBay has been asked.
+  const overlay = metrics || {};
   // Either one lights the card: a buyer has put money on this listing. The
   // same test decides its place in the grid (lib/listingsView.orderListings),
   // so the card that glows is always the card that was lifted.
@@ -668,21 +683,25 @@ export const ListingCard = memo(function ListingCard({
           {l.title || item.title || "(untitled)"}
         </span>
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <StatusBadge status={item.status} />
-          {/* Beside the status, because it changes how the price beside it
-              is read: "Bid $0.99" on an auction is an opening bid, not a
-              99-cent item. */}
-          {showFormat && <FormatBadge listing={l} />}
+          {/* A live auction is one chip: status, format, bids and clock. Any
+              other listing keeps its status, and — beside it, because it
+              changes how the price beside it is read — its format: "Bid
+              $0.99" on an auction is an opening bid, not a 99-cent item. */}
+          {liveAuction ? (
+            <AuctionChip bids={bids} bidsKnown={bidsKnown} high={overlay.high_bid}
+              currency={overlay.bid_currency || l.currency} endsAt={endsAt} />
+          ) : (
+            <>
+              <StatusBadge status={item.status} />
+              {showFormat && <FormatBadge listing={l} />}
+            </>
+          )}
           {/* Ahead of origin, staleness and traffic: those describe the
               listing, this one is a person waiting on the seller. */}
           {offers > 0 && (
             <OfferChip count={offers} top={metrics.top_offer}
               currency={metrics.offer_currency || l.currency}
               expiresAt={metrics.offer_expires_at} />
-          )}
-          {bids > 0 && (
-            <BidChip count={bids} high={metrics.high_bid}
-              currency={metrics.bid_currency || l.currency} />
           )}
           {showOrigin && <OriginBadge item={item} />}
           {stale && <StaleChip />}
@@ -699,10 +718,6 @@ export const ListingCard = memo(function ListingCard({
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
           )}
-          {/* Last on the line, beside the traffic it belongs with — and the
-              one thing here that turns amber on its own when the auction is
-              nearly over, which is what finds it in a row of chips. */}
-          {endsAt ? <AuctionClock endsAt={endsAt} /> : null}
         </span>
         {sold && (
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount} />
@@ -734,16 +749,20 @@ export const ListingCard = memo(function ListingCard({
           // badges start after it rather than under it.
           selectable && "pl-8",
         )}>
-          <StatusBadge status={item.status} className="shadow-card" />
-          {showFormat && <FormatBadge listing={l} className="shadow-card bg-card/95" />}
+          {liveAuction ? (
+            <AuctionChip bids={bids} bidsKnown={bidsKnown} high={overlay.high_bid}
+              currency={overlay.bid_currency || l.currency} endsAt={endsAt}
+              className="shadow-card" />
+          ) : (
+            <>
+              <StatusBadge status={item.status} className="shadow-card" />
+              {showFormat && <FormatBadge listing={l} className="shadow-card bg-card/95" />}
+            </>
+          )}
           {offers > 0 && (
             <OfferChip count={offers} top={metrics.top_offer}
               currency={metrics.offer_currency || l.currency}
               expiresAt={metrics.offer_expires_at} className="shadow-card" />
-          )}
-          {bids > 0 && (
-            <BidChip count={bids} high={metrics.high_bid}
-              currency={metrics.bid_currency || l.currency} className="shadow-card" />
           )}
         </div>
         {stale && <StaleChip className="absolute bottom-3 left-3 shadow-card" />}
@@ -762,14 +781,10 @@ export const ListingCard = memo(function ListingCard({
         <p className="font-semibold text-sm text-ink line-clamp-2">
           {l.title || item.title || "(untitled)"}
         </p>
-        {/* Traffic and the auction clock on one line: "82 views, 10 watchers,
-            2d 4h left" is one sentence about how this listing is doing, and
-            the deadline is the half of it that decides what to do next. */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 empty:hidden">
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
           )}
-          {endsAt ? <AuctionClock endsAt={endsAt} /> : null}
         </div>
         <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
           {/* In the body, not on the photo: the photo's corners already
