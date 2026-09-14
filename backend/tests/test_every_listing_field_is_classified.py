@@ -54,6 +54,11 @@ SELLER_FIELDS = {
     "promote", "ad_rate_percent",
     # per-marketplace fields the seller fills in
     "etsy", "depop",
+    # How a picture is presented -- framed, matted, a bare sheet, and whether
+    # a mat is covering the margin the signature is in. The art expert fills
+    # it off the photos and the seller corrects it in the editor, exactly as
+    # `retail_price` above: they are holding the thing and the server is not.
+    "presentation",
     # Guarded elsewhere, deliberately, and each has its own test:
     #   marketplaces / ebay_listing_id -> state.owned_state_from, which merges
     #     rather than replaces (a client's map is missing entries, not wrong)

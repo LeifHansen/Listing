@@ -208,6 +208,66 @@ class DepopFields(BaseModel):
     size: str = ""               # explicit size; "" = derive from item specifics
 
 
+class Presentation(BaseModel):
+    """How a picture is presented: framed, matted, or a bare sheet.
+
+    Written by the art expert off the photos, corrected by the seller in the
+    editor, exactly as `retail_price` is. It is on the model rather than in
+    item specifics for three reasons, and the third is the one that matters.
+
+    It is read BEFORE a category is resolved -- the shipping estimate needs to
+    know there is glass in the parcel, and eBay's aspects are not available
+    until there is a category to ask about.
+
+    It is structured. "Framed" in a title is a word; `glazing == "glass"` plus
+    an outer size is a box, a weight and a fragile-pack note.
+
+    AND IT HAS TO BE ABLE TO SAY "I CANNOT TELL". eBay aspects are strings,
+    and a string cannot hold the difference between "this print is unmatted"
+    and "I could not see whether it is matted", which on art is the whole
+    game: a mat COVERS THE LOWER MARGIN, and the lower margin is where the
+    pencil signature and the edition number are. ART_RULE's central
+    prohibition -- never claim a mark that is not in the photos, and never
+    DENY one either, because "unsigned" about a margin under a mat is the
+    same false claim in the cheaper direction -- only has teeth if the code
+    can represent the doubt. So `matted` and `margin_visible` are tri-state:
+    True, False, and None meaning nobody has established it.
+    """
+
+    # framed | float_mounted | matted | shrink_wrapped | rolled | loose_sheet
+    # | stretched_canvas | canvas_board | "" when the photos cannot say.
+    mount: str = ""
+    frame_material: str = ""            # wood, gilt, metal, plastic...
+    frame_colour: str = ""
+    # glass | acrylic | none | "" -- glass is the one that changes the parcel.
+    glazing: str = ""
+    # The OUTER size, over the frame: what the piece has to be boxed to, which
+    # is not the size of the picture inside it.
+    outer_width_in: float = 0.0
+    outer_height_in: float = 0.0
+    depth_in: float = 0.0
+
+    # Tri-state, all three of them. None is not a missing value to be filled
+    # in with a default -- it is the answer "the photos do not say", and it is
+    # the answer that stops a claim being made in either direction.
+    matted: Optional[bool] = None
+    margin_visible: Optional[bool] = None
+    signed_area_visible: Optional[bool] = None
+
+    def hides_the_margin(self) -> bool:
+        """Whether something is known to be covering the lower margin.
+
+        True ONLY on positive evidence -- a mat that was seen, or a margin
+        that was looked for and found covered. An unknown mount, an unanswered
+        `matted`, a piece nobody has looked at: all False, because this
+        question exists to ADD a caveat, and a caveat added on ignorance would
+        be attached to every listing in the app.
+        """
+        if self.margin_visible is False:
+            return True
+        return bool(self.matted) and self.margin_visible is not True
+
+
 class Listing(BaseModel):
     """A full eBay listing draft, editable by the user before publishing."""
 
@@ -456,6 +516,9 @@ class Listing(BaseModel):
     # Marketplace-specific listing fields, edited in their own cards.
     etsy: EtsyFields = Field(default_factory=EtsyFields)
     depop: DepopFields = Field(default_factory=DepopFields)
+    # How a picture is presented -- framed, matted, a bare sheet. None on
+    # everything that is not art, which is most of what this app lists.
+    presentation: Optional[Presentation] = None
     # Which fields the SELLER actually changed since this record last agreed
     # with the marketplace. Empty means "nothing known to be edited".
     #

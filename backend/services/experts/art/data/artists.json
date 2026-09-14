@@ -1,0 +1,1799 @@
+{
+ "_comment": "The artists whose work actually turns over, for normalising an attribution's spelling and catching a near miss. NOT a ranking and NOT exhaustive -- see roster.py: absent from this file must never be a reason to drop a name. Every `ulan` is empty because no id here was looked up, and an invented Getty id would be a fabricated record the app then states as fact. scripts/build_art_roster.py fills them and extends the list from Getty ULAN, Wikidata and museum open data.",
+ "source": "seed",
+ "artists": [
+  {
+   "name": "Alberto Giacometti",
+   "ulan": "",
+   "aka": [
+    "Giacometti"
+   ],
+   "born": "1901",
+   "died": "1966",
+   "nationality": "Swiss",
+   "mediums": [
+    "etching",
+    "lithograph",
+    "sculpture"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Albrecht Dürer",
+   "ulan": "",
+   "aka": [
+    "Albrecht Durer",
+    "Durer",
+    "Dürer"
+   ],
+   "born": "1471",
+   "died": "1528",
+   "nationality": "German",
+   "mediums": [
+    "engraving",
+    "woodcut"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Alex Katz",
+   "ulan": "",
+   "aka": [
+    "Katz"
+   ],
+   "born": "1927",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Alexander Calder",
+   "ulan": "",
+   "aka": [
+    "Calder"
+   ],
+   "born": "1898",
+   "died": "1976",
+   "nationality": "American",
+   "mediums": [
+    "gouache",
+    "lithograph",
+    "sculpture"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Alfred Eisenstaedt",
+   "ulan": "",
+   "aka": [
+    "Eisenstaedt"
+   ],
+   "born": "1898",
+   "died": "1995",
+   "nationality": "German-American",
+   "mediums": [
+    "photograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Alphonse Mucha",
+   "ulan": "",
+   "aka": [
+    "Mucha"
+   ],
+   "born": "1860",
+   "died": "1939",
+   "nationality": "Czech",
+   "mediums": [
+    "lithograph",
+    "poster"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Amedeo Modigliani",
+   "ulan": "",
+   "aka": [
+    "Modigliani"
+   ],
+   "born": "1884",
+   "died": "1920",
+   "nationality": "Italian",
+   "mediums": [
+    "drawing",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Anatoly Metlan",
+   "ulan": "",
+   "aka": [
+    "Metlan"
+   ],
+   "born": "1964",
+   "died": "",
+   "nationality": "Ukrainian-Israeli",
+   "mediums": [
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Andrew Wyeth",
+   "ulan": "",
+   "aka": [
+    "Wyeth"
+   ],
+   "born": "1917",
+   "died": "2009",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "tempera",
+    "watercolor"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Andy Warhol",
+   "ulan": "",
+   "aka": [
+    "Warhol"
+   ],
+   "born": "1928",
+   "died": "1987",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "screenprint",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Annie Leibovitz",
+   "ulan": "",
+   "aka": [
+    "Leibovitz"
+   ],
+   "born": "1949",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "photograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Ansel Adams",
+   "ulan": "",
+   "aka": [
+    "Adams"
+   ],
+   "born": "1902",
+   "died": "1984",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "photograph"
+   ],
+   "signature_note": "Most are posthumous or poster reproductions; an estate stamp is not a signature."
+  },
+  {
+   "name": "Banksy",
+   "ulan": "",
+   "aka": [
+    "BANKSY"
+   ],
+   "born": "",
+   "died": "",
+   "nationality": "British",
+   "mediums": [
+    "screenprint",
+    "stencil"
+   ],
+   "signature_note": "Authentication is by Pest Control; a signature alone is not enough."
+  },
+  {
+   "name": "Bernard Buffet",
+   "ulan": "",
+   "aka": [],
+   "born": "1928",
+   "died": "1999",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Bev Doolittle",
+   "ulan": "",
+   "aka": [
+    "Doolittle"
+   ],
+   "born": "1947",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "offset"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Boris Vallejo",
+   "ulan": "",
+   "aka": [
+    "Vallejo"
+   ],
+   "born": "1941",
+   "died": "",
+   "nationality": "Peruvian-American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Bridget Riley",
+   "ulan": "",
+   "aka": [
+    "Riley"
+   ],
+   "born": "1931",
+   "died": "",
+   "nationality": "British",
+   "mediums": [
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Camille Pissarro",
+   "ulan": "",
+   "aka": [
+    "Pissarro"
+   ],
+   "born": "1830",
+   "died": "1903",
+   "nationality": "French",
+   "mediums": [
+    "etching",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Charles M. Russell",
+   "ulan": "",
+   "aka": [
+    "C.M. Russell",
+    "CM Russell",
+    "Charles Russell"
+   ],
+   "born": "1864",
+   "died": "1926",
+   "nationality": "American",
+   "mediums": [
+    "bronze",
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Charles Wysocki",
+   "ulan": "",
+   "aka": [
+    "Wysocki"
+   ],
+   "born": "1928",
+   "died": "2002",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "offset"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Christian Riese Lassen",
+   "ulan": "",
+   "aka": [
+    "Christian Lassen",
+    "Lassen"
+   ],
+   "born": "1956",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "giclee",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Christo",
+   "ulan": "",
+   "aka": [
+    "Christo Javacheff",
+    "Christo and Jeanne-Claude"
+   ],
+   "born": "1935",
+   "died": "2020",
+   "nationality": "Bulgarian",
+   "mediums": [
+    "collage",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Claude Monet",
+   "ulan": "",
+   "aka": [
+    "Monet"
+   ],
+   "born": "1840",
+   "died": "1926",
+   "nationality": "French",
+   "mediums": [
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Currier and Ives",
+   "ulan": "",
+   "aka": [
+    "Currier & Ives",
+    "Currier Ives"
+   ],
+   "born": "",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Damien Hirst",
+   "ulan": "",
+   "aka": [
+    "Hirst"
+   ],
+   "born": "1965",
+   "died": "",
+   "nationality": "British",
+   "mediums": [
+    "giclee",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "David Hockney",
+   "ulan": "",
+   "aka": [
+    "Hockney"
+   ],
+   "born": "1937",
+   "died": "",
+   "nationality": "British",
+   "mediums": [
+    "acrylic",
+    "etching",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Ed Ruscha",
+   "ulan": "",
+   "aka": [
+    "Ruscha"
+   ],
+   "born": "1937",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Edgar Degas",
+   "ulan": "",
+   "aka": [
+    "Degas"
+   ],
+   "born": "1834",
+   "died": "1917",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "oil",
+    "pastel"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Edvard Munch",
+   "ulan": "",
+   "aka": [
+    "Munch"
+   ],
+   "born": "1863",
+   "died": "1944",
+   "nationality": "Norwegian",
+   "mediums": [
+    "lithograph",
+    "oil",
+    "woodcut"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Egon Schiele",
+   "ulan": "",
+   "aka": [
+    "Schiele"
+   ],
+   "born": "1890",
+   "died": "1918",
+   "nationality": "Austrian",
+   "mediums": [
+    "drawing",
+    "lithograph",
+    "watercolor"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Emile Bellet",
+   "ulan": "",
+   "aka": [
+    "Bellet"
+   ],
+   "born": "1941",
+   "died": "",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Erté",
+   "ulan": "",
+   "aka": [
+    "Erte",
+    "Romain de Tirtoff"
+   ],
+   "born": "1892",
+   "died": "1990",
+   "nationality": "Russian-French",
+   "mediums": [
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Fernand Léger",
+   "ulan": "",
+   "aka": [
+    "Fernand Leger",
+    "Leger",
+    "Léger"
+   ],
+   "born": "1881",
+   "died": "1955",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Francisco Goya",
+   "ulan": "",
+   "aka": [
+    "Francisco de Goya",
+    "Goya"
+   ],
+   "born": "1746",
+   "died": "1828",
+   "nationality": "Spanish",
+   "mediums": [
+    "aquatint",
+    "etching",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Frank Frazetta",
+   "ulan": "",
+   "aka": [
+    "Frazetta"
+   ],
+   "born": "1928",
+   "died": "2010",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Frank Stella",
+   "ulan": "",
+   "aka": [
+    "Stella"
+   ],
+   "born": "1936",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Frederic Remington",
+   "ulan": "",
+   "aka": [
+    "Remington"
+   ],
+   "born": "1861",
+   "died": "1909",
+   "nationality": "American",
+   "mediums": [
+    "bronze",
+    "offset",
+    "oil"
+   ],
+   "signature_note": "Bronzes are overwhelmingly later recasts; check the foundry mark."
+  },
+  {
+   "name": "Georges Braque",
+   "ulan": "",
+   "aka": [
+    "Braque"
+   ],
+   "born": "1882",
+   "died": "1963",
+   "nationality": "French",
+   "mediums": [
+    "etching",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Gustav Klimt",
+   "ulan": "",
+   "aka": [
+    "Klimt"
+   ],
+   "born": "1862",
+   "died": "1918",
+   "nationality": "Austrian",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Gustave Baumann",
+   "ulan": "",
+   "aka": [
+    "Baumann"
+   ],
+   "born": "1881",
+   "died": "1971",
+   "nationality": "German-American",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Gustave Doré",
+   "ulan": "",
+   "aka": [
+    "Dore",
+    "Doré",
+    "Gustave Dore"
+   ],
+   "born": "1832",
+   "died": "1883",
+   "nationality": "French",
+   "mediums": [
+    "wood engraving"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Guy Buffet",
+   "ulan": "",
+   "aka": [
+    "Buffet"
+   ],
+   "born": "1943",
+   "died": "",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Hasui Kawase",
+   "ulan": "",
+   "aka": [
+    "Hasui",
+    "Kawase Hasui"
+   ],
+   "born": "1883",
+   "died": "1957",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Helen Frankenthaler",
+   "ulan": "",
+   "aka": [
+    "Frankenthaler"
+   ],
+   "born": "1928",
+   "died": "2011",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "woodcut"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Henri Matisse",
+   "ulan": "",
+   "aka": [
+    "Matisse"
+   ],
+   "born": "1869",
+   "died": "1954",
+   "nationality": "French",
+   "mediums": [
+    "cut-out",
+    "etching",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Henri de Toulouse-Lautrec",
+   "ulan": "",
+   "aka": [
+    "Lautrec",
+    "Toulouse Lautrec",
+    "Toulouse-Lautrec"
+   ],
+   "born": "1864",
+   "died": "1901",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "poster"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Henry Moore",
+   "ulan": "",
+   "aka": [
+    "Moore"
+   ],
+   "born": "1898",
+   "died": "1986",
+   "nationality": "British",
+   "mediums": [
+    "etching",
+    "lithograph",
+    "sculpture"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Hiroshi Yoshida",
+   "ulan": "",
+   "aka": [
+    "Yoshida",
+    "Yoshida Hiroshi"
+   ],
+   "born": "1876",
+   "died": "1950",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Howard Behrens",
+   "ulan": "",
+   "aka": [
+    "Behrens"
+   ],
+   "born": "1933",
+   "died": "2014",
+   "nationality": "American",
+   "mediums": [
+    "giclee",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Itzchak Tarkay",
+   "ulan": "",
+   "aka": [
+    "Tarkay"
+   ],
+   "born": "1935",
+   "died": "2012",
+   "nationality": "Israeli",
+   "mediums": [
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "James McNeill Whistler",
+   "ulan": "",
+   "aka": [
+    "James Whistler",
+    "Whistler"
+   ],
+   "born": "1834",
+   "died": "1903",
+   "nationality": "American",
+   "mediums": [
+    "etching",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Jamie Wyeth",
+   "ulan": "",
+   "aka": [],
+   "born": "1946",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Jasper Johns",
+   "ulan": "",
+   "aka": [
+    "Johns"
+   ],
+   "born": "1930",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "etching",
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Jean-Michel Basquiat",
+   "ulan": "",
+   "aka": [
+    "Basquiat",
+    "Jean Michel Basquiat"
+   ],
+   "born": "1960",
+   "died": "1988",
+   "nationality": "American",
+   "mediums": [
+    "acrylic",
+    "mixed media",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Joan Miró",
+   "ulan": "",
+   "aka": [
+    "Joan Miro",
+    "Miro",
+    "Miró"
+   ],
+   "born": "1893",
+   "died": "1983",
+   "nationality": "Spanish",
+   "mediums": [
+    "aquatint",
+    "etching",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Joan Mitchell",
+   "ulan": "",
+   "aka": [
+    "Mitchell"
+   ],
+   "born": "1925",
+   "died": "1992",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "John James Audubon",
+   "ulan": "",
+   "aka": [
+    "Audubon"
+   ],
+   "born": "1785",
+   "died": "1851",
+   "nationality": "American",
+   "mediums": [
+    "aquatint",
+    "engraving"
+   ],
+   "signature_note": "Almost everything on the market is a later Bien or Amsterdam edition."
+  },
+  {
+   "name": "Josef Albers",
+   "ulan": "",
+   "aka": [
+    "Albers"
+   ],
+   "born": "1888",
+   "died": "1976",
+   "nationality": "German-American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "KAWS",
+   "ulan": "",
+   "aka": [
+    "Brian Donnelly",
+    "Kaws"
+   ],
+   "born": "1974",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Katsushika Hokusai",
+   "ulan": "",
+   "aka": [
+    "Hokusai",
+    "Katsushika Hokusai"
+   ],
+   "born": "1760",
+   "died": "1849",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Keith Haring",
+   "ulan": "",
+   "aka": [
+    "Haring"
+   ],
+   "born": "1958",
+   "died": "1990",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Kitagawa Utamaro",
+   "ulan": "",
+   "aka": [
+    "Utamaro"
+   ],
+   "born": "1753",
+   "died": "1806",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "LeRoy Neiman",
+   "ulan": "",
+   "aka": [
+    "Leroy Neiman",
+    "Neiman"
+   ],
+   "born": "1921",
+   "died": "2012",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Louis Icart",
+   "ulan": "",
+   "aka": [
+    "Icart"
+   ],
+   "born": "1888",
+   "died": "1950",
+   "nationality": "French",
+   "mediums": [
+    "drypoint",
+    "etching"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Louise Nevelson",
+   "ulan": "",
+   "aka": [
+    "Nevelson"
+   ],
+   "born": "1899",
+   "died": "1988",
+   "nationality": "American",
+   "mediums": [
+    "etching",
+    "sculpture"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "M. C. Escher",
+   "ulan": "",
+   "aka": [
+    "Escher",
+    "M.C. Escher",
+    "MC Escher",
+    "Maurits Cornelis Escher"
+   ],
+   "born": "1898",
+   "died": "1972",
+   "nationality": "Dutch",
+   "mediums": [
+    "lithograph",
+    "mezzotint",
+    "woodcut"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Marc Chagall",
+   "ulan": "",
+   "aka": [
+    "Chagal",
+    "Chagall",
+    "Marc Chagal"
+   ],
+   "born": "1887",
+   "died": "1985",
+   "nationality": "French-Russian",
+   "mediums": [
+    "etching",
+    "gouache",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Marcia Baldwin",
+   "ulan": "",
+   "aka": [],
+   "born": "",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "acrylic",
+    "giclee"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Marty Bell",
+   "ulan": "",
+   "aka": [],
+   "born": "1945",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "offset"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Mary Cassatt",
+   "ulan": "",
+   "aka": [
+    "Cassatt"
+   ],
+   "born": "1844",
+   "died": "1926",
+   "nationality": "American",
+   "mediums": [
+    "aquatint",
+    "drypoint",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Max Ernst",
+   "ulan": "",
+   "aka": [
+    "Ernst"
+   ],
+   "born": "1891",
+   "died": "1976",
+   "nationality": "German",
+   "mediums": [
+    "collage",
+    "etching",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Maxfield Parrish",
+   "ulan": "",
+   "aka": [
+    "Parrish"
+   ],
+   "born": "1870",
+   "died": "1966",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Maynard Dixon",
+   "ulan": "",
+   "aka": [
+    "Dixon"
+   ],
+   "born": "1875",
+   "died": "1946",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Michael Godard",
+   "ulan": "",
+   "aka": [
+    "Godard"
+   ],
+   "born": "1960",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "giclee",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "N. C. Wyeth",
+   "ulan": "",
+   "aka": [
+    "N.C. Wyeth",
+    "NC Wyeth",
+    "Newell Convers Wyeth"
+   ],
+   "born": "1882",
+   "died": "1945",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Norman Rockwell",
+   "ulan": "",
+   "aka": [
+    "Rockwell"
+   ],
+   "born": "1894",
+   "died": "1978",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Olaf Wieghorst",
+   "ulan": "",
+   "aka": [
+    "Wieghorst"
+   ],
+   "born": "1899",
+   "died": "1988",
+   "nationality": "Danish-American",
+   "mediums": [
+    "offset",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "P. Buckley Moss",
+   "ulan": "",
+   "aka": [
+    "Buckley Moss",
+    "Moss",
+    "Pat Buckley Moss"
+   ],
+   "born": "1933",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "offset"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Pablo Picasso",
+   "ulan": "",
+   "aka": [
+    "Pablo Ruiz Picasso",
+    "Picaso",
+    "Picasso"
+   ],
+   "born": "1881",
+   "died": "1973",
+   "nationality": "Spanish",
+   "mediums": [
+    "ceramic",
+    "etching",
+    "linocut",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Patrick Nagel",
+   "ulan": "",
+   "aka": [
+    "Nagel"
+   ],
+   "born": "1945",
+   "died": "1984",
+   "nationality": "American",
+   "mediums": [
+    "offset",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Paul Cézanne",
+   "ulan": "",
+   "aka": [
+    "Cezanne",
+    "Cézanne",
+    "Paul Cezanne"
+   ],
+   "born": "1839",
+   "died": "1906",
+   "nationality": "French",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Paul Gauguin",
+   "ulan": "",
+   "aka": [
+    "Gauguin"
+   ],
+   "born": "1848",
+   "died": "1903",
+   "nationality": "French",
+   "mediums": [
+    "oil",
+    "woodcut"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Paul Klee",
+   "ulan": "",
+   "aka": [
+    "Klee"
+   ],
+   "born": "1879",
+   "died": "1940",
+   "nationality": "Swiss-German",
+   "mediums": [
+    "etching",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Peter Max",
+   "ulan": "",
+   "aka": [
+    "Max"
+   ],
+   "born": "1937",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "acrylic",
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Pierre-Auguste Renoir",
+   "ulan": "",
+   "aka": [
+    "Auguste Renoir",
+    "Pierre Auguste Renoir",
+    "Renoir"
+   ],
+   "born": "1841",
+   "died": "1919",
+   "nationality": "French",
+   "mediums": [
+    "etching",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Piet Mondrian",
+   "ulan": "",
+   "aka": [
+    "Mondriaan",
+    "Mondrian",
+    "Piet Mondriaan"
+   ],
+   "born": "1872",
+   "died": "1944",
+   "nationality": "Dutch",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Red Skelton",
+   "ulan": "",
+   "aka": [
+    "Skelton"
+   ],
+   "born": "1913",
+   "died": "1997",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Rembrandt van Rijn",
+   "ulan": "",
+   "aka": [
+    "Rembrandt",
+    "Rembrandt Van Rijn"
+   ],
+   "born": "1606",
+   "died": "1669",
+   "nationality": "Dutch",
+   "mediums": [
+    "drypoint",
+    "etching",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "René Magritte",
+   "ulan": "",
+   "aka": [
+    "Magritte",
+    "Rene Magritte"
+   ],
+   "born": "1898",
+   "died": "1967",
+   "nationality": "Belgian",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Robert Bateman",
+   "ulan": "",
+   "aka": [
+    "Bateman"
+   ],
+   "born": "1930",
+   "died": "",
+   "nationality": "Canadian",
+   "mediums": [
+    "lithograph",
+    "offset"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Robert Lyn Nelson",
+   "ulan": "",
+   "aka": [
+    "Lyn Nelson"
+   ],
+   "born": "1955",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Robert Motherwell",
+   "ulan": "",
+   "aka": [
+    "Motherwell"
+   ],
+   "born": "1915",
+   "died": "1991",
+   "nationality": "American",
+   "mediums": [
+    "aquatint",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Robert Rauschenberg",
+   "ulan": "",
+   "aka": [
+    "Rauschenberg"
+   ],
+   "born": "1925",
+   "died": "2008",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Romero Britto",
+   "ulan": "",
+   "aka": [
+    "Britto"
+   ],
+   "born": "1963",
+   "died": "",
+   "nationality": "Brazilian",
+   "mediums": [
+    "giclee",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Roy Lichtenstein",
+   "ulan": "",
+   "aka": [
+    "Lichenstein",
+    "Lichtenstein"
+   ],
+   "born": "1923",
+   "died": "1997",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Salvador Dalí",
+   "ulan": "",
+   "aka": [
+    "Dali",
+    "Dalí",
+    "Salvador Dali",
+    "Salvadore Dali"
+   ],
+   "born": "1904",
+   "died": "1989",
+   "nationality": "Spanish",
+   "mediums": [
+    "drypoint",
+    "etching",
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": "Widely forged; a Dali signature alone establishes very little."
+  },
+  {
+   "name": "Sam Francis",
+   "ulan": "",
+   "aka": [
+    "Francis"
+   ],
+   "born": "1923",
+   "died": "1994",
+   "nationality": "American",
+   "mediums": [
+    "etching",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Shepard Fairey",
+   "ulan": "",
+   "aka": [
+    "Fairey",
+    "Obey Giant"
+   ],
+   "born": "1970",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Steve Kaufman",
+   "ulan": "",
+   "aka": [
+    "Kaufman",
+    "SAK"
+   ],
+   "born": "1960",
+   "died": "2010",
+   "nationality": "American",
+   "mediums": [
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Takashi Murakami",
+   "ulan": "",
+   "aka": [
+    "Murakami"
+   ],
+   "born": "1962",
+   "died": "",
+   "nationality": "Japanese",
+   "mediums": [
+    "offset",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Terry Redlin",
+   "ulan": "",
+   "aka": [
+    "Redlin"
+   ],
+   "born": "1937",
+   "died": "2016",
+   "nationality": "American",
+   "mediums": [
+    "lithograph",
+    "offset"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Thomas Kinkade",
+   "ulan": "",
+   "aka": [
+    "Kincade",
+    "Kinkade",
+    "Thomas Kincade"
+   ],
+   "born": "1958",
+   "died": "2012",
+   "nationality": "American",
+   "mediums": [
+    "canvas print",
+    "giclee",
+    "lithograph"
+   ],
+   "signature_note": "Almost all are open-edition canvas transfers; the plate number is not an edition."
+  },
+  {
+   "name": "Thomas McKnight",
+   "ulan": "",
+   "aka": [
+    "McKnight"
+   ],
+   "born": "1941",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Toshi Yoshida",
+   "ulan": "",
+   "aka": [
+    "Yoshida Toshi"
+   ],
+   "born": "1911",
+   "died": "1995",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Tsukioka Yoshitoshi",
+   "ulan": "",
+   "aka": [
+    "Yoshitoshi"
+   ],
+   "born": "1839",
+   "died": "1892",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Utagawa Hiroshige",
+   "ulan": "",
+   "aka": [
+    "Ando Hiroshige",
+    "Andō Hiroshige",
+    "Hiroshige"
+   ],
+   "born": "1797",
+   "died": "1858",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Utagawa Kuniyoshi",
+   "ulan": "",
+   "aka": [
+    "Kuniyoshi"
+   ],
+   "born": "1798",
+   "died": "1861",
+   "nationality": "Japanese",
+   "mediums": [
+    "woodblock"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Victor Vasarely",
+   "ulan": "",
+   "aka": [
+    "Vasarely"
+   ],
+   "born": "1906",
+   "died": "1997",
+   "nationality": "Hungarian-French",
+   "mediums": [
+    "screenprint",
+    "serigraph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Vincent van Gogh",
+   "ulan": "",
+   "aka": [
+    "Van Gogh",
+    "Vincent Van Gogh",
+    "van Gogh"
+   ],
+   "born": "1853",
+   "died": "1890",
+   "nationality": "Dutch",
+   "mediums": [
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Wassily Kandinsky",
+   "ulan": "",
+   "aka": [
+    "Kandinsky",
+    "Vassily Kandinsky"
+   ],
+   "born": "1866",
+   "died": "1944",
+   "nationality": "Russian",
+   "mediums": [
+    "lithograph",
+    "oil",
+    "woodcut"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Willem de Kooning",
+   "ulan": "",
+   "aka": [
+    "De Kooning",
+    "Kooning",
+    "de Kooning"
+   ],
+   "born": "1904",
+   "died": "1997",
+   "nationality": "Dutch-American",
+   "mediums": [
+    "lithograph",
+    "oil"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Winslow Homer",
+   "ulan": "",
+   "aka": [
+    "Homer"
+   ],
+   "born": "1836",
+   "died": "1910",
+   "nationality": "American",
+   "mediums": [
+    "watercolor",
+    "wood engraving"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Wyland",
+   "ulan": "",
+   "aka": [
+    "Robert Wyland"
+   ],
+   "born": "1956",
+   "died": "",
+   "nationality": "American",
+   "mediums": [
+    "giclee",
+    "lithograph"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Yayoi Kusama",
+   "ulan": "",
+   "aka": [
+    "Kusama"
+   ],
+   "born": "1929",
+   "died": "",
+   "nationality": "Japanese",
+   "mediums": [
+    "acrylic",
+    "lithograph",
+    "screenprint"
+   ],
+   "signature_note": ""
+  },
+  {
+   "name": "Édouard Manet",
+   "ulan": "",
+   "aka": [
+    "Edouard Manet",
+    "Manet"
+   ],
+   "born": "1832",
+   "died": "1883",
+   "nationality": "French",
+   "mediums": [
+    "etching",
+    "oil"
+   ],
+   "signature_note": ""
+  }
+ ]
+}

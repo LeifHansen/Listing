@@ -121,18 +121,141 @@ def active_comps(query: str, category_id: Optional[str] = None,
     }
 
 
+# Marketplace Insights is a LIMITED RELEASE API: the credentials work, the
+# endpoint exists, and it answers 403 until eBay has approved this application
+# for the buy.marketplace.insights scope. Approval is per-application and is
+# applied for, so the normal state for most installs is "not approved yet".
+#
+# That distinction has to survive all the way to the seller. `suggest` already
+# separates "the market has nothing like this" from "we could not look"
+# (`checked`, and test_a_failed_price_lookup_is_not_no_comps), and an
+# unapproved 403 is neither of those: it is a source that is not turned on. It
+# must not be reported as a market with no sales in it, and it must not make
+# every draft look like a failed lookup either.
+#
+# So a 403 LATCHES. The first one raises, so `suggest` records a failed source
+# for that call and `checked` tells the truth about it; after that the source
+# short-circuits and stops burning a request per item against an endpoint that
+# will refuse all of them. Cleared on process restart, which is when a newly
+# granted approval would be picked up anyway.
+_INSIGHTS_DENIED = False
+
+
+class InsightsNotApproved(RuntimeError):
+    """eBay has not granted this application the marketplace-insights scope."""
+
+
+def insights_enabled() -> bool:
+    return config.taxonomy_ready() and not _INSIGHTS_DENIED
+
+
+def reset_insights_latch() -> None:
+    """For tests, and for a process that has just been granted the scope."""
+    global _INSIGHTS_DENIED
+    _INSIGHTS_DENIED = False
+
+
 def sold_comps(query: str, category_id: Optional[str] = None,
                condition: Optional[str] = None,
                gtin: Optional[str] = None) -> Optional[dict]:
-    """Plug-in point for real sold-price data (the better signal).
+    """What comparable items actually SOLD for — the signal active_comps only
+    approximates.
 
-    Implement with the Marketplace Insights API once eBay approves access
-    (GET /buy/marketplace_insights/v1_beta/item_sales/search — same shape as
-    active_comps above), or an env-gated third-party feed. Return the same
-    dict shape with source="sold_comps" and sold_data=True; suggest() will
-    then prefer it automatically.
+    An asking price is what somebody hopes for; a sold price is what somebody
+    paid. For art the gap between them is enormous, because an unsold print
+    can sit at an optimistic price for years and every one of those listings
+    is a "comp" to a keyword search.
+
+    Returns the same dict shape as active_comps with sold_data=True, so
+    suggest() prefers it automatically (it is first in _SOURCES). None means
+    the search ran and found nothing comparable. RAISES when the lookup could
+    not be made at all, which is what keeps "no sales" and "no answer" apart
+    in the seller's price card.
     """
-    return None
+    if not insights_enabled():
+        return None
+    filters = ["buyingOptions:{FIXED_PRICE|AUCTION}"]
+    bucket = _condition_bucket(condition)
+    if bucket:
+        filters.append("conditions:{%s}" % bucket)
+    params = {"limit": "50", "filter": ",".join(filters)}
+    if gtin:
+        params["gtin"] = str(gtin)
+    else:
+        params["q"] = query
+    if category_id:
+        params["category_ids"] = str(category_id)
+
+    resp = httpx.get(
+        f"{config.EBAY_API_BASE}/buy/marketplace_insights/v1_beta"
+        f"/item_sales/search",
+        params=params,
+        headers={
+            "Authorization": f"Bearer {_app_token()}",
+            "Accept": "application/json",
+            "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID,
+        },
+        timeout=30,
+    )
+    if resp.status_code in (401, 403):
+        global _INSIGHTS_DENIED
+        _INSIGHTS_DENIED = True
+        log.info("pricing: marketplace insights is not approved for this "
+                 "application (%s) — sold prices are off until eBay grants "
+                 "the buy.marketplace.insights scope", resp.status_code)
+        raise InsightsNotApproved(
+            "eBay has not approved this application for sold-price data")
+    resp.raise_for_status()
+    return parse_sold(resp.json(), query, gtin=gtin)
+
+
+def parse_sold(data, query: str, gtin: Optional[str] = None) -> Optional[dict]:
+    """The stats an item_sales payload supports, or None when it holds no
+    usable price. Split from the fetch so the shape can be asserted without a
+    live approval — the same split services/imagesearch uses."""
+    items = (data or {}).get("itemSales") or [] if isinstance(data, dict) else []
+    prices: list[float] = []
+    sample: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        # lastSoldPrice is what this item actually went for. Its absence
+        # means the row is not a sale we can price from.
+        try:
+            price = float((it.get("lastSoldPrice") or {}).get("value"))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        prices.append(price)
+        if len(sample) < MAX_SAMPLE:
+            sample.append({
+                "title": str(it.get("title") or "")[:140],
+                "price": round(price, 2),
+                "condition": str(it.get("condition") or ""),
+                "url": str(it.get("itemWebUrl") or ""),
+            })
+    if not prices:
+        return None
+
+    prices.sort()
+    if len(prices) >= 4:
+        q1, _, q3 = statistics.quantiles(prices, n=4)
+    else:
+        q1, q3 = prices[0], prices[-1]
+    return {
+        "source": "sold_comps",
+        "label": ("What this exact product actually sold for (barcode match)"
+                  if gtin else "What comparable items actually sold for"),
+        "sold_data": True,
+        "estimate": round(statistics.median(prices), 2),
+        "low": round(q1, 2),
+        "high": round(q3, 2),
+        "count": len(prices),
+        "sample": sample,
+        "search_url": ("https://www.ebay.com/sch/i.html?_nkw="
+                       + quote_plus(gtin or query) + "&LH_Sold=1&LH_Complete=1"),
+    }
 
 
 _SOURCES = (sold_comps, active_comps)  # preferred first

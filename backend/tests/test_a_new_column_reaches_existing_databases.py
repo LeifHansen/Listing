@@ -67,6 +67,11 @@ SHIPPED = {
     "media_purges": (
         "attempts", "last_error", "listing_id", "requested_at", "user_id",
     ),
+    "expert_knowledge": (
+        "account_id", "added_at", "added_by", "distillate", "distilled_at",
+        "enabled", "expert", "fetch_error", "id", "last_fetched", "note",
+        "scope", "url", "url_hash",
+    ),
     "notifications": (
         "body", "created_at", "data", "dedupe_key", "id", "kind",
         "listing_id", "read_at", "title", "user_id",

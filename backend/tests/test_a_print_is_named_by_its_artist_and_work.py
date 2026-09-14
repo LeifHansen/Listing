@@ -69,9 +69,10 @@ def lookup(monkeypatch):
 
     def use(answer):
         def identify_artwork(paths, listing, leads=None, observations="",
-                             crops=None):
+                             crops=None, references=None):
             calls.append({"paths": paths, "leads": leads,
-                          "observations": observations, "crops": crops})
+                          "observations": observations, "crops": crops,
+                          "references": references})
             return answer
         monkeypatch.setattr(main.claude_ai, "identify_artwork", identify_artwork)
         return calls

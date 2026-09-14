@@ -1,0 +1,107 @@
+name: Artist roster
+
+# Refresh the art expert's artist roster from Getty ULAN and Wikidata, and
+# open a PULL REQUEST with whatever changed.
+#
+# A pull request rather than a commit, deliberately. This file decides what
+# every art listing in the app is allowed to be CALLED -- a bad refresh could
+# rename an artist, merge two of them, or drop the resale-market names the
+# hand-written seed exists for -- so it is reviewed like code. The builder
+# merges rather than replaces (scripts/build_art_roster.py), which is what
+# keeps the seeded spellings nobody's API will ever return.
+#
+# Monthly: ULAN and Wikidata move slowly, and a roster that churns weekly is a
+# roster nobody reads the diff of.
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'   # 04:00 UTC on the 1st
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: How many artists to ask Wikidata for
+        required: false
+        default: '1000'
+
+permissions: {}
+
+jobs:
+  refresh:
+    name: Rebuild and open a PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Every third-party action is pinned to a commit SHA, with the release
+      # it came from beside it; .github/dependabot.yml keeps the pins current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: pip install httpx pytest
+
+      - name: Rebuild the roster
+        run: |
+          python3 scripts/build_art_roster.py \
+            --limit "${{ github.event.inputs.limit || '1000' }}"
+
+      # The roster's own tests. A refresh that produces a file the app cannot
+      # read, or that drops the seeded resale names, fails HERE rather than in
+      # a pull request somebody approves on the strength of a green tick.
+      - name: Check the roster still holds
+        run: |
+          pytest backend/tests/test_a_misspelled_artist_is_corrected_and_an_unknown_one_is_left_alone.py -q
+
+      - name: Open a pull request if anything changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ROSTER=backend/services/experts/art/data/artists.json
+          if git diff --quiet -- "$ROSTER"; then
+            echo "the roster is unchanged"
+            exit 0
+          fi
+          COUNT=$(python3 -c "import json;print(len(json.load(open('$ROSTER'))['artists']))")
+          BRANCH="art-roster/$(date -u +%Y-%m)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add "$ROSTER"
+          git commit -m "Refresh the artist roster ($COUNT artists)"
+          git push -u origin "$BRANCH" --force-with-lease
+
+          # The body is written to a file rather than inlined: a heredoc
+          # inside a YAML block scalar has to sit at column 0, which ends the
+          # scalar and breaks the workflow.
+          {
+            echo "Rebuilt by \`scripts/build_art_roster.py\` from Getty ULAN and Wikidata."
+            echo
+            echo "**What to look at in the diff**, in the order it matters:"
+            echo
+            echo "- **Names that DISAPPEARED.** The builder merges rather than replaces, so a"
+            echo "  drop means a seeded entry was lost -- most likely one of the resale-print"
+            echo "  names (LeRoy Neiman, Thomas Kinkade, Bev Doolittle, Charles Wysocki) who"
+            echo "  rank nowhere on a museum-presence proxy and whom no API returns. Losing one"
+            echo "  means the app stops fixing that artist's spelling."
+            echo "- **\`aka\` spellings that disappeared.** The hand-written ones (\"Thomas"
+            echo "  Kincade\") are the most useful strings in the file and nothing upstream"
+            echo "  will ever regenerate them."
+            echo "- **A name that changed.** Renaming an artist renames them on every listing"
+            echo "  drafted afterwards."
+            echo "- **\`rank\`** is a PROXY for market presence, never turnover -- real sales"
+            echo "  data is paywalled. \`rank_basis\` says so on every entry, and nothing in"
+            echo "  the app reads it yet."
+            echo
+            echo "Absent from this file is never a reason to drop an attribution"
+            echo "(\`services/experts/art/roster.py\`), so a missing artist costs a spelling"
+            echo "fix, not a listing."
+          } > /tmp/roster-pr-body.md
+
+          gh pr create --draft \
+            --title "Refresh the artist roster ($COUNT artists)" \
+            --body-file /tmp/roster-pr-body.md
