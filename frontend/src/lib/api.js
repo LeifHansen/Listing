@@ -3,6 +3,10 @@ import {
 } from "@/lib/aiConsent";
 import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
 import { noteRequestId } from "@/lib/clientErrors";
+import {
+  decodeAppliesOrientation, drawOriented, fileHead, isJpeg, jpegOrientation,
+  orientedSize,
+} from "@/lib/photoOrientation";
 
 // Kick off an OAuth connect flow (eBay/Etsy/Depop). On the web it's a plain
 // same-origin navigation, exactly as before. In the native shell the
@@ -295,7 +299,8 @@ export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000, on
 // Phone photos are often 5-12MB; the server only needs ~1600px. Re-encoding
 // in the browser before upload cuts transfer time ~10x. Formats the browser
 // can't decode (e.g. HEIC) fall through and upload as-is — the server
-// handles them.
+// handles them. So does a photo whose orientation this browser cannot be
+// trusted with; see downscaleForUpload.
 const MAX_UPLOAD_SIDE = 2000;
 // What goes UNDER a photo that has transparency, and why there has to be
 // something: a canvas starts fully transparent, and toBlob("image/jpeg")
@@ -309,36 +314,74 @@ const MAX_UPLOAD_SIDE = 2000;
 // same colour that function uses, so a photo that is downscaled here and one
 // that is small enough to skip it land on the same backdrop.
 const CANVAS_COLOR = "#f8f8f8";  // services/images.CANVAS_COLOR (248, 248, 248)
-export async function downscaleForUpload(file) {
+// One decode, whichever way this browser offers it: createImageBitmap
+// asked to apply the camera's Orientation tag where the options bag is
+// understood, and an <img> otherwise, which is drawn to a canvas the way it
+// is displayed. Resolves with the decoded image at the size it came out —
+// which is the photo's own size in a browser that applied the tag, and the
+// sensor's in one that did not. The probe below is decoded through this
+// same function, so what it says is true of the path a real photo takes.
+async function decodePhoto(blob) {
   try {
-    let bmp;
-    try {
-      bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
-    } catch (e) {
-      // Some browsers reject the options bag. Decode via <img> instead — that
-      // path always applies EXIF orientation when drawn to a canvas. A bare
-      // createImageBitmap(file) here would NOT, and since this function
-      // re-encodes (dropping EXIF), it painted phone photos sideways.
-      bmp = await new Promise((resolve, reject) => {
-        const url = URL.createObjectURL(file);
-        const el = new Image();
-        el.onload = () => { URL.revokeObjectURL(url); resolve(el); };
-        el.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode failed")); };
-        el.src = url;
-      });
+    const bmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
+    return { source: bmp, width: bmp.width, height: bmp.height,
+             close: () => bmp.close?.() };
+  } catch (e) {
+    const el = await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode failed")); };
+      img.src = url;
+    });
+    return { source: el, width: el.naturalWidth, height: el.naturalHeight,
+             close() {} };
+  }
+}
+
+// `appliesTag` is what the browser's decode does with the camera's
+// Orientation tag — true, false, or null for a browser that could not be
+// asked — per photoOrientation.decodeAppliesOrientation. downscaleAllForUpload
+// asks once for the pile; a lone call asks for itself.
+//
+// This is what keeps a phone photo upright. A canvas keeps pixels and drops
+// the tag, so a browser that decoded the photo WITHOUT applying it — and
+// browsers have differed on that, across engines and versions, behind an
+// option that has been renamed once — used to send the sensor's sideways
+// frame with nothing left to say so, and every item in the batch came out
+// lying on its side. Now: a browser that applies the tag decodes an upright
+// photo and the re-encode is what it always was; one that leaves it alone
+// has the tag read off the JPEG's own bytes and applied by hand while
+// drawing; and one nothing is known about sends the photo exactly as it is,
+// tag and all, for the server to turn — which it does for every format it
+// reads (services/images._load).
+export async function downscaleForUpload(file, appliesTag) {
+  try {
+    const applies = appliesTag === undefined
+      ? await decodeAppliesOrientation(decodePhoto) : appliesTag;
+    if (applies === null) return file;
+    let orientation = 1;
+    if (applies === false) {
+      // Only a JPEG carries a tag this can read. Anything else goes as it
+      // is rather than re-encoded on a guess.
+      const head = await fileHead(file);
+      if (!isJpeg(head)) return file;
+      orientation = jpegOrientation(head);
     }
-    const w = bmp.naturalWidth || bmp.width;
-    const h = bmp.naturalHeight || bmp.height;
+    const photo = await decodePhoto(file);
+    const [w, h] = orientedSize(photo.width, photo.height, orientation);
     const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(w, h));
-    if (scale >= 1 && file.size < 2 * 1024 * 1024) { bmp.close?.(); return file; }
+    // Small enough to send as it is — with its tag on, so the server turns
+    // it whatever this browser would have done.
+    if (scale >= 1 && file.size < 2 * 1024 * 1024) { photo.close(); return file; }
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(w * scale));
     canvas.height = Math.max(1, Math.round(h * scale));
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = CANVAS_COLOR;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-    bmp.close?.();
+    drawOriented(ctx, photo.source, orientation, canvas.width, canvas.height);
+    photo.close();
     const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.9));
     if (!blob) return file;
     const name = (file.name || "photo").replace(/\.\w+$/, "") + ".jpg";
@@ -354,12 +397,16 @@ export async function downscaleForUpload(file) {
 // crash it on phones. Order is preserved.
 export async function downscaleAllForUpload(files, limit = 4) {
   const out = new Array(files.length);
+  if (!files.length) return out;
+  // What this browser's decode does with the camera's tag, asked once for
+  // the whole pile rather than once per photo.
+  const appliesTag = await decodeAppliesOrientation(decodePhoto);
   let next = 0;
   const worker = async () => {
     for (;;) {
       const i = next++;
       if (i >= files.length) return;
-      out[i] = await downscaleForUpload(files[i]);
+      out[i] = await downscaleForUpload(files[i], appliesTag);
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, files.length) }, worker));
