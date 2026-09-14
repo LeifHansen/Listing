@@ -109,9 +109,12 @@ const card = (host, id) => [...host.querySelectorAll("button")]
   .find((el) => el.textContent.includes(`Item ${id}`));
 const lit = (host, id) => card(host, id).classList.contains("card-buyer-glow");
 
-// The bid chip names itself in words, never in colour alone.
-const bidChip = (host) => [...host.querySelectorAll("span")]
-  .find((el) => /^\d+ bids?( · \S+)?$/.test(el.textContent.trim()));
+// The chip that names the bids in words, never in colour alone. On a live
+// auction that is the one auction chip -- status, format, bids and clock
+// together ("Auction · 3 bids · $12.50 · 2d 4h left") -- so it is found by
+// the count it carries, on the element that carries the tooltip.
+const bidChip = (host) => [...host.querySelectorAll("span[title]")]
+  .find((el) => /\b\d+ bids?\b/.test(el.textContent));
 
 // The grid's order, as the seller reads it: the titles top to bottom. The
 // fixtures name every listing "Item <letter><digit>", and the card's text

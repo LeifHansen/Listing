@@ -6,6 +6,11 @@
  * is worth sharing, the second is worth watching — and the seller had to open
  * eBay to tell them apart.
  *
+ * The clock is part of ONE chip on a live auction, with the status, the
+ * format and the bids — "Auction · 6 bids · $17.50 · 2d 4h left" — which
+ * replaced three chips and a separate clock that said the same thing three
+ * times over. The tests below that reach for `clock()` find that chip.
+ *
  * The deadline rides in on the metrics overlay, from the same sweep that
  * already carried the bids (backend/services/ebay_trading), so the rules are
  * that overlay's rules: live listings only, and a card with no answer draws
@@ -86,10 +91,62 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// Every chip on the card that carries a tooltip, by its text.
+const chips = () => [...host.querySelectorAll("span[title]")].map((el) => el.textContent.trim());
+
 describe("the auction clock on a card", () => {
   it("shows how long a live auction has left", () => {
     render({ item: live(), metrics: { bids: 1, ends_at: endsIn(2 * DAY + 4 * HOUR) } });
     expect(text()).toContain("2d 4h left");
+  });
+
+  it("is one chip with the status, the format and the bids, in that order", () => {
+    // Three chips and a clock used to say one thing three times over: a
+    // listing taking bids is live, is an auction, and is on eBay. Now the
+    // whole of it is one field, read left to right.
+    render({ item: live(), metrics: {
+      bids: 6, high_bid: 17.5, bid_currency: "USD", ends_at: endsIn(2 * DAY + 4 * HOUR) } });
+    expect(clock().textContent.trim()).toBe("Auction · 6 bids · $17.50 · 2d 4h left");
+    expect(text()).not.toContain("Live on eBay");
+    expect(chips().filter((t) => t.startsWith("Auction"))).toHaveLength(1);
+    // And the tooltip still says what the chip has no room for: how much,
+    // and exactly when.
+    expect(clock().getAttribute("title")).toContain("high bid is $17.50");
+    expect(clock().getAttribute("title")).toContain("This auction ends");
+  });
+
+  it("says when eBay has counted no bids, and nothing about bids before eBay was asked", () => {
+    render({ item: live(), metrics: { bids: 0, ends_at: endsIn(3 * DAY) } });
+    expect(clock().textContent.trim()).toBe("Auction · No bids · 3d 0h left");
+    rerender({ item: live(), metrics: { views: 4 } });
+    // No `bids` key: eBay's sweep failed or never ran. Absent is unknown,
+    // on the same terms as the watchers beside it, so the chip does not
+    // claim "No bids" -- and has no clock to show either.
+    const chip = chips().find((t) => t.startsWith("Auction"));
+    expect(chip).toBe("Auction");
+  });
+
+  it("keeps the bids on the chip once the auction has ended", () => {
+    render({ item: live(), metrics: {
+      bids: 4, high_bid: 31, bid_currency: "USD", ends_at: endsIn(SECOND) } });
+    tick(2);
+    expect(clock().textContent.trim()).toBe("Auction ended · 4 bids · $31.00");
+  });
+
+  it("leaves a draft auction with its own status and format chips", () => {
+    // Nothing to consolidate before the listing is live: a draft has no
+    // bids and no deadline, and "Draft" is the thing to say about it.
+    render({ item: live({ status: "draft" }) });
+    expect(text()).toContain("Draft");
+    expect(chips()).toContain("Auction");
+    expect(clock()).toBeNull();
+  });
+
+  it("is the same chip in list layout", () => {
+    render({ item: live(), layout: "list", metrics: {
+      bids: 2, high_bid: 6, bid_currency: "USD", ends_at: endsIn(5 * HOUR) } });
+    expect(clock().textContent.trim()).toBe("Auction · 2 bids · $6.00 · 5h 0m left");
+    expect(text()).not.toContain("Live on eBay");
   });
 
   it("counts itself down without the card being touched", () => {
