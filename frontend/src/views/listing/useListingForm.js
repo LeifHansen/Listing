@@ -1014,7 +1014,15 @@ export function useListingForm() {
       const res = await postJson(`/api/autofill-specifics/${sessionId}`, {
         session_id: sessionId, listing: collect(), mode: "draft",
       });
-      setForm((f) => ({ ...f, item_specifics: (res.item_specifics || []).map((s) => ({ ...s })) }));
+      // `enriched_at` rides along: it is the app-wide record that the AI has
+      // read this listing against eBay's aspect list, and the editor's copy
+      // going stale is how a listing that was just filled gets offered the
+      // very same fill again the moment the seller looks at the dashboard.
+      setForm((f) => ({
+        ...f,
+        item_specifics: (res.item_specifics || []).map((s) => ({ ...s })),
+        ...(res.enriched_at ? { enriched_at: res.enriched_at } : {}),
+      }));
       toast(res.added
         ? `Filled ${res.added} item specific${res.added === 1 ? "" : "s"} from your photos.`
         : "Nothing new to add — your item specifics already look complete.",
@@ -1109,14 +1117,29 @@ export function useListingForm() {
   // added nothing and charged the account a second time. The effect still
   // fires when the server pass was skipped (no category resolved, taxonomy
   // down), which is exactly when a client-side fill completes the listing.
+  //
+  // ANY blank aspect starts it, not only a blank REQUIRED one. The required
+  // test was the editor asking a narrower question than the pass it triggers:
+  // the fill reads the photos against eBay's WHOLE aspect list, required and
+  // recommended together, and recommended is where a listing's searchability
+  // actually lives. So a draft whose required specifics came back filled and
+  // whose twenty recommended ones were blank stood the fill down and left
+  // them blank — the seller's only way out being a "Fill 20 with AI" button
+  // on the specifics card, for work this listing had already earned. That
+  // button is gone (see SpecificsCard); this is what replaces it.
+  //
+  // Still exactly one call per session: `once` plus the ref below. And still
+  // only on a FRESH identify — a later category change brings a whole new
+  // aspect set, but auto-spending a token on a listing the seller merely
+  // reopened and re-filed is not ours to decide. "Finish up" runs the same
+  // pass there and asks first.
   const autoFilledFor = useRef(null);
   useEffect(() => {
     const aspects = categoryMeta.aspects || [];
     const fresh = !!session?.confidence;
     if (!fresh || session?.specificsAutofilled || !aspects.length
       || autoFilledFor.current === sessionId) return;
-    const missingRequired = aspects.some((a) => a.required && !getSpecific(a.name));
-    if (!missingRequired) return;
+    if (!aspects.some((a) => !getSpecific(a.name))) return;
     autoFilledFor.current = sessionId;
     autofillSpecifics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
