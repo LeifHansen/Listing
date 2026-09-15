@@ -3197,13 +3197,6 @@ def get_store_categories(request: Request, refresh: bool = False) -> dict:
     return {"store": True, "checked": True, "categories": cats}
 
 
-@app.get("/api/ebay/shipping-services")
-def shipping_services() -> dict:
-    """The catalog of eBay shipping services a seller can one-tap into a
-    fulfillment policy (static; no auth needed)."""
-    return {"services": ebay_auth.SHIPPING_SERVICES}
-
-
 _UNREVIEWED = (
     "Review the policy terms before we create them on your eBay account. "
     "They are shown to buyers and eBay holds you to them.")
