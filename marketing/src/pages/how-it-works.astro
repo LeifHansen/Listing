@@ -4,13 +4,39 @@ import Container from "../components/Container.astro";
 import Section from "../components/Section.astro";
 import PipelineSteps from "../components/PipelineSteps.astro";
 import CTA from "../components/CTA.astro";
-import { marketplaces, marketplaceStatus } from "../lib/site.js";
+import { marketplaces, marketplaceStatus, pipeline } from "../lib/site.js";
 
 const description =
   "From photo to published listing: how Thryft Shop optimizes your images, " +
   "identifies the item with AI, and fans the result out to eBay, Etsy and Depop.";
+
+/**
+ * The pipeline as a HowTo.
+ *
+ * Google retired the HowTo rich result, so this is not here to win a carousel.
+ * It is here because "how does it work" is the question this page exists to
+ * answer, and an answer engine reading it should get the five stages as five
+ * ordered steps rather than as a wall of prose it has to segment itself. The
+ * steps are `pipeline` from site.js — the same array the page renders — so the
+ * summary a machine reads is the summary a person reads.
+ */
+const jsonLd = ({ ids, canonical }) => ({
+  "@type": "HowTo",
+  "@id": `${canonical}#howto`,
+  name: "How to turn a photo of an item into a live marketplace listing",
+  description,
+  image: { "@id": ids.primaryImage },
+  mainEntityOfPage: { "@id": ids.webpage },
+  step: pipeline.map((stage, i) => ({
+    "@type": "HowToStep",
+    position: i + 1,
+    name: stage.title,
+    text: stage.blurb,
+    url: `${canonical}#step-${stage.key}`,
+  })),
+});
 ---
-<Base title="How it works" description={description}>
+<Base title="How it works" description={description} jsonLd={jsonLd}>
   <div class="brand-wash border-b border-line">
     <Container>
       <div class="max-w-3xl py-16 sm:py-20">

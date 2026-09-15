@@ -9,8 +9,32 @@ const updated = entry.data.updated.toLocaleDateString("en-US", {
   month: "long",
   day: "numeric",
 });
+
+/**
+ * The "Last updated" line, in the machine-readable form too.
+ *
+ * Terms and a privacy policy are the pages where a stale copy is a real
+ * problem rather than a cosmetic one — for the reader, and for the marketplace
+ * and app-store reviews that check them. `dateModified` is what lets a crawler
+ * see the page changed; it is also what the sitemap's `lastmod` reads for
+ * these two URLs, from the same frontmatter field, so the two cannot disagree.
+ */
+const jsonLd = ({ ids, canonical }) => ({
+  "@type": "WebPage",
+  "@id": `${canonical}#legal`,
+  name: entry.data.title,
+  description: entry.data.description,
+  dateModified: entry.data.updated.toISOString(),
+  publisher: { "@id": ids.organization },
+  mainEntityOfPage: { "@id": ids.webpage },
+});
 ---
-<Base title={entry.data.title} description={entry.data.description}>
+<Base
+  title={entry.data.title}
+  description={entry.data.description}
+  jsonLd={jsonLd}
+  article={{ modified: entry.data.updated.toISOString() }}
+>
   <div class="brand-wash border-b border-line">
     <Container>
       <div class="max-w-3xl py-16 sm:py-20">

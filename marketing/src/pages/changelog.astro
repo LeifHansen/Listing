@@ -2,16 +2,52 @@
 import { getCollection, render } from "astro:content";
 import Base from "../layouts/Base.astro";
 import Container from "../components/Container.astro";
+import { site } from "../lib/site.js";
 
 const entries = (await getCollection("changelog")).sort((a, b) => b.data.date - a.data.date);
 const rendered = await Promise.all(
   entries.map(async (entry) => ({ entry, Content: (await render(entry)).Content })),
 );
 const fmt = (d) => d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+
+const description =
+  "What shipped, and when. Merging to main is the deploy, so this is the real release history.";
+
+/**
+ * Releases as a dated list.
+ *
+ * A changelog is one of the few pages whose value to a crawler is entirely in
+ * its dates — it is the page that shows the product is alive. The ItemList
+ * carries each entry's own date rather than leaving a parser to guess from the
+ * rendered text, and the page's `dateModified` (set below through `article`)
+ * is the newest of them, which is also what the sitemap advertises.
+ */
+const jsonLd = ({ ids, canonical }) => ({
+  "@type": "ItemList",
+  "@id": `${canonical}#releases`,
+  name: `${site.name} release notes`,
+  itemListOrder: "https://schema.org/ItemListOrderDescending",
+  numberOfItems: entries.length,
+  mainEntityOfPage: { "@id": ids.webpage },
+  itemListElement: entries.map((entry, i) => ({
+    "@type": "ListItem",
+    position: i + 1,
+    item: {
+      "@type": "CreativeWork",
+      name: entry.data.title,
+      datePublished: entry.data.date.toISOString(),
+      publisher: { "@id": ids.organization },
+    },
+  })),
+});
+
+const latest = entries[0]?.data.date.toISOString();
 ---
 <Base
   title="Changelog"
-  description="What shipped, and when. Merging to main is the deploy, so this is the real release history."
+  description={description}
+  jsonLd={jsonLd}
+  article={latest ? { modified: latest } : null}
 >
   <div class="brand-wash border-b border-line">
     <Container>

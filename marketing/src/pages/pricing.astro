@@ -13,19 +13,61 @@ const description =
   "Thryft Shop is free. AI features spend tokens — 50 free every month, then " +
   "packs from $5.99. Purchased tokens never expire.";
 
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@type": "Product",
-  name: `${site.name} AI tokens`,
-  description,
-  offers: packs.map((p) => ({
+/**
+ * Priced offers, modelled the way a shopping crawler expects to read them: one
+ * Product, an AggregateOffer that states the range up front, and the
+ * individual packs inside it. A bare array of Offers leaves "from $5.99" to be
+ * inferred, and it usually isn't.
+ *
+ * `priceValidUntil` is deliberately absent. Google prefers it, but the only
+ * honest value is a date these prices are actually committed to, and inventing
+ * one to satisfy a validator publishes a promise the product has not made.
+ *
+ * The free tier is an Offer too. It is the tier most people land on, and a
+ * price range that starts at $5.99 misrepresents what it costs to use this.
+ */
+const offers = [
+  {
+    "@type": "Offer",
+    name: "Free monthly tokens",
+    sku: "free",
+    price: "0",
+    priceCurrency: "USD",
+    availability: "https://schema.org/InStock",
+    description:
+      `${FREE_TOKENS_PER_MONTH} AI tokens every month at no cost — about ` +
+      `${draftsFor(FREE_TOKENS_PER_MONTH)} complete listing drafts.`,
+  },
+  ...packs.map((p) => ({
     "@type": "Offer",
     name: p.label,
+    sku: p.id,
     price: p.usd.toFixed(2),
     priceCurrency: "USD",
-    description: `${p.tokens} AI tokens — about ${draftsFor(p.tokens)} full listing drafts.`,
+    availability: "https://schema.org/InStock",
+    description: `${p.tokens} AI tokens — about ${draftsFor(p.tokens)} full listing drafts. They never expire.`,
   })),
-};
+];
+
+const jsonLd = ({ ids, canonical }) => ({
+  "@type": "Product",
+  "@id": `${canonical}#tokens`,
+  name: `${site.name} AI tokens`,
+  description,
+  category: "SaaS credits",
+  brand: { "@id": ids.organization },
+  image: { "@id": ids.logo },
+  mainEntityOfPage: { "@id": ids.webpage },
+  offers: {
+    "@type": "AggregateOffer",
+    priceCurrency: "USD",
+    lowPrice: "0",
+    highPrice: Math.max(...packs.map((p) => p.usd)).toFixed(2),
+    offerCount: offers.length,
+    url: canonical,
+    offers: offers.map((o) => ({ ...o, url: canonical })),
+  },
+});
 ---
 <Base title="Pricing" description={description} jsonLd={jsonLd}>
   <div class="brand-wash border-b border-line">

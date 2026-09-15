@@ -80,7 +80,35 @@ export const site = {
   // PLACEHOLDER — the public TestFlight invite link.
   testflightUrl: "",
   bundleId: "com.thryftshop.app",
+
+  /**
+   * Public profiles, once they exist.
+   *
+   * These feed two things: the `sameAs` array on the Organization in every
+   * page's JSON-LD (how a search engine ties this domain to the accounts
+   * posting about it — the entity-resolution step behind a knowledge panel)
+   * and the `twitter:site` card attribution.
+   *
+   * Empty strings are filtered out rather than emitted, because a `sameAs`
+   * naming a handle nobody owns points a crawler at someone else's account.
+   * Fill one in and it appears everywhere; there is no second place to edit.
+   */
+  social: {
+    /** Without the @ — e.g. "thryftshop". */
+    x: "",
+    instagram: "",
+    tiktok: "",
+    youtube: "",
+  },
 };
+
+/** The profile URLs, in the form schema.org's `sameAs` wants. Empty ones drop out. */
+site.sameAs = [
+  site.social.x && `https://x.com/${site.social.x}`,
+  site.social.instagram && `https://instagram.com/${site.social.instagram}`,
+  site.social.tiktok && `https://tiktok.com/@${site.social.tiktok}`,
+  site.social.youtube && `https://youtube.com/@${site.social.youtube}`,
+].filter(Boolean);
 
 export const nav = [
   { href: "/how-it-works", label: "How it works" },

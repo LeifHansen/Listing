@@ -2,14 +2,27 @@
 import "../styles/global.css";
 import Header from "../components/Header.astro";
 import Footer from "../components/Footer.astro";
+import Container from "../components/Container.astro";
 import { site } from "../lib/site.js";
+import { baseGraph, breadcrumbsFor, nodeIds, OG_LOCALE } from "../lib/seo.js";
 
 const {
   title,
   description = site.description,
   image = "/og-default.png",
+  imageAlt = `${site.name} — ${site.tagline}`,
   noindex = false,
   jsonLd = null,
+  /** "website" for a page, "article" for something with a publication date. */
+  ogType = "website",
+  /**
+   * `{ published, modified, author, tags }` for an article. Drives the
+   * `article:*` Open Graph properties and the WebPage's dates. The page still
+   * supplies its own Article/BlogPosting node through `jsonLd`.
+   */
+  article = null,
+  /** Override the derived trail. Rarely needed — the default is path-derived. */
+  breadcrumbs: breadcrumbsProp = null,
 } = Astro.props;
 
 // Astro.site is the `site` from astro.config.mjs; Astro.url is this page.
@@ -23,19 +36,59 @@ const rawPath = Astro.url.pathname.replace(/\/index\.html$/, "/").replace(/\.htm
 const cleanPath = rawPath === "/" ? "/" : rawPath.replace(/\/$/, "");
 const canonical = new URL(cleanPath, Astro.site).href;
 const ogImage = new URL(image, Astro.site).href;
+const origin = Astro.site.href;
 
 // The page title already carries the brand on the home page; everywhere else
 // it is suffixed, so a search result reads "Pricing — Thryft Shop".
 const fullTitle = title ? `${title} — ${site.name}` : `${site.name} — ${site.tagline}`;
 
-const organization = {
+// Breadcrumbs are derived from the path so a new route gets a correct trail
+// without anyone remembering to declare one. The 404 is noindex and has no
+// place in a hierarchy, so it gets none.
+const breadcrumbs = noindex ? [] : (breadcrumbsProp ?? breadcrumbsFor(cleanPath, title));
+
+// Everything a page might want to reference by @id — passed to a `jsonLd`
+// function so a page-level node can say `publisher: { "@id": ids.organization }`
+// instead of restating the whole organization.
+const ids = nodeIds(origin, canonical);
+
+// One @graph, not a pile of disconnected <script> blocks. Separate blocks
+// describe an organization, a page and an article that a parser has no reason
+// to believe are related; a graph with @id references says this article is
+// published by this organization and appears on this page.
+const pageNodes = typeof jsonLd === "function" ? jsonLd({ ids, canonical, origin }) : jsonLd;
+const graph = {
   "@context": "https://schema.org",
-  "@type": "Organization",
-  name: site.name,
-  url: Astro.site.href,
-  logo: new URL("/logo-512.webp", Astro.site).href,
-  description: site.description,
+  "@graph": [
+    ...baseGraph({
+      origin,
+      canonical,
+      name: fullTitle,
+      description,
+      image: ogImage,
+      imageAlt,
+      breadcrumbs,
+      article,
+    }),
+    ...(pageNodes ? [pageNodes].flat().filter(Boolean) : []),
+  ],
 };
+
+// The `article:*` Open Graph properties belong to og:type="article" and mean
+// nothing on a page that is not one. A page can still pass `article` purely
+// for its dates — a legal page with a "last updated" has a real dateModified
+// worth putting in the graph — so gate the meta tags on the type, not on the
+// presence of the prop.
+const isArticle = ogType === "article" && Boolean(article);
+
+// Indexable pages say so explicitly, and ask for the treatment that actually
+// changes how a result looks: `max-image-preview:large` is what makes Google
+// show the large thumbnail (and is a prerequisite for appearing in Discover),
+// and the uncapped snippet lengths stop it truncating to a default it would
+// otherwise pick for us.
+const robots = noindex
+  ? "noindex, nofollow"
+  : "index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1";
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -45,25 +98,34 @@ const organization = {
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
-    {noindex && <meta name="robots" content="noindex, nofollow" />}
+    <meta name="robots" content={robots} />
 
     <link rel="icon" type="image/png" sizes="48x48" href="/logo-48.png" />
     <link rel="apple-touch-icon" href="/logo-180.png" />
     <link rel="sitemap" href="/sitemap-index.xml" />
     <link rel="alternate" type="application/rss+xml" title={`${site.name} blog`} href="/rss.xml" />
 
-    <meta property="og:type" content="website" />
+    <meta property="og:type" content={ogType} />
     <meta property="og:site_name" content={site.name} />
+    <meta property="og:locale" content={OG_LOCALE} />
     <meta property="og:title" content={fullTitle} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:image" content={ogImage} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={imageAlt} />
+    {isArticle && article.published && <meta property="article:published_time" content={article.published} />}
+    {isArticle && article.modified && <meta property="article:modified_time" content={article.modified} />}
+    {isArticle && article.author && <meta property="article:author" content={article.author} />}
+    {isArticle && article.tags?.map((tag) => <meta property="article:tag" content={tag} />)}
+
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={fullTitle} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={imageAlt} />
+    {site.social.x && <meta name="twitter:site" content={`@${site.social.x}`} />}
 
     <meta name="theme-color" content="#f8f3e7" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#101a2e" media="(prefers-color-scheme: dark)" />
@@ -91,8 +153,7 @@ const organization = {
       } catch (e) {}
     </script>
 
-    <script type="application/ld+json" set:html={JSON.stringify(organization)} />
-    {jsonLd && <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />}
+    <script type="application/ld+json" set:html={JSON.stringify(graph)} />
   </head>
   <body class="bg-bg text-ink antialiased">
     <a
@@ -103,6 +164,28 @@ const organization = {
     </a>
     <Header />
     <main id="main">
+      {/* One line, always: the ancestors keep their width and the page's own
+          crumb ellipsizes. A trail that wraps puts a hanging separator at the
+          start of the second line on a phone, and the last crumb is the one
+          heading the reader is about to see in full anyway. */}
+      {breadcrumbs.length > 1 && (
+        <nav aria-label="Breadcrumb" class="border-b border-line bg-bg-sunken">
+          <Container>
+            <ol class="flex items-center gap-x-2 py-2.5 text-xs text-ink-secondary">
+              {breadcrumbs.map((crumb, i) => (
+                <li class={`flex items-center gap-2 ${i === breadcrumbs.length - 1 ? "min-w-0" : "shrink-0"}`}>
+                  {i > 0 && <span aria-hidden="true" class="text-line">/</span>}
+                  {i === breadcrumbs.length - 1 ? (
+                    <span aria-current="page" class="truncate font-semibold text-ink">{crumb.name}</span>
+                  ) : (
+                    <a href={crumb.path} class="transition-colors hover:text-ink">{crumb.name}</a>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </Container>
+        </nav>
+      )}
       <slot />
     </main>
     <Footer />

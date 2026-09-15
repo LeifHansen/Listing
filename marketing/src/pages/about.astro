@@ -4,10 +4,30 @@ import Container from "../components/Container.astro";
 import Section from "../components/Section.astro";
 import CTA from "../components/CTA.astro";
 import { site } from "../lib/site.js";
+
+const description =
+  "Why Thryft Shop exists: listing is the bottleneck between owning something " +
+  "and selling it, and it should not take twenty minutes an item.";
+
+/**
+ * Typed as an AboutPage and pointed at the organization it is about. This is
+ * the page a search engine reads to decide what entity this domain represents,
+ * so saying "this page is about that organization" in the markup — rather than
+ * leaving it to be inferred from prose — is the whole point of marking it up.
+ */
+const jsonLd = ({ ids, canonical }) => ({
+  "@type": "AboutPage",
+  "@id": `${canonical}#about`,
+  name: `About ${site.name}`,
+  description,
+  mainEntity: { "@id": ids.organization },
+  mainEntityOfPage: { "@id": ids.webpage },
+});
 ---
 <Base
   title="About"
-  description="Why Thryft Shop exists: listing is the bottleneck between owning something and selling it, and it should not take twenty minutes an item."
+  description={description}
+  jsonLd={jsonLd}
 >
   <div class="brand-wash border-b border-line">
     <Container>

@@ -67,6 +67,74 @@ The app still serves its own copies at `/about`, `/terms` and
 engines; repointing the registered URLs is a deliberate, separate step for when
 the domain is live.
 
+## SEO
+
+Every page's head and structured data come from `src/layouts/Base.astro`. A
+page supplies a `title`, a `description` and — if it has something specific to
+say about itself — a `jsonLd`; everything else is derived, so a new route is
+correct by default rather than correct if somebody remembers.
+
+| Where | What it produces |
+|---|---|
+| `src/layouts/Base.astro` | Title, description, canonical, robots directive, Open Graph and Twitter cards, and the page's JSON-LD graph |
+| `src/lib/seo.js` | The breadcrumb trail (derived from the path) and the Organization / WebSite / WebPage / BreadcrumbList nodes every page carries |
+| `src/pages/robots.txt.js` | `robots.txt`, with the sitemap URL derived from the configured origin |
+| `src/pages/llms.txt.js` | `llms.txt` — the product summarized for answer engines, generated from `site.js` |
+| `astro.config.mjs` | The sitemap, including `lastmod` read from content frontmatter |
+| `scripts/check-links.mjs` | The gate that fails a pull request when any of the above breaks |
+
+**One graph, not a pile of blocks.** Each page emits a single
+`<script type="application/ld+json">` containing an `@graph`. Separate blocks
+describe an organization, a page and an article that a parser has no reason to
+believe are related; a graph whose nodes reference each other by `@id` says
+*this* post was published by *this* organization and appears on *this* page —
+which is what makes attribution survive into a rich result or a cited answer.
+
+A page adds its own node by passing a function, which receives the `@id`s it
+can point at:
+
+```js
+const jsonLd = ({ ids, canonical }) => ({
+  "@type": "BlogPosting",
+  "@id": `${canonical}#article`,
+  publisher: { "@id": ids.organization },
+  mainEntityOfPage: { "@id": ids.webpage },
+});
+```
+
+**Breadcrumbs are derived, not declared.** `breadcrumbsFor()` walks the URL and
+labels each segment from `nav`/`footerNav` — the same strings the header and
+footer render — so the trail cannot disagree with the navigation, and a new
+page gets one without doing anything. The visible trail and the
+`BreadcrumbList` are built from the same array.
+
+**`lastmod` is only emitted where a date is real.** Blog posts, the changelog
+and the legal pages have dates in their frontmatter; those become the sitemap's
+`lastmod`. The hand-written marketing pages get none, deliberately — a sitemap
+that stamps every URL with the build time claims the whole site changed on every
+deploy, and a crawler that checks twice and finds nothing different stops
+trusting the field at all. Set `updated:` on a post you revise and its `lastmod`,
+its `dateModified` and its "updated" byline all move together.
+
+**`npm run links` is the enforcement.** None of this fails loudly on its own: a
+lost canonical, an `@id` that stopped resolving after a route was renamed, two
+pages that drifted into the same meta description — all of it builds, deploys
+and serves a 200, and the only symptom is traffic that never arrives. So the
+check asserts it against `dist/`: the SEO tags are present, titles and
+descriptions are unique and inside the lengths a result actually renders, the
+JSON-LD parses and every `@id` reference resolves, each page below the root
+carries a breadcrumb that ends at its own canonical, the sitemap's dates parse
+and are not in the future, and `robots.txt` names a sitemap that was built.
+
+**Answer engines get a first-class file.** `/llms.txt` is the emerging
+convention for telling an assistant what a site is without making it infer the
+product from nav, Tailwind classes and three CTAs. It is *generated* from
+`site.js` and the content collections for the same reason no page hardcodes a
+price: a stale one would be a machine-readable claim that something untrue is
+authoritative — a marketplace promised that is still partner-gated, say.
+`robots.txt` names the answer-engine crawlers explicitly and allows them, so
+that decision is written down rather than inherited from `User-agent: *`.
+
 ## Assets
 
 Masters go in `marketing/assets/` (see the README there); optimized derivatives
@@ -299,6 +367,14 @@ Left:
 - [ ] Fill in `public/.well-known/` once the App Store and Play releases exist
       (see the README there)
 - [ ] Pick an analytics tool, or decide to go without. Nothing is wired up
+- [ ] Verify the domain in Google Search Console and Bing Webmaster Tools and
+      submit `/sitemap-index.xml`. Both accept a DNS TXT record, which avoids
+      adding a verification file to `public/` — the records live at GoDaddy
+      beside the four in "The records" above
+- [ ] Fill in `site.social` once the accounts exist. The handles become the
+      Organization's `sameAs` (how a search engine ties this domain to the
+      accounts posting about it) and the `twitter:site` card attribution; until
+      then neither is emitted rather than pointing at a handle nobody owns
 
 ### Triggering a deploy by hand
 
