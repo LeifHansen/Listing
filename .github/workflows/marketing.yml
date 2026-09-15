@@ -107,11 +107,23 @@ jobs:
             check "$p" 200
           done
 
-          # Files search engines and the app stores fetch.
-          for p in /robots.txt /sitemap-index.xml /rss.xml /og-default.png \
+          # Files search engines, answer engines and the app stores fetch.
+          for p in /robots.txt /sitemap-index.xml /sitemap-0.xml /rss.xml \
+                   /llms.txt /og-default.png \
                    /.well-known/apple-app-site-association; do
             check "$p" 200
           done
+
+          # robots.txt must name a sitemap this server actually serves. The
+          # link check already asserts it against dist/; this asserts it
+          # against the running site, where a try_files mistake could still
+          # turn the URL into a 404 that nothing else would notice.
+          declared=$(curl -s http://127.0.0.1:8099/robots.txt | awk '/^Sitemap:/ {print $2}')
+          if [ -z "$declared" ]; then
+            echo "::error::robots.txt declares no sitemap"; fail=1
+          else
+            check "$(printf '%s' "$declared" | sed -E 's#^https?://[^/]+##')" 200
+          fi
 
           # A missing page must be a real 404, not a 200 that tells a crawler
           # the URL exists.

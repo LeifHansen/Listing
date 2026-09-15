@@ -51,15 +51,31 @@ const faqs = [
   },
 ];
 
-const jsonLd = {
-  "@context": "https://schema.org",
+/**
+ * The FAQ, as questions and answers a machine can lift whole.
+ *
+ * Google narrowed the FAQ rich result to health and government sites in 2023,
+ * so this is not chasing an accordion in the results page. It matters anyway:
+ * these are the exact questions people ask an assistant about a tool like this
+ * ("does it work with only Etsy", "what if the AI gets it wrong"), and this is
+ * the only form in which the answer travels intact instead of being
+ * paraphrased out of surrounding marketing copy.
+ *
+ * It sits beside the WebPage node Base.astro emits and points back at it with
+ * `mainEntityOfPage`, so a parser reads one page that happens to be an FAQ
+ * rather than two unrelated things that share a URL.
+ */
+const jsonLd = ({ ids, canonical }) => ({
   "@type": "FAQPage",
-  mainEntity: faqs.map((f) => ({
+  "@id": `${canonical}#faq`,
+  mainEntityOfPage: { "@id": ids.webpage },
+  mainEntity: faqs.map((f, i) => ({
     "@type": "Question",
+    "@id": `${canonical}#q${i + 1}`,
     name: f.q,
     acceptedAnswer: { "@type": "Answer", text: f.a },
   })),
-};
+});
 ---
 <Base
   title="Support & FAQ"

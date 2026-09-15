@@ -6,22 +6,45 @@ import Button from "../components/Button.astro";
 import PipelineSteps from "../components/PipelineSteps.astro";
 import FeatureGrid from "../components/FeatureGrid.astro";
 import CTA from "../components/CTA.astro";
-import { site, marketplaces, marketplaceStatus, SIGNUP_URL, appLink, FREE_TOKENS_PER_MONTH, draftsFor } from "../lib/site.js";
+import { site, marketplaces, marketplaceStatus, features, SIGNUP_URL, APP_URL, appLink, FREE_TOKENS_PER_MONTH, draftsFor } from "../lib/site.js";
 
-const jsonLd = {
-  "@context": "https://schema.org",
+/**
+ * The home page's job in structured data is to say what the THING is, as
+ * distinct from what the page is. Base.astro already describes the page and
+ * the organization; this describes the software, references both by @id, and
+ * points `url` at the app rather than at this page — the application lives at
+ * a different origin, and conflating the two is how a rich result ends up
+ * linking a "launch the app" affordance back to the marketing site.
+ *
+ * `featureList` is read from the same array the feature grid renders below, so
+ * the machine-readable claim and the human-readable one cannot drift.
+ */
+const jsonLd = ({ ids, canonical, origin }) => ({
   "@type": "SoftwareApplication",
+  "@id": `${canonical}#software`,
   name: site.name,
+  url: APP_URL,
   applicationCategory: "BusinessApplication",
+  applicationSubCategory: "Marketplace listing automation",
   operatingSystem: "Web, iOS, Android",
   description: site.description,
+  slogan: site.tagline,
+  featureList: features.map((f) => f.title),
+  screenshot: new URL("/og-default.png", origin).href,
+  softwareHelp: { "@type": "CreativeWork", url: new URL("/how-it-works", origin).href },
+  publisher: { "@id": ids.organization },
+  provider: { "@id": ids.organization },
+  image: { "@id": ids.logo },
+  mainEntityOfPage: { "@id": ids.webpage },
   offers: {
     "@type": "Offer",
     price: "0",
     priceCurrency: "USD",
+    availability: "https://schema.org/InStock",
+    url: new URL("/pricing", origin).href,
     description: `Free to use, including ${FREE_TOKENS_PER_MONTH} AI tokens each month.`,
   },
-};
+});
 ---
 <Base title={null} jsonLd={jsonLd}>
   <!-- Hero -->

@@ -3,38 +3,126 @@ import { getCollection, render } from "astro:content";
 import Base from "../../layouts/Base.astro";
 import Container from "../../components/Container.astro";
 import CTA from "../../components/CTA.astro";
-import { site } from "../../lib/site.js";
 
 export async function getStaticPaths() {
-  const posts = await getCollection("blog", ({ data }) => !data.draft);
-  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+  const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
+    (a, b) => b.data.date - a.data.date,
+  );
+  return posts.map((post, i) => ({
+    params: { slug: post.id },
+    props: {
+      post,
+      // Newest-first, so the NEXT index is the older post. Named by time
+      // rather than by position, because "next" in an array and "next" in a
+      // reading order point opposite ways here and that is a bug waiting.
+      newer: posts[i - 1] ?? null,
+      older: posts[i + 1] ?? null,
+      all: posts,
+    },
+  }));
 }
 
-const { post } = Astro.props;
+const { post, newer, older, all } = Astro.props;
 const { Content } = await render(post);
-const fmt = post.data.date.toLocaleDateString("en-US", {
-  year: "numeric", month: "long", day: "numeric",
-});
+const fmt = (d) =>
+  d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 
-const jsonLd = {
-  "@context": "https://schema.org",
+const published = post.data.date;
+const modified = post.data.updated ?? post.data.date;
+
+/**
+ * Other posts worth reading, most-shared-tags first.
+ *
+ * This is the internal linking that a two-post blog does not obviously need
+ * and a twenty-post one silently suffers without. A post with no inbound links
+ * from the rest of the site is a page a crawler reaches once from the index
+ * and has no reason to treat as connected to anything — and a reader who
+ * finishes a post and finds no next thing to read leaves.
+ *
+ * The previous/next pair below already links its two neighbours, so those are
+ * excluded here — repeating them would be two cards pointing at the same post.
+ */
+const shownAlready = new Set([post.id, newer?.id, older?.id].filter(Boolean));
+const related = all
+  .filter((p) => !shownAlready.has(p.id))
+  .map((p) => ({
+    post: p,
+    shared: p.data.tags.filter((t) => post.data.tags.includes(t)).length,
+  }))
+  .sort((a, b) => b.shared - a.shared || b.post.data.date - a.post.data.date)
+  .slice(0, 2)
+  .map((r) => r.post);
+
+/**
+ * The post as an Article.
+ *
+ * `dateModified`, `wordCount` and `articleSection` are not decoration: the
+ * first is what a crawler uses to decide whether to re-read a page it has
+ * already seen, and the other two are how a short opinion piece is told apart
+ * from a reference article. `author` and `publisher` reference the graph's
+ * organization by @id instead of restating it, which is what ties this post to
+ * everything else the site publishes rather than to a name that happens to
+ * match.
+ */
+const wordCount = post.body.trim().split(/\s+/).length;
+
+const jsonLd = ({ ids, canonical }) => ({
   "@type": "BlogPosting",
+  "@id": `${canonical}#article`,
   headline: post.data.title,
   description: post.data.description,
-  datePublished: post.data.date.toISOString(),
-  author: { "@type": "Organization", name: post.data.author },
-  publisher: { "@type": "Organization", name: site.name },
-};
+  datePublished: published.toISOString(),
+  dateModified: modified.toISOString(),
+  author: { "@id": ids.organization },
+  publisher: { "@id": ids.organization },
+  image: { "@id": ids.primaryImage },
+  mainEntityOfPage: { "@id": ids.webpage },
+  isPartOf: { "@id": `${new URL("/blog", canonical).href}#blog` },
+  url: canonical,
+  inLanguage: "en-US",
+  wordCount,
+  ...(post.data.tags.length
+    ? { keywords: post.data.tags, articleSection: post.data.tags[0] }
+    : {}),
+});
 ---
-<Base title={post.data.title} description={post.data.description} jsonLd={jsonLd}>
+<Base
+  title={post.data.title}
+  description={post.data.description}
+  image={post.data.image ?? "/og-default.png"}
+  imageAlt={post.data.imageAlt ?? post.data.title}
+  ogType="article"
+  article={{
+    published: published.toISOString(),
+    modified: modified.toISOString(),
+    author: post.data.author,
+    tags: post.data.tags,
+  }}
+  jsonLd={jsonLd}
+>
   <div class="brand-wash border-b border-line">
     <Container>
       <div class="max-w-3xl py-16 sm:py-20">
         <a href="/blog" class="text-sm font-semibold text-blue-ink hover:underline">← All posts</a>
         <h1 class="mt-5 text-4xl sm:text-5xl">{post.data.title}</h1>
         <p class="mt-4 text-ink-secondary">
-          <time datetime={post.data.date.toISOString()}>{fmt}</time> · {post.data.author}
+          <time datetime={published.toISOString()}>{fmt(published)}</time> · {post.data.author}
+          {post.data.updated && (
+            <>
+              {" · updated "}
+              <time datetime={modified.toISOString()}>{fmt(modified)}</time>
+            </>
+          )}
         </p>
+        {post.data.tags.length > 0 && (
+          <ul class="mt-5 flex flex-wrap gap-2">
+            {post.data.tags.map((tag) => (
+              <li class="rounded-full bg-blue-soft px-3 py-1 font-display text-xs font-semibold text-blue-ink">
+                {tag}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </Container>
   </div>
@@ -43,6 +131,55 @@ const jsonLd = {
     <article class="prose max-w-3xl py-14 sm:py-16">
       <Content />
     </article>
+
+    <div class="max-w-3xl pb-14 sm:pb-16">
+      {(newer || older) && (
+        <nav aria-label="More posts" class="grid gap-4 sm:grid-cols-2">
+          {older ? (
+            <a
+              href={`/blog/${older.id}`}
+              rel="prev"
+              class="rounded-card border border-line bg-card p-5 shadow-card transition-shadow hover:shadow-card-hover"
+            >
+              <p class="text-xs font-semibold uppercase tracking-[0.14em] text-ink-secondary">
+                ← Previous
+              </p>
+              <p class="mt-2 font-display font-semibold text-ink">{older.data.title}</p>
+            </a>
+          ) : <div class="hidden sm:block"></div>}
+          {newer && (
+            <a
+              href={`/blog/${newer.id}`}
+              rel="next"
+              class="rounded-card border border-line bg-card p-5 text-right shadow-card transition-shadow hover:shadow-card-hover"
+            >
+              <p class="text-xs font-semibold uppercase tracking-[0.14em] text-ink-secondary">
+                Next →
+              </p>
+              <p class="mt-2 font-display font-semibold text-ink">{newer.data.title}</p>
+            </a>
+          )}
+        </nav>
+      )}
+
+      {related.length > 0 && (
+        <section class="mt-12" aria-labelledby="related-heading">
+          <h2 id="related-heading" class="text-xl">Related reading</h2>
+          <ul class="mt-4 space-y-3">
+            {related.map((r) => (
+              <li>
+                <a href={`/blog/${r.id}`} class="group block">
+                  <span class="font-display font-semibold text-ink group-hover:text-blue-ink">
+                    {r.data.title}
+                  </span>
+                  <span class="mt-1 block text-sm text-ink-secondary">{r.data.description}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
   </Container>
 
   <CTA />
