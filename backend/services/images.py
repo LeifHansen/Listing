@@ -1163,26 +1163,32 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
     A REMOTE engine gets a second look at the border, and only at the border.
     `border()` is asked first and is still the trusted answer, because it is
     geometry and cannot be wrong about what is inside the box it returns. When
-    it gives up -- a print shot at an angle, a frame the same colour as the
-    table -- the remote matte's outer box is offered instead, and
-    artwork.box_from_alpha refuses it unless it is shaped like a picture
-    rather than like a subject lifted out of one. Either way the matte that
-    ships is artwork.mask(): a filled rectangle. There is still no code path
-    here that can remove a pixel from inside the border.
+    it gives up -- and the commonest reason is a print photographed hand-held
+    over a floor rather than square-on -- the remote matte's outer SHAPE is
+    offered instead, and artwork.quad_from_alpha refuses it unless it is a
+    rectangle at some angle rather than a subject lifted out of one. Either
+    way the matte that ships is solid, from artwork.mask() or artwork.quad().
+    There is still no code path here that can remove a pixel from inside the
+    border.
     """
     box = artwork.border(rgb)
-    how = "scanned"
-    if box is None:
-        remote = _remote_alpha(rgb)
-        if remote is not None:
-            box = artwork.box_from_alpha(rgb.size, remote)
-            how = "located by the remote engine"
-    if box is None:
+    if box is not None:
+        log.info("art cutout: kept the picture whole inside %s (scanned) of a "
+                 "%dx%d photo", box, rgb.width, rgb.height)
+        return _compose_on_white(rgb, artwork.mask(rgb.size, box))
+    remote = _remote_alpha(rgb)
+    if remote is None:
         return None
-    alpha = artwork.mask(rgb.size, box)
-    log.info("art cutout: kept the picture whole inside %s (%s) of a %dx%d "
-             "photo", box, how, rgb.width, rgb.height)
-    return _compose_on_white(rgb, alpha)
+    # Four corners rather than a box, because the photo that gets here is the
+    # one border() could not scan -- and the commonest reason for that is that
+    # the print was photographed hand-held over a floor rather than square-on.
+    # See artwork.quad_from_alpha.
+    corners = artwork.quad_from_alpha(rgb.size, remote)
+    if corners is None:
+        return None
+    log.info("art cutout: kept the picture whole inside %s (located by the "
+             "remote engine) of a %dx%d photo", corners, rgb.width, rgb.height)
+    return _compose_on_white(rgb, artwork.quad(rgb.size, corners))
 
 
 def _remote_alpha(rgb: Image.Image) -> Optional[Image.Image]:

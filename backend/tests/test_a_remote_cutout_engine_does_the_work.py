@@ -20,8 +20,9 @@ What is pinned here:
   * the engine that actually ran is reported, because a key that is expired
     or mistyped otherwise shows up only as cutouts quietly getting worse;
   * and a framed print, which today gets no cutout at all when its border
-    cannot be scanned, gets one -- as a FILLED RECTANGLE, so the thing
-    services/artwork exists to prevent stays impossible.
+    cannot be scanned, gets one -- at whatever angle it was photographed at,
+    and always as a SOLID shape, so the thing services/artwork exists to
+    prevent stays impossible.
 
 No httpx here on purpose. The engines are stubbed at the cutout_api boundary,
 because the `cutout` CI job installs Pillow and pytest and nothing else, and
@@ -36,7 +37,7 @@ import pytest
 
 pytest.importorskip("PIL")
 
-from PIL import Image, ImageDraw  # noqa: E402
+from PIL import Image, ImageDraw, ImageFilter  # noqa: E402
 
 from backend import config  # noqa: E402
 from backend.services import artwork, cutout_api, images  # noqa: E402
@@ -329,6 +330,28 @@ def _framed_print(size=(1200, 900), box=(280, 160, 900, 760)):
     return img, box
 
 
+def _tilted_cut(size, deg, inner=(620, 700)):
+    """What a remote engine returns for a print lying at `deg` on a floor."""
+    out = Image.new("RGBA", size, (0, 0, 0, 0))
+    lay = Image.new("RGBA", inner, ITEM + (255,))
+    lay = lay.rotate(deg, expand=True, resample=Image.BICUBIC)
+    out.paste(lay, ((size[0] - lay.width) // 2, (size[1] - lay.height) // 2))
+    return out
+
+
+def _points_inside(kept, step=40, inset=12):
+    """Sample points comfortably inside an opaque region."""
+    eroded = kept.filter(ImageFilter.MinFilter(9))
+    box = eroded.getbbox()
+    pts = []
+    for y in range(box[1] + inset, box[3] - inset, step):
+        for x in range(box[0] + inset, box[2] - inset, step):
+            if eroded.getpixel((x, y)) >= 128:
+                pts.append((x, y))
+    assert pts, "the fixture produced no interior to check"
+    return pts
+
+
 def test_a_framed_print_gets_a_cutout_when_the_border_cannot_be_scanned(
         chain, no_local, monkeypatch):
     """The reported bug: "doesn't try for simple objects (rectangular framed
@@ -346,6 +369,50 @@ def test_a_framed_print_gets_a_cutout_when_the_border_cannot_be_scanned(
     assert out.getpixel((5, 5)) == images.WHITE
     assert out.getpixel(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)) == \
         img.getpixel(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
+
+
+def test_a_print_photographed_at_an_angle_is_still_a_print(chain, no_local,
+                                                           monkeypatch):
+    """The photos this was actually reported on: prints laid on a wooden floor
+    and shot hand-held, 39 of them in one batch, every one kept as shot.
+
+    None of them is square-on, and a rotated rectangle fills its AXIS-ALIGNED
+    box badly -- 0.85 at 5 degrees, 0.74 at 10. Judged that way the fix refuses
+    the very photos it exists for, so the rectangle is fitted at the best
+    angle instead."""
+    chain("removebg", "local")
+    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+
+    for deg in (0, 3, 5, 8, 12, 20):
+        img, _ = _framed_print()
+        _remote(monkeypatch, removebg=_engine(
+            returns=lambda rgb, d=deg: _tilted_cut(rgb.size, d)))
+
+        assert images.art_cutout(img) is not None, (
+            f"a print at {deg} degrees is still a print")
+
+
+def test_an_angled_print_keeps_every_pixel_of_itself(chain, no_local,
+                                                     monkeypatch):
+    """The invariant, on the angled path: the quad must COVER the print. An
+    earlier revision turned the corners the wrong way and clipped one corner
+    off while taking floor at the opposite one -- accepted/rejected looked
+    perfect throughout, and only measuring the overlap showed it."""
+    chain("removebg", "local")
+    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+
+    for deg in (0, 5, 12, 20):
+        img, _ = _framed_print()
+        matte = _tilted_cut(img.size, deg)
+        _remote(monkeypatch, removebg=_engine(returns=lambda rgb, m=matte: m))
+
+        out = images.art_cutout(img)
+        assert out is not None
+
+        kept = matte.split()[3].point(lambda a: 255 if a >= 128 else 0)
+        for xy in _points_inside(kept):
+            assert out.getpixel(xy) == img.getpixel(xy), (
+                f"at {deg} degrees the pixel {xy} inside the print was altered")
 
 
 def test_the_scanned_border_still_wins(chain, no_local, monkeypatch):
@@ -367,8 +434,9 @@ def test_a_subject_lifted_out_of_a_painting_is_refused(chain, no_local,
                                                        monkeypatch):
     """The baby out of the basket. A remote engine handed a photo OF a picture
     answers the only question it knows -- which part of this is the subject --
-    and for a painting the honest answer is "all of it". The box it offers is
-    rejected on SHAPE: a picture fills its own bounding box, a baby does not."""
+    and for a painting the honest answer is "all of it". The shape it offers is
+    rejected because it is not a rectangle at ANY angle: a round subject scores
+    0.785 however it is turned, well under the 0.9 floor."""
     img, _ = _framed_print()
     chain("removebg", "local")
 

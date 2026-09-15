@@ -40,10 +40,11 @@ pass works under, which is what lets CI prove this on Pillow alone.
 """
 from __future__ import annotations
 
+import math
 import os
 from typing import Optional
 
-from PIL import Image, ImageChops, ImageFilter, ImageStat
+from PIL import (Image, ImageChops, ImageDraw, ImageFilter, ImageStat)
 
 from ..config import log
 
@@ -139,6 +140,9 @@ _EDGE_SHARE = float(os.getenv("ART_EDGE_SHARE", "0.10") or 0.10)
 _EDGE_RUN = int(os.getenv("ART_EDGE_RUN", "2") or 2)
 
 Box = tuple[int, int, int, int]
+# Four corners, clockwise from the top-left of the picture as it lies in the
+# photo. A picture shot square-on is a Box; one shot hand-held is a Quad.
+Quad = tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int]]
 
 
 def _surround(small: Image.Image) -> tuple[int, int, int]:
@@ -346,28 +350,70 @@ def border(rgb: Image.Image) -> Optional[Box]:
             min(w, int(right + mx + 0.999)), min(h, int(bottom + my + 0.999)))
 
 
-# How much of its own bounding box a remote engine's matte must fill before
-# that box is allowed to be a picture's border. This one number is what makes
-# box_from_alpha safe, so it sits ABOVE _MIN_RECT_FILL rather than at it: a
-# framed print's matte fills its box almost completely (0.95+, since a picture
-# IS its bounding box), while a subject the model lifted OUT of a painting --
-# the baby out of the basket -- fills perhaps 0.5-0.7 of the box around it.
-# That gap is the whole discriminator, and the cost of being strict is only a
-# cutout not attempted.
+# How nearly a remote engine's matte must fill the best rectangle that can be
+# drawn around it before that shape is allowed to be a picture's border.
+#
+# Measured at the BEST ANGLE, not against the axis-aligned box, and that is the
+# whole point. A print photographed hand-held over a floor is a rectangle that
+# happens to be rotated a few degrees, and a rotated rectangle fills its
+# axis-aligned box poorly: 0.94 at 2 degrees, 0.85 at 5, 0.74 at 10. Judging it
+# that way refuses the exact photo this exists to rescue -- 39 in one seller's
+# batch -- while an ellipse, which is never a picture, scores 0.785 at every
+# angle. Asking "is this a rectangle at SOME angle" separates those two; asking
+# "is it an upright rectangle" only separates tripod shots from handheld ones.
 _MIN_ALPHA_RECT_FILL = float(os.getenv("ART_ALPHA_RECT_FILL", "0.9") or 0.9)
 
+# Angles tried when fitting that rectangle. A rectangle repeats every 90
+# degrees, so the sweep never needs to go further.
+_FIT_COARSE = int(os.getenv("ART_FIT_COARSE", "3") or 3)
 
-def box_from_alpha(size: tuple[int, int], alpha: Image.Image) -> Optional[Box]:
-    """The picture's outer border as a remote engine's matte found it, or None.
+
+def _fill_at(alpha: Image.Image, deg: float) -> float:
+    """What share of its bounding box the matte fills once turned by `deg`."""
+    turned = alpha.rotate(deg, resample=Image.BILINEAR, fillcolor=0)
+    box = turned.getbbox()
+    if not box:
+        return 0.0
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    if not bw or not bh:
+        return 0.0
+    kept = turned.crop(box).point(lambda a: 255 if a >= 128 else 0)
+    return sum(kept.histogram()[128:]) / float(bw * bh)
+
+
+def _best_angle(alpha: Image.Image) -> tuple[float, float]:
+    """The angle at which the matte most looks like a rectangle, and how much
+    it looks like one there. Coarse sweep, then one degree either side."""
+    best, best_fill = 0.0, 0.0
+    for deg in range(0, 90, _FIT_COARSE):
+        fill = _fill_at(alpha, float(deg))
+        if fill > best_fill:
+            best, best_fill = float(deg), fill
+    for step in (1.0, 0.5):
+        for deg in (best - step, best + step):
+            fill = _fill_at(alpha, deg)
+            if fill > best_fill:
+                best, best_fill = deg, fill
+    return best, best_fill
+
+
+def quad_from_alpha(size: tuple[int, int],
+                    alpha: Image.Image) -> Optional[Quad]:
+    """The picture's outer edge as a remote engine's matte found it, as four
+    corners -- or None.
 
     The second opinion for the case this module otherwise answers with "do
-    nothing": a framed print whose border `border()` could not scan -- shot at
-    an angle, on a surface its own colour, or with the moulding too low in
-    contrast to find. A segmentation model locates a framed picture on a wall
-    easily; what it cannot be trusted with is what is INSIDE the border, and
-    nothing here asks it that. Only the outer box is taken, and the caller
-    turns that box into a filled rectangle through mask(), exactly as it does
-    with border()'s answer.
+    nothing": a print whose border `border()` could not scan, because it was
+    photographed hand-held over a floor rather than square-on, or lies on a
+    surface close to its own colour. A segmentation model finds a sheet of
+    paper on a wooden floor easily. What it cannot be trusted with is what is
+    INSIDE that sheet, and nothing here asks it -- only the outer shape is
+    taken, and the caller fills it solid through quad().
+
+    Four corners rather than a box because the photo is the angled one: the
+    axis-aligned box around a print lying at 8 degrees includes a triangle of
+    floor at each corner, and a listing photo with four wedges of somebody's
+    floorboards in it is not a cutout. The corners follow the print.
 
     None on every doubt, with the same meaning as everywhere else in this
     module: keep the photo as shot. Never "use the matte itself".
@@ -375,32 +421,81 @@ def box_from_alpha(size: tuple[int, int], alpha: Image.Image) -> Optional[Box]:
     w, h = size
     if w < 8 or h < 8:
         return None
-    box = alpha.getbbox()
+    if alpha.getbbox() is None:
+        return None
+    # Everything below is a question about a shape a few hundred pixels
+    # across, so it is answered on a thumbnail and scaled back up -- and the
+    # sweep rotates the image ~35 times, which is why that matters.
+    scale = _SIDE / max(alpha.size)
+    small = (alpha.resize((max(8, round(alpha.width * scale)),
+                           max(8, round(alpha.height * scale))), Image.BOX)
+             if scale < 1 else alpha)
+    # Pad to a square big enough that no rotation can push a corner off the
+    # canvas, which would clip the shape and flatter its score.
+    diag = int((small.width ** 2 + small.height ** 2) ** 0.5) + 4
+    pad = Image.new("L", (diag, diag), 0)
+    ox, oy = (diag - small.width) // 2, (diag - small.height) // 2
+    pad.paste(small, (ox, oy))
+
+    deg, fill = _best_angle(pad)
+    if fill < _MIN_ALPHA_RECT_FILL:
+        log.info("art border: the matte fills %.2f of its best rectangle — "
+                 "that is a subject inside a picture, not the picture; "
+                 "keeping the photo as shot", fill)
+        return None
+
+    box = pad.rotate(deg, resample=Image.BILINEAR, fillcolor=0).getbbox()
     if not box:
         return None
     bw, bh = box[2] - box[0], box[3] - box[1]
-    if not bw or not bh:
-        return None
-    # Is this matte SHAPED like a picture? Counted on the alpha itself rather
-    # than a downscale: the question is what fraction of the box is opaque, and
-    # a BOX-filtered thumbnail would smear a ragged edge into a fuller one.
-    kept = alpha.crop(box).point(lambda a: 255 if a >= 128 else 0)
-    fill = sum(kept.histogram()[128:]) / float(bw * bh)
-    if fill < _MIN_ALPHA_RECT_FILL:
-        log.info("art border: the matte fills %.2f of its box — that is a "
-                 "subject inside a picture, not the picture; keeping the "
-                 "photo as shot", fill)
-        return None
-    area = (bw * bh) / float(w * h)
+    area = (bw * bh) / float(small.width * small.height)
     if area < _MIN_AREA:
-        log.info("art border: matte box covers %.2f of the frame, too small "
+        log.info("art border: the matte covers %.2f of the frame, too small "
                  "to be the picture — keeping the photo as shot", area)
         return None
-    # Outward by the same margin border() uses, so a moulding the matte
-    # clipped is not shaved off the print.
+
+    # Out by the usual margin, then back: the corners are found in the TURNED
+    # image, so each is turned back by the same angle about the same centre,
+    # un-padded and un-scaled. PIL rotates counter-clockwise about the centre,
+    # so undoing it is the same rotation with the sign flipped.
     mx, my = bw * _MARGIN, bh * _MARGIN
-    return (max(0, int(box[0] - mx)), max(0, int(box[1] - my)),
-            min(w, int(box[2] + mx + 0.999)), min(h, int(box[3] + my + 0.999)))
+    corners = ((box[0] - mx, box[1] - my), (box[2] + mx, box[1] - my),
+               (box[2] + mx, box[3] + my), (box[0] - mx, box[3] + my))
+    centre = diag / 2.0
+    rad = math.radians(deg)
+    cos, sin = math.cos(rad), math.sin(rad)
+    k = 1 / scale if scale < 1 else 1.0
+    out = []
+    for px, py in corners:
+        # PIL's rotate(deg) sends a source point (x, y) to
+        #     (u·cos + v·sin, −u·sin + v·cos)   where u = x−c, v = y−c
+        # and these corners were measured in that rotated image, so getting
+        # back to the photo means applying that matrix's INVERSE -- which,
+        # being a rotation, is just its transpose. Turning the same way twice
+        # instead is the bug this replaced: it put the quad somewhere else
+        # entirely, clipping the print at one corner and taking floor at the
+        # opposite one, and only a test that measured overlap could see it.
+        u, v = px - centre, py - centre
+        sx = centre + u * cos - v * sin
+        sy = centre + u * sin + v * cos
+        out.append((round((sx - ox) * k), round((sy - oy) * k)))
+    log.info("art border: the matte is a rectangle at %.1f° filling %.2f of "
+             "it", deg, fill)
+    return tuple(out)
+
+
+def quad(size: tuple[int, int], corners: Quad) -> Image.Image:
+    """A matte fully opaque inside the four corners and fully clear outside.
+
+    mask() for a picture that is not square-on. Same guarantee, same reason:
+    what comes back is a SOLID convex shape, so compositing through it cannot
+    remove anything inside the picture's edge. There is still no threshold in
+    here and no shape to get wrong -- the corners came in, the fill goes out.
+    """
+    out = Image.new("L", size, 0)
+    ImageDraw.Draw(out).polygon([(int(x), int(y)) for x, y in corners],
+                                fill=255)
+    return out
 
 
 def mask(size: tuple[int, int], box: Box) -> Image.Image:
